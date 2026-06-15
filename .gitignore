@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+.turbo/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Local secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Build outputs
+target/
+out/
+
+# Helm
+charts/*/charts/
+charts/*/Chart.lock
