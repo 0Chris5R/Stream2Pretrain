@@ -1,0 +1,459 @@
+# Stream2Pretrain values - canonical configuration for every component.
+#
+# Image building is out of scope for this chart; produce by CI. See the README
+# for the expected image refs.
+
+# -----------------------------------------------------------------------------
+# Global / image
+# -----------------------------------------------------------------------------
+image:
+  registry: ghcr.io
+  # tag falls back to .Chart.AppVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+commonLabels: {}
+commonAnnotations: {}
+
+# Cluster profile: dev or prod. Drives default partition counts and resource
+# requests via the per-component overrides below.
+profile: dev
+
+# -----------------------------------------------------------------------------
+# Service account / RBAC
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+# -----------------------------------------------------------------------------
+# Redpanda connection (the bus is provisioned by the platform Helmfile, not
+# this chart). Stream2Pretrain only needs the bootstrap servers + auth.
+# -----------------------------------------------------------------------------
+redpanda:
+  bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
+  schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
+  saslMechanism: ""
+  authSecret: ""
+  topics:
+    rawFetched: raw.fetched
+    docsNormalized: docs.normalized
+    docsCurated: docs.curated
+    deconAttest: decon.attest
+
+# -----------------------------------------------------------------------------
+# MinIO / object storage
+# -----------------------------------------------------------------------------
+minio:
+  endpoint: http://minio.minio.svc.cluster.local:9000
+  region: us-east-1
+  buckets:
+    bronze: s2p-bronze
+    silver: s2p-silver
+    gold: s2p-gold
+    decon: s2p-decon
+  credentialsSecret: stream2pretrain-minio
+
+# -----------------------------------------------------------------------------
+# Iceberg / Polaris REST catalog
+# -----------------------------------------------------------------------------
+iceberg:
+  catalog: stream2pretrain
+  namespace: gold
+  polarisUrl: http://polaris.polaris.svc.cluster.local:8181/api/catalog
+  warehouse: s3://s2p-gold/warehouse
+  branches:
+    main: main
+    shadowA: shadow-a
+    shadowB: shadow-b
+
+# -----------------------------------------------------------------------------
+# Network policies
+# -----------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+  defaultDeny: true
+  # Egress allow-list per ingest component. Keep this in sync with SOURCES.md.
+  egressAllow:
+    arxiv:
+      - export.arxiv.org
+      - oaipmh.arxiv.org
+      - rss.arxiv.org
+      - arxiv.org
+    github:
+      - api.github.com
+      - github.com
+      - raw.githubusercontent.com
+      - codeload.github.com
+    huggingface:
+      - huggingface.co
+      - cdn-lfs.huggingface.co
+    blogs:
+      - openai.com
+      - deepmind.google
+      - bair.berkeley.edu
+      - blog.eleuther.ai
+  # Allow DNS to kube-dns.
+  dnsNamespace: kube-system
+
+# -----------------------------------------------------------------------------
+# Source feed catalog (mirrors SOURCES.md). Every entry becomes either a
+# CronJob (poll cadence > 5 min) or a Deployment (steady poll loop).
+# -----------------------------------------------------------------------------
+sources:
+  arxiv:
+    enabled: true
+    oaiPmh:
+      name: arxiv-oai-cs
+      endpoint: https://oaipmh.arxiv.org/oai
+      set: cs
+      pollIntervalSeconds: 7200
+      licenseDefault: arxiv-non-exclusive-distribution
+      kind: cronjob
+      schedule: "13 */2 * * *"
+    rss:
+      categories:
+        - cs.CL
+        - cs.LG
+        - cs.AI
+        - cs.CV
+      pollIntervalSeconds: 7200
+      kind: cronjob
+      schedule: "27 */2 * * *"
+      licenseDefault: arxiv-non-exclusive-distribution
+  github:
+    enabled: true
+    events:
+      name: github-events
+      pollIntervalSeconds: 60
+      respectXPollInterval: true
+      kind: deployment
+      tokenSecret: stream2pretrain-github
+      tokenSecretKey: token
+      aiOrgFilter:
+        - openai
+        - anthropics
+        - huggingface
+        - google-deepmind
+        - meta-llama
+        - mistralai
+        - allenai
+        - eleutherai
+        - bytewax
+        - vllm-project
+    releases:
+      name: github-releases
+      pollIntervalSeconds: 7200
+      kind: cronjob
+      schedule: "37 */2 * * *"
+      tokenSecret: stream2pretrain-github
+      tokenSecretKey: token
+      repos:
+        - huggingface/transformers
+        - vllm-project/vllm
+        - pytorch/pytorch
+        - ggerganov/llama.cpp
+        - karpathy/llm.c
+        - unslothai/unsloth
+        - meta-llama/llama
+        - openai/whisper
+        - anthropics/courses
+        - apple/ml-tic-lm
+        - mlfoundations/dclm
+        - huggingface/datatrove
+        - NVIDIA-NeMo/Curator
+        - allenai/dolma
+        - bytewax/bytewax
+        - redpanda-data/redpanda
+        - apache/iceberg
+        - MaterializeInc/materialize
+        - risingwavelabs/risingwave
+        - pathwaycom/pathway
+        - unclecode/crawl4ai
+        - firecrawl/firecrawl
+        - microsoft/onnxruntime
+        - facebookresearch/llama-stack
+        - openai/triton
+        - google/gemma
+        - mistralai/mistral-src
+        - tinygrad/tinygrad
+        - rwightman/pytorch-image-models
+        - pytorch/torchtitan
+  huggingface:
+    enabled: true
+    models:
+      name: hf-models
+      endpoint: https://huggingface.co/api/models
+      pollIntervalSeconds: 600
+      kind: deployment
+      tokenSecret: stream2pretrain-hf
+      tokenSecretKey: token
+    dailyPapers:
+      name: hf-daily-papers
+      endpoint: https://huggingface.co/api/daily_papers
+      pollIntervalSeconds: 21600
+      kind: cronjob
+      schedule: "47 */6 * * *"
+      tokenSecret: stream2pretrain-hf
+      tokenSecretKey: token
+  blogs:
+    enabled: true
+    pollIntervalSeconds: 21600
+    kind: cronjob
+    schedule: "53 */6 * * *"
+    feeds:
+      - name: openai-news
+        url: https://openai.com/news/rss.xml
+      - name: deepmind
+        url: https://deepmind.google/blog/rss.xml
+      - name: hf-blog
+        url: https://huggingface.co/blog/feed.xml
+      - name: bair
+        url: https://bair.berkeley.edu/blog/feed.xml
+      - name: eleuther
+        url: https://blog.eleuther.ai/index.xml
+  sitemap:
+    enabled: false
+    name: sitemap-poller
+    pollIntervalSeconds: 21600
+    kind: cronjob
+    schedule: "11 */6 * * *"
+    feeds: []
+
+# -----------------------------------------------------------------------------
+# Ingest components
+# -----------------------------------------------------------------------------
+ingest:
+  rss:
+    image: stream2pretrain/ingest-rss
+    replicas: 1
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  oaipmh:
+    image: stream2pretrain/ingest-oaipmh
+    replicas: 1
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 1, memory: 512Mi}
+  sitemap:
+    image: stream2pretrain/ingest-sitemap
+    replicas: 1
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  githubEvents:
+    image: stream2pretrain/ingest-github-events
+    replicas: 1
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  githubReleases:
+    image: stream2pretrain/ingest-github-releases
+    replicas: 1
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  hf:
+    image: stream2pretrain/ingest-hf
+    replicas: 1
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  submitApi:
+    image: stream2pretrain/submit-api
+    replicas: 2
+    port: 8080
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+    ingress:
+      enabled: true
+      host: submit.stream2pretrain.local
+      tlsSecret: submit-stream2pretrain-tls
+
+# -----------------------------------------------------------------------------
+# Processor components
+# -----------------------------------------------------------------------------
+processor:
+  fetcher:
+    image: stream2pretrain/processor-fetcher
+    replicas: 2
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}
+      limits: {cpu: 1, memory: 1Gi}
+    concurrency: 32
+  curate:
+    image: stream2pretrain/processor-curate
+    replicas: 1
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {cpu: 2, memory: 2Gi}
+    checkpoint:
+      storageClass: ""
+      size: 20Gi
+    onnxModel: /models/fineweb-edu-int8.onnx
+    minHashBands: 14
+    minHashRowsPerBand: 9
+    # FineWeb-Edu ONNX model bundle. Downloaded by an init container into an
+    # emptyDir mounted at /models. Set ``url`` empty to disable the init
+    # container (e.g. when the model is baked into the curate image).
+    modelBundle:
+      url: ""
+      sha256: ""
+      sizeMi: 256
+      image: ghcr.io/stream2pretrain/curl-jq:1.0.0
+  iceberg:
+    image: stream2pretrain/processor-iceberg-writer
+    replicas: 1
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}
+      limits: {cpu: 1, memory: 1Gi}
+    flushIntervalSeconds: 60
+    flushRecords: 5000
+  deconGate:
+    image: stream2pretrain/decon-gate
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+    benchmarks:
+      - mmlu
+      - gsm8k
+      - humaneval
+      - bbh
+    bloomBits: 33
+    bloomHashes: 7
+    signingKeySecret: stream2pretrain-decon-signing
+    signingKeyKey: ed25519.key
+
+# -----------------------------------------------------------------------------
+# Mixture controller (kopf)
+# -----------------------------------------------------------------------------
+mixtureController:
+  image: stream2pretrain/mixture-controller
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  reconcileIntervalSeconds: 30
+
+# -----------------------------------------------------------------------------
+# UI (Next.js 14)
+# -----------------------------------------------------------------------------
+ui:
+  image: stream2pretrain/ui
+  replicas: 2
+  port: 3000
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  ingress:
+    enabled: true
+    host: stream2pretrain.local
+    tlsSecret: stream2pretrain-ui-tls
+    clusterIssuer: letsencrypt-prod
+    entryPoints:
+      - websecure
+  env:
+    duckdbCacheSeconds: 30
+
+# -----------------------------------------------------------------------------
+# KEDA scaling
+# -----------------------------------------------------------------------------
+keda:
+  enabled: true
+  pollingInterval: 15
+  cooldownPeriod: 60
+  fetcher:
+    minReplicas: 1
+    maxReplicas: 10
+    lagThreshold: 1000
+  curate:
+    minReplicas: 1
+    maxReplicas: 4
+    lagThreshold: 500
+  iceberg:
+    minReplicas: 1
+    maxReplicas: 3
+    lagThreshold: 2000
+  triggerAuthSecret: stream2pretrain-keda-redpanda
+  # Set ``auth.enabled: true`` only when the Redpanda profile actually has
+  # SASL/TLS turned on and the secret named by ``triggerAuthSecret`` exists
+  # with keys (sasl, tls, username, password). For the dev/prod profiles
+  # shipped in infra/helmfile-values, plaintext PLAIN is used and auth
+  # MUST stay disabled.
+  auth:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Observability
+# -----------------------------------------------------------------------------
+observability:
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    interval: 30s
+    scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack
+  grafana:
+    dashboards:
+      enabled: true
+      labels:
+        grafana_dashboard: "1"
+      namespace: monitoring
+  tracing:
+    otlpEndpoint: http://tempo.tempo.svc.cluster.local:4317
+    sampleRatio: 0.1
+  logs:
+    lokiEndpoint: http://loki.loki.svc.cluster.local:3100
+
+# -----------------------------------------------------------------------------
+# OPA Gatekeeper constraints
+# -----------------------------------------------------------------------------
+gatekeeper:
+  enabled: true
+  enforcementAction: deny
+  minPollIntervalSeconds: 30
+  maxPollIntervalSeconds: 86400
+
+# -----------------------------------------------------------------------------
+# CRDs (toggle for cases where the platform installs them out-of-band)
+# -----------------------------------------------------------------------------
+crds:
+  install: true
+
+# -----------------------------------------------------------------------------
+# Pod security defaults
+# -----------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -----------------------------------------------------------------------------
+# Affinity / scheduling defaults
+# -----------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""

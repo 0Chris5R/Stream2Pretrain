@@ -1,0 +1,292 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stream2Pretrain values",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["image", "redpanda", "minio", "iceberg", "sources", "ingest", "processor", "ui", "keda", "observability"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registry", "pullPolicy"],
+      "properties": {
+        "registry": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]},
+        "pullSecrets": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "nameOverride": {"type": "string"},
+    "fullnameOverride": {"type": "string"},
+    "commonLabels": {"type": "object"},
+    "commonAnnotations": {"type": "object"},
+    "profile": {"type": "string", "enum": ["dev", "prod"]},
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {"type": "boolean"},
+        "name": {"type": "string"},
+        "annotations": {"type": "object"}
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"create": {"type": "boolean"}}
+    },
+    "redpanda": {
+      "type": "object",
+      "required": ["bootstrapServers", "topics"],
+      "properties": {
+        "bootstrapServers": {"type": "string", "minLength": 1},
+        "schemaRegistry": {"type": "string"},
+        "saslMechanism": {"type": "string"},
+        "authSecret": {"type": "string"},
+        "topics": {
+          "type": "object",
+          "required": ["rawFetched", "docsNormalized", "docsCurated", "deconAttest"],
+          "properties": {
+            "rawFetched": {"type": "string"},
+            "docsNormalized": {"type": "string"},
+            "docsCurated": {"type": "string"},
+            "deconAttest": {"type": "string"}
+          }
+        }
+      }
+    },
+    "minio": {
+      "type": "object",
+      "required": ["endpoint", "buckets", "credentialsSecret"],
+      "properties": {
+        "endpoint": {"type": "string", "format": "uri"},
+        "region": {"type": "string"},
+        "buckets": {
+          "type": "object",
+          "required": ["bronze", "silver", "gold", "decon"],
+          "properties": {
+            "bronze": {"type": "string"},
+            "silver": {"type": "string"},
+            "gold": {"type": "string"},
+            "decon": {"type": "string"}
+          }
+        },
+        "credentialsSecret": {"type": "string", "minLength": 1}
+      }
+    },
+    "iceberg": {
+      "type": "object",
+      "required": ["catalog", "namespace", "polarisUrl", "warehouse", "branches"],
+      "properties": {
+        "catalog": {"type": "string"},
+        "namespace": {"type": "string"},
+        "polarisUrl": {"type": "string", "format": "uri"},
+        "warehouse": {"type": "string"},
+        "branches": {
+          "type": "object",
+          "required": ["main", "shadowA", "shadowB"],
+          "properties": {
+            "main": {"type": "string"},
+            "shadowA": {"type": "string"},
+            "shadowB": {"type": "string"}
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "defaultDeny": {"type": "boolean"},
+        "egressAllow": {"type": "object"},
+        "dnsNamespace": {"type": "string"}
+      }
+    },
+    "sources": {
+      "type": "object",
+      "required": ["arxiv", "github", "huggingface", "blogs"],
+      "properties": {
+        "arxiv": {
+          "type": "object",
+          "required": ["enabled", "oaiPmh", "rss"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "oaiPmh": {
+              "type": "object",
+              "required": ["name", "endpoint", "set", "pollIntervalSeconds", "schedule"],
+              "properties": {
+                "name": {"type": "string"},
+                "endpoint": {"type": "string", "format": "uri"},
+                "set": {"type": "string"},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                "licenseDefault": {"type": "string"},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "schedule": {"type": "string"}
+              }
+            },
+            "rss": {
+              "type": "object",
+              "required": ["categories", "pollIntervalSeconds", "schedule"],
+              "properties": {
+                "categories": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "schedule": {"type": "string"},
+                "licenseDefault": {"type": "string"}
+              }
+            }
+          }
+        },
+        "github": {
+          "type": "object",
+          "required": ["enabled", "events", "releases"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "events": {
+              "type": "object",
+              "required": ["name", "pollIntervalSeconds", "tokenSecret", "tokenSecretKey"],
+              "properties": {
+                "name": {"type": "string"},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 30, "maximum": 86400},
+                "respectXPollInterval": {"type": "boolean"},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "tokenSecret": {"type": "string"},
+                "tokenSecretKey": {"type": "string"},
+                "aiOrgFilter": {"type": "array", "items": {"type": "string"}}
+              }
+            },
+            "releases": {
+              "type": "object",
+              "required": ["name", "pollIntervalSeconds", "schedule", "tokenSecret", "tokenSecretKey", "repos"],
+              "properties": {
+                "name": {"type": "string"},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "schedule": {"type": "string"},
+                "tokenSecret": {"type": "string"},
+                "tokenSecretKey": {"type": "string"},
+                "repos": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+              }
+            }
+          }
+        },
+        "huggingface": {
+          "type": "object",
+          "required": ["enabled", "models", "dailyPapers"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "models": {
+              "type": "object",
+              "required": ["name", "endpoint", "pollIntervalSeconds", "tokenSecret", "tokenSecretKey"],
+              "properties": {
+                "name": {"type": "string"},
+                "endpoint": {"type": "string", "format": "uri"},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "tokenSecret": {"type": "string"},
+                "tokenSecretKey": {"type": "string"}
+              }
+            },
+            "dailyPapers": {
+              "type": "object",
+              "required": ["name", "endpoint", "pollIntervalSeconds", "schedule", "tokenSecret", "tokenSecretKey"],
+              "properties": {
+                "name": {"type": "string"},
+                "endpoint": {"type": "string", "format": "uri"},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "schedule": {"type": "string"},
+                "tokenSecret": {"type": "string"},
+                "tokenSecretKey": {"type": "string"}
+              }
+            }
+          }
+        },
+        "blogs": {
+          "type": "object",
+          "required": ["enabled", "schedule", "feeds"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+            "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+            "schedule": {"type": "string"},
+            "feeds": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "url"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "url": {"type": "string", "format": "uri"}
+                }
+              }
+            }
+          }
+        },
+        "sitemap": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "name": {"type": "string"},
+            "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+            "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+            "schedule": {"type": "string"},
+            "feeds": {"type": "array", "items": {"type": "object"}}
+          }
+        }
+      }
+    },
+    "ingest": {"type": "object"},
+    "processor": {"type": "object"},
+    "mixtureController": {"type": "object"},
+    "ui": {"type": "object"},
+    "keda": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "pollingInterval": {"type": "integer", "minimum": 1},
+        "cooldownPeriod": {"type": "integer", "minimum": 1},
+        "fetcher": {
+          "type": "object",
+          "properties": {
+            "minReplicas": {"type": "integer", "minimum": 0},
+            "maxReplicas": {"type": "integer", "minimum": 1},
+            "lagThreshold": {"type": "integer", "minimum": 1}
+          }
+        },
+        "curate": {"type": "object"},
+        "iceberg": {"type": "object"},
+        "triggerAuthSecret": {"type": "string"}
+      }
+    },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "serviceMonitor": {"type": "object"},
+        "grafana": {"type": "object"},
+        "tracing": {"type": "object"},
+        "logs": {"type": "object"}
+      }
+    },
+    "gatekeeper": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "enforcementAction": {"type": "string", "enum": ["deny", "dryrun", "warn"]},
+        "minPollIntervalSeconds": {"type": "integer", "minimum": 1},
+        "maxPollIntervalSeconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "crds": {
+      "type": "object",
+      "properties": {"install": {"type": "boolean"}}
+    },
+    "podSecurityContext": {"type": "object"},
+    "containerSecurityContext": {"type": "object"},
+    "nodeSelector": {"type": "object"},
+    "tolerations": {"type": "array"},
+    "affinity": {"type": "object"},
+    "topologySpreadConstraints": {"type": "array"},
+    "priorityClassName": {"type": "string"}
+  }
+}

@@ -1,0 +1,169 @@
+# Stream2Pretrain - dev SourceFeed catalogue.
+#
+# Loaded by every ingest pod when ``S2P_FEED_CONFIG`` is set (the default in
+# docker-compose.dev.yml). In cluster, the same shape is installed as
+# SourceFeed CRDs and read via the Kubernetes API.
+#
+# Phase-1 demo set per SOURCES.md.
+feeds:
+  - name: rss-arxiv-cs-cl
+    protocol: rss
+    endpoint: https://rss.arxiv.org/rss/cs.CL
+    poll_interval_seconds: 7200
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 4
+    license_default: arxiv-non-exclusive-distribution
+    egress_allow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
+
+  - name: rss-arxiv-cs-lg
+    protocol: rss
+    endpoint: https://rss.arxiv.org/rss/cs.LG
+    poll_interval_seconds: 7200
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 4
+    license_default: arxiv-non-exclusive-distribution
+    egress_allow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
+
+  - name: rss-arxiv-cs-ai
+    protocol: rss
+    endpoint: https://rss.arxiv.org/rss/cs.AI
+    poll_interval_seconds: 7200
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 4
+    license_default: arxiv-non-exclusive-distribution
+    egress_allow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
+
+  - name: rss-arxiv-cs-cv
+    protocol: rss
+    endpoint: https://rss.arxiv.org/rss/cs.CV
+    poll_interval_seconds: 7200
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 4
+    license_default: arxiv-non-exclusive-distribution
+    egress_allow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
+
+  - name: rss-openai-news
+    protocol: rss
+    endpoint: https://openai.com/news/rss.xml
+    poll_interval_seconds: 21600
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 2
+    license_default: unknown
+    egress_allow: ["openai.com", "cdn.openai.com"]
+
+  - name: rss-deepmind-blog
+    protocol: rss
+    endpoint: https://deepmind.google/blog/rss.xml
+    poll_interval_seconds: 21600
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 2
+    license_default: unknown
+    egress_allow: ["deepmind.google"]
+
+  - name: rss-hf-blog
+    protocol: rss
+    endpoint: https://huggingface.co/blog/feed.xml
+    poll_interval_seconds: 21600
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 2
+    license_default: unknown
+    egress_allow: ["huggingface.co", "hf.co"]
+
+  - name: rss-bair-blog
+    protocol: rss
+    endpoint: https://bair.berkeley.edu/blog/feed.xml
+    poll_interval_seconds: 86400
+    rate_limit:
+      requests_per_second: 0.5
+      burst: 1
+    license_default: unknown
+    egress_allow: ["bair.berkeley.edu"]
+
+  - name: rss-eleuther-blog
+    protocol: rss
+    endpoint: https://blog.eleuther.ai/index.xml
+    poll_interval_seconds: 86400
+    rate_limit:
+      requests_per_second: 0.5
+      burst: 1
+    license_default: unknown
+    egress_allow: ["blog.eleuther.ai"]
+
+  - name: oai-arxiv-cs
+    protocol: oai-pmh
+    endpoint: https://oaipmh.arxiv.org/oai
+    poll_interval_seconds: 7200
+    rate_limit:
+      requests_per_second: 4.0
+      burst: 4
+    license_default: arxiv-non-exclusive-distribution
+    egress_allow: ["oaipmh.arxiv.org", "export.arxiv.org"]
+
+  - name: hf-models
+    protocol: rest-json
+    endpoint: https://huggingface.co/api/models
+    poll_interval_seconds: 900
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 2
+    license_default: unknown
+    auth:
+      type: bearer
+      secret_name: hf-token
+      secret_key: token
+    egress_allow: ["huggingface.co", "hf.co"]
+
+  - name: hf-daily-papers
+    protocol: rest-json
+    endpoint: https://huggingface.co/api/daily_papers
+    poll_interval_seconds: 21600
+    rate_limit:
+      requests_per_second: 0.5
+      burst: 1
+    license_default: unknown
+    auth:
+      type: bearer
+      secret_name: hf-token
+      secret_key: token
+    egress_allow: ["huggingface.co", "hf.co"]
+
+  - name: github-events
+    protocol: rest-json
+    endpoint: https://api.github.com/events
+    poll_interval_seconds: 60
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 1
+      respect_x_poll_interval: true
+    license_default: unknown
+    auth:
+      type: bearer
+      secret_name: github-token
+      secret_key: token
+    egress_allow: ["api.github.com", "github.com"]
+
+  - name: github-releases
+    protocol: atom
+    endpoint: https://github.com
+    poll_interval_seconds: 7200
+    rate_limit:
+      requests_per_second: 2.0
+      burst: 4
+    license_default: unknown
+    egress_allow: ["github.com", "api.github.com"]
+
+  - name: manual-submit
+    protocol: manual
+    endpoint: https://stream2pretrain.local/manual
+    poll_interval_seconds: 86400
+    rate_limit:
+      requests_per_second: 2.0
+      burst: 8
+    license_default: unknown

@@ -67,3 +67,43 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - All lecture slides in `lecture_slides/`.
 - Full research output in `RESEARCH.md`.
 - Workflow run id (deep research): `wf_14fc06f4-2b8`, 30 subagents, 14 candidate novelty claims, 7 survived adversarial review.
+
+### 2026-06-15 - Implementation layout landed (v0.1.0)
+
+The repo now contains the v0.1.0 implementation footprint described in
+RESEARCH.md sections 4-8. Key paths:
+
+- `schemas/` - shared Pydantic models for bronze, silver, gold, decon
+  attestations, SourceFeed and MixtureRecipe CRDs, plus Redpanda topic
+  catalogue.
+- `ingest/` - pollers (rss, sitemap, oai-pmh, github events / releases,
+  HF Hub) + FastAPI submit API. `ingest/common/` hosts the shared HTTP,
+  S3, Kafka, OTel, rate-limit, robots, and feeds-loader libs.
+- `processor/` - Bytewax dataflows (fetcher, curate, iceberg_writer,
+  decon_gate, sign) plus operators in `processor/operators/`. Mixture
+  controller lives in `processor/mixture_controller/`.
+- `ui/` - Next.js 14 App Router UI with shadcn/ui + TanStack Query.
+  Routes: `/dashboard`, `/sources`, `/decon`, `/as-of`, `/mixtures`.
+  DuckDB-backed via `ui/lib/duckdb-client.ts`.
+- `charts/stream2pretrain/` - single Helm chart for every component plus
+  CRDs (`SourceFeed`, `MixtureRecipe`), KEDA `ScaledObject`s,
+  `ServiceMonitor`s, `NetworkPolicies`, Gatekeeper constraints, Grafana
+  dashboards. Lints clean.
+- `infra/` - Terraform for OpenStack VMs, k3s install script, helmfile
+  values for the lecture-stack dependencies (kube-prometheus-stack, Loki,
+  Alloy, Tempo, Traefik, cert-manager, KEDA, Gatekeeper, MinIO, Redpanda,
+  Polaris-lite).
+- `tests/` - cross-component integration tests (`tests/integration/`)
+  and a k6 submit-API load profile (`tests/load/`). Component unit tests
+  live alongside their packages.
+- `scripts/` - `seed_topics.sh`, `load_seed_feeds.sh`, `decon_bisect.py`,
+  `dev_smoke.sh`.
+- `docs/` - `architecture.md` + `architecture.mmd`, `data-model.md`,
+  `operations.md`, `novelty.md`, `threat-model.md`.
+- Top-level: `CHANGELOG.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`,
+  `LICENSE` (Apache-2.0). README has Quickstart (dev) + Quickstart (k3s)
+  + Repo layout sections appended.
+
+Open items still marked `needs-measurement`: throughput on the actual k3s
+cluster, prod partition counts, Polaris RBAC token TTLs, integrity-scan
+cadence on MinIO bronze, and DHBWCloud quotas.

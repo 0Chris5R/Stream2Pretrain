@@ -1,0 +1,44 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+# All sensitive values can also be supplied via TF_VAR_* environment variables.
+
+# --- Required -------------------------------------------------------------
+
+# Name of the OpenStack external/floating-IP network in your DHBWCloud project.
+external_network = "ext-net"
+
+# Public-key half of the SSH keypair you use to reach the VMs.
+ssh_public_key = "ssh-ed25519 AAAA... your-comment"
+
+# --- Sizing (defaults are sane for DHBWCloud) ----------------------------
+
+cluster_name      = "stream2pretrain"
+control_flavor    = "m1.large"      # 4 vCPU / 8 GB
+worker_flavor     = "m1.xlarge"     # 8 vCPU / 16 GB
+worker_count      = 2
+image_name        = "Ubuntu 24.04 LTS"
+
+control_data_volume_gb = 50
+worker_data_volume_gb  = 100
+
+# --- Network -------------------------------------------------------------
+
+tenant_network_cidr = "10.123.0.0/24"
+dns_nameservers     = ["1.1.1.1", "9.9.9.9"]
+
+# Restrict admin access. In production lock these down to the lab VPN range.
+allowed_admin_cidrs = ["0.0.0.0/0"]
+ingress_cidrs       = ["0.0.0.0/0"]
+
+# --- k3s ----------------------------------------------------------------
+
+# Pin the channel for reproducibility. Latest stable can be checked via:
+#   curl -sL https://update.k3s.io/v1-release/channels | jq '.data[] | select(.id=="stable")'
+k3s_version = "v1.30.3+k3s1"
+
+# Leave empty to auto-generate. If you set it, treat as a secret.
+# k3s_token = ""
+
+# --- Optional -----------------------------------------------------------
+
+# availability_zone = "nova"
+# extra_tags = { "owner" = "dhbw-team-x" }

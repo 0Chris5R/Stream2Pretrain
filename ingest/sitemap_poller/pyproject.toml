@@ -1,0 +1,21 @@
+[project]
+name = "stream2pretrain-sitemap-poller"
+version = "0.1.0"
+description = "Sitemap.xml CronJob poller for Stream2Pretrain."
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "stream2pretrain",
+    "stream2pretrain-ingest-common",
+]
+
+[project.scripts]
+s2p-sitemap-poller = "ingest.sitemap_poller.poller:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

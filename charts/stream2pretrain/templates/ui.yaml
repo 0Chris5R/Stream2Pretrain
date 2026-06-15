@@ -1,0 +1,133 @@
+{{- $component := "ui" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      containers:
+        - name: ui
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ui.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ui.port }}
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: {{ .Values.ui.port | quote }}
+            - name: S2P_REDPANDA_BROKERS
+              value: {{ .Values.redpanda.bootstrapServers | quote }}
+            - name: S2P_ICEBERG_REST_URL
+              value: {{ .Values.iceberg.polarisUrl | quote }}
+            - name: S2P_MINIO_ENDPOINT
+              value: {{ .Values.minio.endpoint | quote }}
+            - name: S2P_DUCKDB_CACHE_SECONDS
+              value: {{ .Values.ui.env.duckdbCacheSeconds | quote }}
+            - name: S2P_SUBMIT_API_URL
+              value: http://{{ include "stream2pretrain.fullname" . }}-submit-api.{{ .Release.Namespace }}.svc.cluster.local
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.credentialsSecret | quote }}
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.credentialsSecret | quote }}
+                  key: secretKey
+          livenessProbe:
+            httpGet: {path: /api/health, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+          volumeMounts:
+            - name: cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+{{- if .Values.ui.ingress.enabled }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  entryPoints:
+    {{- toYaml .Values.ui.ingress.entryPoints | nindent 4 }}
+  routes:
+    - match: Host(`{{ .Values.ui.ingress.host }}`)
+      kind: Rule
+      services:
+        - name: {{ $name }}
+          port: 80
+  tls:
+    secretName: {{ .Values.ui.ingress.tlsSecret | quote }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.ui.ingress.tlsSecret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  secretName: {{ .Values.ui.ingress.tlsSecret | quote }}
+  dnsNames:
+    - {{ .Values.ui.ingress.host | quote }}
+  issuerRef:
+    name: {{ .Values.ui.ingress.clusterIssuer | quote }}
+    kind: ClusterIssuer
+{{- end }}

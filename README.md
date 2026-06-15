@@ -45,3 +45,107 @@ The course is heavily Kubernetes-centric: Terraform + Ansible -> k3s on DHBWClou
 ## Next steps
 
 Start Week 1 of the implementation plan in `RESEARCH.md` section 7.
+
+## Quickstart (dev)
+
+The local dev stack runs Redpanda single-node + MinIO + the FastAPI submit
+API on a laptop, no Kubernetes required. It backs all `tests/integration/`.
+
+```bash
+# 1. boot Redpanda + MinIO
+make dev-up
+
+# 2. seed the four core topics
+make seed-topics
+
+# 3. run the submit API (uses the dev feed catalogue)
+S2P_FEED_CONFIG=ingest/feeds.dev.yaml \
+S2P_REDPANDA_BROKERS=localhost:9092 \
+S2P_MINIO_ENDPOINT=http://localhost:9000 \
+S2P_MINIO_ACCESS_KEY=minioadmin \
+S2P_MINIO_SECRET_KEY=minioadmin \
+  uv run uvicorn ingest.submit_api.app:app --host 127.0.0.1 --port 8000
+
+# 4. one-shot smoke (compose up + topics + API + sample submission)
+bash scripts/dev_smoke.sh
+
+# 5. tests
+uv run pytest
+
+# 6. load test (k6 must be installed separately)
+k6 run -e SUBMIT_URL=http://localhost:8000/submit tests/load/k6_submit.js
+```
+
+UIs to open while developing:
+
+- Redpanda Console: http://localhost:8080
+- MinIO Console: http://localhost:9001 (minioadmin / minioadmin)
+- Submit API: http://localhost:8000/docs
+
+Tear the stack down with `make dev-down` (preserves volumes) or
+`make dev-reset` (destroys volumes).
+
+## Quickstart (k3s)
+
+The full deployment runs as a single Helm release pulled in via Helmfile.
+The chart bundles every Stream2Pretrain component plus the lecture stack
+(kube-prometheus-stack, Loki, Alloy, Tempo, Traefik, cert-manager, KEDA,
+OPA Gatekeeper).
+
+```bash
+# 1. provision the cluster on DHBWCloud (one-time)
+bash infra/k3s-install.sh
+
+# 2. apply the chart and dependencies
+helmfile -f helmfile.yaml apply
+
+# 3. seed the Phase-1 SourceFeed CRDs
+NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
+
+# 4. open the cockpit
+kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
+open http://localhost:3000/dashboard
+
+# 5. drive load
+k6 run -e SUBMIT_URL=https://stream2pretrain.demo/submit tests/load/k6_submit.js
+```
+
+Operational runbooks (scale, debug, restart from checkpoint, rotate signing
+key) live in [`docs/operations.md`](docs/operations.md).
+
+## Repo layout
+
+```
+.
+|- charts/stream2pretrain/   single Helm chart, all components + CRDs
+|  |- crds/                  SourceFeed, MixtureRecipe
+|  |- templates/             ingest, processor, ui, observability, policy
+|  |- dashboards/            Grafana JSON
+|  +- values{,-dev,-prod}.yaml
+|- helmfile.yaml             top-level deploy
+|- infra/                    Terraform + k3s install + helmfile values
+|- ingest/                   pollers + FastAPI submit
+|  |- common/                shared HTTP, S3, kafka, OTel, rate-limit, robots
+|  |- submit_api/            FastAPI Deployment
+|  |- rss_poller/, sitemap_poller/, oaipmh_poller/
+|  +- github_events/, github_releases/, hf_poller/
+|- processor/                Bytewax dataflows + curation operators
+|  |- operators/             extraction, langid, gopher/c4, minhash, lshbloom,
+|  |                         quality, kenlm, pii, validity, decon
+|  |- mixture_controller/    shadow-A/B reconciler
+|  |- fetcher.py, curate.py, iceberg_writer.py, decon_gate.py, sign.py
+|- schemas/                  shared Pydantic + JSON-Schema mirror
+|  +- bronze.py, silver.py, gold.py, decon.py, sourcefeed.py, topics.py
+|- ui/                       Next.js 14 App Router + shadcn/ui + TanStack
+|  |- app/{dashboard,sources,decon,as-of,mixtures}
+|  +- components/, lib/duckdb-client.ts
+|- docs/                     architecture, data-model, operations, novelty,
+|                            threat-model
+|- scripts/                  seed_topics.sh, load_seed_feeds.sh,
+|                            dev_smoke.sh, decon_bisect.py
+|- tests/                    integration + load (component unit tests live
+|                            alongside their packages)
+|- docker-compose.dev.yml    laptop dev stack
+|- pyproject.toml + uv.lock  uv workspace
++- README.md, CLAUDE.md, RESEARCH.md, SOURCES.md, CHANGELOG.md, LICENSE
+```

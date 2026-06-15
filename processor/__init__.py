@@ -1,0 +1,23 @@
+"""Stream2Pretrain processor - Bytewax dataflows + curation operators.
+
+This package contains the streaming processors that turn raw fetched
+documents into curated, mixture-ready ``GoldRecord`` rows on the
+``docs.curated`` Redpanda topic and into Iceberg ``gold`` table snapshots.
+
+Modules
+-------
+- :mod:`processor.fetcher`         - HTML extraction + lang ID + validity
+- :mod:`processor.curate`          - main curation dataflow
+- :mod:`processor.iceberg_writer`  - micro-batch Iceberg sink
+- :mod:`processor.decon_gate`      - streaming contamination gate
+- :mod:`processor.sign`            - cosign / Ed25519 attestation signer
+- :mod:`processor.tokenize`        - GPT-2 / sentencepiece token-count helper
+- :mod:`processor.operators`       - reusable Bytewax operators
+- :mod:`processor.mixture_controller` - kopf operator for MixtureRecipe CRDs
+
+The shared Kafka / OTel / settings glue lives in :mod:`processor.common`.
+"""
+
+from __future__ import annotations
+
+__version__ = "0.1.0"

@@ -1,0 +1,160 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sourcefeeds.stream2pretrain.io
+  labels:
+    app.kubernetes.io/part-of: stream2pretrain
+spec:
+  group: stream2pretrain.io
+  scope: Namespaced
+  names:
+    plural: sourcefeeds
+    singular: sourcefeed
+    kind: SourceFeed
+    shortNames:
+      - sf
+    categories:
+      - stream2pretrain
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Protocol
+          type: string
+          jsonPath: .spec.protocol
+        - name: Endpoint
+          type: string
+          jsonPath: .spec.endpoint
+        - name: Interval
+          type: integer
+          jsonPath: .spec.pollIntervalSeconds
+        - name: License
+          type: string
+          jsonPath: .spec.licenseDefault
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              additionalProperties: false
+              required:
+                - name
+                - protocol
+                - endpoint
+                - pollIntervalSeconds
+                - rateLimit
+                - licenseDefault
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: "^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$"
+                protocol:
+                  type: string
+                  enum: [rss, atom, oai-pmh, rest-json, sitemap, manual]
+                endpoint:
+                  type: string
+                  format: uri
+                  minLength: 1
+                  maxLength: 2083
+                pollIntervalSeconds:
+                  type: integer
+                  minimum: 1
+                  maximum: 86400
+                enabled:
+                  type: boolean
+                  default: true
+                licenseDefault:
+                  type: string
+                  description: |
+                    SPDX license that applies to the feed unless a per-document
+                    license is detected at fetch time. The Gatekeeper policy
+                    rejects "unknown" so unset / unknown values are forced to a
+                    deliberate operator choice. This field is required.
+                  enum:
+                    - CC-BY-4.0
+                    - CC-BY-SA-4.0
+                    - CC0-1.0
+                    - Apache-2.0
+                    - MIT
+                    - BSD-3-Clause
+                    - arxiv-non-exclusive-distribution
+                rateLimit:
+                  type: object
+                  additionalProperties: false
+                  required: [requestsPerSecond, burst]
+                  properties:
+                    requestsPerSecond:
+                      type: number
+                      exclusiveMinimum: true
+                      minimum: 0
+                    burst:
+                      type: integer
+                      exclusiveMinimum: true
+                      minimum: 0
+                    respectXPollInterval:
+                      type: boolean
+                      default: false
+                auth:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    type:
+                      type: string
+                      enum: [none, bearer, header, basic]
+                      default: none
+                    secretName:
+                      type: string
+                    secretKey:
+                      type: string
+                    headerName:
+                      type: string
+                egressAllow:
+                  type: array
+                  items:
+                    type: string
+                acceptContentTypes:
+                  type: array
+                  items:
+                    type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Active, Throttled, Failed, Disabled]
+                lastPolledAt:
+                  type: string
+                  format: date-time
+                lastSuccessAt:
+                  type: string
+                  format: date-time
+                lastErrorMessage:
+                  type: string
+                docsEmittedTotal:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: {type: string}
+                      status: {type: string, enum: ["True", "False", "Unknown"]}
+                      reason: {type: string}
+                      message: {type: string}
+                      lastTransitionTime: {type: string, format: date-time}

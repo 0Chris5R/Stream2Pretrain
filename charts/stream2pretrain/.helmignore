@@ -1,0 +1,16 @@
+# Patterns to ignore when building packages.
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.hg/
+.svn/
+.idea/
+.vscode/
+*.bak
+*.swp
+*.tmp
+*.orig
+*.tmproj
+*.tgz
+OWNERS

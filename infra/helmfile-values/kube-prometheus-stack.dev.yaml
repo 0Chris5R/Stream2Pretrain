@@ -1,0 +1,80 @@
+---
+# kube-prometheus-stack dev preset. Tight resources, short retention, no persistent volumes.
+fullnameOverride: kps
+crds:
+  enabled: true
+defaultRules:
+  create: true
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    replicas: 1
+    retention: 24h
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+grafana:
+  enabled: true
+  adminPassword: stream2pretrain # >>> REPLACE in prod via secret <<<
+  defaultDashboardsTimezone: utc
+  serviceMonitor:
+    enabled: true
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+      label: grafana_dashboard
+    datasources:
+      enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+prometheus:
+  prometheusSpec:
+    retention: 24h
+    retentionSize: 5GiB
+    walCompression: true
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    enableAdminAPI: true
+    enableFeatures:
+      - exemplar-storage
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+nodeExporter:
+  enabled: true
+kubeStateMetrics:
+  enabled: true

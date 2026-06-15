@@ -1,0 +1,30 @@
+Stream2Pretrain {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+Components:
+- Ingest: arXiv (OAI-PMH + 4 RSS), GitHub Events + Releases, HF Hub models +
+  Daily Papers, AI-lab blogs, sitemap (optional), submit-api (FastAPI).
+- Processor: fetcher (Resiliparse), curate (Bytewax StatefulSet with decon-gate
+  sidecar on 127.0.0.1:9595), iceberg-writer (PyIceberg).
+- Control plane: mixture-controller (kopf) + SourceFeed/MixtureRecipe CRDs.
+- UI: Next.js 14 reachable at https://{{ .Values.ui.ingress.host }}/ once the
+  Certificate {{ .Values.ui.ingress.tlsSecret }} is Ready.
+- Submit API at https://{{ .Values.ingest.submitApi.ingress.host }}/ (POST
+  /v1/sourcefeeds, /v1/mixturerecipes).
+
+Required external secrets (create before installing or use sealed-secrets):
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.minio.credentialsSecret }} \
+      --from-literal=accessKey=... --from-literal=secretKey=...
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.sources.github.events.tokenSecret }} \
+      --from-literal=token=ghp_...
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.sources.huggingface.models.tokenSecret }} \
+      --from-literal=token=hf_...
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.processor.deconGate.signingKeySecret }} \
+      --from-file=ed25519.key=./signing.key
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.keda.triggerAuthSecret }} \
+      --from-literal=sasl=plain --from-literal=tls=disable \
+      --from-literal=username=... --from-literal=password=...
+
+Verify:
+  kubectl -n {{ .Release.Namespace }} get sourcefeeds,mixturerecipes
+  kubectl -n {{ .Release.Namespace }} get scaledobjects
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}

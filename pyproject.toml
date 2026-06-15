@@ -1,0 +1,99 @@
+[project]
+name = "stream2pretrain"
+version = "0.1.0"
+description = "Streaming-first LLM pretraining data curator on Kubernetes."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Stream2Pretrain Contributors" }]
+
+# Shared runtime dependencies. Components import these directly; component-specific
+# extras live in the workspace member's own pyproject.toml when needed.
+#
+# Note on Kafka client choice:
+#   - ingest/* uses aiokafka (async producer for FastAPI + asyncio pollers).
+#   - processor uses confluent-kafka (Bytewax's bytewax-kafka connector wraps it).
+# Both are listed here so the schemas package and shared utilities can be exercised
+# from either side without re-resolving the lock.
+dependencies = [
+    "pydantic>=2.7,<3",
+    "structlog>=24.1",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp>=1.27",
+    "httpx>=0.27",
+    "orjson>=3.10",
+    "aiokafka>=0.11",
+    "confluent-kafka>=2.5",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["schemas"]
+
+# uv workspace - members are paths whose pyproject.toml will be discovered.
+# `charts/` intentionally omitted (Helm only, no Python).
+[tool.uv.workspace]
+members = [
+    "ingest/rss_poller",
+    "ingest/sitemap_poller",
+    "ingest/submit_api",
+    "processor",
+    "tests",
+]
+
+[tool.uv.sources]
+# Workspace members reference the shared `stream2pretrain` package by path so
+# `uv sync` resolves against the local source tree rather than PyPI.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "SIM", # simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501", # line length handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["N802", "N803"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["confluent_kafka.*", "aiokafka.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error::DeprecationWarning"]

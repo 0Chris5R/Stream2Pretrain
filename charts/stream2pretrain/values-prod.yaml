@@ -1,0 +1,40 @@
+# Prod override - 3 replica targets, prod KEDA caps, real cluster issuer.
+profile: prod
+
+ingest:
+  submitApi:
+    replicas: 3
+    ingress:
+      host: submit.stream2pretrain.example.com
+
+processor:
+  fetcher:
+    replicas: 3
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {cpu: 2, memory: 2Gi}
+  curate:
+    replicas: 1
+    checkpoint:
+      size: 100Gi
+      storageClass: ceph-block
+    resources:
+      requests: {cpu: 1, memory: 2Gi}
+      limits: {cpu: 4, memory: 4Gi}
+  iceberg:
+    replicas: 2
+
+ui:
+  replicas: 3
+  ingress:
+    host: stream2pretrain.example.com
+    clusterIssuer: letsencrypt-prod
+
+keda:
+  fetcher: {minReplicas: 2, maxReplicas: 20, lagThreshold: 1000}
+  curate: {minReplicas: 1, maxReplicas: 8, lagThreshold: 500}
+  iceberg: {minReplicas: 1, maxReplicas: 4, lagThreshold: 2000}
+
+observability:
+  tracing:
+    sampleRatio: 0.1

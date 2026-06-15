@@ -1,0 +1,211 @@
+---
+# Stream2Pretrain platform Helmfile.
+#
+# Single source of truth for all platform releases on the k3s cluster. Apply with:
+#   helmfile -e dev   apply
+#   helmfile -e prod  apply
+#
+# Releases are declared in topological order. helmfile resolves `needs:` so that
+# CRDs (cert-manager, KEDA, Gatekeeper, Traefik, Loki, Tempo, Prometheus, MinIO,
+# Redpanda) install before the project chart that consumes them.
+#
+# Per-release values live under infra/helmfile-values/<release>.<env>.yaml and
+# are referenced via the {{ .Environment.Name }} template variable so the same
+# release stanza serves both environments.
+#
+# Stack lock (CLAUDE.md, 2026-06-15): cert-manager + Traefik + kube-prometheus
+# stack + Loki + Tempo + Alloy + KEDA + Gatekeeper + MinIO + Redpanda + Polaris
+# (lite chart scaffolded in this repo) + the project chart at ./charts/stream2pretrain.
+
+# ---- Repositories ---------------------------------------------------------
+
+repositories:
+  - name: jetstack
+    url: https://charts.jetstack.io
+  - name: traefik
+    url: https://traefik.github.io/charts
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: grafana
+    url: https://grafana.github.io/helm-charts
+  - name: kedacore
+    url: https://kedacore.github.io/charts
+  - name: gatekeeper
+    url: https://open-policy-agent.github.io/gatekeeper/charts
+  - name: minio-operator
+    url: https://operator.min.io
+  - name: redpanda
+    url: https://charts.redpanda.com
+
+# ---- Environments ---------------------------------------------------------
+
+environments:
+  dev:
+    values:
+      - environment: dev
+      - domain: stream2pretrain.local
+      - storageClass: local-path
+      - resourcePresets: small
+      - clusterIssuer: letsencrypt-staging
+      - tlsEnabled: false
+  prod:
+    values:
+      - environment: prod
+      # >>> REPLACE <<< with the team's real DNS zone (see CLAUDE.md open question).
+      - domain: stream2pretrain.example.org
+      - storageClass: local-path
+      - resourcePresets: medium
+      - clusterIssuer: letsencrypt-prod
+      - tlsEnabled: true
+
+# Default to dev so a bare `helmfile apply` is non-destructive.
+---
+
+helmDefaults:
+  wait: true
+  waitForJobs: true
+  timeout: 600
+  atomic: false
+  createNamespace: true
+  historyMax: 5
+
+# ---- Releases -------------------------------------------------------------
+
+releases:
+  # 1. cert-manager - issues TLS certs via the rfc2136 ClusterIssuer.
+  - name: cert-manager
+    namespace: cert-manager
+    chart: jetstack/cert-manager
+    version: v1.15.3
+    values:
+      - infra/helmfile-values/cert-manager.{{ .Environment.Name }}.yaml
+    set:
+      - name: installCRDs
+        value: true
+
+  # 2. Traefik - lecture-default ingress + TLS termination. Disabled in k3s
+  #    bootstrap (see infra/k3s-install/k3s-server.sh) so this chart owns it.
+  - name: traefik
+    namespace: traefik
+    chart: traefik/traefik
+    version: 30.1.0
+    needs:
+      - cert-manager/cert-manager
+    values:
+      - infra/helmfile-values/traefik.{{ .Environment.Name }}.yaml
+
+  # 3. kube-prometheus-stack - Prometheus, Grafana, AlertManager, ServiceMonitor CRDs.
+  - name: kube-prometheus-stack
+    namespace: monitoring
+    chart: prometheus-community/kube-prometheus-stack
+    version: 65.1.0
+    values:
+      - infra/helmfile-values/kube-prometheus-stack.{{ .Environment.Name }}.yaml
+
+  # 4. Loki - log aggregation; lecture default.
+  - name: loki
+    namespace: monitoring
+    chart: grafana/loki
+    version: 6.16.0
+    needs:
+      - monitoring/kube-prometheus-stack
+    values:
+      - infra/helmfile-values/loki.{{ .Environment.Name }}.yaml
+
+  # 5. Tempo - distributed tracing. Required for the OTel-trace-id-in-Iceberg
+  #    novelty (RESEARCH.md N5).
+  - name: tempo
+    namespace: monitoring
+    chart: grafana/tempo
+    version: 1.13.0
+    needs:
+      - monitoring/kube-prometheus-stack
+    values:
+      - infra/helmfile-values/tempo.{{ .Environment.Name }}.yaml
+
+  # 6. Grafana Alloy - OTel + log collector replacing the Grafana Agent.
+  - name: alloy
+    namespace: monitoring
+    chart: grafana/alloy
+    version: 0.9.2
+    needs:
+      - monitoring/loki
+      - monitoring/tempo
+    values:
+      - infra/helmfile-values/alloy.{{ .Environment.Name }}.yaml
+
+  # 7. KEDA - Kafka-lag autoscaling for every Bytewax consumer group.
+  - name: keda
+    namespace: keda
+    chart: kedacore/keda
+    version: 2.15.1
+    values:
+      - infra/helmfile-values/keda.{{ .Environment.Name }}.yaml
+
+  # 8. OPA Gatekeeper - SourceFeed CRD admission policy (RESEARCH.md Week 5).
+  - name: gatekeeper
+    namespace: gatekeeper-system
+    chart: gatekeeper/gatekeeper
+    version: 3.17.0
+    values:
+      - infra/helmfile-values/gatekeeper.{{ .Environment.Name }}.yaml
+
+  # 9. MinIO operator - manages the tenant chart below.
+  - name: minio-operator
+    namespace: minio-operator
+    chart: minio-operator/operator
+    version: 6.0.4
+    values:
+      - infra/helmfile-values/minio-operator.{{ .Environment.Name }}.yaml
+
+  # 10. MinIO tenant - object store for bronze/silver/gold + decon attestations.
+  - name: minio
+    namespace: minio
+    chart: minio-operator/tenant
+    version: 6.0.4
+    needs:
+      - minio-operator/minio-operator
+    values:
+      - infra/helmfile-values/minio-tenant.{{ .Environment.Name }}.yaml
+
+  # 11. Redpanda - 1-broker dev mode (CLAUDE.md: 2 worker layout cannot fit 3 brokers).
+  - name: redpanda
+    namespace: redpanda
+    chart: redpanda/redpanda
+    version: 5.9.5
+    values:
+      - infra/helmfile-values/redpanda.{{ .Environment.Name }}.yaml
+
+  # 12. Polaris-lite - REST Iceberg catalog.
+  #
+  #     The upstream Apache Polaris Helm chart (apache/polaris) is incubating and
+  #     versions/availability are needs-measurement at install time. We ship a
+  #     minimal local chart at charts/polaris-lite that runs polaris-server in
+  #     no-auth dev mode against a JDBC-on-disk catalog. Swap to the upstream
+  #     chart once it stabilises.
+  - name: polaris
+    namespace: polaris
+    chart: ./charts/polaris-lite
+    needs:
+      - minio/minio
+    values:
+      - infra/helmfile-values/polaris.{{ .Environment.Name }}.yaml
+
+  # 13. Stream2Pretrain - the project chart itself (built by another agent).
+  #     This release sits at the top of the dependency tree and consumes every
+  #     platform piece above (Redpanda topics, MinIO buckets, KEDA scalers,
+  #     Polaris catalog, Traefik IngressRoute, Prometheus ServiceMonitors).
+  - name: stream2pretrain
+    namespace: stream2pretrain
+    chart: ./charts/stream2pretrain
+    needs:
+      - cert-manager/cert-manager
+      - traefik/traefik
+      - monitoring/kube-prometheus-stack
+      - keda/keda
+      - gatekeeper/gatekeeper
+      - minio/minio
+      - redpanda/redpanda
+      - polaris/polaris
+    values:
+      - infra/helmfile-values/stream2pretrain.{{ .Environment.Name }}.yaml

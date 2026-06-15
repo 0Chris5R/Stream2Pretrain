@@ -1,0 +1,172 @@
+{
+  "$defs": {
+    "AuthSpec": {
+      "additionalProperties": false,
+      "description": "Reference to a Secret holding the auth token.",
+      "properties": {
+        "header_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Header Name"
+        },
+        "secret_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secret Key"
+        },
+        "secret_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secret Name"
+        },
+        "type": {
+          "default": "none",
+          "enum": [
+            "none",
+            "bearer",
+            "header",
+            "basic"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "AuthSpec",
+      "type": "object"
+    },
+    "RateLimitSpec": {
+      "additionalProperties": false,
+      "description": "Politeness limits for a single SourceFeed.",
+      "properties": {
+        "burst": {
+          "exclusiveMinimum": 0,
+          "title": "Burst",
+          "type": "integer"
+        },
+        "requests_per_second": {
+          "exclusiveMinimum": 0.0,
+          "title": "Requests Per Second",
+          "type": "number"
+        },
+        "respect_x_poll_interval": {
+          "default": false,
+          "description": "If true, the poller defers to the response's X-Poll-Interval header.",
+          "title": "Respect X Poll Interval",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requests_per_second",
+        "burst"
+      ],
+      "title": "RateLimitSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Spec of a single SourceFeed CRD instance.",
+  "properties": {
+    "accept_content_types": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Accept Content Types",
+      "type": "array"
+    },
+    "auth": {
+      "$ref": "#/$defs/AuthSpec"
+    },
+    "egress_allow": {
+      "description": "Hostnames the SourceFeed pod may dial (NetworkPolicy egress).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Egress Allow",
+      "type": "array"
+    },
+    "enabled": {
+      "default": true,
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "endpoint": {
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1,
+      "title": "Endpoint",
+      "type": "string"
+    },
+    "license_default": {
+      "default": "unknown",
+      "enum": [
+        "unknown",
+        "CC-BY-4.0",
+        "CC-BY-SA-4.0",
+        "CC0-1.0",
+        "Apache-2.0",
+        "MIT",
+        "BSD-3-Clause",
+        "arxiv-non-exclusive-distribution"
+      ],
+      "title": "License Default",
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 63,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "poll_interval_seconds": {
+      "exclusiveMinimum": 0,
+      "maximum": 86400,
+      "title": "Poll Interval Seconds",
+      "type": "integer"
+    },
+    "protocol": {
+      "enum": [
+        "rss",
+        "atom",
+        "oai-pmh",
+        "rest-json",
+        "sitemap",
+        "manual"
+      ],
+      "title": "Protocol",
+      "type": "string"
+    },
+    "rate_limit": {
+      "$ref": "#/$defs/RateLimitSpec"
+    }
+  },
+  "required": [
+    "name",
+    "protocol",
+    "endpoint",
+    "poll_interval_seconds",
+    "rate_limit"
+  ],
+  "title": "SourceFeedSpec",
+  "type": "object"
+}

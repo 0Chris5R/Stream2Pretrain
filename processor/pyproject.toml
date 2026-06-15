@@ -1,0 +1,66 @@
+[project]
+name = "stream2pretrain-processor"
+version = "0.1.0"
+description = "Bytewax dataflows + curation operators for Stream2Pretrain."
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+# Heavy ML dependencies (onnxruntime, transformers, kenlm, rensa, plyvel) are
+# kept under extras so unit tests can run on a cheap CI image. Production
+# Dockerfiles install the [runtime] extra.
+dependencies = [
+    "stream2pretrain",
+    "pydantic>=2.7,<3",
+    "structlog>=24.1",
+    "orjson>=3.10",
+    "httpx>=0.27",
+    "boto3>=1.34",
+    "botocore>=1.34",
+    "cryptography>=42.0",
+    "prometheus-client>=0.20",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp>=1.27",
+]
+
+[project.optional-dependencies]
+runtime = [
+    "bytewax>=0.21",
+    "confluent-kafka>=2.5",
+    "resiliparse>=0.14",
+    "fastlangid>=1.0",
+    "onnxruntime>=1.18",
+    "transformers>=4.40",
+    "tokenizers>=0.19",
+    "tiktoken>=0.7",
+    "datasketch>=1.6",
+    "rensa>=0.2",
+    "kenlm>=0.2",
+    "plyvel>=1.5",
+    "sqlitedict>=2.1",
+    "presidio-analyzer>=2.2",
+    "kopf>=1.37",
+    "kubernetes>=29.0",
+    "pyiceberg>=0.7",
+    "pyarrow>=16.0",
+    "aiohttp>=3.9",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+s2p-fetcher = "processor.fetcher:main"
+s2p-curate = "processor.curate:main"
+s2p-iceberg-writer = "processor.iceberg_writer:main"
+s2p-mixture-controller = "processor.mixture_controller.controller:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

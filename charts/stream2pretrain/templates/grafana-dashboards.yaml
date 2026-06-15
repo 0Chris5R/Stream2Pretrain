@@ -1,0 +1,15 @@
+{{- if .Values.observability.grafana.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stream2pretrain.fullname" . }}-dashboards
+  namespace: {{ .Values.observability.grafana.dashboards.namespace }}
+  labels:
+    {{- include "stream2pretrain.labels" . | nindent 4 }}
+    {{- with .Values.observability.grafana.dashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  stream2pretrain.json: |-
+{{ .Files.Get "dashboards/stream2pretrain.json" | indent 4 }}
+{{- end }}

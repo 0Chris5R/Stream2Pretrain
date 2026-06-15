@@ -1,0 +1,47 @@
+# Dev override - single broker, single replica everywhere, smaller resources.
+profile: dev
+
+ingest:
+  rss: {replicas: 1}
+  oaipmh: {replicas: 1}
+  sitemap: {replicas: 1}
+  githubEvents: {replicas: 1}
+  githubReleases: {replicas: 1}
+  hf: {replicas: 1}
+  submitApi:
+    replicas: 1
+    ingress:
+      enabled: true
+      host: submit.s2p.dev.local
+
+processor:
+  fetcher:
+    replicas: 1
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+  curate:
+    replicas: 1
+    checkpoint:
+      size: 5Gi
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}
+      limits: {cpu: 1, memory: 1Gi}
+  iceberg:
+    replicas: 1
+
+ui:
+  replicas: 1
+  ingress:
+    enabled: true
+    host: s2p.dev.local
+    clusterIssuer: selfsigned-issuer
+
+keda:
+  fetcher: {minReplicas: 1, maxReplicas: 2, lagThreshold: 500}
+  curate: {minReplicas: 1, maxReplicas: 2, lagThreshold: 500}
+  iceberg: {minReplicas: 1, maxReplicas: 1, lagThreshold: 1000}
+
+observability:
+  tracing:
+    sampleRatio: 1.0

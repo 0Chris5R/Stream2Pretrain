@@ -1,0 +1,62 @@
+{{- if .Values.sources.github.enabled }}
+{{- $component := "ingest-github-releases" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  schedule: {{ .Values.sources.github.releases.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 12 }}
+            stream2pretrain.io/egress-class: github
+        spec:
+          serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- include "stream2pretrain.imagePullSecrets" . | nindent 10 }}
+          {{- include "stream2pretrain.podSecurityContext" . | nindent 10 }}
+          {{- include "stream2pretrain.scheduling" . | nindent 10 }}
+          containers:
+            - name: releases
+              image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.githubReleases.image) | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
+              args:
+                - --config
+                - /etc/s2p/feeds/github-repos.json
+              env:
+                {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
+                - name: S2P_COMPONENT
+                  value: {{ $component | quote }}
+                - name: S2P_GITHUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.sources.github.releases.tokenSecret | quote }}
+                      key: {{ .Values.sources.github.releases.tokenSecretKey | quote }}
+              volumeMounts:
+                - name: feeds
+                  mountPath: /etc/s2p/feeds
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.ingest.githubReleases.resources | nindent 16 }}
+          volumes:
+            - name: feeds
+              configMap:
+                name: {{ include "stream2pretrain.fullname" . }}-feeds
+            - name: tmp
+              emptyDir: {}
+{{- end }}

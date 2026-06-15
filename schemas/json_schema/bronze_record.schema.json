@@ -1,0 +1,108 @@
+{
+  "additionalProperties": false,
+  "description": "Pointer + provenance for a raw fetched document.",
+  "properties": {
+    "bytes_size": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Size of the stored raw payload in bytes.",
+      "title": "Bytes Size"
+    },
+    "content_type": {
+      "description": "MIME type, e.g. 'text/html'.",
+      "title": "Content Type",
+      "type": "string"
+    },
+    "doc_id": {
+      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "etag": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "HTTP ETag, used by the poller for conditional GET.",
+      "title": "Etag"
+    },
+    "fetched_at": {
+      "description": "UTC instant the fetcher received the response.",
+      "format": "date-time",
+      "title": "Fetched At",
+      "type": "string"
+    },
+    "http_last_modified": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Value of the HTTP Last-Modified response header if present.",
+      "title": "Http Last Modified"
+    },
+    "http_status": {
+      "maximum": 599,
+      "minimum": 100,
+      "title": "Http Status",
+      "type": "integer"
+    },
+    "raw_html_s3_uri": {
+      "description": "Pointer to the gzipped raw bytes in MinIO.",
+      "pattern": "^s3://[^/]+/.+",
+      "title": "Raw Html S3 Uri",
+      "type": "string"
+    },
+    "source_feed": {
+      "description": "SourceFeed CRD name that produced this fetch.",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Feed",
+      "type": "string"
+    },
+    "trace_id": {
+      "description": "W3C trace-id (lowercase hex, 32 chars).",
+      "pattern": "^[0-9a-f]{32}$",
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "url": {
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1,
+      "title": "Url",
+      "type": "string"
+    }
+  },
+  "required": [
+    "doc_id",
+    "url",
+    "fetched_at",
+    "http_status",
+    "content_type",
+    "raw_html_s3_uri",
+    "source_feed",
+    "trace_id"
+  ],
+  "title": "BronzeRecord",
+  "type": "object"
+}

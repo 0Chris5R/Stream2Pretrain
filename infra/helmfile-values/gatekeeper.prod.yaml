@@ -1,0 +1,36 @@
+---
+replicas: 3
+auditInterval: 60
+auditMatchKindOnly: false
+auditChunkSize: 500
+constraintViolationsLimit: 20
+postInstall:
+  labelNamespace:
+    enabled: true
+    extraNamespaces:
+      - stream2pretrain
+emitAdmissionEvents: true
+emitAuditEvents: true
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+controllerManager:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+audit:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi

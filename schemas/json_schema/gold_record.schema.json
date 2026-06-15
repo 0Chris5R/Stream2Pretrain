@@ -1,0 +1,193 @@
+{
+  "additionalProperties": false,
+  "description": "Curated document plus full provenance + scoring metadata.",
+  "properties": {
+    "_row_id": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Iceberg V3 row lineage id.",
+      "title": "Row Id"
+    },
+    "classifier_revision": {
+      "title": "Classifier Revision",
+      "type": "string"
+    },
+    "contaminated_with": {
+      "description": "Benchmark identifiers this doc overlapped with, e.g. ['MMLU'].",
+      "items": {
+        "type": "string"
+      },
+      "title": "Contaminated With",
+      "type": "array"
+    },
+    "doc_id": {
+      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "edu_score": {
+      "description": "Distilled-classifier educational score.",
+      "maximum": 5.0,
+      "minimum": 0.0,
+      "title": "Edu Score",
+      "type": "number"
+    },
+    "lang": {
+      "maxLength": 8,
+      "minLength": 2,
+      "title": "Lang",
+      "type": "string"
+    },
+    "license": {
+      "description": "SPDX id or 'unknown'.",
+      "title": "License",
+      "type": "string"
+    },
+    "license_source": {
+      "enum": [
+        "html_meta",
+        "robots_txt",
+        "sitemap",
+        "license_file",
+        "manual",
+        "unknown"
+      ],
+      "title": "License Source",
+      "type": "string"
+    },
+    "pii_flags": {
+      "items": {
+        "enum": [
+          "email",
+          "phone",
+          "ssn",
+          "credit_card",
+          "ipv4",
+          "ipv6",
+          "passport"
+        ],
+        "type": "string"
+      },
+      "title": "Pii Flags",
+      "type": "array"
+    },
+    "policy_revision": {
+      "description": "Git SHA of the policy bundle, prefixed 'git:'.",
+      "title": "Policy Revision",
+      "type": "string"
+    },
+    "quality_score": {
+      "description": "FineWeb-Edu raw classifier score.",
+      "maximum": 5.0,
+      "minimum": 0.0,
+      "title": "Quality Score",
+      "type": "number"
+    },
+    "reject_reasons": {
+      "items": {
+        "enum": [
+          "language_filter",
+          "gopher_filter",
+          "c4_nopunc_filter",
+          "near_duplicate",
+          "low_quality_score",
+          "high_perplexity",
+          "pii_detected",
+          "license_excluded",
+          "decontamination_hit",
+          "validity_interval_invalid"
+        ],
+        "type": "string"
+      },
+      "title": "Reject Reasons",
+      "type": "array"
+    },
+    "risk_tier": {
+      "enum": [
+        1,
+        2,
+        3
+      ],
+      "title": "Risk Tier",
+      "type": "integer"
+    },
+    "scoring_version": {
+      "title": "Scoring Version",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Snapshot Id"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "tokens": {
+      "description": "GPT-2-tokenizer token count.",
+      "minimum": 0,
+      "title": "Tokens",
+      "type": "integer"
+    },
+    "trace_id": {
+      "description": "W3C trace-id (lowercase hex, 32 chars).",
+      "pattern": "^[0-9a-f]{32}$",
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "valid_from": {
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_to": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valid To"
+    }
+  },
+  "required": [
+    "doc_id",
+    "text",
+    "lang",
+    "tokens",
+    "quality_score",
+    "edu_score",
+    "license",
+    "license_source",
+    "risk_tier",
+    "valid_from",
+    "scoring_version",
+    "classifier_revision",
+    "policy_revision",
+    "trace_id"
+  ],
+  "title": "GoldRecord",
+  "type": "object"
+}

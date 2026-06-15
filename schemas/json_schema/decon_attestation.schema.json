@@ -1,0 +1,93 @@
+{
+  "additionalProperties": false,
+  "description": "Snapshot-bound, signed contamination certificate.",
+  "properties": {
+    "benchmark_set_version": {
+      "description": "Version pin of the benchmark corpus, e.g. 'v2026-06-01'.",
+      "title": "Benchmark Set Version",
+      "type": "string"
+    },
+    "benchmarks": {
+      "items": {
+        "enum": [
+          "MMLU",
+          "GSM8K",
+          "HumanEval",
+          "MATH",
+          "GPQA"
+        ],
+        "type": "string"
+      },
+      "title": "Benchmarks",
+      "type": "array"
+    },
+    "committed_at": {
+      "format": "date-time",
+      "title": "Committed At",
+      "type": "string"
+    },
+    "per_benchmark_hits": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "description": "Hit counts per benchmark (zero entries included).",
+      "propertyNames": {
+        "enum": [
+          "MMLU",
+          "GSM8K",
+          "HumanEval",
+          "MATH",
+          "GPQA"
+        ]
+      },
+      "title": "Per Benchmark Hits",
+      "type": "object"
+    },
+    "rejected_doc_hashes": {
+      "description": "Sha256 doc_ids whose 13-gram or embedding sketch matched.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Rejected Doc Hashes",
+      "type": "array"
+    },
+    "signature": {
+      "description": "Base64-encoded Ed25519 (or cosign) signature over canonical JSON.",
+      "title": "Signature",
+      "type": "string"
+    },
+    "signer_cert": {
+      "description": "X.509 PEM certificate bound to the signing key.",
+      "title": "Signer Cert",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "minimum": 0,
+      "title": "Snapshot Id",
+      "type": "integer"
+    },
+    "tokens_flagged": {
+      "minimum": 0,
+      "title": "Tokens Flagged",
+      "type": "integer"
+    },
+    "tokens_scanned": {
+      "minimum": 0,
+      "title": "Tokens Scanned",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "snapshot_id",
+    "committed_at",
+    "benchmark_set_version",
+    "benchmarks",
+    "tokens_scanned",
+    "tokens_flagged",
+    "per_benchmark_hits",
+    "signature",
+    "signer_cert"
+  ],
+  "title": "DeconAttestation",
+  "type": "object"
+}

@@ -1,0 +1,126 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mixturerecipes.stream2pretrain.io
+  labels:
+    app.kubernetes.io/part-of: stream2pretrain
+spec:
+  group: stream2pretrain.io
+  scope: Namespaced
+  names:
+    plural: mixturerecipes
+    singular: mixturerecipe
+    kind: MixtureRecipe
+    shortNames:
+      - mix
+    categories:
+      - stream2pretrain
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Branch
+          type: string
+          jsonPath: .spec.branch
+        - name: Sources
+          type: integer
+          jsonPath: .status.sourceCount
+        - name: MinQuality
+          type: number
+          jsonPath: .spec.minQualityScore
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              additionalProperties: false
+              required: [name, branch, sources]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: "^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$"
+                branch:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                sources:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [sourceFeed, weight]
+                    properties:
+                      sourceFeed:
+                        type: string
+                        minLength: 1
+                        maxLength: 63
+                      weight:
+                        type: number
+                        exclusiveMinimum: true
+                        minimum: 0
+                        maximum: 1
+                minQualityScore:
+                  type: number
+                  minimum: 0
+                  maximum: 5
+                  default: 2.0
+                minEduScore:
+                  type: number
+                  minimum: 0
+                  maximum: 5
+                  default: 2.0
+                maxRiskTier:
+                  type: integer
+                  enum: [1, 2, 3]
+                  default: 2
+                languages:
+                  type: array
+                  items:
+                    type: string
+                  default: [en]
+                targetTokensPerHour:
+                  type: integer
+                  minimum: 0
+                  nullable: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Materializing, Ready, ShadowComparing, Failed]
+                sourceCount:
+                  type: integer
+                tokensWritten:
+                  type: integer
+                  format: int64
+                lastSnapshotId:
+                  type: string
+                lastReconcileAt:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: {type: string}
+                      status: {type: string, enum: ["True", "False", "Unknown"]}
+                      reason: {type: string}
+                      message: {type: string}
+                      lastTransitionTime: {type: string, format: date-time}

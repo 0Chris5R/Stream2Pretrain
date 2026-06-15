@@ -1,0 +1,67 @@
+---
+# Redpanda 1-broker dev mode (CLAUDE.md: 2 worker layout cannot host 3 brokers).
+# Documented limitation: no replication; topic.replication.factor is forced to 1.
+statefulset:
+  replicas: 1
+  podAntiAffinity:
+    type: soft
+console:
+  enabled: true
+  ingress:
+    enabled: false
+  service:
+    type: ClusterIP
+external:
+  enabled: false
+auth:
+  sasl:
+    enabled: false
+tls:
+  enabled: false
+listeners:
+  kafka:
+    port: 9093
+    tls:
+      enabled: false
+  admin:
+    port: 9644
+    tls:
+      enabled: false
+  http:
+    enabled: true
+    port: 8082
+    tls:
+      enabled: false
+  schemaRegistry:
+    enabled: true
+    port: 8081
+    tls:
+      enabled: false
+  rpc:
+    port: 33145
+    tls:
+      enabled: false
+config:
+  cluster:
+    auto_create_topics_enabled: false
+    default_topic_replications: 1
+    log_retention_ms: 604800000     # 7 days
+    log_segment_size: 67108864      # 64 MiB
+storage:
+  persistentVolume:
+    enabled: true
+    storageClass: local-path
+    size: 50Gi
+resources:
+  cpu:
+    cores: 1
+  memory:
+    container:
+      max: 2Gi
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+post_install_job:
+  enabled: false
+post_upgrade_job:
+  enabled: false

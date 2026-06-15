@@ -1,0 +1,170 @@
+{
+  "$defs": {
+    "SilverTags": {
+      "additionalProperties": false,
+      "description": "Heuristic tagger outputs and perplexity score.",
+      "properties": {
+        "c4_nopunc_pass": {
+          "description": "Passed the C4 fraction-of-lines-without-punctuation filter.",
+          "title": "C4 Nopunc Pass",
+          "type": "boolean"
+        },
+        "gopher_pass": {
+          "description": "Passed the Gopher quality filter.",
+          "title": "Gopher Pass",
+          "type": "boolean"
+        },
+        "perplexity": {
+          "description": "KenLM perplexity (lower is more typical text).",
+          "minimum": 0.0,
+          "title": "Perplexity",
+          "type": "number"
+        },
+        "perplexity_bucket": {
+          "enum": [
+            "head",
+            "middle",
+            "tail"
+          ],
+          "title": "Perplexity Bucket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gopher_pass",
+        "c4_nopunc_pass",
+        "perplexity",
+        "perplexity_bucket"
+      ],
+      "title": "SilverTags",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Normalized, language-tagged, heuristically-scored document.",
+  "properties": {
+    "doc_id": {
+      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "extracted_with": {
+      "description": "Extractor identity + version, e.g. 'resiliparse-0.14'.",
+      "title": "Extracted With",
+      "type": "string"
+    },
+    "lang": {
+      "description": "ISO 639-1/3 language code.",
+      "maxLength": 8,
+      "minLength": 2,
+      "title": "Lang",
+      "type": "string"
+    },
+    "lang_score": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Lang Score",
+      "type": "number"
+    },
+    "minhash_sig": {
+      "description": "Binary MinHash signature, 112 permutations packed little-endian.",
+      "format": "binary",
+      "title": "Minhash Sig",
+      "type": "string"
+    },
+    "near_dup_cluster_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set by the LSHBloom operator; None for first occurrence in band.",
+      "title": "Near Dup Cluster Id"
+    },
+    "tags": {
+      "$ref": "#/$defs/SilverTags"
+    },
+    "text": {
+      "description": "Extracted plain text (Resiliparse output).",
+      "title": "Text",
+      "type": "string"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "trace_id": {
+      "description": "W3C trace-id (lowercase hex, 32 chars).",
+      "pattern": "^[0-9a-f]{32}$",
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "url": {
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1,
+      "title": "Url",
+      "type": "string"
+    },
+    "valid_from": {
+      "description": "Inclusive start of the document's validity interval.",
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_from_source": {
+      "enum": [
+        "http_last_modified",
+        "schema_org_date_published",
+        "wayback_first_seen",
+        "license_effective_date",
+        "fetched_at"
+      ],
+      "title": "Valid From Source",
+      "type": "string"
+    },
+    "valid_to": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Exclusive end of the validity interval; None means open-ended.",
+      "title": "Valid To"
+    }
+  },
+  "required": [
+    "doc_id",
+    "url",
+    "text",
+    "lang",
+    "lang_score",
+    "extracted_with",
+    "tags",
+    "minhash_sig",
+    "valid_from",
+    "valid_from_source",
+    "trace_id"
+  ],
+  "title": "SilverRecord",
+  "type": "object"
+}

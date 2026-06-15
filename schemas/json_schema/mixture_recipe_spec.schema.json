@@ -1,0 +1,106 @@
+{
+  "$defs": {
+    "MixtureSourceWeight": {
+      "additionalProperties": false,
+      "description": "A single source's weight within a mixture.",
+      "properties": {
+        "source_feed": {
+          "maxLength": 63,
+          "minLength": 1,
+          "title": "Source Feed",
+          "type": "string"
+        },
+        "weight": {
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "source_feed",
+        "weight"
+      ],
+      "title": "MixtureSourceWeight",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Spec of a MixtureRecipe CRD instance.\n\nTwo MixtureRecipe instances pointing at the same SourceFeed set form the\nshadow A/B comparison: each materializes a separate Iceberg branch and a\nproxy LM is trained on each branch in rolling windows.",
+  "properties": {
+    "branch": {
+      "description": "Iceberg branch name this recipe writes to.",
+      "maxLength": 63,
+      "minLength": 1,
+      "title": "Branch",
+      "type": "string"
+    },
+    "languages": {
+      "description": "Language allow-list (ISO codes).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Languages",
+      "type": "array"
+    },
+    "max_risk_tier": {
+      "default": 2,
+      "enum": [
+        1,
+        2,
+        3
+      ],
+      "title": "Max Risk Tier",
+      "type": "integer"
+    },
+    "min_edu_score": {
+      "default": 2.0,
+      "maximum": 5.0,
+      "minimum": 0.0,
+      "title": "Min Edu Score",
+      "type": "number"
+    },
+    "min_quality_score": {
+      "default": 2.0,
+      "maximum": 5.0,
+      "minimum": 0.0,
+      "title": "Min Quality Score",
+      "type": "number"
+    },
+    "name": {
+      "maxLength": 63,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/MixtureSourceWeight"
+      },
+      "minItems": 1,
+      "title": "Sources",
+      "type": "array"
+    },
+    "target_tokens_per_hour": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional throttle target; None means uncapped.",
+      "title": "Target Tokens Per Hour"
+    }
+  },
+  "required": [
+    "name",
+    "branch",
+    "sources"
+  ],
+  "title": "MixtureRecipeSpec",
+  "type": "object"
+}

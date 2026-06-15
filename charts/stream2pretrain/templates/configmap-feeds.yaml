@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stream2pretrain.fullname" . }}-feeds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.labels" . | nindent 4 }}
+data:
+  arxiv.json: |-
+    {{- $oai := .Values.sources.arxiv.oaiPmh }}
+    {
+      "oai_pmh": {
+        "name": {{ $oai.name | quote }},
+        "endpoint": {{ $oai.endpoint | quote }},
+        "set": {{ $oai.set | quote }},
+        "poll_interval_seconds": {{ $oai.pollIntervalSeconds }},
+        "license_default": {{ $oai.licenseDefault | quote }}
+      },
+      "rss": {
+        "categories": {{ toJson .Values.sources.arxiv.rss.categories }},
+        "poll_interval_seconds": {{ .Values.sources.arxiv.rss.pollIntervalSeconds }},
+        "license_default": {{ .Values.sources.arxiv.rss.licenseDefault | quote }}
+      }
+    }
+  github-repos.json: |-
+    {
+      "events": {
+        "ai_org_filter": {{ toJson .Values.sources.github.events.aiOrgFilter }},
+        "poll_interval_seconds": {{ .Values.sources.github.events.pollIntervalSeconds }},
+        "respect_x_poll_interval": {{ .Values.sources.github.events.respectXPollInterval }}
+      },
+      "releases": {
+        "repos": {{ toJson .Values.sources.github.releases.repos }},
+        "poll_interval_seconds": {{ .Values.sources.github.releases.pollIntervalSeconds }}
+      }
+    }
+  hf.json: |-
+    {
+      "models": {
+        "endpoint": {{ .Values.sources.huggingface.models.endpoint | quote }},
+        "poll_interval_seconds": {{ .Values.sources.huggingface.models.pollIntervalSeconds }}
+      },
+      "daily_papers": {
+        "endpoint": {{ .Values.sources.huggingface.dailyPapers.endpoint | quote }},
+        "poll_interval_seconds": {{ .Values.sources.huggingface.dailyPapers.pollIntervalSeconds }}
+      }
+    }
+  blogs.json: |-
+    {
+      "feeds": {{ toJson .Values.sources.blogs.feeds }},
+      "poll_interval_seconds": {{ .Values.sources.blogs.pollIntervalSeconds }}
+    }
+  sitemap.json: |-
+    {
+      "feeds": {{ toJson .Values.sources.sitemap.feeds }},
+      "poll_interval_seconds": {{ .Values.sources.sitemap.pollIntervalSeconds }}
+    }
+  topics.json: |-
+    {
+      "raw_fetched": {{ .Values.redpanda.topics.rawFetched | quote }},
+      "docs_normalized": {{ .Values.redpanda.topics.docsNormalized | quote }},
+      "docs_curated": {{ .Values.redpanda.topics.docsCurated | quote }},
+      "decon_attest": {{ .Values.redpanda.topics.deconAttest | quote }}
+    }

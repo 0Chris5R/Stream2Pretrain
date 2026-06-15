@@ -1,0 +1,158 @@
+{{- $component := "processor-curate" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: {{ .Values.processor.curate.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      terminationGracePeriodSeconds: 60
+      {{- if .Values.processor.curate.modelBundle.url }}
+      initContainers:
+        - name: fetch-onnx-model
+          image: {{ .Values.processor.curate.modelBundle.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command: ["sh", "-ec"]
+          args:
+            - |
+              set -euo pipefail
+              dst="/models/$(basename {{ .Values.processor.curate.onnxModel | quote }})"
+              if [ -s "$dst" ]; then
+                echo "model already present: $dst"
+                exit 0
+              fi
+              echo "downloading $S2P_MODEL_URL -> $dst"
+              curl --fail --silent --show-error --location --max-time 600 \
+                -o "$dst.tmp" "$S2P_MODEL_URL"
+              if [ -n "${S2P_MODEL_SHA256:-}" ]; then
+                echo "$S2P_MODEL_SHA256  $dst.tmp" | sha256sum -c -
+              fi
+              mv "$dst.tmp" "$dst"
+          env:
+            - name: S2P_MODEL_URL
+              value: {{ .Values.processor.curate.modelBundle.url | quote }}
+            - name: S2P_MODEL_SHA256
+              value: {{ .Values.processor.curate.modelBundle.sha256 | quote }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      {{- end }}
+      containers:
+        - name: curate
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $component | quote }}
+            - name: S2P_CHECKPOINT_DIR
+              value: /var/lib/s2p/checkpoint
+            - name: S2P_STATE_DIR
+              value: /var/lib/s2p/checkpoint
+            - name: S2P_ONNX_MODEL
+              value: {{ .Values.processor.curate.onnxModel | quote }}
+            - name: S2P_MODELS_DIR
+              value: /models
+            - name: S2P_MINHASH_BANDS
+              value: {{ .Values.processor.curate.minHashBands | quote }}
+            - name: S2P_MINHASH_ROWS_PER_BAND
+              value: {{ .Values.processor.curate.minHashRowsPerBand | quote }}
+            - name: S2P_CONSUMER_GROUP
+              value: s2p-curate
+            {{- if .Values.processor.deconGate.signingKeySecret }}
+            - name: S2P_DECON_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.processor.deconGate.signingKeySecret | quote }}
+                  key: {{ .Values.processor.deconGate.signingKeyKey | quote }}
+            {{- end }}
+            - name: S2P_DECON_BLOOM_BITS
+              value: {{ .Values.processor.deconGate.bloomBits | quote }}
+            - name: S2P_DECON_BLOOM_HASHES
+              value: {{ .Values.processor.deconGate.bloomHashes | quote }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.processor.curate.resources | nindent 12 }}
+          volumeMounts:
+            - name: checkpoint
+              mountPath: /var/lib/s2p/checkpoint
+            - name: tmp
+              mountPath: /tmp
+            - name: models
+              mountPath: /models
+              readOnly: true
+        # Decon-Gate runs in-process inside the curate container (see
+        # processor/curate.py::build_state -> DeconGate(...)). The earlier
+        # `decon-gate` sidecar shape from RESEARCH.md called for a separate
+        # FastAPI server; that server is not implemented today, and shipping
+        # the container with --listen flags it does not understand would
+        # crash the Pod on startup. The signing-key secret is consumed
+        # directly by the curate container via S2P_DECON_SIGNING_KEY above.
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: models
+          emptyDir:
+            sizeLimit: {{ printf "%dMi" (int .Values.processor.curate.modelBundle.sizeMi) | quote }}
+  volumeClaimTemplates:
+    - metadata:
+        name: checkpoint
+        labels:
+          {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.processor.curate.checkpoint.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.processor.curate.checkpoint.size | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  selector:
+    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}

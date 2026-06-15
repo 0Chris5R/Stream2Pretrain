@@ -1,0 +1,128 @@
+---
+# Stream2Pretrain project chart (./charts/stream2pretrain) - dev preset.
+# Final keys depend on the chart values.yaml authored by the chart-layer agent.
+# Keep this file aligned with that schema; placeholders are documented inline.
+
+global:
+  domain: stream2pretrain.local
+  environment: dev
+  imageRegistry: ghcr.io/stream2pretrain
+  imagePullPolicy: IfNotPresent
+  storageClass: local-path
+  tlsSecretName: ""              # dev = HTTP only
+
+ingress:
+  enabled: true
+  className: traefik
+  host: stream2pretrain.local
+  tls:
+    enabled: false
+
+redpanda:
+  brokers: redpanda.redpanda.svc:9093
+  schemaRegistry: http://redpanda.redpanda.svc:8081
+  topics:
+    rawFetched: raw.fetched
+    docsNormalized: docs.normalized
+    docsCurated: docs.curated
+    deconAttest: decon.attest
+    mixtureControl: mixture.control
+
+minio:
+  endpoint: http://minio.minio.svc:80
+  region: us-east-1
+  accessKeySecret: stream2pretrain-minio-secret
+  buckets:
+    bronze: bronze
+    silver: silver
+    gold: gold
+    decon: decon-attestations
+
+iceberg:
+  catalogUri: http://polaris.polaris.svc:8181
+  warehouse: s3://polaris-warehouse/
+  branchPrefix: dev
+
+observability:
+  otelEndpoint: http://alloy.monitoring.svc:4317
+  serviceNamePrefix: stream2pretrain
+  serviceMonitorEnabled: true
+
+submitApi:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+processor:
+  fetcher:
+    replicas: 1
+    keda:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+      lagThreshold: 1000
+  curate:
+    replicas: 1
+    keda:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 6
+      lagThreshold: 500
+  icebergWriter:
+    replicas: 1
+    keda:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 2
+      lagThreshold: 200
+
+deconGate:
+  enabled: true
+  replicas: 1
+  benchmarkSetVersion: v2026-06-01
+  signing:
+    secretName: decon-signer-key
+
+mixtureController:
+  enabled: false   # build-out in Week 6; off by default in dev
+
+ui:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+duckdbServer:
+  enabled: true
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+ingest:
+  rssPoller:
+    schedule: "*/5 * * * *"
+  sitemapPoller:
+    schedule: "*/15 * * * *"
+  arxivOaiPoller:
+    schedule: "13 */2 * * *"
+  githubEventsPoller:
+    schedule: "*/2 * * * *"
+
+networkPolicies:
+  enabled: false  # turn on once base path stabilises
+
+gatekeeperConstraints:
+  enabled: true

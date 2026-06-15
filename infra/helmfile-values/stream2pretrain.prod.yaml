@@ -1,0 +1,125 @@
+---
+global:
+  domain: stream2pretrain.example.org   # >>> REPLACE <<<
+  environment: prod
+  imageRegistry: ghcr.io/stream2pretrain
+  imagePullPolicy: IfNotPresent
+  storageClass: local-path
+  tlsSecretName: stream2pretrain-wildcard-tls
+
+ingress:
+  enabled: true
+  className: traefik
+  host: stream2pretrain.example.org    # >>> REPLACE <<<
+  tls:
+    enabled: true
+    secretName: stream2pretrain-wildcard-tls
+
+redpanda:
+  brokers: redpanda.redpanda.svc:9093
+  schemaRegistry: http://redpanda.redpanda.svc:8081
+  topics:
+    rawFetched: raw.fetched
+    docsNormalized: docs.normalized
+    docsCurated: docs.curated
+    deconAttest: decon.attest
+    mixtureControl: mixture.control
+
+minio:
+  endpoint: http://minio.minio.svc:80
+  region: us-east-1
+  accessKeySecret: stream2pretrain-minio-secret
+  buckets:
+    bronze: bronze
+    silver: silver
+    gold: gold
+    decon: decon-attestations
+
+iceberg:
+  catalogUri: http://polaris.polaris.svc:8181
+  warehouse: s3://polaris-warehouse/
+  branchPrefix: prod
+
+observability:
+  otelEndpoint: http://alloy.monitoring.svc:4317
+  serviceNamePrefix: stream2pretrain
+  serviceMonitorEnabled: true
+
+submitApi:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+processor:
+  fetcher:
+    replicas: 2
+    keda:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      lagThreshold: 2000
+  curate:
+    replicas: 2
+    keda:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 16
+      lagThreshold: 1000
+  icebergWriter:
+    replicas: 1
+    keda:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 4
+      lagThreshold: 500
+
+deconGate:
+  enabled: true
+  replicas: 2
+  benchmarkSetVersion: v2026-06-01
+  signing:
+    secretName: decon-signer-key
+
+mixtureController:
+  enabled: true
+
+ui:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+duckdbServer:
+  enabled: true
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+ingest:
+  rssPoller:
+    schedule: "*/5 * * * *"
+  sitemapPoller:
+    schedule: "*/15 * * * *"
+  arxivOaiPoller:
+    schedule: "13 */2 * * *"
+  githubEventsPoller:
+    schedule: "*/2 * * * *"
+
+networkPolicies:
+  enabled: true
+
+gatekeeperConstraints:
+  enabled: true

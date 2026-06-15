@@ -1,0 +1,37 @@
+---
+# Polaris-lite (dev): single-replica REST Iceberg catalog.
+#
+# This values file targets the local chart at ./charts/polaris-lite, which
+# is scaffolded by the chart-layer agent. Upstream Apache Polaris chart
+# availability and stable version: needs-measurement (CLAUDE.md).
+replicaCount: 1
+image:
+  repository: apache/polaris
+  tag: latest
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 8181
+catalog:
+  warehouse: s3://polaris-warehouse/
+  s3:
+    endpoint: http://minio.minio.svc:80
+    region: us-east-1
+    pathStyleAccess: true
+    credentialsSecret: stream2pretrain-minio-secret
+auth:
+  enabled: false
+persistence:
+  enabled: true
+  storageClass: local-path
+  size: 5Gi
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
