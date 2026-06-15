@@ -40,6 +40,14 @@
       "description": "HTTP ETag, used by the poller for conditional GET.",
       "title": "Etag"
     },
+    "extraction_pipeline": {
+      "default": "raw-fetch",
+      "description": "Operator-chain identifier (e.g. 'arxiv-html-2026-06', 'marker-pdf-1.5', 'the-stack-v2'). 'raw-fetch' for plain bytes.",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Extraction Pipeline",
+      "type": "string"
+    },
     "fetched_at": {
       "description": "UTC instant the fetcher received the response.",
       "format": "date-time",
@@ -77,6 +85,48 @@
       "maxLength": 128,
       "minLength": 1,
       "title": "Source Feed",
+      "type": "string"
+    },
+    "source_format": {
+      "default": "html",
+      "description": "Wire shape of the document; downstream extractors dispatch on this.",
+      "enum": [
+        "html",
+        "pdf",
+        "latex",
+        "code",
+        "web",
+        "metadata",
+        "review"
+      ],
+      "title": "Source Format",
+      "type": "string"
+    },
+    "spdx_license": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "OSI-list verified SPDX id (e.g. 'Apache-2.0'); None when no machine-readable license was attached to the source.",
+      "title": "Spdx License"
+    },
+    "spdx_license_source": {
+      "default": "unknown",
+      "description": "Where the SPDX id was read from.",
+      "enum": [
+        "github_api",
+        "html_meta",
+        "dataset_metadata",
+        "manual_override",
+        "unknown"
+      ],
+      "title": "Spdx License Source",
       "type": "string"
     },
     "trace_id": {

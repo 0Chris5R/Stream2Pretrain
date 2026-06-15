@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-15
+
+Fulltext, code, and seed-mixture release. Turns the v0.1 metadata-and-blog
+pipeline into a real fulltext + code curator, and lands a 5-component HF
+seed mixture so the per-document validity-interval novelty has material to
+query on day 1 of the demo. Driven by two research reports:
+`docs/research-fulltext-and-code.md` and `docs/research-seed-corpus.md`.
+
+### Added
+- **Ingest**: `ingest/arxiv_html_fetcher/` (native arXiv `/html/<id>` with
+  `ar5iv.labs.arxiv.org` fallback for older papers; full paper bodies, not
+  abstracts), `ingest/openreview_poller/` (OpenReview API v2 for fresh
+  venues + REVIEWARENA HF dataset for backfill of ICLR / NeurIPS / ICML /
+  COLM full PDFs and review text),
+  `ingest/github_release_tarball_fetcher/` (per-release tarball at
+  `/repos/{o}/{r}/tarball/{tag}` -> per-file `CodeFileRecord`, reusing the
+  shared 5000 req/h GitHub rate-limit helper).
+- **Processor**: `processor/seed_loader.py` - one-shot Bytewax Job that
+  streams the 5-component HF seed mixture (peS2o cs.* + RedPajama-arxiv +
+  FineWeb-Edu URL-filtered + Stack-Edu Python+ML + custom Wayback backfill)
+  into `docs.normalized` as Silver records. Native publication-date columns
+  populate `valid_from`.
+- **Schemas**: `source_format`
+  (`html`|`pdf`|`latex`|`code`|`web`|`metadata`|`review`),
+  `extraction_pipeline`, `spdx_license`, `spdx_license_source` on
+  `BronzeRecord`, `SilverRecord`, `GoldRecord`. New `CodeFileRecord`
+  (`schemas/code.py`) for per-file code records emitted by the release
+  tarball fetcher (`doc_id`, `repo_full_name`, `ref`, `path`, `language`,
+  `sloc`, `license`, `raw_s3_uri`, `valid_from`, `valid_to`). All JSON
+  Schema sidecars regenerated.
+- **Docs**: `docs/research-fulltext-and-code.md` and
+  `docs/research-seed-corpus.md`. New "Phase-1.5 fulltext + code (v0.2.0)"
+  and "Seed corpus (v0.2.0)" sections in `SOURCES.md`. New "v0.2.0
+  amendment" section in `RESEARCH.md`. New v0.2.0 highlights paragraph in
+  `README.md`.
+
+### Removed
+- **Ingest**: `ingest/submit_api/` (manual URL submit FastAPI endpoint).
+  The Helm template `templates/ingest-submit-api.yaml`, every reference in
+  `values.yaml` and `networkpolicies.yaml`, the Quickstart submit-API
+  invocation in `README.md`, and the k6 load profile pointed at it are all
+  removed. The seed loader plus live pollers cover the v0.1 demo role
+  without the abuse surface.
+
+### Changed
+- Topic catalogue: explicit decision (`schemas/topics.py`,
+  `CODE_SOURCE_FORMAT`) NOT to add a fifth `docs.code` topic. Code records
+  ride the existing `raw.fetched` / `docs.normalized` topics with
+  `source_format='code'` and downstream operators dispatch on that column.
+- `valid_from_source` on `SilverRecord` gains two values:
+  `dataset_metadata` (HF seed datasets) and `release_published_at` (GitHub
+  release tarballs).
+
+### Notes
+- All numerical estimates for the new sources are marked `needs-measurement`
+  until benchmarked on the actual k3s cluster in Week 5.
+- License detection on tarball-extracted files relies on the GitHub License
+  API (`/repos/{o}/{r}/license`) plus the SPDX-permissive whitelist (MIT,
+  BSD-2-Clause, BSD-3-Clause, Apache-2.0, MPL-2.0). It remains heuristic;
+  v0.2.0 is still not a legal-compliance product.
+
 ## [0.1.0] - 2026-06-15
 
 Initial public preview. This is the v0.1 reference cut described in
@@ -64,5 +125,6 @@ Initial public preview. This is the v0.1 reference cut described in
 - Single-broker Redpanda in dev; 3-broker target documented but
   out-of-scope for the 2-worker prototype cluster.
 
-[Unreleased]: https://github.com/stream2pretrain/stream2pretrain/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/stream2pretrain/stream2pretrain/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/stream2pretrain/stream2pretrain/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/stream2pretrain/stream2pretrain/releases/tag/v0.1.0

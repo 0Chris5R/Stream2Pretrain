@@ -47,8 +47,6 @@ spec:
               value: {{ .Values.minio.endpoint | quote }}
             - name: S2P_DUCKDB_CACHE_SECONDS
               value: {{ .Values.ui.env.duckdbCacheSeconds | quote }}
-            - name: S2P_SUBMIT_API_URL
-              value: http://{{ include "stream2pretrain.fullname" . }}-submit-api.{{ .Release.Namespace }}.svc.cluster.local
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

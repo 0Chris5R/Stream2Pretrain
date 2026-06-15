@@ -86,9 +86,9 @@ export const ICEBERG_GOLD_TABLE = 's3://stream2pretrain/gold/curated/';
  *
  * Authentication: the browser MUST never see raw MinIO credentials. We
  * rely exclusively on short-lived presigned URLs returned by the server
- * (FastAPI submit-api -> /api/duckdb/presign), which already encode the
- * SigV4 signature into the URL path/query. DuckDB's httpfs extension
- * follows them transparently; no SET statements with secrets needed.
+ * (Next.js /api/duckdb/presign route), which already encode the SigV4
+ * signature into the URL path/query. DuckDB's httpfs extension follows
+ * them transparently; no SET statements with secrets needed.
  *
  * Earlier revisions of this file read static access/secret keys from a
  * `<meta name="x-s2p-s3-creds">` tag and interpolated them into SET

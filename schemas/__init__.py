@@ -11,15 +11,20 @@ Public API
 - :class:`schemas.bronze.BronzeRecord`
 - :class:`schemas.silver.SilverRecord`
 - :class:`schemas.gold.GoldRecord`
+- :class:`schemas.code.CodeFileRecord`
 - :class:`schemas.decon.DeconAttestation`
 - :class:`schemas.sourcefeed.SourceFeedSpec`
-- :class:`schemas.sourcefeed.MixtureRecipeSpec`
 - :mod:`schemas.topics` - topic name + partition / replication constants.
 """
 
 from __future__ import annotations
 
-from schemas.bronze import BronzeRecord
+from schemas.bronze import (
+    BronzeRecord,
+    SourceFormat,
+    SpdxLicenseSource,
+)
+from schemas.code import CodeFileRecord
 from schemas.decon import BenchmarkHit, DeconAttestation
 from schemas.gold import GoldRecord
 from schemas.silver import SilverRecord, SilverTags
@@ -29,6 +34,7 @@ from schemas.sourcefeed import (
     SourceFeedSpec,
 )
 from schemas.topics import (
+    CODE_SOURCE_FORMAT,
     DECON_ATTEST,
     DOCS_CURATED,
     DOCS_NORMALIZED,
@@ -43,15 +49,19 @@ __all__ = [
     "SilverRecord",
     "SilverTags",
     "GoldRecord",
+    "CodeFileRecord",
     "DeconAttestation",
     "BenchmarkHit",
     "SourceFeedSpec",
     "MixtureRecipeSpec",
     "MixtureSourceWeight",
+    "SourceFormat",
+    "SpdxLicenseSource",
     "RAW_FETCHED",
     "DOCS_NORMALIZED",
     "DOCS_CURATED",
     "DECON_ATTEST",
+    "CODE_SOURCE_FORMAT",
     "TopicConfig",
     "dev_topic_configs",
     "prod_topic_configs",

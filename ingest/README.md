@@ -16,8 +16,10 @@ See ``../SOURCES.md`` for the full feed catalogue and rate limits, and
 | ``sitemap_poller/`` | Gzipped sitemap.xml CronJob with index expansion | every 24 h |
 | ``github_events/`` | Long-running Deployment (60 s ``X-Poll-Interval``) | continuous |
 | ``github_releases/`` | Atom feed CronJob across curated AI repos | every 2 h |
+| ``github_release_tarball_fetcher/`` | Per-release source tarball expander, one ``CodeFileRecord`` per allow-listed file | event-driven on ``raw.fetched`` |
 | ``hf_poller/`` | HF Hub REST CronJob (models + daily_papers) | every 10-15 min / 6 h |
-| ``submit_api/`` | FastAPI ``POST /submit`` for manual pushes | request-driven |
+| ``arxiv_html_fetcher/`` | Native arXiv ``/html/<id>`` fulltext fetcher with ``ar5iv.labs.arxiv.org`` fallback | event-driven on ``docs.normalized`` |
+| ``openreview_poller/`` | OpenReview API v2 venue poll + REVIEWARENA backfill | every 6 h / one-shot |
 | ``common/`` | Shared HTTP client, Kafka producer, MinIO writer, OTel, structlog | n/a |
 
 Every poller emits identical ``BronzeRecord`` shapes per ``schemas/bronze.py``.
@@ -40,12 +42,11 @@ uv run python -m ingest.hf_poller.poller
 
 # Long-running pollers
 uv run python -m ingest.github_events.poller &
-uv run s2p-submit-api &
 
-# Curl the submit endpoint
-curl -X POST localhost:8000/submit \
-  -H 'content-type: application/json' \
-  -d '{"url": "https://huggingface.co/blog/some-post"}'
+# v0.2.0 fulltext + code fetchers (one-shot mode)
+uv run python -m ingest.arxiv_html_fetcher.fetcher --once
+uv run python -m ingest.openreview_poller.poller --once
+uv run python -m ingest.github_release_tarball_fetcher.fetcher --once
 ```
 
 ## Tests

@@ -9,6 +9,10 @@ Subpackages:
 - ``sitemap_poller``: gzipped sitemap.xml CronJob poller with index expansion.
 - ``github_events``: long-running GitHub Public Events poller.
 - ``github_releases``: GitHub Releases Atom CronJob poller.
+- ``github_release_tarball_fetcher``: per-release source tarball fetcher
+  emitting one ``CodeFileRecord`` per allow-listed file (v0.2.0).
 - ``hf_poller``: Hugging Face Hub REST CronJob poller.
-- ``submit_api``: FastAPI ``POST /submit`` endpoint.
+- ``arxiv_html_fetcher``: native arXiv ``/html/<id>`` fetcher with
+  ``ar5iv.labs.arxiv.org`` fallback (v0.2.0).
+- ``openreview_poller``: OpenReview API v2 + REVIEWARENA backfill (v0.2.0).
 """

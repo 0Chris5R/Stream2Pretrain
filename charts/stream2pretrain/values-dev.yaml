@@ -8,11 +8,6 @@ ingest:
   githubEvents: {replicas: 1}
   githubReleases: {replicas: 1}
   hf: {replicas: 1}
-  submitApi:
-    replicas: 1
-    ingress:
-      enabled: true
-      host: submit.s2p.dev.local
 
 processor:
   fetcher:

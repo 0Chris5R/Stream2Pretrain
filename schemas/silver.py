@@ -4,6 +4,11 @@ A silver record is the output of HTML extraction (Resiliparse), language id,
 heuristic taggers (Gopher / C4), and MinHash signature compute. Near-dup
 cluster membership is filled in by the LSHBloom operator downstream and may
 be ``None`` for the first occurrence in a band.
+
+v0.2.0 propagates ``source_format``, ``extraction_pipeline``, ``spdx_license``,
+and ``spdx_license_source`` from the Bronze record so the silver consumer no
+longer has to join back to bronze to know which extractor produced the text
+or which license the source attached.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
-from schemas.bronze import DocId, TraceId
+from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
 
 ValidFromSource = Literal[
     "http_last_modified",
@@ -22,6 +27,8 @@ ValidFromSource = Literal[
     "wayback_first_seen",
     "license_effective_date",
     "fetched_at",
+    "dataset_metadata",
+    "release_published_at",
 ]
 PerplexityBucket = Literal["head", "middle", "tail"]
 
@@ -90,3 +97,30 @@ class SilverRecord(BaseModel):
     )
     valid_from_source: ValidFromSource
     trace_id: TraceId
+
+    # v0.2.0 classifier columns (mirrored from Bronze; kept on Silver so
+    # downstream Iceberg writers do not need to re-join with the bronze topic).
+    source_format: SourceFormat = Field(
+        default="html",
+        description="Wire shape carried forward from the Bronze record.",
+    )
+    extraction_pipeline: str = Field(
+        default="resiliparse-0.14",
+        min_length=1,
+        max_length=128,
+        description=(
+            "Operator-chain identifier of the extractor that produced ``text``. "
+            "Distinct from ``extracted_with`` so a single extractor binary can "
+            "ship multiple named pipelines (e.g. 'arxiv-html-2026-06' vs "
+            "'fineweb-edu-html')."
+        ),
+    )
+    spdx_license: str | None = Field(
+        default=None,
+        max_length=128,
+        description="OSI-list verified SPDX id, or None if not attached.",
+    )
+    spdx_license_source: SpdxLicenseSource = Field(
+        default="unknown",
+        description="Where the SPDX id was read from.",
+    )

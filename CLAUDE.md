@@ -55,6 +55,33 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Group size: assignment says "nach Vorgabe der Veranstaltung" - confirm and divide week-1..6 work accordingly.
 - Final project name (see above).
 
+## Open TODOs from v0.2.0 adversarial review
+
+- **TODO (v0.3.0): KEDA self-amplification on `ingest-github-tarball-fetcher`.**
+  The worker consumes from `raw.fetched` and also produces `CodeFileRecord`
+  back to `raw.fetched` (the four-topic contract in `schemas/topics.py` is
+  frozen, so a separate `docs.code` topic is rejected by design). Each release
+  that emits hundreds of code records inflates the same KEDA Kafka-lag signal
+  the scaler watches, producing a positive feedback loop. v0.2.0 mitigation:
+  cap `ingest.githubTarballFetcher.keda.maxReplicas` conservatively. Real
+  fix: switch the ScaledObject to a KEDA Prometheus trigger keyed on a
+  custom `s2p_github_releases_unprocessed` metric (count of
+  `source_feed=github-releases` records on `raw.fetched` past the consumer's
+  committed offset). Requires (a) `ingest/github_releases` to export the
+  metric, (b) chart change in `templates/ingest-github-tarball.yaml` to swap
+  the trigger.
+
+- **TODO (v0.3.0): SeedDocument.extra metadata propagation.**
+  Per-component loaders populate `SeedDocument.extra` with `pes2o_version`,
+  `redpajama_config`, `wayback_timestamp`, `feed_name`, `repository_name`,
+  `fineweb_edu_score`, `language` but `to_silver()` drops the map and
+  `SilverRecord` has no general-purpose extras column. v0.2.0 mitigation:
+  the docstring on `SeedDocument.extra` and the README seed-loader notes
+  document the drop honestly so operators do not rely on these tags. Real
+  fix: extend `SilverRecord` with `Optional[Dict[str, str]] extra` plus the
+  matching Iceberg V3 nested column on Silver and Gold, then propagate
+  `doc.extra` into it inside `to_silver()`.
+
 ## Anti-patterns to avoid
 
 - Do not claim parity with NeMo Curator on operator surface - their classifier zoo is broader.
@@ -107,3 +134,51 @@ RESEARCH.md sections 4-8. Key paths:
 Open items still marked `needs-measurement`: throughput on the actual k3s
 cluster, prod partition counts, Polaris RBAC token TTLs, integrity-scan
 cadence on MinIO bronze, and DHBWCloud quotas.
+
+### 2026-06-15 - v0.2.0 scope change
+
+- **Drop the manual URL submit endpoint.** `ingest/submit_api/`, the Helm
+  template `templates/ingest-submit-api.yaml`, every reference in
+  `values.yaml`, `networkpolicies.yaml`, README, and docs go away. Manual
+  submit was a v0.1 demo affordance with no Phase-2 path; live pollers plus
+  the new seed loader cover all demo needs without the abuse surface.
+- **Add three fulltext / code ingest modules**:
+  `ingest/arxiv_html_fetcher/` (native arXiv `/html/<id>` with
+  `ar5iv.labs.arxiv.org` fallback for older papers - full paper bodies, not
+  abstracts); `ingest/openreview_poller/` (OpenReview API v2 for fresh
+  venues plus the REVIEWARENA HuggingFace dataset for backfill of ICLR /
+  NeurIPS / ICML / COLM full PDFs + review text);
+  `ingest/github_release_tarball_fetcher/` (per-release tarball at
+  `/repos/{o}/{r}/tarball/{tag}` -> per-file `CodeFileRecord`, reusing the
+  existing 5000 req/h rate-limit helper).
+- **Add `processor/seed_loader.py`** - one-shot Bytewax Job that streams the
+  5-component HF seed mixture (peS2o cs.* + RedPajama-arxiv +
+  FineWeb-Edu URL-filtered + Stack-Edu Python+ML + custom Wayback backfill)
+  directly into `docs.normalized` as Silver records. Native publication-date
+  metadata populates `valid_from` so the N2 validity-interval novelty has
+  data on day 1.
+- **Schema additions**: `source_format`
+  (html | pdf | latex | code | web | metadata | review),
+  `extraction_pipeline`, `spdx_license`, `spdx_license_source` on
+  `BronzeRecord` / `SilverRecord` / `GoldRecord`. New `CodeFileRecord` model
+  for per-file code records emitted by the release tarball fetcher
+  (`doc_id`, `repo_full_name`, `ref`, `path`, `language`, `sloc`, `license`,
+  `raw_s3_uri`, `valid_from`, `valid_to`).
+- **Topic decision**: do NOT add `docs.code`. Reuse `docs.normalized` (and
+  `raw.fetched`) and dispatch on `source_format == 'code'`. The 4-topic
+  Redpanda contract stays stable across v0.1 -> v0.2 and the existing KEDA
+  scalers do not need a refactor.
+- **Source documents**: `docs/research-fulltext-and-code.md` (mid-2026
+  verified channels for arXiv HTML, OpenReview, GitHub tarballs) and
+  `docs/research-seed-corpus.md` (5-component seed mixture sizing + license
+  matrix).
+- **Primary arXiv fulltext channel**: native arXiv HTML at `/html/<id>`
+  (~97% coverage, ~75% LaTeXML-clean). `ar5iv.labs.arxiv.org` fallback for
+  older papers. LaTeX bulk + PDF parsing both deferred (PDF parsing
+  requires a GPU node, not feasible on the 2-worker cluster).
+- **Code primary path**: GitHub release tarballs from the existing 30-repo
+  allowlist (~720 req/day inside the 5000 req/h authed PAT budget). Do not
+  crawl GitHub at scale. The Stack v2 backfill is a Phase-2 candidate.
+- **SPDX whitelist for code Apache-2.0 release**: MIT, BSD-2-Clause,
+  BSD-3-Clause, Apache-2.0, MPL-2.0. License detection remains heuristic;
+  this is not a legal-compliance product.

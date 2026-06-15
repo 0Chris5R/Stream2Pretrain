@@ -24,8 +24,8 @@ export const SourceFeedRateLimitSchema = z.object({
  * Protocol enum mirrors `schemas/sourcefeed.py::SourceFeedProtocol` and the
  * generated `schemas/json_schema/source_feed_spec.schema.json`. The wire
  * uses kebab-case (`oai-pmh`, `rest-json`); the legacy underscore variants
- * (`oai_pmh`, `rest_json`, `submit_api`) are NOT accepted by the FastAPI
- * submit API or by the Gatekeeper admission policy. Keep in sync.
+ * (`oai_pmh`, `rest_json`) are NOT accepted by the Gatekeeper admission
+ * policy. Keep in sync.
  */
 export const SourceFeedProtocols = [
   'rss',

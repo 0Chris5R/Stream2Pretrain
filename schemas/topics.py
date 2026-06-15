@@ -23,6 +23,15 @@ DOCS_NORMALIZED: Final[str] = "docs.normalized"
 DOCS_CURATED: Final[str] = "docs.curated"
 DECON_ATTEST: Final[str] = "decon.attest"
 
+# v0.2.0 deliberately does NOT add a fifth ``docs.code`` topic. Per-file code
+# records produced by ``ingest/github_release_tarball_fetcher`` ride the same
+# ``raw.fetched`` topic and carry ``source_format='code'`` on the BronzeRecord;
+# Silver/Gold equivalents likewise ride ``docs.normalized`` / ``docs.curated``.
+# Downstream operators dispatch on the ``source_format`` column. This keeps
+# the 4-topic Redpanda contract stable across v0.1 -> v0.2 and avoids a KEDA
+# scaler refactor.
+CODE_SOURCE_FORMAT: Final[str] = "code"
+
 ALL_TOPICS: Final[tuple[str, ...]] = (
     RAW_FETCHED,
     DOCS_NORMALIZED,

@@ -2,10 +2,10 @@
 
 The single Helm chart that deploys every Stream2Pretrain component on a
 Kubernetes cluster: ingest CronJobs/Deployments, the Bytewax curate StatefulSet
-with the decon-gate sidecar, the iceberg-writer Deployment, the FastAPI
-submit-api, the Next.js UI, the kopf mixture-controller, the SourceFeed and
-MixtureRecipe CRDs, KEDA ScaledObjects, NetworkPolicies, ServiceMonitors, the
-Stream2Pretrain Grafana dashboard, and OPA Gatekeeper constraints.
+with the decon-gate sidecar, the iceberg-writer Deployment, the Next.js UI,
+the kopf mixture-controller, the SourceFeed and MixtureRecipe CRDs, KEDA
+ScaledObjects, NetworkPolicies, ServiceMonitors, the Stream2Pretrain Grafana
+dashboard, and OPA Gatekeeper constraints.
 
 The platform-layer dependencies (Redpanda, MinIO, Polaris, KEDA controllers,
 OPA Gatekeeper, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
@@ -22,7 +22,6 @@ to `.Chart.AppVersion`. Producing those images is a CI job. Expected refs:
 - `<registry>/stream2pretrain/ingest-github-events:<tag>`
 - `<registry>/stream2pretrain/ingest-github-releases:<tag>`
 - `<registry>/stream2pretrain/ingest-hf:<tag>`
-- `<registry>/stream2pretrain/submit-api:<tag>`
 - `<registry>/stream2pretrain/processor-fetcher:<tag>`
 - `<registry>/stream2pretrain/processor-curate:<tag>`
 - `<registry>/stream2pretrain/processor-iceberg-writer:<tag>`
@@ -46,8 +45,7 @@ For production:
 helm install stream2pretrain ./charts/stream2pretrain \
     --namespace stream2pretrain --create-namespace \
     -f charts/stream2pretrain/values-prod.yaml \
-    --set ui.ingress.host=stream2pretrain.example.com \
-    --set ingest.submitApi.ingress.host=submit.stream2pretrain.example.com
+    --set ui.ingress.host=stream2pretrain.example.com
 ```
 
 ## Required secrets

@@ -158,12 +158,3 @@ feeds:
       burst: 4
     license_default: unknown
     egress_allow: ["github.com", "api.github.com"]
-
-  - name: manual-submit
-    protocol: manual
-    endpoint: https://stream2pretrain.local/manual
-    poll_interval_seconds: 86400
-    rate_limit:
-      requests_per_second: 2.0
-      burst: 8
-    license_default: unknown

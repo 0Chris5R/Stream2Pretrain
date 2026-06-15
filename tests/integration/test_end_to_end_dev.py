@@ -2,24 +2,26 @@
 
 What this exercises:
 1. Boot ``docker-compose.dev.yml`` (via the ``dev_stack`` fixture).
-2. POST a known URL to the submit API.
-3. Consume from ``docs.curated`` and assert a matching ``doc_id`` lands within
-   30 seconds.
+2. Inject a synthetic ``BronzeRecord`` directly onto ``raw.fetched``. The v0.2
+   pipeline replaces the v0.1 manual submit endpoint with native fulltext
+   pollers (``arxiv_html_fetcher``, ``openreview_poller``,
+   ``github_release_tarball_fetcher``); the test contract is unchanged - a
+   bronze record makes it through to ``docs.curated`` within 30 seconds.
+3. Consume from ``docs.curated`` and assert a matching ``doc_id`` lands in
+   time. When the curator is not running, the fallback assertion is "the
+   record made it onto ``raw.fetched``", since that is the contract the
+   injection step alone owns.
 
 Skips cleanly when:
 - Docker is unavailable or the dev stack cannot be reached.
-- The submit API is not running on ``localhost:8000`` (the test does not boot
-  the API itself - it is started separately by ``scripts/dev_smoke.sh`` or by
-  ``uvicorn ingest.submit_api.app:app``).
-- The full processor topology is not running (then the assertion targets
-  ``raw.fetched`` rather than ``docs.curated``, since the bronze hop is the
-  contract the submit API alone owns).
+- ``confluent-kafka`` is not installed (the producer is built on it).
 """
 
 from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -30,18 +32,25 @@ from tests.conftest import StackEndpoints
 
 pytestmark = pytest.mark.integration
 
-# A tiny static page that arXiv exposes; chosen because it is small, stable,
-# and reachable without auth. The submit API will fetch it on our behalf.
+# A pinned arXiv id whose URL is small and stable. The test injects a bronze
+# pointer for it directly; no live HTTP fetch is involved.
 KNOWN_URL = "https://export.arxiv.org/abs/2402.00159"
+
+
+def _make_doc_id(url: str) -> str:
+    """Mirror ``schemas.bronze.canonical_doc_id`` without the import dance."""
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
 def _consume_until(
     brokers: str,
     topic: str,
-    predicate: Any,
+    predicate: Callable[[dict[str, Any]], bool],
     timeout_s: float,
 ) -> dict[str, Any] | None:
-    """Tail ``topic`` from the latest offset until ``predicate(record)`` is true."""
+    """Tail ``topic`` from the earliest offset until ``predicate(record)`` is true."""
     confluent_kafka = pytest.importorskip(
         "confluent_kafka", reason="confluent-kafka not installed"
     )
@@ -82,30 +91,51 @@ def _topic_exists(brokers: str, topic: str) -> bool:
     return topic in md.topics
 
 
-def test_submit_to_curated_within_30s(
-    dev_stack: StackEndpoints, submit_api_reachable: bool
+def _produce_bronze(
+    brokers: str, topic: str, record: dict[str, Any], timeout_s: float = 5.0
 ) -> None:
-    """A POST /submit lands a record on the curated topic in <= 30s.
+    """Produce a single JSON record to ``topic`` and flush before returning."""
+    confluent_kafka = pytest.importorskip(
+        "confluent_kafka", reason="confluent-kafka not installed"
+    )
+    producer = confluent_kafka.Producer({"bootstrap.servers": brokers})
+    producer.produce(
+        topic,
+        value=json.dumps(record).encode("utf-8"),
+        key=record["doc_id"].encode("utf-8"),
+    )
+    remaining = producer.flush(timeout_s)
+    if remaining:
+        raise AssertionError(f"{remaining} bronze records still pending after flush")
+
+
+def test_bronze_to_curated_within_30s(dev_stack: StackEndpoints) -> None:
+    """A synthetic bronze record lands on the curated topic in <= 30s.
 
     If the processor topology is not running we fall back to verifying the
-    bronze hop only, since that is the contract the submit API alone owns.
+    bronze hop only, since that is the contract the injection step alone owns.
     """
-    if not submit_api_reachable:
-        pytest.skip("submit API is not reachable on localhost:8000")
+    pytest.importorskip("confluent_kafka", reason="confluent-kafka not installed")
 
-    httpx = pytest.importorskip("httpx", reason="httpx not installed")
+    doc_id = _make_doc_id(KNOWN_URL)
+    bronze = {
+        "doc_id": doc_id,
+        "url": KNOWN_URL,
+        "source_feed": "arxiv-html-fetcher",
+        "source_format": "html",
+        "extraction_pipeline": "arxiv-html-fetcher@v0.2",
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "license_spdx": "arxiv-non-exclusive-distribution",
+        "minio_object": (
+            "s3://bronze/year=2026/month=06/day=15/source=arxiv-html-fetcher/"
+            f"{doc_id[len('sha256:'):]}.html.gz"
+        ),
+        "bytes_size": 0,
+        "trace_id": "0" * 32,
+    }
 
-    payload = {"url": KNOWN_URL, "source_feed": "manual-submit"}
     start = time.monotonic()
-    with httpx.Client(timeout=10.0) as client:
-        response = client.post(
-            f"{dev_stack.submit_api_url}/submit", json=payload
-        )
-    assert response.status_code == 201, response.text
-    body = response.json()
-    assert body["accepted"] is True
-    doc_id = body["doc_id"]
-    assert doc_id.startswith("sha256:")
+    _produce_bronze(dev_stack.redpanda_brokers, RAW_FETCHED, bronze)
 
     if not _topic_exists(dev_stack.redpanda_brokers, DOCS_CURATED):
         pytest.skip("docs.curated topic does not exist; processor not running")
@@ -127,35 +157,37 @@ def test_submit_to_curated_within_30s(
     assert record["doc_id"] == doc_id
 
 
-def test_submit_unknown_feed_is_rejected(
-    dev_stack: StackEndpoints, submit_api_reachable: bool
-) -> None:
-    """POSTing to a feed name not in the catalogue must return 400."""
-    if not submit_api_reachable:
-        pytest.skip("submit API is not reachable on localhost:8000")
-    httpx = pytest.importorskip("httpx", reason="httpx not installed")
+def test_bronze_lands_on_raw_fetched(dev_stack: StackEndpoints) -> None:
+    """A synthetic bronze record is observable on ``raw.fetched`` immediately.
 
-    with httpx.Client(timeout=5.0) as client:
-        response = client.post(
-            f"{dev_stack.submit_api_url}/submit",
-            json={"url": KNOWN_URL, "source_feed": "feed-that-does-not-exist"},
-        )
-    assert response.status_code == 400
-    assert "unknown source_feed" in response.text
+    This exercises the bus contract on its own, with no curator dependency.
+    """
+    pytest.importorskip("confluent_kafka", reason="confluent-kafka not installed")
 
+    doc_id = _make_doc_id(KNOWN_URL + "?probe=raw")
+    bronze = {
+        "doc_id": doc_id,
+        "url": KNOWN_URL + "?probe=raw",
+        "source_feed": "arxiv-html-fetcher",
+        "source_format": "html",
+        "extraction_pipeline": "arxiv-html-fetcher@v0.2",
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "license_spdx": "arxiv-non-exclusive-distribution",
+        "minio_object": (
+            "s3://bronze/year=2026/month=06/day=15/source=arxiv-html-fetcher/"
+            f"{doc_id[len('sha256:'):]}.html.gz"
+        ),
+        "bytes_size": 0,
+        "trace_id": "0" * 32,
+    }
 
-def test_submit_api_healthz(
-    dev_stack: StackEndpoints, submit_api_reachable: bool
-) -> None:
-    """healthz reports both Redpanda and MinIO ready when the dev stack is up."""
-    if not submit_api_reachable:
-        pytest.skip("submit API is not reachable on localhost:8000")
-    httpx = pytest.importorskip("httpx", reason="httpx not installed")
+    _produce_bronze(dev_stack.redpanda_brokers, RAW_FETCHED, bronze)
 
-    with httpx.Client(timeout=5.0) as client:
-        response = client.get(f"{dev_stack.submit_api_url}/healthz")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "ok"
-    assert body["redpanda"] is True
-    assert body["minio"] is True
+    record = _consume_until(
+        brokers=dev_stack.redpanda_brokers,
+        topic=RAW_FETCHED,
+        predicate=lambda r: r.get("doc_id") == doc_id,
+        timeout_s=10.0,
+    )
+    assert record is not None, f"injected doc_id={doc_id} not visible on raw.fetched"
+    assert record["url"].endswith("?probe=raw")

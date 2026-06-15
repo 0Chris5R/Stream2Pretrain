@@ -41,7 +41,6 @@ Deployment depending on cadence):
 | `github-events` | `ingest-github-events` Deployment | `X-Poll-Interval` (~60s) | `raw.fetched` |
 | `github-releases` | `ingest-github-releases` Deployment | 2h ETag-conditional | `raw.fetched` |
 | `hf-models`, `hf-daily-papers` | `ingest-hf` Deployment | 10-15 min | `raw.fetched` |
-| `manual-submit` | `submit-api` Deployment (FastAPI) | event-driven | `raw.fetched` |
 | `*-blog` RSS bundle | shares `ingest-rss` workload | 6-24h | `raw.fetched` |
 | Sitemaps | `ingest-sitemap` CronJob | per-feed | `raw.fetched` |
 
@@ -58,7 +57,7 @@ A single-binary Kafka API broker. Topics:
 
 | Topic | Producer(s) | Consumer(s) | Partitions (dev / prod) |
 |---|---|---|---|
-| `raw.fetched` | all pollers + submit API | curator | 1 / 12 |
+| `raw.fetched` | all pollers | curator | 1 / 12 |
 | `docs.normalized` | curator (after extract+lang+tags) | curator (next stage) + UI streams | 1 / 12 |
 | `docs.curated` | curator | Iceberg writer + Decon-Gate | 1 / 12 |
 | `decon.attest` | Decon-Gate | UI + verifier scripts | 1 / 3 |
@@ -115,9 +114,9 @@ UI's queries via a thin HTTP wrapper (`ui/lib/duckdb-client.ts`). The Next.js
 
 - **Autoscaling**: KEDA `ScaledObject` per consumer group keyed by Kafka lag.
 - **Observability**: kube-prometheus-stack scrapes every `/metrics`, Loki
-  picks up structured logs, Tempo records OTel traces. The submit API,
-  curator, and Iceberg writer all emit a `trace_id` that is stored on the
-  gold record so a UI click can pivot from a row to the full trace.
+  picks up structured logs, Tempo records OTel traces. The pollers, fulltext
+  fetchers, curator, and Iceberg writer all emit a `trace_id` that is stored
+  on the gold record so a UI click can pivot from a row to the full trace.
 - **Ingress + TLS**: Traefik IngressRoute with cert-manager.
 - **Policy**: OPA Gatekeeper validates SourceFeed admission. Constraint
   templates live in `charts/stream2pretrain/templates/gatekeeper-constraints.yaml`.
@@ -133,7 +132,6 @@ flowchart LR
     oai[OAI-PMH poller]
     gh[GitHub events / releases]
     hf[HF Hub poller]
-    sub[FastAPI Submit API]
   end
 
   subgraph bus[Redpanda]
@@ -169,7 +167,6 @@ flowchart LR
   oai --> raw
   gh --> raw
   hf --> raw
-  sub --> raw
   raw --> fetch --> extract --> tags --> score --> decon --> valid --> iceberg
   decon --> att
   iceberg --> silver
@@ -191,7 +188,6 @@ flowchart LR
 | Polaris | control or worker-2 | 0.5 vCPU, 512 MiB |
 | DuckDB | control | 1 vCPU, 1 GiB |
 | UI | control | 0.25 vCPU, 256 MiB |
-| Submit API (2 replicas) | both workers | 0.25 vCPU, 256 MiB each |
 | Pollers | both workers | 0.1 vCPU, 128 MiB each |
 | kube-prometheus-stack + Loki | dedicated namespace | shared 1 vCPU, 1 GiB |
 

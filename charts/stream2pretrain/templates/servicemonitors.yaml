@@ -1,6 +1,6 @@
 {{- if .Values.observability.serviceMonitor.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
-{{- range $component := list "ingest-github-events" "ingest-hf-models" "submit-api" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "mixture-controller" }}
+{{- range $component := list "ingest-github-events" "ingest-hf-models" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "mixture-controller" }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -20,23 +20,15 @@ spec:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
   endpoints:
-{{- if ne $component "submit-api" }}
     - port: metrics
       interval: {{ $.Values.observability.serviceMonitor.interval }}
       scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout }}
       path: /metrics
-{{- end }}
 {{- /*
 The `processor-curate` Service no longer exposes a `gate-metrics` port -
 the Decon-Gate runs in-process inside the curate container and shares the
 main `metrics` endpoint. Keeping the conditional removed so Prometheus
 Operator does not log spurious "no port named gate-metrics" warnings.
 */}}
-{{- if eq $component "submit-api" }}
-    - port: http
-      interval: {{ $.Values.observability.serviceMonitor.interval }}
-      scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout }}
-      path: /metrics
-{{- end }}
 {{- end }}
 {{- end }}

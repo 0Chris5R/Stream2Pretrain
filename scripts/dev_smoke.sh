@@ -6,14 +6,14 @@
 #   2. seed_topics.sh  (create the four core topics)
 #   3. probe Redpanda admin API for cluster health
 #   4. probe MinIO health
-#   5. (best-effort) start the FastAPI submit API in the background, POST a
-#      known URL, and assert a bronze record lands on `raw.fetched`.
+#   5. (best-effort) drive a single ``arxiv_html_fetcher`` run against a
+#      pinned arXiv id and assert a bronze record lands on ``raw.fetched``.
 #
 # This is the "30 seconds to confidence" check developers run after `git pull`.
 #
 # Usage:
 #   bash scripts/dev_smoke.sh
-#   SKIP_API=1 bash scripts/dev_smoke.sh    # don't spin up the API
+#   SKIP_FETCH=1 bash scripts/dev_smoke.sh    # don't drive the fetcher
 #
 # Exit codes:
 #   0  all checks passed
@@ -71,19 +71,23 @@ info "seeding topics"
 bash "${REPO_ROOT}/scripts/seed_topics.sh"
 ok "topics created (or already existed)"
 
-# 5. optional API check
-if [[ "${SKIP_API:-0}" == "1" ]]; then
-  info "skipping submit API check (SKIP_API=1)"
+# 5. optional fulltext-fetcher check
+if [[ "${SKIP_FETCH:-0}" == "1" ]]; then
+  info "skipping arxiv_html_fetcher check (SKIP_FETCH=1)"
   echo
   echo "dev stack is healthy."
   exit 0
 fi
 
-info "starting submit API (background)"
 LOG_DIR="$(mktemp -d -t s2p-smoke-XXXXXX)"
-API_LOG="${LOG_DIR}/submit_api.log"
+FETCH_LOG="${LOG_DIR}/arxiv_html_fetcher.log"
 
-# Use the dev feed catalogue and dev MinIO/Redpanda endpoints.
+# A pinned, small, stable arXiv paper that has a native HTML rendering. The
+# fetcher walks /html/<id> first and falls back to ar5iv.labs.arxiv.org.
+PINNED_ARXIV_ID="2402.00159"
+EXPECTED_DOC_ID_PREFIX="sha256:"
+
+info "running arxiv_html_fetcher --once for arXiv:${PINNED_ARXIV_ID}"
 S2P_FEED_CONFIG="${REPO_ROOT}/ingest/feeds.dev.yaml" \
 S2P_REDPANDA_BROKERS="localhost:9092" \
 S2P_MINIO_ENDPOINT="http://localhost:9000" \
@@ -91,47 +95,22 @@ S2P_MINIO_ACCESS_KEY="minioadmin" \
 S2P_MINIO_SECRET_KEY="minioadmin" \
 S2P_RAW_TOPIC="raw.fetched" \
 S2P_LOG_LEVEL="info" \
-  uv run uvicorn ingest.submit_api.app:app --host 127.0.0.1 --port 8000 \
-  >"${API_LOG}" 2>&1 &
-API_PID=$!
+S2P_ARXIV_IDS="${PINNED_ARXIV_ID}" \
+  uv run python -m ingest.arxiv_html_fetcher.fetcher --once \
+  >"${FETCH_LOG}" 2>&1 || {
+    cat "${FETCH_LOG}" >&2 || true
+    fail "arxiv_html_fetcher --once exited non-zero; see ${FETCH_LOG}"
+  }
+ok "arxiv_html_fetcher one-shot completed"
 
-cleanup() {
-  if kill -0 "${API_PID}" >/dev/null 2>&1; then
-    kill "${API_PID}" >/dev/null 2>&1 || true
-    wait "${API_PID}" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
-
-for i in $(seq 1 30); do
-  if curl -fsS "http://localhost:8000/healthz" >/dev/null 2>&1; then
-    ok "submit API responsive"
-    break
-  fi
-  sleep 1
-  if [[ "$i" == "30" ]]; then
-    cat "${API_LOG}" >&2 || true
-    fail "submit API never came up; see logs at ${API_LOG}"
-  fi
-done
-
-info "POST /submit"
-SUBMIT_BODY='{"url":"https://export.arxiv.org/abs/2402.00159","source_feed":"manual-submit"}'
-RESP="$(curl -fsS -X POST "http://localhost:8000/submit" \
-  -H 'Content-Type: application/json' -d "${SUBMIT_BODY}")" || fail "POST /submit failed"
-echo "    response: ${RESP}"
-DOC_ID="$(printf '%s' "${RESP}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["doc_id"])')"
-[[ -n "${DOC_ID}" ]] || fail "no doc_id in response"
-ok "submitted ${DOC_ID}"
-
-info "checking raw.fetched for the doc_id (timeout 15s)"
+info "checking raw.fetched for the arXiv id (timeout 15s)"
 if docker exec s2p-redpanda rpk topic consume raw.fetched --num 50 --offset start \
     --format '%v\n' 2>/dev/null \
-    | grep -q "${DOC_ID}"; then
-  ok "doc_id appeared on raw.fetched"
+    | grep -q "${PINNED_ARXIV_ID}"; then
+  ok "arXiv id appeared on raw.fetched"
 else
-  fail "doc_id ${DOC_ID} did not appear on raw.fetched"
+  fail "arXiv id ${PINNED_ARXIV_ID} did not appear on raw.fetched"
 fi
 
 echo
-echo "dev smoke completed. logs: ${API_LOG}"
+echo "dev smoke completed. logs: ${FETCH_LOG}"

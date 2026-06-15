@@ -13,18 +13,18 @@ detection is heuristic; see the README caveat).
 
 ```
 Internet                      kube-apiserver           cluster-internal
-  ----[Traefik+cert-mgr]--------->  [SubmitAPI]  -----> [Redpanda]
-                                      |                    |
-                                      v                    v
-                                  [MinIO]          [Bytewax curator]
-                                                       |
-                                                       v
-                                                  [Iceberg + Polaris]
+  ----[Traefik+cert-mgr]--------->  [UI / source pollers]  --> [Redpanda]
+                                      |                          |
+                                      v                          v
+                                  [MinIO]                [Bytewax curator]
+                                                              |
+                                                              v
+                                                       [Iceberg + Polaris]
 ```
 
 Six trust boundaries:
 1. Internet -> ingress
-2. Ingress -> SubmitAPI / UI
+2. Ingress -> UI
 3. Pod -> Redpanda (Kafka API)
 4. Pod -> MinIO (S3 API)
 5. Pod -> Polaris (REST)
@@ -36,7 +36,6 @@ Six trust boundaries:
 
 | Asset | Threat | Mitigation | Residual |
 |---|---|---|---|
-| SubmitAPI client | An attacker forges a `/submit` request from a non-allowlisted IP | TLS via cert-manager, Traefik IP allowlist middleware, optional bearer-token middleware | If the bearer secret is shared widely, abuse is possible. Treat the secret as service-to-service only. |
 | Decon-Gate signing key | Attacker convinces a verifier that a forged attestation is genuine | Ed25519 signature + x509 cert chain + canonical JSON; verifier replays the rule | Single in-cluster key in prototype. Rotation runbook in `operations.md`. Prod path is Sigstore Rekor (`needs-measurement` to integrate). |
 | Iceberg snapshot author | Attacker writes a snapshot impersonating the curator | Polaris RBAC restricts `gold` writes to the curator service account | If the SA token leaks, attacker can write. Use short-lived tokens (`needs-measurement`). |
 | SourceFeed CRD | Attacker creates a SourceFeed pointing at an internal URL | OPA Gatekeeper constraint allowlists protocols + denies RFC1918 hosts | Constraint coverage is `needs-measurement`. |
@@ -61,7 +60,7 @@ Six trust boundaries:
 
 | Asset | Threat | Mitigation | Residual |
 |---|---|---|---|
-| Submitted URL bodies (PII) | A submitted page contains private data that lands in MinIO bronze | PII regex on the silver path strips emails, phones, SSNs, credit cards, IPs, passport numbers; gold rows omit text segments containing PII flags | PII regex is heuristic; a determined classifier would do better (`needs-measurement`). Bronze still contains the raw payload for 30 days. |
+| Fetched URL bodies (PII) | A polled page contains private data that lands in MinIO bronze | PII regex on the silver path strips emails, phones, SSNs, credit cards, IPs, passport numbers; gold rows omit text segments containing PII flags | PII regex is heuristic; a determined classifier would do better (`needs-measurement`). Bronze still contains the raw payload for 30 days. |
 | Bearer tokens | HF / GitHub PAT exposure via logs or env | Tokens in K8s Secrets, never logged (the structured logger filters known token-shaped fields) | If a developer adds a `print(token)` it bypasses the filter. Add a CI secret-scan (`needs-measurement`). |
 | Polaris RBAC tokens | Token leak grants table read | Short-lived tokens, namespace-scoped roles | Polaris token TTLs are `needs-measurement`. |
 | Inter-pod traffic | An attacker on one Pod reads another's traffic | NetworkPolicy default-deny + per-component allowlists | mTLS within the cluster is not enabled by default (`needs-measurement`; would require a service mesh). |
@@ -70,7 +69,6 @@ Six trust boundaries:
 
 | Asset | Threat | Mitigation | Residual |
 |---|---|---|---|
-| SubmitAPI | Flood of POST /submit | Per-source rate limiter, KEDA-driven horizontal scaling, Traefik rate-limit middleware | Upstream fetches are synchronous; an attacker can amplify by submitting URLs that respond slowly. Add a `max_fetch_seconds` config (`needs-measurement`). |
 | Curator | Adversarial document that triggers pathological MinHash / KenLM cost | Per-doc deadline; Bytewax operator timeout drops the doc with `reject_reasons=["timeout"]` | Pathological corpora can still raise tail latency; backpressure is via KEDA. |
 | Redpanda | Topic flood | KEDA scales producers (CronJobs cap) and consumers; quotas in `redpanda` chart | Single-broker dev mode has no replica failover. |
 | MinIO | Storage exhaustion | Bucket retention + monthly rotation job | Retention defaults are conservative; `needs-measurement` after Week 5 benchmark. |

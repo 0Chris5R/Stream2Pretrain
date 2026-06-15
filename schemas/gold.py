@@ -5,6 +5,12 @@ all the way into the Iceberg ``gold`` table and be queryable by DuckDB. The
 ``snapshot_id`` and ``_row_id`` columns are populated by the Iceberg writer
 on commit and may be ``None`` while the record is still in-flight on the
 ``docs.curated`` Redpanda topic.
+
+v0.2.0 propagates ``source_format``, ``extraction_pipeline``, ``spdx_license``,
+``spdx_license_source`` from the Silver record. The ``license`` and
+``license_source`` columns from v0.1 stay for backwards compatibility, but
+new writers SHOULD populate ``spdx_license`` (the canonical OSI-validated id)
+and let the legacy fields mirror it on commit.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from schemas.bronze import DocId, TraceId
+from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
 
 # Risk-tier follows the MixtureVitae / Common Pile convention:
 #   1 = clean (permissive license, low PII, low contamination)
@@ -91,3 +97,29 @@ class GoldRecord(BaseModel):
 
     # Tracing.
     trace_id: TraceId
+
+    # v0.2.0 classifier columns. Mirrored forward from Silver so a single
+    # ``SELECT * FROM gold`` carries the full provenance chain without joins.
+    source_format: SourceFormat = Field(
+        default="html",
+        description="Wire shape carried forward from Bronze/Silver.",
+    )
+    extraction_pipeline: str = Field(
+        default="resiliparse-0.14",
+        min_length=1,
+        max_length=128,
+        description="Operator-chain identifier carried forward from Silver.",
+    )
+    spdx_license: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "OSI-list verified SPDX id; the canonical license column for "
+            "Apache-2.0-release filtering. Mirrors ``license`` for v0.1 "
+            "writers; new writers populate this directly."
+        ),
+    )
+    spdx_license_source: SpdxLicenseSource = Field(
+        default="unknown",
+        description="Where the SPDX id was read from.",
+    )

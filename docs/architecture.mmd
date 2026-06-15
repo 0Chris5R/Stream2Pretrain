@@ -18,7 +18,6 @@ flowchart LR
     gh[GitHub events + releases]
     hf[HF Hub poller]
     site[Sitemap poller]
-    sub[FastAPI Submit API]
   end
 
   subgraph BUS [Redpanda]
@@ -59,7 +58,6 @@ flowchart LR
   gh --> raw
   hf --> raw
   site --> raw
-  sub --> raw
 
   raw --> fetch
   fetch --> extract
@@ -81,7 +79,7 @@ flowchart LR
   duckdb --> ui
   att --> ui
 
-  class rss,oai,gh,hf,site,sub edge
+  class rss,oai,gh,hf,site edge
   class raw,norm,cur,att bus
   class fetch,extract,tags,score,decon,valid,iceberg engine
   class minio,silver,gold,polaris store

@@ -26,10 +26,10 @@ kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
 ```
 
 Expected pods (18-22 depending on optional extras): redpanda + console,
-minio + bootstrap, polaris, duckdb, ui, submit-api (2 replicas), curator
-(1 replica that KEDA scales), 5-7 ingest pollers, decon-gate sidecar,
-plus the kube-prometheus-stack + Loki + Alloy + Tempo + Traefik +
-cert-manager + Gatekeeper system pods.
+minio + bootstrap, polaris, duckdb, ui, curator (1 replica that KEDA
+scales), 5-7 ingest pollers, decon-gate sidecar, plus the
+kube-prometheus-stack + Loki + Alloy + Tempo + Traefik + cert-manager +
+Gatekeeper system pods.
 
 ## 2. Scale the curator
 

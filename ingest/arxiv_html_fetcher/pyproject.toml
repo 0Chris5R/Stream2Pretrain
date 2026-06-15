@@ -1,0 +1,34 @@
+[project]
+name = "stream2pretrain-arxiv-html-fetcher"
+version = "0.2.0"
+description = "Fetch arXiv full-paper HTML (and ar5iv fallback) and emit Bronze records."
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+# Resiliparse is the project default extractor (per CLAUDE.md tech-stack lock);
+# it ships C extensions, so the Dockerfile pulls the prebuilt wheel. The
+# stdlib fallback in extractor.py keeps the unit tests installable on hosts
+# without the wheel (e.g. ARM dev boxes).
+dependencies = [
+    "stream2pretrain",
+    "stream2pretrain-ingest-common",
+    "resiliparse>=0.14",
+    "aiokafka>=0.11",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[project.scripts]
+s2p-arxiv-html-fetcher = "ingest.arxiv_html_fetcher.fetcher:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

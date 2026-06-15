@@ -20,6 +20,10 @@ The eventual project repo (`stream2pretrain-curator/`) will live as a sibling di
 
 A Kubernetes-native, streaming-first curation pipeline for LLM pretraining data. It ingests live web documents (RSS, sitemaps, manual submissions), runs FineWeb-class curation operators (HTML extraction, language ID, Gopher/C4 heuristics, MinHash near-deduplication, classifier-based quality scoring, PII filtering, benchmark decontamination) as long-running stateful stream operators on event-time semantics, and lands curated tokens into an Apache Iceberg lakehouse on MinIO. Three differentiators that survived adversarial novelty review: (a) a streaming Decon-Gate sidecar that emits a per-Iceberg-snapshot signed contamination attestation, (b) a per-document validity-interval column with an `as_of(timestamp)` query view for deterministic contamination replay, and (c) a shadow-mode A/B mixture comparison primitive where two `MixtureRecipe` CRDs read the same live SourceFeed.
 
+## v0.2.0 highlights
+
+v0.2.0 turns the v0.1 metadata-and-blog pipeline into a real fulltext + code curator. Three new ingest modules land alongside the existing pollers: `arxiv_html_fetcher` pulls native arXiv HTML at `/html/<id>` (with `ar5iv.labs.arxiv.org` as fallback for older papers) so the curator gets full paper bodies instead of just abstracts; `openreview_poller` ingests OpenReview API v2 for fresh ICLR / NeurIPS / ICML / COLM venues plus the REVIEWARENA HuggingFace dataset for backfill of full PDFs and review text; `github_release_tarball_fetcher` extracts per-file source records from each curated-repo release inside the existing 5000 req/h GitHub PAT budget. A new `processor/seed_loader.py` Bytewax Job streams a 5-component HF seed mixture (peS2o cs.* + RedPajama-arxiv + FineWeb-Edu URL-filtered + Stack-Edu Python+ML + a custom Wayback backfill) into `docs.normalized` so the validity-interval `as_of(timestamp)` demo has material on day 1. Schemas pick up `source_format`, `extraction_pipeline`, and SPDX-license columns on every tier, and the v0.1 manual URL submit endpoint is removed in favour of these higher-signal sources. Full per-source breakdown in `SOURCES.md`; sizing and license posture for the seed mixture in `docs/research-seed-corpus.md`.
+
 ## Where to read what
 
 - **Use case + Big-Data motivation** — `RESEARCH.md` section 1 (Executive Summary)
@@ -48,8 +52,8 @@ Start Week 1 of the implementation plan in `RESEARCH.md` section 7.
 
 ## Quickstart (dev)
 
-The local dev stack runs Redpanda single-node + MinIO + the FastAPI submit
-API on a laptop, no Kubernetes required. It backs all `tests/integration/`.
+The local dev stack runs Redpanda single-node + MinIO on a laptop, no
+Kubernetes required. It backs all `tests/integration/`.
 
 ```bash
 # 1. boot Redpanda + MinIO
@@ -58,29 +62,25 @@ make dev-up
 # 2. seed the four core topics
 make seed-topics
 
-# 3. run the submit API (uses the dev feed catalogue)
+# 3. drive a real fetch through the v0.2.0 arxiv-html-fetcher (one-shot)
 S2P_FEED_CONFIG=ingest/feeds.dev.yaml \
 S2P_REDPANDA_BROKERS=localhost:9092 \
 S2P_MINIO_ENDPOINT=http://localhost:9000 \
 S2P_MINIO_ACCESS_KEY=minioadmin \
 S2P_MINIO_SECRET_KEY=minioadmin \
-  uv run uvicorn ingest.submit_api.app:app --host 127.0.0.1 --port 8000
+  uv run python -m ingest.arxiv_html_fetcher.fetcher --once
 
-# 4. one-shot smoke (compose up + topics + API + sample submission)
+# 4. one-shot smoke (compose up + topics + arxiv-html-fetcher one-shot run)
 bash scripts/dev_smoke.sh
 
 # 5. tests
 uv run pytest
-
-# 6. load test (k6 must be installed separately)
-k6 run -e SUBMIT_URL=http://localhost:8000/submit tests/load/k6_submit.js
 ```
 
 UIs to open while developing:
 
 - Redpanda Console: http://localhost:8080
 - MinIO Console: http://localhost:9001 (minioadmin / minioadmin)
-- Submit API: http://localhost:8000/docs
 
 Tear the stack down with `make dev-down` (preserves volumes) or
 `make dev-reset` (destroys volumes).
@@ -105,9 +105,6 @@ NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
 # 4. open the cockpit
 kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
 open http://localhost:3000/dashboard
-
-# 5. drive load
-k6 run -e SUBMIT_URL=https://stream2pretrain.demo/submit tests/load/k6_submit.js
 ```
 
 Operational runbooks (scale, debug, restart from checkpoint, rotate signing
@@ -124,11 +121,12 @@ key) live in [`docs/operations.md`](docs/operations.md).
 |  +- values{,-dev,-prod}.yaml
 |- helmfile.yaml             top-level deploy
 |- infra/                    Terraform + k3s install + helmfile values
-|- ingest/                   pollers + FastAPI submit
+|- ingest/                   pollers + fulltext fetchers (v0.2.0)
 |  |- common/                shared HTTP, S3, kafka, OTel, rate-limit, robots
-|  |- submit_api/            FastAPI Deployment
 |  |- rss_poller/, sitemap_poller/, oaipmh_poller/
-|  +- github_events/, github_releases/, hf_poller/
+|  |- github_events/, github_releases/, github_release_tarball_fetcher/
+|  |- hf_poller/, openreview_poller/
+|  +- arxiv_html_fetcher/
 |- processor/                Bytewax dataflows + curation operators
 |  |- operators/             extraction, langid, gopher/c4, minhash, lshbloom,
 |  |                         quality, kenlm, pii, validity, decon

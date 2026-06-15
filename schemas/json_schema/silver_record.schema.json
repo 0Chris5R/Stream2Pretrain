@@ -54,6 +54,14 @@
       "title": "Extracted With",
       "type": "string"
     },
+    "extraction_pipeline": {
+      "default": "resiliparse-0.14",
+      "description": "Operator-chain identifier of the extractor that produced ``text``. Distinct from ``extracted_with`` so a single extractor binary can ship multiple named pipelines (e.g. 'arxiv-html-2026-06' vs 'fineweb-edu-html').",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Extraction Pipeline",
+      "type": "string"
+    },
     "lang": {
       "description": "ISO 639-1/3 language code.",
       "maxLength": 8,
@@ -66,6 +74,19 @@
       "minimum": 0.0,
       "title": "Lang Score",
       "type": "number"
+    },
+    "minhash_backend": {
+      "default": "rensa",
+      "description": "Identity of the MinHash backend that produced ``minhash_sig`` (rensa | datasketch | pure-python). Consumers MUST refuse to LSH-band a signature whose backend differs from the one their in-process MinHasher expects, because the per-permutation byte layout is not interchangeable across backends.",
+      "title": "Minhash Backend",
+      "type": "string"
+    },
+    "minhash_num_perms": {
+      "default": 112,
+      "description": "Number of permutations packed into ``minhash_sig``.",
+      "minimum": 1,
+      "title": "Minhash Num Perms",
+      "type": "integer"
     },
     "minhash_sig": {
       "description": "Binary MinHash signature, 112 permutations packed little-endian.",
@@ -85,6 +106,48 @@
       "default": null,
       "description": "Set by the LSHBloom operator; None for first occurrence in band.",
       "title": "Near Dup Cluster Id"
+    },
+    "source_format": {
+      "default": "html",
+      "description": "Wire shape carried forward from the Bronze record.",
+      "enum": [
+        "html",
+        "pdf",
+        "latex",
+        "code",
+        "web",
+        "metadata",
+        "review"
+      ],
+      "title": "Source Format",
+      "type": "string"
+    },
+    "spdx_license": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "OSI-list verified SPDX id, or None if not attached.",
+      "title": "Spdx License"
+    },
+    "spdx_license_source": {
+      "default": "unknown",
+      "description": "Where the SPDX id was read from.",
+      "enum": [
+        "github_api",
+        "html_meta",
+        "dataset_metadata",
+        "manual_override",
+        "unknown"
+      ],
+      "title": "Spdx License Source",
+      "type": "string"
     },
     "tags": {
       "$ref": "#/$defs/SilverTags"
@@ -130,9 +193,12 @@
       "enum": [
         "http_last_modified",
         "schema_org_date_published",
+        "sitemap_lastmod",
         "wayback_first_seen",
         "license_effective_date",
-        "fetched_at"
+        "fetched_at",
+        "dataset_metadata",
+        "release_published_at"
       ],
       "title": "Valid From Source",
       "type": "string"

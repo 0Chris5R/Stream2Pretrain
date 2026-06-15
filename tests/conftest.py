@@ -34,8 +34,6 @@ REDPANDA_HOST = "localhost"
 REDPANDA_PORT = 9092
 MINIO_HOST = "localhost"
 MINIO_PORT = 9000
-SUBMIT_API_HOST = os.environ.get("S2P_SUBMIT_API_HOST", "localhost")
-SUBMIT_API_PORT = int(os.environ.get("S2P_SUBMIT_API_PORT", "8000"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +44,6 @@ class StackEndpoints:
     minio_endpoint: str
     minio_access_key: str
     minio_secret_key: str
-    submit_api_url: str
 
 
 def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -123,19 +120,12 @@ def dev_stack() -> Iterator[StackEndpoints]:
         minio_endpoint=f"http://{MINIO_HOST}:{MINIO_PORT}",
         minio_access_key="minioadmin",
         minio_secret_key="minioadmin",
-        submit_api_url=f"http://{SUBMIT_API_HOST}:{SUBMIT_API_PORT}",
     )
     try:
         yield endpoints
     finally:
         if started_here and os.environ.get("S2P_TEARDOWN_STACK") == "1":
             _compose_down()
-
-
-@pytest.fixture(scope="session")
-def submit_api_reachable(dev_stack: StackEndpoints) -> bool:
-    """True iff the submit API is currently listening. Tests skip otherwise."""
-    return _port_open(SUBMIT_API_HOST, SUBMIT_API_PORT)
 
 
 @pytest.fixture

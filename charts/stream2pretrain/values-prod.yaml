@@ -1,12 +1,6 @@
 # Prod override - 3 replica targets, prod KEDA caps, real cluster issuer.
 profile: prod
 
-ingest:
-  submitApi:
-    replicas: 3
-    ingress:
-      host: submit.stream2pretrain.example.com
-
 processor:
   fetcher:
     replicas: 3

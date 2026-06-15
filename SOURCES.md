@@ -20,6 +20,7 @@ These are the locked-in sources for the first deliverable. Picked for: free, no-
 | 8 | Hugging Face Hub models | `https://huggingface.co/api/models?sort=lastModified&direction=-1&limit=100` | REST/JSON | optional bearer (token raises 5-min quota from 500 -> 1000-2500) | every 10-15 min, dedup on `id`+`lastModified` | needs-measurement (hundreds-thousands) | Model cards = engineering artifacts + metadata |
 | 9 | HF Daily Papers | `https://huggingface.co/api/daily_papers?sort=publishedAt&limit=100` | REST/JSON | bearer required | every 6h | ~20-50 | Curated frontier papers w/ community signal |
 | 10 | AI-lab blog RSS bundle | OpenAI News, DeepMind, HF Blog, BAIR, EleutherAI | RSS | none | every 6h | ~5-10 total | Long-form lab writeups |
+| ~~11~~ | ~~FastAPI submit~~ | ~~`POST /submit`~~ | ~~HTTP/JSON~~ | ~~none~~ | ~~on-demand~~ | ~~ad-hoc~~ | **DELETED in v0.2.0** - manual URL submit endpoint removed; the live pollers and seed loader cover demo needs without the abuse surface |
 
 ### Curated GitHub repos for Releases Atom (Phase 1)
 `huggingface/transformers`, `vllm-project/vllm`, `pytorch/pytorch`, `ggerganov/llama.cpp`, `karpathy/llm.c`, `unslothai/unsloth`, `meta-llama/llama`, `openai/whisper`, `anthropics/courses`, `apple/ml-tic-lm`, `mlfoundations/dclm`, `huggingface/datatrove`, `NVIDIA-NeMo/Curator`, `allenai/dolma`, `bytewax/bytewax`, `redpanda-data/redpanda`, `apache/iceberg`, `MaterializeInc/materialize`, `risingwavelabs/risingwave`, `pathwaycom/pathway`, `unclecode/crawl4ai`, `firecrawl/firecrawl`, plus 8 more to reach ~30. List lives in `charts/stream2pretrain/values.yaml` once code starts.
@@ -30,6 +31,36 @@ These are the locked-in sources for the first deliverable. Picked for: free, no-
 - `https://huggingface.co/blog/feed.xml`
 - `https://bair.berkeley.edu/blog/feed.xml`
 - `https://blog.eleuther.ai/index.xml`
+
+## Phase-1.5 Fulltext + Code (v0.2.0)
+
+These four sources land in v0.2.0 alongside the existing Phase-1 pollers. They turn the curator from a metadata-and-blog feed into a real fulltext pipeline (arXiv HTML for the freshest tier, OpenReview for peer-review prose) and a real code pipeline (release tarballs from the curated AI-repo allowlist). All endpoints + rate-limit math from `docs/research-fulltext-and-code.md` (verified 2026-06-15).
+
+| # | Source | Endpoint | Protocol | Auth | Poll interval | Est. docs/day | Why |
+|---|---|---|---|---|---|---|---|
+| 12 | arXiv native HTML | `https://arxiv.org/html/<arxiv_id>` (fallback `https://ar5iv.labs.arxiv.org/html/<id>` on 404) | HTTPS HTML | none | fan-out from #1 / #2-5; fetch each new id once, conditional-GET via ETag thereafter | ~700-900 (paper bodies, equals Phase-1 abstract count) | Replaces PDF parsing for the fresh tier; ~97% of new submissions covered, ~75% LaTeXML-clean per arxiv.org/pdf/2605.16562 |
+| 13 | OpenReview API v2 | `https://api2.openreview.net/notes?invitation=<venue>/-/Submission` + per-note PDF over HTTPS | REST/JSON + HTTPS PDF | none for reads | every 6h between deadlines, every 30 min during ICLR/NeurIPS/ICML/COLM submission windows | needs-measurement (bursty: thousands during conference deadlines) | Peer-review prose + rebuttals. Full review texts unavailable elsewhere |
+| 14 | REVIEWARENA HF dataset | `huggingface.co/datasets/<reviewarena_repo>` (one-shot streaming load) | HF datasets streaming | bearer (HF token) | one-shot backfill | n/a (one-shot ~tens of GB) | Backfill of ICLR 2020-2026, NeurIPS 2021-2025, ICML 2025, COLM 2024-2025 PDFs + reviews + decisions |
+| 15 | GitHub release tarballs | `https://api.github.com/repos/{o}/{r}/tarball/{tag}` | REST/binary | personal token (5000 req/h shared with #6) | fan-out from #7 (Releases Atom) on every new release | needs-measurement (~30 repos x mean ~5 releases/day x ~50-200 files/release after path+license filter) | Per-file source records under SPDX-permissive license; lands as `source_format=code` on the existing topics |
+
+Notes on rate-limit budget:
+- Tarballs share the 5000 req/h GitHub PAT budget with sources #6 and #7. With 30 curated repos and conservative ~5 releases/repo/day the daily fetch count is well under 200 requests, leaving > 4800 req/h headroom.
+- arXiv HTML fan-out sits inside the same 4 req/s, 1-second-sleep budget the OAI / RSS pollers use; the queue is bounded by Phase-1's daily new-id count (~700-900).
+- OpenReview pagination uses `limit=1000` + `offset`; total page count is bounded by the venue size (typically 5-50k notes). PDF fetch is rate-limited by `respect_x_poll_interval`-style 1 req/s politeness because OpenReview does not publish a hard cap.
+
+## Seed corpus (v0.2.0)
+
+One-shot Bytewax `seed-loader` Job that streams a 5-component HF mixture into `docs.normalized` as Silver records before live polling kicks in. Every component is permissive-license-compatible with the project's Apache-2.0 release. Per-document `valid_from` is populated from each dataset's native publication-date column so the validity-interval N2 novelty has data to query on day 1.
+
+| # | Component | HF id / source | Bronze GB target | Tokens (B) target | License | Role |
+|---|---|---|---|---|---|---|
+| S1 | peS2o v3 filtered to cs.* | `allenai/peS2o` (`data/v3/`) | ~50 | needs-measurement (~12-15B; v2 baseline 42.01B at cutoff 2023-01-03) | ODC-By 1.0 | AI2 academic backbone; filtered to cs.CL/cs.LG/cs.AI/stat.ML where metadata is available |
+| S2 | RedPajama v1 arxiv | `togethercomputer/RedPajama-Data-1T` config `arxiv` | ~92 | ~28 | Apache-2.0 wrapper + per-paper arXiv terms | LaTeX-derived view of arXiv; complementary to peS2o's PDF-derived view; powers the shadow A/B extraction-method demo |
+| S3 | FineWeb-Edu URL-filtered | `HuggingFaceFW/fineweb-edu` (URL allowlist for arxiv.org / openai.com / deepmind.google / huggingface.co/blog / eleuther.ai / bair.berkeley.edu / lilianweng.github.io / sebastianraschka.com / etc.) | ~50 | needs-measurement (~5-10B post-filter) | ODC-By 1.0 | AI/ML-domain web slice carrying FineWeb-Edu classifier scores >=3 |
+| S4 | Stack-Edu Python+ML | `HuggingFaceTB/stack-edu` filtered to Python + AI/ML repos | ~80 | needs-measurement (~8-12B; OLMo-3 used ~410B from this dataset) | ODC-By family | Educational-quality code subset; same dataset OLMo-3 used for code training |
+| S5 | Custom Wayback backfill | arXiv OAI `from=2024-06-01`, GitHub Releases Atom history, HF Daily Papers `before=...`, AI-lab blogs via Wayback Machine | ~5-10 | ~1 | per-source (research fair-use for blog backfill) | Validates streaming "backfill mode" with `valid_from` populated from per-document publication dates |
+
+Total target: ~275-280 GB Bronze, ~55-65B tokens. The seed loader rides the same `docs.normalized` topic and Silver/Gold operators the live pollers use, so seeding is structurally a backfill mode, not a parallel pipeline. Day-1 demo benefits: `gold_as_of('2023-06-01')` queries return material; Decon-Gate has snapshots to attest; quality histograms have meaningful distributions.
 
 ## Phase-2 Expansion Set (breadth, plug-in after Week 6)
 

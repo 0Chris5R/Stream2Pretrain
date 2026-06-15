@@ -273,21 +273,6 @@ spec:
   licenseDefault: unknown
   egressAllow: ["blog.eleuther.ai"]
   enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: manual-submit
-spec:
-  name: manual-submit
-  protocol: manual
-  endpoint: https://stream2pretrain.local/manual
-  pollIntervalSeconds: 86400
-  rateLimit:
-    requestsPerSecond: 2.0
-    burst: 8
-  licenseDefault: unknown
-  enabled: true
 YAML
 
 if [[ "${DRY_RUN}" == "1" ]]; then

@@ -96,6 +96,10 @@ networkPolicy:
     huggingface:
       - huggingface.co
       - cdn-lfs.huggingface.co
+    openreview:
+      - api2.openreview.net
+      - api.openreview.net
+      - openreview.net
     blogs:
       - openai.com
       - deepmind.google
@@ -129,6 +133,21 @@ sources:
       kind: cronjob
       schedule: "27 */2 * * *"
       licenseDefault: arxiv-non-exclusive-distribution
+    # Native arXiv full-paper-HTML fetcher (v0.2.0). Subscribes to
+    # ``docs.normalized`` and walks every fresh arXiv id through
+    # ``arxiv.org/html/<id>`` (with ``ar5iv.labs.arxiv.org`` as fallback).
+    htmlFetcher:
+      enabled: true
+      feedName: arxiv-html-fetcher
+      licenseDefault: arxiv-non-exclusive-distribution
+      backfill:
+        enabled: false
+        schedule: "23 4 * * *"
+        deadlineSeconds: 7200
+        # When non-empty, mount this ConfigMap at /etc/s2p/backfill instead
+        # of the chart's default empty placeholder. Operators populate it
+        # with a single ``ids.txt`` key containing one arXiv id per line.
+        configMap: ""
   github:
     enabled: true
     events:
@@ -262,23 +281,156 @@ ingest:
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: 500m, memory: 256Mi}
+  # arXiv full-paper-HTML fetcher (v0.2.0). Long-running Deployment that
+  # subscribes to docs.normalized for arXiv ids and fetches the rendered
+  # HTML body (with ar5iv as fallback). Toggle via
+  # ``sources.arxiv.htmlFetcher.enabled``.
+  arxivHtmlFetcher:
+    image: stream2pretrain/ingest-arxiv-html
+    replicas: 1
+    # Bound how many ids one Deployment loop drains before yielding back
+    # to KEDA. Empty / 0 means unlimited. Useful for testing on small
+    # clusters; production should leave this 0.
+    maxRecordsPerLoop: 0
+    scaling:
+      minReplicas: 0
+      maxReplicas: 3
+      # docs.normalized lag threshold; arXiv ids form a small fraction of
+      # the topic, so keep this low. needs-measurement on the real cluster.
+      lagThreshold: 200
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 1, memory: 768Mi}
+  # GitHub release tarball fetcher (v0.2.0). Consumes raw.fetched events
+  # emitted by the github_releases poller and downloads each release's
+  # source tarball, emitting one CodeFileRecord per allow-listed file.
+  githubTarballFetcher:
+    enabled: true
+    image: stream2pretrain/ingest-github-tarball-fetcher
+    replicas: 1
+    consumerGroup: s2p-github-tarball-fetcher
+    # File extensions retained from the tarball (lowercase, leading dot).
+    # Non-listed files are skipped silently. Tune via override.
+    allowedExtensions:
+      - .py
+      - .pyx
+      - .pyi
+      - .c
+      - .h
+      - .cpp
+      - .hpp
+      - .cc
+      - .cu
+      - .rs
+      - .go
+      - .js
+      - .ts
+      - .tsx
+      - .jsx
+      - .java
+      - .scala
+      - .kt
+      - .swift
+      - .rb
+      - .r
+      - .jl
+      - .md
+      - .rst
+      - .txt
+      - .yaml
+      - .yml
+      - .toml
+      - .json
+    # 1 MiB default per-file ceiling. Files above this are skipped without
+    # being read into memory.
+    maxFileSizeBytes: 1048576
+    # OSI permissive default. Repos whose GitHub License API SPDX id is not
+    # in this list are skipped entirely (no tarball download, no records).
+    allowedLicenses:
+      - Apache-2.0
+      - MIT
+      - BSD-2-Clause
+      - BSD-3-Clause
+      - ISC
+      - MPL-2.0
+      - Unlicense
+      - CC0-1.0
+    # Per-pod GitHub REST budget. With burst=4 and rate=1.0 req/s the worst
+    # case is ~3600 req/h per pod, comfortably under the 5000 req/h ceiling
+    # while leaving headroom for the github_releases poller. Lag-driven
+    # KEDA scaling assumes a single consumer group across replicas.
+    requestRatePerSecond: 1.0
+    requestBurst: 4
+    keda:
+      minReplicas: 0
+      # Capped at 2 to dampen the self-amplification feedback loop on
+      # raw.fetched (worker consumes from the topic and produces back to
+      # it; see the KEDA TODO in CLAUDE.md and the comment in
+      # templates/ingest-github-tarball.yaml).
+      maxReplicas: 2
+      # Threshold value is needs-measurement on the real cluster - see the
+      # honest-fallback note in templates/ingest-github-tarball.yaml.
+      lagThreshold: 50
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 1, memory: 1Gi}
   hf:
     image: stream2pretrain/ingest-hf
     replicas: 1
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
-  submitApi:
-    image: stream2pretrain/submit-api
-    replicas: 2
-    port: 8080
+  # OpenReview poller (v0.2.0). The same image runs both live and backfill
+  # modes; the Helm template selects via container `command`.
+  openreview:
+    image: stream2pretrain/ingest-openreview
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
-    ingress:
-      enabled: true
-      host: submit.stream2pretrain.local
-      tlsSecret: submit-stream2pretrain-tls
+    # Backfill streams a multi-GB HF dataset; size up the head room.
+    backfillResources:
+      requests: {cpu: 200m, memory: 512Mi}
+      limits: {cpu: 1, memory: 2Gi}
+
+# -----------------------------------------------------------------------------
+# OpenReview poller (v0.2.0). Live CronJob polls api2.openreview.net every 6h;
+# the backfill Job is a one-shot REVIEWARENA HF dataset bridge gated behind
+# ``openreviewPoller.runBackfill = true`` so an operator opts in explicitly.
+# -----------------------------------------------------------------------------
+openreviewPoller:
+  enabled: true
+  # ICLR.cc/2026/Conference, NeurIPS.cc/2025/Conference, ICML.cc/2025/Conference,
+  # COLM/2025/Conference. Which years are actually open at any given time is
+  # ``needs-measurement``; the live module skips venues that return zero notes.
+  venues:
+    - ICLR.cc/2026/Conference
+    - NeurIPS.cc/2025/Conference
+    - ICML.cc/2025/Conference
+    - COLM/2025/Conference
+  # OpenReview supports anonymous listing once a venue's submissions are
+  # public. Populate ``tokenSecret`` to unlock pre-release access.
+  tokenSecret: ""
+  tokenSecretKey: token
+  live:
+    schedule: "17 */6 * * *"
+    activeDeadlineSeconds: 3600
+    # Cursor PVC: holds the seen_note_ids JSON written by FeedStateStore.
+    # Replaces the v0.2.0 emptyDir mount that defeated idempotency. The
+    # default 1Gi accommodates a 20k-id seen-set per venue across the
+    # configured venue list with comfortable headroom.
+    state:
+      storageClass: ""
+      size: 1Gi
+      existingClaim: ""
+  runBackfill: false
+  backfill:
+    # Empty means: resolve the dataset id at runtime via the HF Hub search API
+    # (see ingest/openreview_poller/backfill.py). Set explicitly to pin a
+    # known revision once the operator has confirmed it.
+    datasetId: ""
+    # Optional smoke-scale limit. Empty means "no limit".
+    maxRows: ""
+    activeDeadlineSeconds: 21600
 
 # -----------------------------------------------------------------------------
 # Processor components
@@ -344,6 +496,68 @@ mixtureController:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: 500m, memory: 512Mi}
   reconcileIntervalSeconds: 30
+
+# -----------------------------------------------------------------------------
+# Seed loader (one-shot Bytewax Job; v0.2.0)
+# -----------------------------------------------------------------------------
+# Streams the 5-component HuggingFace seed mixture into docs.normalized as
+# Silver records. Disabled by default - kick off explicitly via the helper
+# script `scripts/seed_corpus.sh`. Honest scope notes live in
+# processor/seed/README.md; the headline ones:
+#   - HF cache PVC default is 50Gi. Full 5-component backfill needs 1-2 TiB,
+#     so the demo cluster runs only a selected subset via --components=...
+#   - peS2o v3 token count and FineWeb-Edu domain-filter yield are
+#     `needs-measurement` per docs/research-seed-corpus.md.
+seedLoader:
+  enabled: false
+  image: stream2pretrain/processor-seed-loader
+  # `inProcess` runs the synchronous fallback (no Bytewax workers) which is
+  # the right shape for a one-shot Job on the dev cluster. Flip to false
+  # only when scaling to multiple worker Pods is wanted.
+  inProcess: true
+  dryRun: false
+  # Components to ingest, in priority order. Override on the helm CLI:
+  #   --set seedLoader.components={pes2o,stack-edu}
+  components:
+    - pes2o
+    - redpajama-arxiv
+    - fineweb-edu
+    - stack-edu
+    - wayback
+  maxDocsPerComponent: 0  # 0 means unlimited; set to N for smoke runs
+  waybackMonths: 24
+  stateBucket: s2p-state
+  runId: ""  # filled in by scripts/seed_corpus.sh; templates default to now
+  activeDeadlineSeconds: 86400
+  hfTokenSecret: stream2pretrain-hf
+  hfTokenSecretKey: token
+  hf_cache_pvc:
+    existingClaim: ""
+    storageClass: ""
+    size: 50Gi
+  resources:
+    requests: {cpu: 500m, memory: 2Gi}
+    limits: {cpu: 2, memory: 6Gi}
+  # FineWeb-Edu URL allowlist - hostnames matched as exact-host or suffix
+  # (so `magazine.sebastianraschka.com` matches `sebastianraschka.com`).
+  fineweb_url_allowlist:
+    - arxiv.org
+    - openai.com
+    - deepmind.google
+    - anthropic.com
+    - ai.meta.com
+    - huggingface.co
+    - distill.pub
+    - eleuther.ai
+    - bair.berkeley.edu
+    - lilianweng.github.io
+    - sebastianraschka.com
+    - magazine.sebastianraschka.com
+    - jalammar.github.io
+    - karpathy.ai
+    - pytorch.org
+    - tensorflow.org
+    - pytorch-lightning.readthedocs.io
 
 # -----------------------------------------------------------------------------
 # UI (Next.js 14)

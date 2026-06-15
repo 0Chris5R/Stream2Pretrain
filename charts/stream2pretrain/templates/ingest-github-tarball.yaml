@@ -1,0 +1,163 @@
+{{- if and .Values.sources.github.enabled .Values.ingest.githubTarballFetcher.enabled }}
+{{- $component := "ingest-github-tarball-fetcher" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $kedaAuthEnabled := .Values.keda.auth.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ .Values.ingest.githubTarballFetcher.replicas }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+        stream2pretrain.io/egress-class: github
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      containers:
+        - name: tarball-fetcher
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.githubTarballFetcher.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $component | quote }}
+            # GITHUB_TOKEN (no S2P_ prefix) so IngestConfig.github_token in
+            # ingest/common/config.py picks it up. Without this, the License
+            # API + tarball requests are anonymous and hit the 60 req/h
+            # ceiling within minutes during normal AI-org release bursts.
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sources.github.releases.tokenSecret | quote }}
+                  key: {{ .Values.sources.github.releases.tokenSecretKey | quote }}
+            - name: S2P_TARBALL_ALLOWED_EXTENSIONS
+              value: {{ join "," .Values.ingest.githubTarballFetcher.allowedExtensions | quote }}
+            - name: S2P_TARBALL_MAX_FILE_SIZE_BYTES
+              value: {{ .Values.ingest.githubTarballFetcher.maxFileSizeBytes | quote }}
+            - name: S2P_TARBALL_ALLOWED_LICENSES
+              value: {{ join "," .Values.ingest.githubTarballFetcher.allowedLicenses | quote }}
+            - name: S2P_TARBALL_RATE_PER_SECOND
+              value: {{ .Values.ingest.githubTarballFetcher.requestRatePerSecond | quote }}
+            - name: S2P_TARBALL_BURST
+              value: {{ .Values.ingest.githubTarballFetcher.requestBurst | quote }}
+            - name: S2P_TARBALL_CONSUMER_GROUP
+              value: {{ .Values.ingest.githubTarballFetcher.consumerGroup | quote }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.ingest.githubTarballFetcher.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  selector:
+    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+{{- if .Values.keda.enabled }}
+---
+{{/*
+KEDA Kafka-lag scaler keyed on raw.fetched.
+
+Honest fallback: KEDA's Kafka trigger does not support filtering by message
+header (the worker filters out non-github-releases events in code, but they
+still count toward the consumer group's committed offsets). The lag threshold
+below is therefore set against the full raw.fetched topic; the scaler treats
+"raw.fetched lag for the s2p-github-tarball-fetcher consumer group" as the
+backpressure signal. See the github_release_tarball_fetcher README for the
+documented honest fallback discussion. The lagThreshold value is configurable
+in values.yaml and should be re-tuned after measurement on the live cluster
+(needs-measurement).
+
+KNOWN-LIMITATION (v0.2.0): the worker also produces CodeFileRecords back to
+``raw.fetched``. The producer's records also count toward this consumer
+group's lag (Kafka measures log-end-offset vs committed offset). For a
+release that emits hundreds of CodeFileRecords this creates a positive
+feedback loop: lag spike -> KEDA scales up -> more producers -> bigger lag
+spike. The locked four-topic contract (schemas/topics.py CODE_SOURCE_FORMAT
+note) blocks the obvious fix (separate code topic). Tracked as TODO in
+CLAUDE.md: switch to a Prometheus-backed KEDA trigger keyed on
+``s2p_github_releases_unprocessed`` once the github-releases poller exports
+that metric. Until then, set ``ingest.githubTarballFetcher.keda.maxReplicas``
+conservatively to dampen the loop (1 in dev, small in prod).
+*/}}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.ingest.githubTarballFetcher.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.ingest.githubTarballFetcher.keda.maxReplicas }}
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
+        consumerGroup: {{ .Values.ingest.githubTarballFetcher.consumerGroup | quote }}
+        topic: {{ .Values.redpanda.topics.rawFetched | quote }}
+        lagThreshold: {{ .Values.ingest.githubTarballFetcher.keda.lagThreshold | quote }}
+        offsetResetPolicy: latest
+        {{- if not $kedaAuthEnabled }}
+        sasl: ""
+        tls: "disable"
+        {{- end }}
+      {{- if $kedaAuthEnabled }}
+      authenticationRef:
+        name: {{ include "stream2pretrain.fullname" . }}-redpanda
+      {{- end }}
+{{- end }}
+{{- end }}

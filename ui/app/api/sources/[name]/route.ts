@@ -1,8 +1,9 @@
 /**
  * DELETE /api/sources/{name}
  *
- * Proxies SourceFeed deletion to the submit-api. Returns `{ deleted: true }`
- * on success; mirrors the upstream's 404 when the SourceFeed does not exist.
+ * Proxies SourceFeed deletion to the sources-api upstream. Returns
+ * `{ deleted: true }` on success; mirrors the upstream's 404 when the
+ * SourceFeed does not exist.
  */
 import { NextResponse } from 'next/server';
 
@@ -21,20 +22,20 @@ export async function DELETE(
   }
   try {
     const resp = await fetch(
-      `${UPSTREAM.submitApi}/v1/sources/${encodeURIComponent(name)}`,
+      `${UPSTREAM.sourcesApi}/v1/sources/${encodeURIComponent(name)}`,
       { method: 'DELETE' },
     );
     if (resp.status === 404) {
       return NextResponse.json({ detail: 'source not found' }, { status: 404 });
     }
     if (!resp.ok) {
-      return NextResponse.json(upstreamError(`submit_api_status_${resp.status}`), {
+      return NextResponse.json(upstreamError(`sources_api_status_${resp.status}`), {
         status: 502,
       });
     }
     return NextResponse.json({ deleted: true });
   } catch (err) {
     console.warn('sources DELETE upstream failed', (err as Error).message);
-    return NextResponse.json(upstreamError('submit_api_unreachable'), { status: 502 });
+    return NextResponse.json(upstreamError('sources_api_unreachable'), { status: 502 });
   }
 }

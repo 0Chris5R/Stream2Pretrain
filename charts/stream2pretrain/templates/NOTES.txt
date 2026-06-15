@@ -1,15 +1,15 @@
 Stream2Pretrain {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
 
 Components:
-- Ingest: arXiv (OAI-PMH + 4 RSS), GitHub Events + Releases, HF Hub models +
-  Daily Papers, AI-lab blogs, sitemap (optional), submit-api (FastAPI).
+- Ingest: arXiv (OAI-PMH + 4 RSS + native HTML fetcher), OpenReview (API v2
+  + REVIEWARENA backfill), GitHub Events + Releases + per-release tarball
+  fetcher, HF Hub models + Daily Papers, AI-lab blogs, sitemap (optional).
 - Processor: fetcher (Resiliparse), curate (Bytewax StatefulSet with decon-gate
-  sidecar on 127.0.0.1:9595), iceberg-writer (PyIceberg).
+  sidecar on 127.0.0.1:9595), iceberg-writer (PyIceberg), seed-loader (one-shot
+  Bytewax Job for the 5-component HF seed mixture).
 - Control plane: mixture-controller (kopf) + SourceFeed/MixtureRecipe CRDs.
 - UI: Next.js 14 reachable at https://{{ .Values.ui.ingress.host }}/ once the
   Certificate {{ .Values.ui.ingress.tlsSecret }} is Ready.
-- Submit API at https://{{ .Values.ingest.submitApi.ingress.host }}/ (POST
-  /v1/sourcefeeds, /v1/mixturerecipes).
 
 Required external secrets (create before installing or use sealed-secrets):
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.minio.credentialsSecret }} \

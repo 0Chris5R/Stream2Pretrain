@@ -48,16 +48,6 @@ observability:
   serviceNamePrefix: stream2pretrain
   serviceMonitorEnabled: true
 
-submitApi:
-  replicas: 1
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-
 processor:
   fetcher:
     replicas: 1

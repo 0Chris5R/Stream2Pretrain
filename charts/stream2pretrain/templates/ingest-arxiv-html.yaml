@@ -1,0 +1,178 @@
+{{- /*
+arXiv full-paper-HTML fetcher.
+
+Two workloads ship under one toggle (``sources.arxiv.htmlFetcher.enabled``):
+
+  - A long-running ``Deployment`` that subscribes to ``docs.normalized`` and
+    fetches the native HTML body for every freshly seen arXiv id. KEDA
+    scales this on the same topic's lag.
+  - An optional ``CronJob`` that runs the same image with ``--ids-file`` for
+    backfill or replay. The job is dormant unless
+    ``backfill.enabled`` is set so demo clusters do not pay the cost.
+
+Per CLAUDE.md the egress class is ``arxiv`` (already wired in
+networkpolicies.yaml).
+
+KEDA note (kept honest): the Kafka trigger does NOT support per-source-feed
+lag selectors as of mid-2026. We scale on the topic-level lag of
+``docs.normalized``; the consumer-group filter on ``source_feed`` happens
+inside the pod. If a fine-grained KEDA selector becomes available later we
+can swap this for a metrics-api-based scaler without churning the rest of
+the chart.
+*/ -}}
+{{- if and .Values.sources.arxiv.enabled .Values.sources.arxiv.htmlFetcher.enabled }}
+{{- $component := "ingest-arxiv-html" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $hf := .Values.ingest.arxivHtmlFetcher }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ default 1 $hf.replicas }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+        stream2pretrain.io/egress-class: arxiv
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      containers:
+        - name: arxiv-html
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" $hf.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          args:
+            - --feed-name
+            - {{ .Values.sources.arxiv.htmlFetcher.feedName | quote }}
+            - --license-default
+            - {{ .Values.sources.arxiv.htmlFetcher.licenseDefault | quote }}
+            - --stream-topic
+            - {{ .Values.redpanda.topics.docsNormalized | quote }}
+            {{- if $hf.maxRecordsPerLoop }}
+            - --max-records
+            - {{ $hf.maxRecordsPerLoop | quote }}
+            {{- end }}
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $component | quote }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml $hf.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- if .Values.keda.enabled }}
+{{- $kedaAuthEnabled := .Values.keda.auth.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ default 1 $hf.scaling.minReplicas }}
+  maxReplicaCount: {{ default 4 $hf.scaling.maxReplicas }}
+  triggers:
+    - type: kafka
+      metadata:
+        # We scale on docs.normalized lag (topic-wide). KEDA's Kafka trigger
+        # cannot filter to a subset of source_feed values; the in-pod
+        # consumer drops non-arxiv records before fetching.
+        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
+        consumerGroup: s2p-arxiv-html-fetcher
+        topic: {{ .Values.redpanda.topics.docsNormalized | quote }}
+        lagThreshold: {{ default 200 $hf.scaling.lagThreshold | quote }}
+        offsetResetPolicy: latest
+        {{- if not $kedaAuthEnabled }}
+        sasl: ""
+        tls: "disable"
+        {{- end }}
+      {{- if $kedaAuthEnabled }}
+      authenticationRef:
+        name: {{ include "stream2pretrain.fullname" . }}-redpanda
+      {{- end }}
+{{- end }}
+{{- if .Values.sources.arxiv.htmlFetcher.backfill.enabled }}
+---
+{{- $backfillName := printf "%s-backfill" $name }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $backfillName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  schedule: {{ .Values.sources.arxiv.htmlFetcher.backfill.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ default 7200 .Values.sources.arxiv.htmlFetcher.backfill.deadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 12 }}
+            stream2pretrain.io/egress-class: arxiv
+        spec:
+          serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- include "stream2pretrain.imagePullSecrets" . | nindent 10 }}
+          {{- include "stream2pretrain.podSecurityContext" . | nindent 10 }}
+          {{- include "stream2pretrain.scheduling" . | nindent 10 }}
+          containers:
+            - name: arxiv-html-backfill
+              image: {{ include "stream2pretrain.image" (dict "ctx" . "image" $hf.image) | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
+              args:
+                - --ids-file
+                - /etc/s2p/backfill/ids.txt
+                - --feed-name
+                - {{ .Values.sources.arxiv.htmlFetcher.feedName | quote }}
+                - --license-default
+                - {{ .Values.sources.arxiv.htmlFetcher.licenseDefault | quote }}
+              env:
+                {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
+                - name: S2P_COMPONENT
+                  value: {{ printf "%s-backfill" $component | quote }}
+              volumeMounts:
+                - name: backfill
+                  mountPath: /etc/s2p/backfill
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml $hf.resources | nindent 16 }}
+          volumes:
+            - name: backfill
+              configMap:
+                name: {{ default (printf "%s-backfill-ids" $name) .Values.sources.arxiv.htmlFetcher.backfill.configMap }}
+            - name: tmp
+              emptyDir: {}
+{{- end }}
+{{- end }}

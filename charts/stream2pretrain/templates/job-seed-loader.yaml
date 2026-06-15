@@ -1,0 +1,104 @@
+{{- if .Values.seedLoader.enabled }}
+{{- $component := "seed-loader" }}
+{{- $runId := default (printf "%s" (now | date "20060102-150405")) .Values.seedLoader.runId }}
+{{- $name := printf "%s-%s-%s" (include "stream2pretrain.fullname" .) $component $runId | trunc 63 | trimSuffix "-" }}
+{{- $componentsCsv := join "," .Values.seedLoader.components }}
+{{- $allowlistCsv := join "," .Values.seedLoader.fineweb_url_allowlist }}
+{{- $hfPvc := default (printf "%s-%s-hf-cache" (include "stream2pretrain.fullname" .) $component) .Values.seedLoader.hf_cache_pvc.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $hfPvc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.seedLoader.hf_cache_pvc.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      # Default 50Gi covers the smoke + selected-component runs. The full
+      # 5-component ingest requires 1-2 TiB per the
+      # processor/seed/README.md scope notes; resize this PVC before
+      # enabling all components on the demo cluster.
+      storage: {{ .Values.seedLoader.hf_cache_pvc.size | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+  annotations:
+    stream2pretrain.io/seed-run-id: {{ $runId | quote }}
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: {{ .Values.seedLoader.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      containers:
+        - name: seed-loader
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.seedLoader.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command: ["python", "-m", "processor.seed_loader"]
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $component | quote }}
+            - name: S2P_SEED_COMPONENTS
+              value: {{ $componentsCsv | quote }}
+            - name: S2P_SEED_DRY_RUN
+              value: {{ ternary "1" "0" .Values.seedLoader.dryRun | quote }}
+            - name: S2P_SEED_INPROCESS
+              value: {{ ternary "1" "0" .Values.seedLoader.inProcess | quote }}
+            {{- if .Values.seedLoader.maxDocsPerComponent }}
+            - name: S2P_SEED_MAX_DOCS_PER_COMPONENT
+              value: {{ .Values.seedLoader.maxDocsPerComponent | quote }}
+            {{- end }}
+            - name: S2P_SEED_FINEWEB_ALLOWLIST
+              value: {{ $allowlistCsv | quote }}
+            - name: S2P_SEED_WAYBACK_MONTHS
+              value: {{ .Values.seedLoader.waybackMonths | quote }}
+            - name: S2P_STATE_BUCKET
+              value: {{ .Values.seedLoader.stateBucket | quote }}
+            - name: HF_HOME
+              value: /var/lib/hf-cache
+            - name: HF_DATASETS_CACHE
+              value: /var/lib/hf-cache/datasets
+            - name: TRANSFORMERS_CACHE
+              value: /var/lib/hf-cache/transformers
+            {{- if .Values.seedLoader.hfTokenSecret }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.seedLoader.hfTokenSecret | quote }}
+                  key: {{ .Values.seedLoader.hfTokenSecretKey | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.seedLoader.resources | nindent 12 }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /var/lib/hf-cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: {{ $hfPvc }}
+        - name: tmp
+          emptyDir: {}
+{{- end }}

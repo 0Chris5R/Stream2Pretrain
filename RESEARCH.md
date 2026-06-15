@@ -522,4 +522,24 @@ The grader sees, in 5 minutes from screenshots alone:
 72. https://github.com/yidingjiang/ado (ADO)
 73. https://research.nvidia.com/labs/lpr/climb/
 74. https://openreview.net/forum?id=jnRBe6zatP (FineWeb2)
+
+## 13. v0.2.0 amendment - fulltext, code, and seed mixture
+
+This section is an amendment, not a rewrite. It records the scope change applied on 2026-06-15 between v0.1.0 (Sections 1-12 above) and v0.2.0. Two follow-on research reports drove the change; both live in this repo:
+
+- `docs/research-fulltext-and-code.md` - mid-2026 survey of how to ingest arXiv fulltext and source code at scale without a GPU node. Verified the native arXiv HTML rollout (~97% coverage at `/html/<id>`, ~75% LaTeXML-clean), confirmed OpenReview API v2 + the REVIEWARENA HF dataset are the realistic paths to peer-review prose, and showed that GitHub release tarballs (`/repos/{o}/{r}/tarball/{tag}`) stay well inside the 5000 req/h authed PAT budget for the existing 30-repo allowlist.
+- `docs/research-seed-corpus.md` - 5-component HF seed mixture sizing (peS2o cs.* + RedPajama-arxiv + FineWeb-Edu URL-filtered + Stack-Edu Python+ML + custom Wayback backfill) sized at ~275-280 GB Bronze / ~55-65B tokens, all under permissive licenses compatible with this project's Apache-2.0 release.
+
+Resulting v0.2.0 deltas (full source-feed catalogue in `SOURCES.md`):
+
+- Three new ingest modules: `arxiv_html_fetcher`, `openreview_poller`, `github_release_tarball_fetcher`.
+- One new processor: `processor/seed_loader.py`, a one-shot Bytewax Job that lands the seed mixture directly on `docs.normalized` so Silver/Gold operators see the seed identically to live polling.
+- Schema additions on Bronze, Silver, and Gold: `source_format` (html | pdf | latex | code | web | metadata | review), `extraction_pipeline`, `spdx_license`, `spdx_license_source`. New `CodeFileRecord` model for per-file code records.
+- Removal: the v0.1 manual URL submit endpoint (`ingest/submit_api/`). Its demo role is covered by the seed loader plus live pollers, with no abuse surface.
+
+Topic decision: deliberately no fifth `docs.code` topic. Code records ride the existing `raw.fetched` / `docs.normalized` topics with `source_format=='code'`. This keeps the four-topic Redpanda contract stable from v0.1 -> v0.2.
+
+Native publication-date columns populate `valid_from` for every seed component, so the N2 validity-interval novelty has material to query (`gold_as_of('2023-06-01')`) on day 1 of the demo rather than after live polling has accumulated history.
+
+Sections 1-12 above stay as-is; nothing in v0.2.0 retracts a v0.1 design choice.
 75. https://aclanthology.org/2025.findings-naacl.291 (NAACL 2025 contamination survey)

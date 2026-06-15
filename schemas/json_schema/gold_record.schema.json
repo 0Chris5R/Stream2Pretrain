@@ -41,6 +41,14 @@
       "title": "Edu Score",
       "type": "number"
     },
+    "extraction_pipeline": {
+      "default": "resiliparse-0.14",
+      "description": "Operator-chain identifier carried forward from Silver.",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Extraction Pipeline",
+      "type": "string"
+    },
     "lang": {
       "maxLength": 8,
       "minLength": 2,
@@ -104,7 +112,8 @@
           "pii_detected",
           "license_excluded",
           "decontamination_hit",
-          "validity_interval_invalid"
+          "validity_interval_invalid",
+          "minhash_backend_mismatch"
         ],
         "type": "string"
       },
@@ -136,6 +145,48 @@
       ],
       "default": null,
       "title": "Snapshot Id"
+    },
+    "source_format": {
+      "default": "html",
+      "description": "Wire shape carried forward from Bronze/Silver.",
+      "enum": [
+        "html",
+        "pdf",
+        "latex",
+        "code",
+        "web",
+        "metadata",
+        "review"
+      ],
+      "title": "Source Format",
+      "type": "string"
+    },
+    "spdx_license": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "OSI-list verified SPDX id; the canonical license column for Apache-2.0-release filtering. Mirrors ``license`` for v0.1 writers; new writers populate this directly.",
+      "title": "Spdx License"
+    },
+    "spdx_license_source": {
+      "default": "unknown",
+      "description": "Where the SPDX id was read from.",
+      "enum": [
+        "github_api",
+        "html_meta",
+        "dataset_metadata",
+        "manual_override",
+        "unknown"
+      ],
+      "title": "Spdx License Source",
+      "type": "string"
     },
     "text": {
       "title": "Text",

@@ -6,13 +6,17 @@
  * dev (kind/k3d) and prod (DHBWCloud k3s) clusters without rebuilds.
  *
  * Defaults match the Helm chart's Service names; see
- * `charts/stream2pretrain/templates/processor-curate.yaml` and
- * `ingest-submit-api.yaml` for the canonical names.
+ * `charts/stream2pretrain/templates/` for the canonical names.
+ *
+ * Note (v0.2.0): the v0.1 manual URL submit endpoint is gone. The
+ * `sourcesApi` key keeps the cockpit's `/api/sources` route pointing at
+ * an in-cluster SourceFeed CRUD upstream (currently the mixture
+ * controller's REST surface); override via the `SOURCES_API_URL` env.
  */
 
 export const UPSTREAM = {
-  /** FastAPI submit-api: SourceFeed CRUD, manual document submit. */
-  submitApi: process.env.SUBMIT_API_URL ?? 'http://stream2pretrain-submit-api.stream2pretrain.svc:80',
+  /** SourceFeed CRUD upstream (mixture-controller REST surface). */
+  sourcesApi: process.env.SOURCES_API_URL ?? 'http://stream2pretrain-mixture-controller.stream2pretrain.svc:8080',
   /** Decon-Gate REST: per-snapshot attestation lookup, decon stats. */
   deconGate: process.env.DECON_GATE_URL ?? 'http://decon-gate.stream2pretrain.svc:8081',
   /** Mixture controller REST: shadow-mode A/B comparison. */

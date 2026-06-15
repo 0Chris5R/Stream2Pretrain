@@ -11,7 +11,7 @@ authors = [{ name = "Stream2Pretrain Contributors" }]
 # extras live in the workspace member's own pyproject.toml when needed.
 #
 # Note on Kafka client choice:
-#   - ingest/* uses aiokafka (async producer for FastAPI + asyncio pollers).
+#   - ingest/* uses aiokafka (async producer for asyncio pollers and fetchers).
 #   - processor uses confluent-kafka (Bytewax's bytewax-kafka connector wraps it).
 # Both are listed here so the schemas package and shared utilities can be exercised
 # from either side without re-resolving the lock.
@@ -50,7 +50,9 @@ packages = ["schemas"]
 members = [
     "ingest/rss_poller",
     "ingest/sitemap_poller",
-    "ingest/submit_api",
+    "ingest/arxiv_html_fetcher",
+    "ingest/github_release_tarball_fetcher",
+    "ingest/openreview_poller",
     "processor",
     "tests",
 ]

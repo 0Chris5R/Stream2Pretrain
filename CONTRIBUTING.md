@@ -50,12 +50,6 @@ uv run pytest
 
 Integration tests skip cleanly when Docker or the dev stack is unavailable.
 
-Load tests use [k6](https://k6.io):
-
-```bash
-k6 run -e SUBMIT_URL=http://localhost:8000/submit tests/load/k6_submit.js
-```
-
 ## Branches and PRs
 
 - Branch from `main`. Use a short topical prefix: `feat/`, `fix/`, `chore/`,

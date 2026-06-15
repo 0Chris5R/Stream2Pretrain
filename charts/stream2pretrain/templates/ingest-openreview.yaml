@@ -1,0 +1,155 @@
+{{- if .Values.openreviewPoller.enabled }}
+{{- $component := "ingest-openreview-live" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $statePvc := default (printf "%s-%s-state" (include "stream2pretrain.fullname" .) $component) .Values.openreviewPoller.live.state.existingClaim }}
+---
+# Cursor PVC: live.py persists ``seen_note_ids`` to FeedStateStore at
+# /var/lib/s2p-state/openreview_poller. An emptyDir would defeat
+# idempotency (each CronJob Pod would start with an empty seen-set and
+# re-emit every previously-seen submission). We therefore back the cursor
+# with a small ReadWriteOnce PVC. Concurrency is gated by
+# concurrencyPolicy: Forbid below, so RWO is sufficient.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $statePvc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.openreviewPoller.live.state.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.openreviewPoller.live.state.size | quote }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  schedule: {{ .Values.openreviewPoller.live.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ .Values.openreviewPoller.live.activeDeadlineSeconds | int }}
+      template:
+        metadata:
+          labels:
+            {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 12 }}
+            stream2pretrain.io/egress-class: openreview
+        spec:
+          serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- include "stream2pretrain.imagePullSecrets" . | nindent 10 }}
+          {{- include "stream2pretrain.podSecurityContext" . | nindent 10 }}
+          {{- include "stream2pretrain.scheduling" . | nindent 10 }}
+          containers:
+            - name: openreview-live
+              image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.openreview.image) | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
+              command: ["s2p-openreview-live"]
+              env:
+                {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
+                - name: S2P_COMPONENT
+                  value: {{ $component | quote }}
+                - name: S2P_OPENREVIEW_VENUES
+                  value: {{ join "," .Values.openreviewPoller.venues | quote }}
+                {{- if .Values.openreviewPoller.tokenSecret }}
+                - name: OPENREVIEW_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.openreviewPoller.tokenSecret | quote }}
+                      key: {{ .Values.openreviewPoller.tokenSecretKey | quote }}
+                      optional: true
+                {{- end }}
+              volumeMounts:
+                - name: state
+                  mountPath: /var/lib/s2p-state
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.ingest.openreview.resources | nindent 16 }}
+          volumes:
+            - name: state
+              persistentVolumeClaim:
+                claimName: {{ $statePvc }}
+            - name: tmp
+              emptyDir: {}
+{{- if .Values.openreviewPoller.runBackfill }}
+---
+{{- $bComponent := "ingest-openreview-backfill" }}
+{{- $bName := printf "%s-%s" (include "stream2pretrain.fullname" .) $bComponent }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $bName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $bComponent) | nindent 4 }}
+  annotations:
+    # One-shot Job: re-running needs an explicit `helm upgrade --set
+    # openreviewPoller.runBackfill=false` first to drop the previous Job and a
+    # second `--set openreviewPoller.runBackfill=true` to re-create it.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: {{ .Values.openreviewPoller.backfill.activeDeadlineSeconds | int }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $bComponent) | nindent 8 }}
+        stream2pretrain.io/egress-class: huggingface
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      restartPolicy: Never
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      containers:
+        - name: openreview-backfill
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.openreview.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command: ["s2p-openreview-backfill"]
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $bComponent | quote }}
+            {{- if .Values.openreviewPoller.backfill.datasetId }}
+            - name: S2P_REVIEWARENA_DATASET
+              value: {{ .Values.openreviewPoller.backfill.datasetId | quote }}
+            {{- end }}
+            {{- if .Values.openreviewPoller.backfill.maxRows }}
+            - name: S2P_BACKFILL_MAX_ROWS
+              value: {{ .Values.openreviewPoller.backfill.maxRows | quote }}
+            {{- end }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sources.huggingface.dailyPapers.tokenSecret | quote }}
+                  key: {{ .Values.sources.huggingface.dailyPapers.tokenSecretKey | quote }}
+                  optional: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.ingest.openreview.backfillResources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
+{{- end }}
