@@ -1,4 +1,4 @@
-# CLAUDE.md — Working notes for the AI pair
+# CLAUDE.md - Working notes for the AI pair
 
 See README.md for the high-level project description and RESEARCH.md for the full plan. This file holds decisions and context not derivable from those.
 
@@ -11,7 +11,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 
 ## Decision log
 
-### 2026-06-15 — Project framing locked
+### 2026-06-15 - Project framing locked
 - Use case: streaming-first LLM pretraining data curator on Kubernetes.
 - Architecture: Kappa (streaming-only), per the lecture default.
 - Three locked novelty differentiators (survived adversarial verification):
@@ -19,7 +19,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
   2. Per-document validity intervals + Iceberg `as_of(timestamp)` query view.
   3. Shadow-mode A/B mixture comparison via two `MixtureRecipe` CRDs.
 
-### 2026-06-15 — Tech stack frozen
+### 2026-06-15 - Tech stack frozen
 - Streaming bus: **Redpanda** (single-binary Kafka API; begründete Abweichung).
 - Stream engine: **Bytewax** (Python, Rust core; lighter than Flink for 2 worker nodes).
 - Object store: **MinIO** (lecture default).
@@ -29,31 +29,35 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Quality classifier: **FineWeb-Edu** distilled to ONNX INT8 for CPU.
 - UI: **Next.js 14 App Router + shadcn/ui + TanStack Query**.
 - Lakehouse query: **DuckDB + iceberg extension**.
-- Submit API: **FastAPI**.
+- Submit API: **FastAPI** (in v0.1.0 only; removed in v0.2.0 - see decision log).
 - Autoscaling: **KEDA** Kafka-lag trigger.
 - Observability: lecture stack (kube-prometheus-stack + Loki + Alloy + Tempo for traces).
 - Ingress + TLS: lecture stack (Traefik + cert-manager).
 - Policy: **OPA Gatekeeper** for SourceFeed CRD admission.
 
-### 2026-06-15 — Naming locked
+### 2026-06-15 - Naming locked
 - Final name: **Stream2Pretrain**.
 - Verified free on PyPI, GitHub user/repo, Hugging Face, npm, crates.io (2026-06-15).
 - Backup names if conflict ever surfaces: `Corpustide`, `Verbastream`, `Distilstream`, `Kairoscorpus` (all probed free same day).
 - Earlier note in this log incorrectly said Stream2Pretrain was taken on PyPI - that was a misread; corrected.
 
-### 2026-06-15 — Scope tightened to AI research
+### 2026-06-15 - Scope tightened to AI research
 - Domain focus: streaming curation for fresh AI-research pretraining data.
 - Phase-1 sources: arXiv OAI-PMH + 4 arXiv RSS feeds + GitHub Events (AI-filtered) + GitHub Releases Atom (~30 curated AI repos) + HF Hub models + HF Daily Papers + AI-lab blog RSS bundle. Target 5-20k docs/day.
 - Phase-2 expansion: remaining arXiv categories, HF Datasets/Spaces, OpenReview, Semantic Scholar, GitHub READMEs, long-tail blogs, Alignment Forum.
 - Full source catalog with rate limits in `SOURCES.md`.
 - Out of scope (with reasons): GitHub Trending, YouTube transcripts, Twitter/X, Reddit, full arXiv PDFs, paid proceedings.
 
-## Open questions to resolve before Week 1
+## Open questions to resolve before deploying
 
-- DHBWCloud OpenStack quota: how many vCPU / RAM / disk per VM? Sets whether 1+2 worker layout actually works for Redpanda + Bytewax + MinIO + monitoring stack.
-- Wildcard TLS DNS zone available to the team (rfc2136 zone + tsig credentials per Exercise Track 1).
-- Group size: assignment says "nach Vorgabe der Veranstaltung" - confirm and divide week-1..6 work accordingly.
-- Final project name (see above).
+These are the v0.2.0 deploy-blockers documented in the README "What you must
+provide" section. Tracked here for the AI pair.
+
+- DHBWCloud OpenStack quota: how many vCPU / RAM / disk per VM? Sets whether 1+2 worker layout actually works for Redpanda + Bytewax + MinIO + monitoring stack. The Terraform defaults assume `m1.large` and `ext-net` external network - verify and override in `terraform.tfvars`.
+- Wildcard TLS DNS zone available to the team (rfc2136 zone + tsig credentials per Exercise Track 1). Replace `stream2pretrain.example.org` placeholders.
+- The five Kubernetes Secrets enumerated in the README before `helm install`.
+- Container image builds for the 12 component images. Build commands per component are in `charts/stream2pretrain/README.md`.
+- First-run verification of seed-loader column names: peS2o v3 (`data/v3/` layout), RedPajama-arxiv config string, FineWeb-Edu (`date` vs `crawl_date`), Stack-Edu config + content column, REVIEWARENA HF dataset id resolution. The loaders log and skip cleanly on mismatch but should be pinned in `values.yaml` once observed.
 
 ## Open TODOs from v0.2.0 adversarial review
 
@@ -182,3 +186,24 @@ cadence on MinIO bronze, and DHBWCloud quotas.
 - **SPDX whitelist for code Apache-2.0 release**: MIT, BSD-2-Clause,
   BSD-3-Clause, Apache-2.0, MPL-2.0. License detection remains heuristic;
   this is not a legal-compliance product.
+
+### 2026-06-15 - Documentation refresh
+
+- README.md rewritten end-to-end. The earlier framing (lines 5-17 / 27-37 /
+  43-51 of the old README) still claimed "research and planning phase, no
+  application code". The current README reflects v0.2.0 actual state: full
+  ingest + processor + UI + chart + infra inventory, three locked novelty
+  paragraphs, repo layout matching what is on disk, dev + k3s quickstarts,
+  the demo story updated to drop the manual /submit step (replaced by a
+  known-MMLU SourceFeed) and to note that the seed loader pre-populates
+  day-zero data, an explicit "What you must provide" section consolidating
+  the v0.1 + v0.2 deploy-blockers, the Redpanda + Bytewax begründete
+  Abweichung paragraph for bonus-point eligibility, and a documentation
+  index linking every doc.
+- CLAUDE.md (this file) lightly trimmed: stale "Week 1" framing removed
+  from open-questions section, FastAPI submit-API stack note flagged as
+  v0.1-only, this entry added.
+- Other docs (RESEARCH.md, SOURCES.md, CHANGELOG.md, docs/* and per-
+  component READMEs) deliberately not refreshed in this pass - they were
+  written by the v0.1 / v0.2 implementation workflows and are still
+  internally consistent. Touch them only when content actually changes.
