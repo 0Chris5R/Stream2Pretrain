@@ -28,13 +28,13 @@ if TYPE_CHECKING:
 _INITIALIZED = False
 
 
-def init_tracer(service_name: str, cfg: "IngestConfig") -> trace.Tracer:
+def init_tracer(service_name: str, cfg: IngestConfig) -> trace.Tracer:
     """Initialize a global tracer provider once and return a tracer.
 
     ``service_name`` becomes the ``service.name`` resource attribute and is what
     Tempo / Grafana group spans by.
     """
-    global _INITIALIZED  # noqa: PLW0603 - module-level flag is the simplest pattern
+    global _INITIALIZED
     if _INITIALIZED:
         return trace.get_tracer(service_name)
 

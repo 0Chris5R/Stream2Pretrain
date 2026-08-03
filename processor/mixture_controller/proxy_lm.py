@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 PROXY_LM_REVISION: str = "proxy-bigram-0.1"
 

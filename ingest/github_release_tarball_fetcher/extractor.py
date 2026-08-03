@@ -127,7 +127,7 @@ def _count_sloc(data: bytes) -> int:
     """Count non-blank lines in ``data``; UTF-8 errors are tolerated."""
     try:
         text = data.decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001 - defensive; decode("replace") cannot raise
+    except Exception:
         return 0
     return sum(1 for line in text.splitlines() if line.strip())
 

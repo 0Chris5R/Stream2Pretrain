@@ -19,4 +19,4 @@ the PDF body lives in MinIO and the BronzeRecord is the durable pointer.
 
 from __future__ import annotations
 
-__all__ = ["live", "backfill"]
+__all__ = ["backfill", "live"]

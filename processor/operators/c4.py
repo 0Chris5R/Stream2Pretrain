@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-_VALID_SENTENCE_TERMINATORS: tuple[str, ...] = (".", "!", "?", '"', "”", "’", ")")
+_VALID_SENTENCE_TERMINATORS: tuple[str, ...] = (".", "!", "?", '"', "\u201d", "\u2019", ")")
 _LOREM_TOKENS: tuple[str, ...] = (
     "lorem ipsum",
     "dolor sit amet",

@@ -6,8 +6,8 @@ release, fetches the source tarball from
 ``https://api.github.com/repos/{owner}/{repo}/tarball/{tag}`` into MinIO.
 
 The fetcher then stream-extracts the ``tar.gz`` (no full archive in memory),
-emits one :class:`schemas.code.CodeFileRecord` per allow-listed source file,
-and writes the file bytes to MinIO under
+emits one :class:`schemas.bronze.BronzeRecord` with ``source_format="code"``
+per allow-listed source file, and writes the file bytes to MinIO under
 ``s3://bronze/code/repo=<owner>__<repo>/ref=<tag>/<path>``.
 
 Budget: stays under the GitHub REST 5000 req/h ceiling because exactly one

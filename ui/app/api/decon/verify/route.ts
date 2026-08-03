@@ -26,13 +26,13 @@ import { z } from 'zod';
 
 import { DeconAttestationSchema } from '@/lib/schemas';
 import { canonicalJSONStringify } from '@/lib/canonical-json';
+import { UPSTREAM } from '@/lib/upstream';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const RequestSchema = z.object({ snapshot_id: z.number().int().nonnegative() });
 
-const DECON_GATE_URL = process.env.DECON_GATE_URL ?? 'http://decon-gate.stream2pretrain.svc:8081';
 const COSIGN_BIN = process.env.COSIGN_BIN ?? 'cosign';
 const USE_COSIGN = process.env.S2P_USE_COSIGN === '1';
 
@@ -77,7 +77,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   let attestationResp: Response;
   try {
-    attestationResp = await fetch(`${DECON_GATE_URL}/attestations/${snapshot_id}`, {
+    attestationResp = await fetch(`${UPSTREAM.deconGate}/attestations/${snapshot_id}`, {
       cache: 'no-store',
     });
   } catch {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -36,7 +36,7 @@ def cfg(tmp_path: Any) -> IngestConfig:
 @pytest.fixture
 def fixed_now() -> datetime:
     """A deterministic UTC instant."""
-    return datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    return datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
 
 
 class FakeProducer:
@@ -47,7 +47,7 @@ class FakeProducer:
         self.started = False
         self.stopped = False
 
-    async def __aenter__(self) -> "FakeProducer":
+    async def __aenter__(self) -> FakeProducer:
         await self.start()
         return self
 
@@ -72,7 +72,7 @@ class FakeMinio:
         self.objects: dict[str, dict[str, Any]] = {}
         self.started = False
 
-    async def __aenter__(self) -> "FakeMinio":
+    async def __aenter__(self) -> FakeMinio:
         await self.start()
         return self
 

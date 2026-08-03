@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from ingest.common.config import IngestConfig
 from ingest.common.http_client import build_async_client
 from ingest.common.state import FeedStateStore
 from ingest.common.tests.conftest import FakeMinio, FakeProducer  # type: ignore[attr-defined]
@@ -42,9 +43,7 @@ def _feed() -> SourceFeedSpec:
     )
 
 
-def _cfg() -> "IngestConfig":  # type: ignore[name-defined]
-    from ingest.common.config import IngestConfig
-
+def _cfg() -> IngestConfig:
     return IngestConfig(
         env="dev",
         log_level="DEBUG",

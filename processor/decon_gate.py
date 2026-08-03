@@ -26,19 +26,20 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Iterator
 
+from processor.sign import AttestationSigner
 from schemas.decon import BenchmarkName, DeconAttestation
 from schemas.gold import GoldRecord
-from processor.sign import AttestationSigner
 
 DEFAULT_NGRAM: int = 13
 DEFAULT_BLOOM_BITS: int = 1 << 24  # 16 MiB
 DEFAULT_BLOOM_HASHES: int = 5
 DEFAULT_EMBED_THRESHOLD: float = 0.92
+BENCHMARKS: tuple[BenchmarkName, ...] = ("MMLU", "GSM8K", "HumanEval", "MATH", "GPQA")
 
 _WORD = re.compile(r"\w+", re.UNICODE)
 
@@ -63,7 +64,7 @@ def shingle_ngrams(text: str, n: int = DEFAULT_NGRAM) -> Iterator[str]:
 class _Bloom:
     """Tiny Bloom filter used by the per-benchmark n-gram index."""
 
-    __slots__ = ("_bits", "_hashes", "_data", "_count")
+    __slots__ = ("_bits", "_count", "_data", "_hashes")
 
     def __init__(self, bits: int = DEFAULT_BLOOM_BITS, hashes: int = DEFAULT_BLOOM_HASHES) -> None:
         self._bits = bits
@@ -76,7 +77,7 @@ class _Bloom:
             self._data[h >> 3] |= 1 << (h & 7)
         self._count += 1
 
-    def __contains__(self, item: bytes) -> bool:  # noqa: D401
+    def __contains__(self, item: bytes) -> bool:
         return all((self._data[h >> 3] & (1 << (h & 7))) for h in self._iter_hashes(item))
 
     def _iter_hashes(self, item: bytes) -> Iterable[int]:
@@ -100,7 +101,7 @@ class _ScanState:
     tokens_flagged: int = 0
     rejected_doc_hashes: list[str] = field(default_factory=list)
     per_benchmark_hits: dict[BenchmarkName, int] = field(
-        default_factory=lambda: {b: 0 for b in ("MMLU", "GSM8K", "HumanEval", "MATH", "GPQA")}
+        default_factory=lambda: {b: 0 for b in BENCHMARKS}
     )
 
 
@@ -119,18 +120,12 @@ class DeconGate:
         benchmark_corpus: dict[BenchmarkName, list[str]] | None = None,
         signer: AttestationSigner | None = None,
         ngram: int = DEFAULT_NGRAM,
-        embedding: "_EmbeddingSketch | None" = None,
+        embedding: _EmbeddingSketch | None = None,
     ) -> None:
         self._set_version = benchmark_set_version
         self._ngram = ngram
         self._signer = signer or AttestationSigner()
-        self._blooms: dict[BenchmarkName, _Bloom] = {
-            "MMLU": _Bloom(),
-            "GSM8K": _Bloom(),
-            "HumanEval": _Bloom(),
-            "MATH": _Bloom(),
-            "GPQA": _Bloom(),
-        }
+        self._blooms: dict[BenchmarkName, _Bloom] = {benchmark: _Bloom() for benchmark in BENCHMARKS}
         # Track every shingle width we have indexed so ``scan`` knows which
         # window sizes to try. The default n is always present; short
         # benchmark prompts add their own sub-13 token window.
@@ -240,7 +235,7 @@ class DeconGate:
         local accumulators so a single attestation reflects the full
         per-snapshot contamination signal.
         """
-        committed = committed_at or datetime.now(timezone.utc)
+        committed = committed_at or datetime.now(UTC)
         per_bench: dict[BenchmarkName, int] = dict(self._state.per_benchmark_hits)
         if extra_per_benchmark_hits:
             for k, v in extra_per_benchmark_hits.items():
@@ -362,7 +357,7 @@ class _EmbeddingSketch:
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    num = sum(x * y for x, y in zip(a, b))
+    num = sum(x * y for x, y in zip(a, b, strict=True))
     da = math.sqrt(sum(x * x for x in a))
     db = math.sqrt(sum(y * y for y in b))
     if da == 0 or db == 0:

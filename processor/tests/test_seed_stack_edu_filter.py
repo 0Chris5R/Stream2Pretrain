@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from processor.seed import stack_edu_filter as se
 from processor.seed.cursor import SeedCursor
@@ -33,7 +33,7 @@ def test_is_ml_relevant_neither_matches() -> None:
 
 def test_derive_valid_from_iso() -> None:
     row = {"commit_date": "2024-09-01T00:00:00Z"}
-    assert se.derive_valid_from(row) == datetime(2024, 9, 1, tzinfo=timezone.utc)
+    assert se.derive_valid_from(row) == datetime(2024, 9, 1, tzinfo=UTC)
 
 
 def test_derive_valid_from_falls_back_to_cutoff() -> None:

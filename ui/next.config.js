@@ -3,9 +3,7 @@ const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
   poweredByHeader: false,
-  experimental: {
-    typedRoutes: false,
-  },
+  typedRoutes: false,
   // DuckDB-WASM ships its workers as separate files; let them be served as static assets.
   webpack: (config) => {
     config.resolve.fallback = { ...config.resolve.fallback, fs: false };

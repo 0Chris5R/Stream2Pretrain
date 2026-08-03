@@ -9,6 +9,8 @@ terraform.tfstate
 terraform.tfstate.backup
 crash.log
 *.tfplan
+tfplan*
+generated-inventory.yml
 override.tf
 override.tf.json
 *_override.tf

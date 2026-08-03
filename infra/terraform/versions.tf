@@ -1,5 +1,6 @@
 # Terraform + provider pins for Stream2Pretrain on DHBWCloud OpenStack.
-# OpenStack provider 3.x is the latest 3.0+ line and works with Yoga/Bobcat clouds.
+# This mirrors the working demo setup: OpenStack creates the VMs and the local
+# provider writes the generated Ansible inventory.
 
 terraform {
   required_version = ">= 1.7.0"
@@ -9,13 +10,9 @@ terraform {
       source  = "terraform-provider-openstack/openstack"
       version = "~> 3.0"
     }
-    cloudinit = {
-      source  = "hashicorp/cloudinit"
-      version = "~> 2.3"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
     }
   }
 }

@@ -15,7 +15,7 @@ Anonymous Atom requests are not subject to the GitHub REST 60 req/h floor
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -108,7 +108,7 @@ async def poll_repo(
         if doc_id in seen:
             continue
         seen.add(doc_id)
-        fetched_at = datetime.now(tz=timezone.utc)
+        fetched_at = datetime.now(tz=UTC)
         payload = _entry_xml(entry)
         key = bronze_object_key(
             source_feed=SOURCE_FEED,
@@ -186,7 +186,7 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
                     state_store=store,
                     bucket=bucket,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception("releases.repo_error", repo=repo, err=str(exc))
     return total
 

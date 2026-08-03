@@ -7,8 +7,7 @@ constraintViolationsLimit: 20
 postInstall:
   labelNamespace:
     enabled: true
-    extraNamespaces:
-      - stream2pretrain
+    extraNamespaces: []
 emitAdmissionEvents: true
 emitAuditEvents: true
 metrics:

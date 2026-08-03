@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 
 
 def test_object_key_layout() -> None:
-    fetched = datetime(2026, 6, 15, 8, 30, tzinfo=timezone.utc)
+    fetched = datetime(2026, 6, 15, 8, 30, tzinfo=UTC)
     key = bronze_object_key(
         source_feed="rss-arxiv-cs-cl",
         doc_id="sha256:abc",
@@ -19,7 +19,7 @@ def test_object_key_layout() -> None:
 
 
 def test_s3_uri_includes_bucket() -> None:
-    fetched = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    fetched = datetime(2026, 1, 2, tzinfo=UTC)
     uri = bronze_s3_uri(
         bucket="bronze",
         source_feed="manual",
@@ -36,7 +36,7 @@ def test_naive_datetime_is_treated_as_utc() -> None:
 
 
 def test_source_feed_with_slash_is_safe() -> None:
-    fetched = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    fetched = datetime(2026, 1, 2, tzinfo=UTC)
     key = bronze_object_key(
         source_feed="orgs/feed", doc_id="sha256:y", fetched_at=fetched
     )

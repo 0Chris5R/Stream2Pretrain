@@ -1,9 +1,10 @@
 # stream2pretrain Helm chart
 
 The single Helm chart that deploys every Stream2Pretrain component on a
-Kubernetes cluster: ingest CronJobs/Deployments, the Bytewax curate StatefulSet
-with the decon-gate sidecar, the iceberg-writer Deployment, the Next.js UI,
-the kopf mixture-controller, the SourceFeed and MixtureRecipe CRDs, KEDA
+Kubernetes cluster: ingest CronJobs/Deployments, the Bytewax curate StatefulSet,
+the iceberg-writer Deployment, the DuckDB query API, the Decon-Gate attestation
+API, the Next.js UI, the kopf mixture-controller plus its SourceFeed REST API,
+the SourceFeed and MixtureRecipe CRDs, KEDA
 ScaledObjects, NetworkPolicies, ServiceMonitors, the Stream2Pretrain Grafana
 dashboard, and OPA Gatekeeper constraints.
 
@@ -25,6 +26,7 @@ to `.Chart.AppVersion`. Producing those images is a CI job. Expected refs:
 - `<registry>/stream2pretrain/processor-fetcher:<tag>`
 - `<registry>/stream2pretrain/processor-curate:<tag>`
 - `<registry>/stream2pretrain/processor-iceberg-writer:<tag>`
+- `<registry>/stream2pretrain/processor-duckdb-api:<tag>`
 - `<registry>/stream2pretrain/decon-gate:<tag>`
 - `<registry>/stream2pretrain/mixture-controller:<tag>`
 - `<registry>/stream2pretrain/ui:<tag>`
@@ -58,7 +60,8 @@ via `sealed-secrets` or External Secrets Operator before `helm install`:
 | `stream2pretrain-minio` (`.Values.minio.credentialsSecret`)      | `accessKey`, `secretKey`          | every component               |
 | `stream2pretrain-github` (`.Values.sources.github.events.tokenSecret`) | `token` (PAT, `read:public`)      | ingest-github-events / -releases |
 | `stream2pretrain-hf` (`.Values.sources.huggingface.models.tokenSecret`) | `token` (HF user token)           | ingest-hf                     |
-| `stream2pretrain-decon-signing` (`.Values.processor.deconGate.signingKeySecret`) | `ed25519.key` (raw 32-byte key) | decon-gate sidecar            |
+| `stream2pretrain-decon-signing` (`.Values.processor.deconGate.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), optional `ed25519.crt` | Decon-Gate signer |
+| `stream2pretrain-decon-benchmarks` (`.Values.processor.deconGate.benchmarkCorpus.configMap`) | `corpus.json` | Decon-Gate benchmark corpus |
 | `stream2pretrain-keda-redpanda` (`.Values.keda.triggerAuthSecret`) | `sasl`, `tls`, `username`, `password` | KEDA Kafka trigger            |
 
 ## CRDs

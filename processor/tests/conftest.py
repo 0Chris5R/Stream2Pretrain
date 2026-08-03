@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -32,6 +31,7 @@ def cfg(tmp_path: Path) -> ProcessorConfig:
         bronze_bucket="bronze",
         silver_bucket="silver",
         gold_bucket="gold",
+        decon_bucket="decon",
         polaris_uri="http://polaris:8181/api/catalog",
         polaris_warehouse="stream2pretrain",
         polaris_token=None,
@@ -53,7 +53,7 @@ def cfg(tmp_path: Path) -> ProcessorConfig:
 @pytest.fixture
 def fixed_now() -> datetime:
     """A deterministic UTC instant for fixtures."""
-    return datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    return datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
 
 
 def _doc_id(url: str) -> str:

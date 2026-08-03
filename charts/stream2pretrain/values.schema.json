@@ -76,12 +76,16 @@
     },
     "iceberg": {
       "type": "object",
-      "required": ["catalog", "namespace", "polarisUrl", "warehouse", "branches"],
+      "required": ["catalog", "namespace", "goldTable", "polarisUrl", "warehouse", "credentialSecret", "credentialKey", "scopeKey", "branches"],
       "properties": {
         "catalog": {"type": "string"},
         "namespace": {"type": "string"},
+        "goldTable": {"type": "string"},
         "polarisUrl": {"type": "string", "format": "uri"},
         "warehouse": {"type": "string"},
+        "credentialSecret": {"type": "string"},
+        "credentialKey": {"type": "string"},
+        "scopeKey": {"type": "string"},
         "branches": {
           "type": "object",
           "required": ["main", "shadowA", "shadowB"],
@@ -312,11 +316,11 @@
             "requestBurst": {"type": "integer", "minimum": 1},
             "keda": {
               "type": "object",
-              "required": ["minReplicas", "maxReplicas", "lagThreshold"],
+              "required": ["minReplicas", "maxReplicas", "threshold"],
               "properties": {
                 "minReplicas": {"type": "integer", "minimum": 0},
                 "maxReplicas": {"type": "integer", "minimum": 1},
-                "lagThreshold": {"type": "integer", "minimum": 1}
+                "threshold": {"type": "string", "minLength": 1}
               }
             },
             "resources": {"type": "object"}
@@ -340,10 +344,20 @@
         "live": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schedule", "activeDeadlineSeconds"],
+          "required": ["schedule", "activeDeadlineSeconds", "state"],
           "properties": {
             "schedule": {"type": "string", "minLength": 1},
-            "activeDeadlineSeconds": {"type": "integer", "minimum": 60, "maximum": 86400}
+            "activeDeadlineSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+            "state": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["storageClass", "size", "existingClaim"],
+              "properties": {
+                "storageClass": {"type": "string"},
+                "size": {"type": "string", "minLength": 1},
+                "existingClaim": {"type": "string"}
+              }
+            }
           }
         },
         "runBackfill": {"type": "boolean"},
@@ -414,6 +428,12 @@
         "enabled": {"type": "boolean"},
         "pollingInterval": {"type": "integer", "minimum": 1},
         "cooldownPeriod": {"type": "integer", "minimum": 1},
+        "prometheus": {
+          "type": "object",
+          "properties": {
+            "serverAddress": {"type": "string", "format": "uri"}
+          }
+        },
         "fetcher": {
           "type": "object",
           "properties": {

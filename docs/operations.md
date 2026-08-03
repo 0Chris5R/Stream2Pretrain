@@ -27,7 +27,7 @@ kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
 
 Expected pods (18-22 depending on optional extras): redpanda + console,
 minio + bootstrap, polaris, duckdb, ui, curator (1 replica that KEDA
-scales), 5-7 ingest pollers, decon-gate sidecar, plus the
+scales), 5-7 ingest pollers, decon-gate API, plus the
 kube-prometheus-stack + Loki + Alloy + Tempo + Traefik + cert-manager +
 Gatekeeper system pods.
 
@@ -117,17 +117,14 @@ openssl req -new -x509 -key new.key -out new.crt -days 365 \
     -subj "/CN=stream2pretrain-decon-gate/O=Stream2Pretrain"
 
 # 5.3 Update the Secret in-place.
-kubectl -n stream2pretrain create secret generic decon-gate-signing \
-    --from-file=tls.key=new.key \
-    --from-file=tls.crt=new.crt \
+kubectl -n stream2pretrain create secret generic stream2pretrain-decon-signing \
+    --from-file=ed25519.key=new.key \
+    --from-file=ed25519.crt=new.crt \
     --dry-run=client -o yaml | kubectl apply -f -
 
-# 5.4 Restart the Decon-Gate sidecar to pick up the new key.
-kubectl -n stream2pretrain rollout restart deploy/decon-gate
-
-# 5.5 Re-attest the latest snapshot so verifiers can adopt the new key.
-kubectl -n stream2pretrain exec -it deploy/decon-gate -- \
-    python -m processor.decon_gate reattest --latest
+# 5.4 Restart signing workloads to pick up the new key.
+kubectl -n stream2pretrain rollout restart statefulset/stream2pretrain-processor-curate
+kubectl -n stream2pretrain rollout restart deploy/stream2pretrain-processor-iceberg-writer
 ```
 
 After rotation, old attestations remain verifiable using their embedded

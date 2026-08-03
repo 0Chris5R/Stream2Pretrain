@@ -6,7 +6,7 @@ statefulset:
   podAntiAffinity:
     type: soft
 console:
-  enabled: true
+  enabled: false
   ingress:
     enabled: false
   service:

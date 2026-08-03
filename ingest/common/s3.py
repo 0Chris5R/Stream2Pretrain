@@ -10,7 +10,7 @@ producer never disagree on the path scheme.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def _safe_doc_id(doc_id: str) -> str:
@@ -29,8 +29,8 @@ def bronze_object_key(
 ) -> str:
     """Compute the object key (no bucket prefix) for a bronze artifact."""
     if fetched_at.tzinfo is None:
-        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-    fetched_utc = fetched_at.astimezone(timezone.utc)
+        fetched_at = fetched_at.replace(tzinfo=UTC)
+    fetched_utc = fetched_at.astimezone(UTC)
     safe_id = _safe_doc_id(doc_id)
     safe_feed = source_feed.replace("/", "_")
     return (

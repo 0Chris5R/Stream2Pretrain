@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -18,13 +18,13 @@ class _FakeS3:
         self.objects: dict[tuple[str, str], bytes] = {}
         self.put_calls: int = 0
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
         if (Bucket, Key) not in self.objects:
             raise KeyError(f"NoSuchKey: {Bucket}/{Key}")
         return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
 
     def put_object(
-        self, *, Bucket: str, Key: str, Body: bytes, ContentType: str = "application/json"
+        self, *, Bucket: str, Key: str, Body: bytes, ContentType: str = "application/json"  # noqa: N803
     ) -> dict[str, Any]:
         self.put_calls += 1
         self.objects[(Bucket, Key)] = Body
@@ -51,7 +51,7 @@ def test_seed_cursor_round_trip_json() -> None:
         repo_id="HuggingFaceTB/stack-edu",
         last_native_id="abcdef",
         rows_emitted=42,
-        updated_at=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC),
     )
     blob = cursor.to_json()
     parsed = SeedCursor.from_json(blob, repo_id="HuggingFaceTB/stack-edu")

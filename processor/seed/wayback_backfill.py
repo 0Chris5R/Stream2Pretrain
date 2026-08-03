@@ -21,9 +21,10 @@ only depends on httpx, which is already in the runtime dependency set.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Iterable, Iterator
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 import httpx
@@ -76,7 +77,7 @@ class Snapshot:
     def captured_at(self) -> datetime:
         """Parse :attr:`timestamp` to a timezone-aware UTC datetime."""
         return datetime.strptime(self.timestamp, "%Y%m%d%H%M%S").replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         )
 
     def playback_url(self) -> str:
@@ -151,10 +152,8 @@ class WaybackClient:
 
     def close(self) -> None:
         """Release the underlying httpx client."""
-        try:
+        with suppress(Exception):
             self.client.close()
-        except Exception:
-            pass
 
 
 def native_id_for(feed: WaybackFeed, snapshot: Snapshot) -> str:
@@ -214,7 +213,7 @@ def iter_documents(
     if client is None:
         client = WaybackClient()
         own_client = True
-    when = now or datetime.now(tz=timezone.utc)
+    when = now or datetime.now(tz=UTC)
     emitted = 0
     try:
         for feed in feeds:
@@ -238,16 +237,16 @@ def iter_documents(
 
 
 __all__ = [
+    "DEFAULT_FEEDS",
+    "PLAYBACK_TEMPLATE",
     "REPO_ID_PREFIX",
     "TIMEMAP_TEMPLATE",
-    "PLAYBACK_TEMPLATE",
-    "WaybackFeed",
     "Snapshot",
-    "DEFAULT_FEEDS",
     "WaybackClient",
-    "parse_timemap",
+    "WaybackFeed",
     "filter_recent",
-    "native_id_for",
-    "to_seed_document",
     "iter_documents",
+    "native_id_for",
+    "parse_timemap",
+    "to_seed_document",
 ]

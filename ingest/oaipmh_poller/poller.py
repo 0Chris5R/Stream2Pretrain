@@ -9,7 +9,7 @@ inline) and emit a BronzeRecord pointing at the OAI canonical URL.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ingest.common.config import IngestConfig, load_config
@@ -35,7 +35,7 @@ log = get_logger(__name__)
 
 
 def _today_iso() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
 
 async def poll_feed(
@@ -78,7 +78,7 @@ async def poll_feed(
                 continue
             url = record.arxiv_abs_url() or f"oai://{feed.endpoint}/{record.identifier}"
             doc_id = doc_id_for_url(url) if url.startswith("http") else f"sha256:{_sha256(url)}"
-            fetched_at = datetime.now(tz=timezone.utc)
+            fetched_at = datetime.now(tz=UTC)
             key = bronze_object_key(
                 source_feed=feed.name,
                 doc_id=doc_id,
@@ -151,7 +151,7 @@ async def _run(cfg: IngestConfig, feeds: list[SourceFeedSpec], **kw: Any) -> int
     for feed in feeds:
         try:
             total += await poll_feed(feed, cfg, state_store=state_store, **kw)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("oai.feed.error", feed=feed.name, err=str(exc))
     return total
 

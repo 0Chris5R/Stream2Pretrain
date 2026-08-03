@@ -14,9 +14,9 @@ export const dynamic = 'force-dynamic';
 
 export async function DELETE(
   _req: Request,
-  ctx: { params: { name: string } },
+  ctx: { params: Promise<{ name: string }> },
 ): Promise<NextResponse> {
-  const name = ctx.params.name;
+  const { name } = await ctx.params;
   if (!/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(name)) {
     return NextResponse.json({ detail: 'invalid source name' }, { status: 400 });
   }

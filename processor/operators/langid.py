@@ -20,16 +20,16 @@ from dataclasses import dataclass
 # detector via the processor extras.
 _STOPWORDS: dict[str, frozenset[str]] = {
     "en": frozenset(
-        "the and that have for not with you this but his they are from which one".split()
+        ["the", "and", "that", "have", "for", "not", "with", "you", "this", "but", "his", "they", "are", "from", "which", "one"]
     ),
     "de": frozenset(
-        "der die und das mit nicht ein eine ist auch sich auf zu von im sind".split()
+        ["der", "die", "und", "das", "mit", "nicht", "ein", "eine", "ist", "auch", "sich", "auf", "zu", "von", "im", "sind"]
     ),
     "fr": frozenset(
-        "le la les des une est pas que pour dans avec sur ne par plus mais ou".split()
+        ["le", "la", "les", "des", "une", "est", "pas", "que", "pour", "dans", "avec", "sur", "ne", "par", "plus", "mais", "ou"]
     ),
     "es": frozenset(
-        "que de no la el en los se las por con para una su al lo como mas".split()
+        ["que", "de", "no", "la", "el", "en", "los", "se", "las", "por", "con", "para", "una", "su", "al", "lo", "como", "mas"]
     ),
 }
 

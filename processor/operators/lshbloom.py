@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 from processor.operators.minhash import MinHashSignature
 
@@ -44,7 +45,7 @@ class NearDupResult:
 class _BitArray:
     """In-memory bit array used inside each band's Bloom filter."""
 
-    __slots__ = ("_data", "_bits")
+    __slots__ = ("_bits", "_data")
 
     def __init__(self, num_bits: int) -> None:
         self._bits = num_bits
@@ -64,7 +65,7 @@ class _BitArray:
         return bytes(self._data)
 
     @classmethod
-    def from_bytes(cls, payload: bytes, num_bits: int) -> "_BitArray":
+    def from_bytes(cls, payload: bytes, num_bits: int) -> _BitArray:
         ba = cls(num_bits)
         ba._data = bytearray(payload)
         return ba
@@ -260,7 +261,7 @@ class LSHBloomIndex:
         except Exception:
             pass
 
-    def __enter__(self) -> "LSHBloomIndex":
+    def __enter__(self) -> LSHBloomIndex:
         return self
 
     def __exit__(self, *exc: object) -> None:

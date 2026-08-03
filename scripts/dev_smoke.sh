@@ -89,12 +89,12 @@ EXPECTED_DOC_ID_PREFIX="sha256:"
 
 info "running arxiv_html_fetcher --once for arXiv:${PINNED_ARXIV_ID}"
 S2P_FEED_CONFIG="${REPO_ROOT}/ingest/feeds.dev.yaml" \
-S2P_REDPANDA_BROKERS="localhost:9092" \
-S2P_MINIO_ENDPOINT="http://localhost:9000" \
-S2P_MINIO_ACCESS_KEY="minioadmin" \
-S2P_MINIO_SECRET_KEY="minioadmin" \
+REDPANDA_BROKERS="localhost:9092" \
+MINIO_ENDPOINT="http://localhost:9000" \
+MINIO_ACCESS_KEY="minioadmin" \
+MINIO_SECRET_KEY="minioadmin" \
 S2P_RAW_TOPIC="raw.fetched" \
-S2P_LOG_LEVEL="info" \
+LOG_LEVEL="INFO" \
 S2P_ARXIV_IDS="${PINNED_ARXIV_ID}" \
   uv run python -m ingest.arxiv_html_fetcher.fetcher --once \
   >"${FETCH_LOG}" 2>&1 || {

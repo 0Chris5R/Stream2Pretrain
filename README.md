@@ -65,7 +65,7 @@ These survived adversarial verification across 14 candidate claims; they are the
                                   +-------------------+---------------------+
                                                       |
                                                       v
-                                       DuckDB serving (UI queries)
+                                       DuckDB API (UI lakehouse queries)
                                        Polaris REST catalog
 
 Cross-cutting: kube-prometheus-stack + Loki + Alloy + Tempo (trace_id end-to-end),
@@ -197,8 +197,15 @@ The repo is fully implemented in code; what is **not** committed for security an
   - `stream2pretrain-decon-signing` (`ed25519.key`)
   - `stream2pretrain-keda-redpanda` (`sasl`, `tls`, `username`, `password`)
 - **Grafana admin Secret** `grafana-admin` (`admin-user`, `admin-password`) and **MinIO tenant secret** in prod.
-- **Container image builds** for the 12 component images (`registry/stream2pretrain/<component>:0.2.0`). The Helm chart references images; building them is a CI job. Per-component Dockerfile build commands are in `charts/stream2pretrain/README.md`.
-- **Allowed admin/ingress CIDRs** - default is `0.0.0.0/0`; lock to lab VPN once known.
+- **Container image builds** for the 13 component images (`registry/stream2pretrain/<component>:0.2.0`). The Helm chart references images; building them is a CI job. Per-component Dockerfile build commands are in `charts/stream2pretrain/README.md`.
+- **Allowed admin/ingress CIDRs** - Terraform defaults to no public SSH/API or
+  Traefik access. Set `allowed_admin_cidrs` to the lab VPN or bastion CIDR and
+  set `ingress_cidrs` to the intended UI audience before applying.
+- **Target-cluster capacity measurements** - run `uv run python
+  scripts/capacity_probe.py` on the DHBWCloud k3s context and follow
+  [`docs/capacity-benchmark.md`](docs/capacity-benchmark.md) before locking
+  production Redpanda partitions, worker resources, MinIO throughput, or
+  seed-loader PVC size.
 
 ## Source data
 
@@ -220,7 +227,7 @@ The grader sees, in five minutes from screenshots alone:
 5. **Decon-Gate viewer** - click a snapshot, see the signed certificate (per-benchmark hit counts, rejected hashes, signature verification status).
 6. **`as_of(timestamp)` view** - date picker; the table shows the deterministic token mixture as it would have been at that timestamp (powered by the seed loader on day 1).
 7. **DuckDB query** - `SELECT lang, COUNT(*), SUM(tokens) FROM gold WHERE risk_tier=1 GROUP BY lang;`.
-8. **Tempo trace** - submit-and-trace via SourceFeed: a fresh URL flows through FastAPI -> Redpanda -> fetcher -> curator -> Iceberg, every span labelled with the `trace_id` materialised into the manifest.
+8. **Tempo trace** - a fresh SourceFeed item flows through poller -> Redpanda -> fetcher -> curator -> Iceberg, every span labelled with the `trace_id` materialised into the manifest.
 9. **KEDA scale-up** - load generator pumps 10k URLs; the curator pod count climbs from 1 to 6 in real time.
 10. **Failure recovery** - `kubectl delete pod` on a curator; Bytewax restores from RocksDB checkpoint and resumes without duplicates (Redpanda transactional consumer).
 
@@ -238,6 +245,7 @@ The lecture stack does not include a streaming bus or stream engine. This projec
 - [`docs/architecture.md`](docs/architecture.md) - component breakdown
 - [`docs/data-model.md`](docs/data-model.md) - Bronze/Silver/Gold field-by-field
 - [`docs/operations.md`](docs/operations.md) - deploy, scale, debug, recover
+- [`docs/capacity-benchmark.md`](docs/capacity-benchmark.md) - target-cluster capacity measurement procedure
 - [`docs/novelty.md`](docs/novelty.md) - the three differentiators with evidence
 - [`docs/threat-model.md`](docs/threat-model.md) - STRIDE for the curator
 - [`docs/research-fulltext-and-code.md`](docs/research-fulltext-and-code.md) - mid-2026 fulltext + code acquisition research

@@ -68,8 +68,12 @@ minio:
 iceberg:
   catalog: stream2pretrain
   namespace: gold
+  goldTable: curated
   polarisUrl: http://polaris.polaris.svc.cluster.local:8181/api/catalog
   warehouse: s3://s2p-gold/warehouse
+  credentialSecret: stream2pretrain-polaris
+  credentialKey: credential
+  scopeKey: scope
   branches:
     main: main
     shadowA: shadow-a
@@ -363,14 +367,11 @@ ingest:
     requestBurst: 4
     keda:
       minReplicas: 0
-      # Capped at 2 to dampen the self-amplification feedback loop on
-      # raw.fetched (worker consumes from the topic and produces back to
-      # it; see the KEDA TODO in CLAUDE.md and the comment in
-      # templates/ingest-github-tarball.yaml).
       maxReplicas: 2
-      # Threshold value is needs-measurement on the real cluster - see the
-      # honest-fallback note in templates/ingest-github-tarball.yaml.
-      lagThreshold: 50
+      # Prometheus-backed trigger avoids raw.fetched Kafka-lag self-amplification.
+      # Threshold is a count of observed release records currently being processed
+      # by tarball fetcher pods.
+      threshold: "1"
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 1Gi}
@@ -471,8 +472,18 @@ processor:
       limits: {cpu: 1, memory: 1Gi}
     flushIntervalSeconds: 60
     flushRecords: 5000
+  duckdbApi:
+    image: stream2pretrain/processor-duckdb-api
+    replicas: 1
+    apiPort: 8090
+    goldRelation: gold
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 1, memory: 1Gi}
   deconGate:
     image: stream2pretrain/decon-gate
+    replicas: 1
+    apiPort: 8081
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
@@ -485,6 +496,13 @@ processor:
     bloomHashes: 7
     signingKeySecret: stream2pretrain-decon-signing
     signingKeyKey: ed25519.key
+    signingCertKey: ed25519.crt
+    benchmarkSetVersion: v2026-06-01
+    benchmarkCorpus:
+      configMap: stream2pretrain-decon-benchmarks
+      secret: ""
+      fileName: corpus.json
+      mountPath: /etc/stream2pretrain/decon
 
 # -----------------------------------------------------------------------------
 # Mixture controller (kopf)
@@ -586,6 +604,8 @@ keda:
   enabled: true
   pollingInterval: 15
   cooldownPeriod: 60
+  prometheus:
+    serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
   fetcher:
     minReplicas: 1
     maxReplicas: 10

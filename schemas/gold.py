@@ -97,6 +97,12 @@ class GoldRecord(BaseModel):
 
     # Tracing.
     trace_id: TraceId
+    source_feed: str = Field(
+        default="unknown",
+        min_length=1,
+        max_length=128,
+        description="SourceFeed CRD name propagated from Bronze/Silver.",
+    )
 
     # v0.2.0 classifier columns. Mirrored forward from Silver so a single
     # ``SELECT * FROM gold`` carries the full provenance chain without joins.

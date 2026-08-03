@@ -32,8 +32,8 @@ import asyncio
 import json
 import os
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ingest.common.config import IngestConfig, load_config
@@ -96,15 +96,15 @@ def resolve_reviewarena_id(
         return override
     if search_fn is None:
         try:
-            from huggingface_hub import HfApi  # noqa: PLC0415
+            from huggingface_hub import HfApi
 
             search_fn = HfApi().list_datasets
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("reviewarena.search_unavailable", err=str(exc))
             return None
     try:
         candidates = list(search_fn(search=DEFAULT_REVIEWARENA_QUERY))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("reviewarena.search_failed", err=str(exc))
         return None
     best: tuple[int, str] | None = None
@@ -146,7 +146,7 @@ class _RowView:
     cdate: datetime | None
 
     @classmethod
-    def from_dict(cls, row: dict[str, Any]) -> "_RowView":
+    def from_dict(cls, row: dict[str, Any]) -> _RowView:
         note_id = _first_str(row, ["note_id", "id", "openreview_id", "paper_id"])
         forum_id = _first_str(row, ["forum", "forum_id", "thread_id"]) or note_id or ""
         venue = _first_str(row, ["venue", "venue_id", "conference"]) or "unknown"
@@ -205,16 +205,16 @@ def _first_datetime(row: dict[str, Any], keys: Iterable[str]) -> datetime | None
     for k in keys:
         v = row.get(k)
         if isinstance(v, datetime):
-            return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+            return v if v.tzinfo else v.replace(tzinfo=UTC)
         if isinstance(v, int):
             try:
-                return datetime.fromtimestamp(v / 1000.0, tz=timezone.utc)
+                return datetime.fromtimestamp(v / 1000.0, tz=UTC)
             except (OSError, OverflowError, ValueError):
                 continue
         if isinstance(v, str) and v:
             try:
                 parsed = datetime.fromisoformat(v.replace("Z", "+00:00"))
-                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
             except ValueError:
                 continue
     return None
@@ -282,7 +282,7 @@ async def _emit_pdf(
     if not view.pdf_bytes or not view.note_id:
         return False
     url = f"https://openreview.net/pdf?id={view.note_id}"
-    fetched_at = datetime.now(tz=timezone.utc)
+    fetched_at = datetime.now(tz=UTC)
     cdate = view.cdate or fetched_at
     key = _backfill_pdf_key(view)
     metadata = {
@@ -336,7 +336,7 @@ async def _emit_review(
     if not view.review_text or not view.note_id:
         return False
     url = f"https://openreview.net/forum?id={view.note_id}"
-    fetched_at = datetime.now(tz=timezone.utc)
+    fetched_at = datetime.now(tz=UTC)
     cdate = view.cdate or fetched_at
     payload = json.dumps(
         {
@@ -412,7 +412,7 @@ def stream_dataset(
     if streaming_loader is not None:
         yield from streaming_loader(dataset_id, split=split)
         return
-    from datasets import load_dataset  # noqa: PLC0415 - optional dep
+    from datasets import load_dataset
 
     ds = load_dataset(dataset_id, split=split, streaming=True)
     for row in ds:
@@ -461,13 +461,13 @@ async def run_backfill(
             try:
                 if await _emit_pdf(view=view, cfg=cfg, producer=producer, minio=minio):
                     stats.pdfs_emitted += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("reviewarena.pdf_emit_failed", err=str(exc))
                 stats.skipped += 1
             try:
                 if await _emit_review(view=view, cfg=cfg, producer=producer, minio=minio):
                     stats.reviews_emitted += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("reviewarena.review_emit_failed", err=str(exc))
                 stats.skipped += 1
             if max_rows is not None and stats.rows_seen >= max_rows:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from processor.seed import redpajama_arxiv as rpa
 from processor.seed.cursor import SeedCursor
@@ -11,13 +11,13 @@ from processor.seed.cursor import SeedCursor
 
 def test_parse_meta_timestamp_dict() -> None:
     dt = rpa.parse_meta_timestamp({"timestamp": "2024-01-04T10:00:00Z"})
-    assert dt == datetime(2024, 1, 4, 10, 0, 0, tzinfo=timezone.utc)
+    assert dt == datetime(2024, 1, 4, 10, 0, 0, tzinfo=UTC)
 
 
 def test_parse_meta_timestamp_string() -> None:
     payload = json.dumps({"timestamp": "2023-04-17T00:00:00+00:00"})
     dt = rpa.parse_meta_timestamp(payload)
-    assert dt == datetime(2023, 4, 17, tzinfo=timezone.utc)
+    assert dt == datetime(2023, 4, 17, tzinfo=UTC)
 
 
 def test_parse_meta_timestamp_invalid_returns_none() -> None:
@@ -40,7 +40,7 @@ def test_native_id_falls_back_to_text_hash() -> None:
 
 def test_derive_valid_from_uses_meta_timestamp() -> None:
     row = {"meta": {"timestamp": "2022-07-04T00:00:00Z"}}
-    assert rpa.derive_valid_from(row) == datetime(2022, 7, 4, tzinfo=timezone.utc)
+    assert rpa.derive_valid_from(row) == datetime(2022, 7, 4, tzinfo=UTC)
 
 
 def test_derive_valid_from_falls_back_to_release_cutoff() -> None:
@@ -64,7 +64,7 @@ def test_to_seed_document_arxiv_url() -> None:
     assert doc.source_format == "latex"
     assert doc.extraction_pipeline == "redpajama-arxiv-2023-04"
     assert doc.spdx_license == "Apache-2.0"
-    assert doc.valid_from == datetime(2023, 8, 10, tzinfo=timezone.utc)
+    assert doc.valid_from == datetime(2023, 8, 10, tzinfo=UTC)
 
 
 def test_to_seed_document_drops_empty_text() -> None:

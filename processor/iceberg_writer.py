@@ -30,12 +30,16 @@ from __future__ import annotations
 
 import os
 import threading
+import time
+from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from processor import common
 from processor.decon_gate import DeconGate
+from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
+from processor.probes import start_probe_server
 from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
 
@@ -45,10 +49,19 @@ if TYPE_CHECKING:
     from pyiceberg.table import Table
 
 
-GOLD_NAMESPACE: str = "stream2pretrain"
-GOLD_TABLE: str = "gold"
+DEFAULT_GOLD_NAMESPACE: str = "gold"
+DEFAULT_GOLD_TABLE: str = "curated"
 DECON_TABLE: str = "decon_attestations"
 DEFAULT_BATCH_SIZE: int = 256
+
+
+def gold_identifier() -> tuple[str, str]:
+    """Return the Iceberg identifier used for the curated Gold table."""
+    namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
+        "ICEBERG_NAMESPACE", DEFAULT_GOLD_NAMESPACE
+    )
+    table = os.environ.get("S2P_ICEBERG_GOLD_TABLE", DEFAULT_GOLD_TABLE)
+    return (namespace, table)
 
 
 @dataclass(slots=True)
@@ -100,12 +113,13 @@ class IcebergWriter:
     def __init__(
         self,
         *,
-        catalog: "Catalog",
+        catalog: Catalog,
         decon: DeconGate,
         scoring_version: str,
         classifier_revision: str,
         policy_revision: str,
-        attestation_writer: "AttestationSink | None" = None,
+        attestation_writer: AttestationSink | None = None,
+        metrics: ProcessorMetrics | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
     ) -> None:
         self._catalog = catalog
@@ -114,6 +128,7 @@ class IcebergWriter:
         self._classifier_revision = classifier_revision
         self._policy_revision = policy_revision
         self._attestation_writer = attestation_writer
+        self._metrics = metrics
         self._batch_size = batch_size
         self._buffer = _Buffer()
         self._lock = threading.Lock()
@@ -124,8 +139,9 @@ class IcebergWriter:
         cfg: common.ProcessorConfig,
         *,
         decon: DeconGate,
-        attestation_writer: "AttestationSink | None" = None,
-    ) -> "IcebergWriter":
+        attestation_writer: AttestationSink | None = None,
+        metrics: ProcessorMetrics | None = None,
+    ) -> IcebergWriter:
         """Build a writer from a :class:`ProcessorConfig`.
 
         Constructs the Polaris REST catalog client lazily so importing the
@@ -144,18 +160,27 @@ class IcebergWriter:
         }
         if cfg.polaris_token:
             props["token"] = cfg.polaris_token
+        credential = os.environ.get("POLARIS_CREDENTIAL")
+        if credential:
+            props["credential"] = credential
+            props["scope"] = os.environ.get("POLARIS_SCOPE", "PRINCIPAL_ROLE:ALL")
         catalog = load_catalog("polaris", **props)
+        sink = attestation_writer if attestation_writer is not None else build_attestation_sink(cfg)
         return cls(
             catalog=catalog,
             decon=decon,
             scoring_version=cfg.benchmark_set_version,
             classifier_revision="fineweb-edu-onnx-int8",
             policy_revision="git:dev",
-            attestation_writer=attestation_writer,
+            attestation_writer=sink,
+            metrics=metrics,
+            batch_size=int(os.environ.get("S2P_FLUSH_RECORDS", DEFAULT_BATCH_SIZE)),
         )
 
     def add(self, record: GoldRecord) -> WriterStats | None:
         """Buffer one record; auto-flush when ``batch_size`` is reached."""
+        if not _is_trainable_gold(record):
+            return None
         with self._lock:
             self._buffer.add(record)
             if len(self._buffer) >= self._batch_size:
@@ -181,7 +206,9 @@ class IcebergWriter:
         watermark = self._buffer.watermark
         table = self._ensure_table()
         arrow_table = self._to_arrow(rows)
+        started = time.perf_counter()
         snapshot_id = self._append(table, arrow_table, watermark)
+        elapsed = time.perf_counter() - started
         if snapshot_id is None:
             # Append failed: keep the buffer intact so the next call retries.
             raise RuntimeError(
@@ -191,7 +218,7 @@ class IcebergWriter:
         self._buffer.reset()
         attestation = self._decon.flush_attestation(
             snapshot_id=snapshot_id,
-            committed_at=datetime.now(timezone.utc),
+            committed_at=datetime.now(UTC),
             extra_per_benchmark_hits=_aggregate_per_benchmark_hits(rows),
             extra_rejected_doc_hashes=_aggregate_rejected_doc_hashes(rows),
             extra_tokens_scanned=_aggregate_tokens_scanned(rows),
@@ -201,6 +228,8 @@ class IcebergWriter:
         if self._attestation_writer is not None:
             attest_uri = self._attestation_writer.write(attestation)
         self._set_snapshot_props(table, snapshot_id, attestation, attest_uri)
+        if self._metrics is not None:
+            self._metrics.record_iceberg_flush(rows=len(rows), seconds=elapsed)
         return WriterStats(
             rows_committed=len(rows),
             snapshot_id=snapshot_id,
@@ -208,7 +237,7 @@ class IcebergWriter:
             watermark=watermark,
         )
 
-    def _ensure_table(self) -> "Table":
+    def _ensure_table(self) -> Table:
         """Create the gold table if missing; return the loaded handle."""
         from pyiceberg.partitioning import PartitionField, PartitionSpec
         from pyiceberg.schema import Schema
@@ -223,16 +252,14 @@ class IcebergWriter:
             TimestampType,
         )
 
-        identifier = (GOLD_NAMESPACE, GOLD_TABLE)
+        identifier = gold_identifier()
         try:
             return self._catalog.load_table(identifier)
         except Exception:
             pass
         # Bring up an empty namespace if it does not yet exist.
-        try:
-            self._catalog.create_namespace((GOLD_NAMESPACE,))
-        except Exception:
-            pass
+        with suppress(Exception):
+            self._catalog.create_namespace((identifier[0],))
         schema = Schema(
             NestedField(1, "doc_id", StringType(), required=True),
             NestedField(2, "text", StringType(), required=True),
@@ -268,6 +295,11 @@ class IcebergWriter:
             NestedField(20, "policy_revision", StringType(), required=True),
             NestedField(21, "snapshot_id", LongType(), required=False),
             NestedField(22, "trace_id", StringType(), required=True),
+            NestedField(23, "source_feed", StringType(), required=True),
+            NestedField(24, "source_format", StringType(), required=True),
+            NestedField(25, "extraction_pipeline", StringType(), required=True),
+            NestedField(26, "spdx_license", StringType(), required=False),
+            NestedField(27, "spdx_license_source", StringType(), required=True),
         )
         partition_spec = PartitionSpec(
             PartitionField(source_id=3, field_id=1000, transform=IdentityTransform(), name="lang"),
@@ -288,7 +320,7 @@ class IcebergWriter:
             },
         )
 
-    def _to_arrow(self, rows: list[GoldRecord]) -> "pa.Table":
+    def _to_arrow(self, rows: list[GoldRecord]) -> pa.Table:
         import pyarrow as pa
 
         cols: dict[str, list[Any]] = {
@@ -311,11 +343,16 @@ class IcebergWriter:
             "policy_revision": [r.policy_revision for r in rows],
             "snapshot_id": [r.snapshot_id for r in rows],
             "trace_id": [r.trace_id for r in rows],
+            "source_feed": [r.source_feed for r in rows],
+            "source_format": [r.source_format for r in rows],
+            "extraction_pipeline": [r.extraction_pipeline for r in rows],
+            "spdx_license": [r.spdx_license for r in rows],
+            "spdx_license_source": [r.spdx_license_source for r in rows],
         }
         return pa.table(cols)
 
     def _append(
-        self, table: "Table", arrow_table: "pa.Table", watermark: datetime | None
+        self, table: Table, arrow_table: pa.Table, watermark: datetime | None
     ) -> int | None:
         """Atomic micro-batch append; returns new snapshot id.
 
@@ -330,7 +367,7 @@ class IcebergWriter:
 
     def _set_snapshot_props(
         self,
-        table: "Table",
+        table: Table,
         snapshot_id: int,
         attestation: DeconAttestation,
         attest_uri: str | None,
@@ -396,11 +433,32 @@ class IcebergWriter:
             pass
 
 
+def build_attestation_sink(cfg: common.ProcessorConfig) -> AttestationSink:
+    """Create the production attestation sink from processor config."""
+    import boto3
+    from confluent_kafka import Producer
+
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=cfg.minio_endpoint,
+        aws_access_key_id=cfg.minio_access_key,
+        aws_secret_access_key=cfg.minio_secret_key,
+        region_name="us-east-1",
+    )
+    producer = Producer({"bootstrap.servers": cfg.redpanda_brokers})
+    return AttestationSink(
+        s3_client=s3_client,
+        bucket=cfg.decon_bucket,
+        kafka_producer=producer,
+        topic=cfg.decon_attest_topic,
+    )
+
+
 class AttestationSink:
     """Writes a signed :class:`DeconAttestation` to MinIO + Kafka.
 
     The S3 path is
-    ``s3://<gold>/decon/<benchmark_set_version>/<snapshot_id>.json``.
+    ``s3://<decon>/decon/<benchmark_set_version>/<snapshot_id>.json``.
     Kafka publication uses the dev/prod ``decon.attest`` topic constants.
     """
 
@@ -473,15 +531,25 @@ def _aggregate_tokens_flagged(rows: list[GoldRecord]) -> int:
     return sum(int(r.tokens or 0) for r in rows if r.contaminated_with)
 
 
+def _is_trainable_gold(record: GoldRecord) -> bool:
+    """Defensive writer-side guard for the clean-only Gold contract."""
+    return (
+        record.risk_tier == 1
+        and not record.reject_reasons
+        and not record.pii_flags
+        and not record.contaminated_with
+    )
+
+
 def build_dataflow(cfg: common.ProcessorConfig) -> object:
     """Construct the Bytewax dataflow that pumps ``docs.curated`` to Iceberg."""
+    from bytewax import operators as op
     from bytewax.connectors.kafka import KafkaSource
     from bytewax.dataflow import Dataflow
-    from bytewax import operators as op
 
     tracer = common.init_tracer("s2p-iceberg-writer", cfg)
     decon = DeconGate(benchmark_set_version=cfg.benchmark_set_version)
-    writer = IcebergWriter.from_config(cfg, decon=decon)
+    writer = IcebergWriter.from_config(cfg, decon=decon, metrics=PROCESSOR_METRICS)
     flow = Dataflow("s2p-iceberg-writer")
     # ``beginning`` keeps the writer at-least-once across restarts (the
     # consumer group offset advances from there). See processor/curate.py.
@@ -501,7 +569,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 return
             try:
                 gold = common.gold_loads(payload)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 span.record_exception(exc)
                 return
             stats = writer.add(gold)
@@ -522,6 +590,7 @@ def main() -> None:
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.iceberg")
     log.info("starting iceberg writer", topic=cfg.curated_topic)
+    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
     from bytewax.run import cli_main
 

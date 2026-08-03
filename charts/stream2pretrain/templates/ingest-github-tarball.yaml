@@ -1,7 +1,6 @@
 {{- if and .Values.sources.github.enabled .Values.ingest.githubTarballFetcher.enabled }}
 {{- $component := "ingest-github-tarball-fetcher" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
-{{- $kedaAuthEnabled := .Values.keda.auth.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -103,29 +102,10 @@ spec:
 {{- if .Values.keda.enabled }}
 ---
 {{/*
-KEDA Kafka-lag scaler keyed on raw.fetched.
-
-Honest fallback: KEDA's Kafka trigger does not support filtering by message
-header (the worker filters out non-github-releases events in code, but they
-still count toward the consumer group's committed offsets). The lag threshold
-below is therefore set against the full raw.fetched topic; the scaler treats
-"raw.fetched lag for the s2p-github-tarball-fetcher consumer group" as the
-backpressure signal. See the github_release_tarball_fetcher README for the
-documented honest fallback discussion. The lagThreshold value is configurable
-in values.yaml and should be re-tuned after measurement on the live cluster
-(needs-measurement).
-
-KNOWN-LIMITATION (v0.2.0): the worker also produces CodeFileRecords back to
-``raw.fetched``. The producer's records also count toward this consumer
-group's lag (Kafka measures log-end-offset vs committed offset). For a
-release that emits hundreds of CodeFileRecords this creates a positive
-feedback loop: lag spike -> KEDA scales up -> more producers -> bigger lag
-spike. The locked four-topic contract (schemas/topics.py CODE_SOURCE_FORMAT
-note) blocks the obvious fix (separate code topic). Tracked as TODO in
-CLAUDE.md: switch to a Prometheus-backed KEDA trigger keyed on
-``s2p_github_releases_unprocessed`` once the github-releases poller exports
-that metric. Until then, set ``ingest.githubTarballFetcher.keda.maxReplicas``
-conservatively to dampen the loop (1 in dev, small in prod).
+KEDA Prometheus scaler keyed on the tarball fetcher's filtered release metric.
+This intentionally does not use raw.fetched Kafka lag: the worker consumes
+github-releases records from raw.fetched and emits code BronzeRecords back to
+the same topic, so topic-wide Kafka lag creates a positive feedback loop.
 */}}
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -144,20 +124,11 @@ spec:
   minReplicaCount: {{ .Values.ingest.githubTarballFetcher.keda.minReplicas }}
   maxReplicaCount: {{ .Values.ingest.githubTarballFetcher.keda.maxReplicas }}
   triggers:
-    - type: kafka
+    - type: prometheus
       metadata:
-        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
-        consumerGroup: {{ .Values.ingest.githubTarballFetcher.consumerGroup | quote }}
-        topic: {{ .Values.redpanda.topics.rawFetched | quote }}
-        lagThreshold: {{ .Values.ingest.githubTarballFetcher.keda.lagThreshold | quote }}
-        offsetResetPolicy: latest
-        {{- if not $kedaAuthEnabled }}
-        sasl: ""
-        tls: "disable"
-        {{- end }}
-      {{- if $kedaAuthEnabled }}
-      authenticationRef:
-        name: {{ include "stream2pretrain.fullname" . }}-redpanda
-      {{- end }}
+        serverAddress: {{ .Values.keda.prometheus.serverAddress | quote }}
+        metricName: s2p_github_releases_unprocessed
+        query: {{ printf "sum(s2p_github_releases_unprocessed{namespace=\"%s\"})" .Release.Namespace | quote }}
+        threshold: {{ .Values.ingest.githubTarballFetcher.keda.threshold | quote }}
 {{- end }}
 {{- end }}

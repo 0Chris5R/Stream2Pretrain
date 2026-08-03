@@ -31,8 +31,8 @@ import asyncio
 import json
 import os
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ingest.common.config import IngestConfig, load_config
@@ -121,7 +121,7 @@ class _NoteView:
     venue_id: str
 
     @classmethod
-    def from_obj(cls, obj: Any, *, venue_id: str) -> "_NoteView":
+    def from_obj(cls, obj: Any, *, venue_id: str) -> _NoteView:
         if hasattr(obj, "to_json"):
             data = obj.to_json()
         elif isinstance(obj, dict):
@@ -187,7 +187,7 @@ def _trace_id() -> str:
 def _ms_to_dt(ms: int | None) -> datetime | None:
     if ms is None:
         return None
-    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    return datetime.fromtimestamp(ms / 1000.0, tz=UTC)
 
 
 def _venue_pdf_key(venue: VenueSpec, note_id: str) -> str:
@@ -232,7 +232,7 @@ def build_openreview_client(
     venues that have already opened reviewing. ``OPENREVIEW_TOKEN`` env var is
     honored.
     """
-    import openreview  # noqa: PLC0415 - optional dependency at import time
+    import openreview
 
     return openreview.api.OpenReviewClient(
         baseurl=baseurl,
@@ -298,14 +298,14 @@ async def emit_submission(
     await bucket.acquire()
     try:
         status, body = await fetch_pdf_bytes(http, pdf_url)
-    except Exception as exc:  # noqa: BLE001 - network errors logged
+    except Exception as exc:
         log.warning("openreview.pdf_fetch_failed", note=note.id, err=str(exc))
         return False
     if status != 200 or not body:
         log.warning("openreview.pdf_bad_status", note=note.id, status=status)
         return False
 
-    fetched_at = datetime.now(tz=timezone.utc)
+    fetched_at = datetime.now(tz=UTC)
     cdate = _ms_to_dt(note.cdate_ms) or fetched_at
     key = _venue_pdf_key(venue, note.id)
     metadata = {
@@ -361,7 +361,7 @@ async def emit_review_thread(
 ) -> int:
     """Persist every reply note (review/decision/rebuttal) under a forum."""
     emitted = 0
-    fetched_at = datetime.now(tz=timezone.utc)
+    fetched_at = datetime.now(tz=UTC)
     for note in notes:
         if note.id == forum_id:
             # The forum-root note is the submission itself; already handled.
@@ -432,7 +432,7 @@ def _iter_notes(items: Any, *, venue_id: str) -> Iterator[_NoteView]:
     for obj in items or ():
         try:
             yield _NoteView.from_obj(obj, venue_id=venue_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("openreview.note_parse_failed", err=str(exc))
             continue
 
@@ -497,7 +497,7 @@ async def poll_venue(
             forum_replies = list(
                 _iter_notes(raw_replies, venue_id=venue.venue_id)
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("openreview.forum_fetch_failed", note=note.id, err=str(exc))
             forum_replies = []
         reviews_emitted += await emit_review_thread(
@@ -562,7 +562,7 @@ async def run_pass(
                     state_store=state_store,
                     bucket=bucket,
                 )
-            except Exception as exc:  # noqa: BLE001 - log + continue
+            except Exception as exc:
                 log.warning("openreview.venue_failed", venue=venue.venue_id, err=str(exc))
                 continue
             stats.venues_polled += 1

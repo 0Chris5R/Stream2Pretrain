@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from processor.operators.validity import (
     ValidityEnricher,
@@ -15,7 +15,7 @@ from processor.operators.validity import (
 def test_parse_iso8601_z_suffix() -> None:
     dt = parse_iso8601("2026-06-12T08:00:00Z")
     assert dt is not None
-    assert dt == datetime(2026, 6, 12, 8, 0, tzinfo=timezone.utc)
+    assert dt == datetime(2026, 6, 12, 8, 0, tzinfo=UTC)
 
 
 def test_parse_iso8601_offset() -> None:
@@ -58,7 +58,7 @@ def test_enricher_precedence_http_last_modified(fixed_now: datetime) -> None:
     out = enricher.enrich(
         url="https://example.com/x",
         fetched_at=fixed_now,
-        http_last_modified=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        http_last_modified=datetime(2026, 1, 1, tzinfo=UTC),
         html='"datePublished": "2026-04-04T00:00:00Z"',
     )
     assert out.valid_from_source == "http_last_modified"

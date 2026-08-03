@@ -8,7 +8,7 @@ handling, and dedup logic.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 
@@ -35,8 +35,8 @@ def parse_http_date(value: str | None) -> datetime | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 async def fetch_and_publish(
@@ -44,8 +44,8 @@ async def fetch_and_publish(
     url: str,
     *,
     source_feed: str,
-    producer: "BronzeProducer",
-    minio: "MinioWriter",
+    producer: BronzeProducer,
+    minio: MinioWriter,
     bucket: str,
     extension: str = "html.gz",
     expected_content_type: str | None = None,
@@ -89,7 +89,7 @@ async def fetch_and_publish(
             return None
 
         payload = resp.content
-        fetched_at = datetime.now(tz=timezone.utc)
+        fetched_at = datetime.now(tz=UTC)
         key = bronze_object_key(
             source_feed=source_feed,
             doc_id=doc_id,

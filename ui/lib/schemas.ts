@@ -81,7 +81,7 @@ export type DeconAttestation = z.infer<typeof DeconAttestationSchema>;
 
 export const MixtureSourceWeightSchema = z.object({
   // Field name mirrors Pydantic `MixtureSourceWeight.source_feed`. The
-  // FastAPI submit API has `extra='forbid'` so the legacy `source` key is
+  // SourceFeed REST API has `extra='forbid'` so the legacy `source` key is
   // rejected on the wire. Always send `source_feed`.
   source_feed: z.string(),
   weight: z.number().gt(0).max(1),

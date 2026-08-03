@@ -7,11 +7,11 @@ description: |
 
   Tech stack (frozen, see CLAUDE.md): Redpanda, Bytewax, MinIO, Iceberg V3,
   Polaris, Resiliparse, Rensa, LSHBloom, FineWeb-Edu (ONNX INT8), Next.js 14,
-  DuckDB, FastAPI, KEDA, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
+  DuckDB API, KEDA, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
   cert-manager, OPA Gatekeeper.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 kubeVersion: ">=1.28.0-0"
 home: https://github.com/stream2pretrain/stream2pretrain
 sources:
@@ -29,5 +29,5 @@ keywords:
   - redpanda
 annotations:
   artifacthub.io/changes: |
-    - Initial chart for Stream2Pretrain v0.1.0
+    - Stream2Pretrain v0.2.0 production-readiness chart
   artifacthub.io/license: Apache-2.0

@@ -20,17 +20,19 @@ from __future__ import annotations
 import gzip
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import boto3
 import orjson
 from botocore.exceptions import BotoCoreError, ClientError
 
 from processor import common
+from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.operators.extract import ResiliparseExtractor
 from processor.operators.langid import LangIdentifier
 from processor.operators.minhash import MinHasher
 from processor.operators.validity import ValidityEnricher, WaybackLookup
+from processor.probes import start_probe_server
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverTags
 
@@ -87,7 +89,7 @@ def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
         return b""
     try:
         resp = state.s3.get_object(Bucket=bucket, Key=key)
-        body = resp["Body"].read()
+        body = cast(bytes, resp["Body"].read())
     except (BotoCoreError, ClientError):
         return b""
     if uri.endswith(".gz") or resp.get("ContentEncoding") == "gzip":
@@ -99,9 +101,18 @@ def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
 
 
 def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> SilverRecord | None:
-    """Turn one (BronzeRecord + raw HTML) into a SilverRecord."""
-    extracted = state.extractor.extract(raw_html)
-    text = extracted.text.strip()
+    """Turn one (BronzeRecord + raw bytes) into a SilverRecord."""
+    if bronze.source_format == "code":
+        text = raw_html.decode("utf-8", errors="replace").strip()
+        title = str(bronze.url).rsplit("/", 1)[-1] or None
+        extracted_with = bronze.extraction_pipeline
+        extraction_pipeline = bronze.extraction_pipeline
+    else:
+        extracted = state.extractor.extract(raw_html)
+        text = extracted.text.strip()
+        title = extracted.title
+        extracted_with = extracted.extracted_with
+        extraction_pipeline = bronze.extraction_pipeline
     if not text:
         return None
     lang_result = state.lang_id.identify(text)
@@ -116,11 +127,11 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
     return SilverRecord(
         doc_id=bronze.doc_id,
         url=bronze.url,
-        title=extracted.title,
+        title=title,
         text=text,
         lang=lang_result.lang,
         lang_score=lang_result.score,
-        extracted_with=extracted.extracted_with,
+        extracted_with=extracted_with,
         tags=SilverTags(
             gopher_pass=True,  # populated by curate.py
             c4_nopunc_pass=True,
@@ -135,14 +146,27 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         valid_to=interval.valid_to,
         valid_from_source=interval.valid_from_source,
         trace_id=bronze.trace_id,
+        source_feed=bronze.source_feed,
+        source_format=bronze.source_format,
+        extraction_pipeline=extraction_pipeline,
+        spdx_license=bronze.spdx_license,
+        spdx_license_source=bronze.spdx_license_source,
     )
 
 
-def process_bronze_payload(state: FetcherState, payload: bytes) -> SilverRecord | None:
+def process_bronze_payload(
+    state: FetcherState,
+    payload: bytes,
+    *,
+    metrics: ProcessorMetrics | None = None,
+) -> SilverRecord | None:
     """Deserialize a Kafka payload, run the pipeline, return the silver row."""
     bronze = common.bronze_loads(payload)
     raw_html = fetch_raw_bytes(state, bronze)
-    return normalize(state, bronze, raw_html)
+    silver = normalize(state, bronze, raw_html)
+    if silver is not None and metrics is not None:
+        metrics.record_normalized(source_feed=silver.source_feed)
+    return silver
 
 
 def build_dataflow(cfg: common.ProcessorConfig) -> object:
@@ -152,9 +176,9 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     import :mod:`processor.fetcher` without paying the runtime dependency.
     Bytewax is only required when actually running the dataflow.
     """
-    from bytewax.connectors.kafka import KafkaSink, KafkaSource, KafkaSinkMessage
-    from bytewax.dataflow import Dataflow
     from bytewax import operators as op
+    from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage, KafkaSource
+    from bytewax.dataflow import Dataflow
 
     tracer = common.init_tracer("s2p-fetcher", cfg)
     state = build_state(cfg)
@@ -177,8 +201,8 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
             if payload is None:
                 return None
             try:
-                silver = process_bronze_payload(state, payload)
-            except Exception as exc:  # noqa: BLE001
+                silver = process_bronze_payload(state, payload, metrics=PROCESSOR_METRICS)
+            except Exception as exc:
                 span.record_exception(exc)
                 return None
             if silver is None:
@@ -207,6 +231,7 @@ def main() -> None:
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.fetcher")
     log.info("starting fetcher dataflow", brokers=cfg.redpanda_brokers, topic=cfg.raw_topic)
+    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
     # ``bytewax.run`` is deferred to avoid importing the runtime in tests.
     from bytewax.run import cli_main
@@ -221,4 +246,4 @@ def serialize_for_kafka(record: SilverRecord) -> tuple[bytes, bytes]:
 
 def deserialize_for_test(payload: bytes) -> dict[str, Any]:
     """Round-trip helper for tests."""
-    return orjson.loads(payload)
+    return cast(dict[str, Any], orjson.loads(payload))

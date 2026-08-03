@@ -16,6 +16,7 @@ can run against frozen-input HTML samples without a heavy dependency.
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
@@ -122,10 +123,8 @@ class _MetaLicenseParser(HTMLParser):
 def extract_metadata(html: str) -> tuple[str | None, dict[str, str]]:
     """Parse ``<title>`` and ``<meta>`` tags from ``html``."""
     p = _MetaLicenseParser()
-    try:
+    with suppress(Exception):
         p.feed(html)
-    except Exception:  # noqa: BLE001 - HTMLParser raises a wide net
-        pass
     return p.title, p.meta
 
 
@@ -181,7 +180,7 @@ def _resiliparse_extract(html: str) -> tuple[str, list[str]]:
         from resiliparse.extract.html2text import (  # type: ignore[import-not-found]
             extract_plain_text,
         )
-    except Exception:  # noqa: BLE001 - dev path without the extra installed
+    except Exception:
         text = _stdlib_extract(html)
         return text, _stdlib_headings(html)
     text = extract_plain_text(
@@ -252,10 +251,7 @@ def extract_arxiv_html(
        stripper preserves them.
     4. Run Resiliparse (or the stdlib fallback) against the rewritten HTML.
     """
-    if isinstance(html, bytes):
-        text_html = html.decode("utf-8", errors="replace")
-    else:
-        text_html = html
+    text_html = html.decode("utf-8", errors="replace") if isinstance(html, bytes) else html
 
     title, meta = extract_metadata(text_html)
 

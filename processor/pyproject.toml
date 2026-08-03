@@ -43,6 +43,7 @@ runtime = [
     "kubernetes>=29.0",
     "pyiceberg>=0.7",
     "pyarrow>=16.0",
+    "duckdb>=1.0",
     "aiohttp>=3.9",
     # v0.2.0 seed loader: streaming HuggingFace dataset reader.
     "datasets>=2.20",
@@ -58,6 +59,8 @@ dev = [
 s2p-fetcher = "processor.fetcher:main"
 s2p-curate = "processor.curate:main"
 s2p-iceberg-writer = "processor.iceberg_writer:main"
+s2p-decon-api = "processor.decon_api:main"
+s2p-duckdb-api = "processor.duckdb_api:main"
 s2p-mixture-controller = "processor.mixture_controller.controller:main"
 s2p-seed-loader = "processor.seed_loader:main"
 

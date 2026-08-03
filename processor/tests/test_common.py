@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from processor.common import (
     bronze_loads,
@@ -10,6 +10,7 @@ from processor.common import (
     decon_loads,
     gold_dumps,
     gold_loads,
+    load_config,
     new_trace_id,
     silver_dumps,
     silver_loads,
@@ -17,7 +18,7 @@ from processor.common import (
 from schemas.bronze import BronzeRecord
 from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
-from schemas.silver import SilverRecord, SilverTags
+from schemas.silver import SilverRecord
 
 
 def test_new_trace_id_format() -> None:
@@ -26,11 +27,51 @@ def test_new_trace_id_format() -> None:
     assert all(c in "0123456789abcdef" for c in tid)
 
 
+def test_load_config_reads_kubernetes_env_contract(monkeypatch) -> None:
+    monkeypatch.setenv("S2P_ENV", "prod")
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("REDPANDA_BROKERS", "redpanda:9092")
+    monkeypatch.setenv("S2P_CONSUMER_GROUP", "s2p-test")
+    monkeypatch.setenv("S2P_RAW_TOPIC", "raw.prod")
+    monkeypatch.setenv("S2P_NORMALIZED_TOPIC", "normalized.prod")
+    monkeypatch.setenv("S2P_CURATED_TOPIC", "curated.prod")
+    monkeypatch.setenv("S2P_DECON_TOPIC", "decon.prod")
+    monkeypatch.setenv("MINIO_ENDPOINT", "http://minio:9000")
+    monkeypatch.setenv("MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("MINIO_SECRET_KEY", "secret")
+    monkeypatch.setenv("MINIO_BRONZE_BUCKET", "bronze-prod")
+    monkeypatch.setenv("MINIO_SILVER_BUCKET", "silver-prod")
+    monkeypatch.setenv("MINIO_GOLD_BUCKET", "gold-prod")
+    monkeypatch.setenv("MINIO_DECON_BUCKET", "decon-prod")
+    monkeypatch.setenv("POLARIS_URI", "http://polaris:8181/api/catalog")
+    monkeypatch.setenv("POLARIS_WAREHOUSE", "s3://gold/warehouse")
+
+    cfg = load_config()
+
+    assert cfg.env == "prod"
+    assert cfg.log_level == "DEBUG"
+    assert cfg.redpanda_brokers == "redpanda:9092"
+    assert cfg.consumer_group == "s2p-test"
+    assert cfg.raw_topic == "raw.prod"
+    assert cfg.normalized_topic == "normalized.prod"
+    assert cfg.curated_topic == "curated.prod"
+    assert cfg.decon_attest_topic == "decon.prod"
+    assert cfg.minio_endpoint == "http://minio:9000"
+    assert cfg.minio_access_key == "access"
+    assert cfg.minio_secret_key == "secret"
+    assert cfg.bronze_bucket == "bronze-prod"
+    assert cfg.silver_bucket == "silver-prod"
+    assert cfg.gold_bucket == "gold-prod"
+    assert cfg.decon_bucket == "decon-prod"
+    assert cfg.polaris_uri == "http://polaris:8181/api/catalog"
+    assert cfg.polaris_warehouse == "s3://gold/warehouse"
+
+
 def test_bronze_roundtrip() -> None:
     rec = BronzeRecord(
         doc_id="sha256:" + "0" * 64,
         url="https://example.com/x",
-        fetched_at=datetime(2026, 6, 15, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 15, tzinfo=UTC),
         http_status=200,
         http_last_modified=None,
         content_type="text/html",
@@ -62,7 +103,7 @@ def test_gold_roundtrip() -> None:
         license="unknown",
         license_source="unknown",
         risk_tier=1,
-        valid_from=datetime(2026, 6, 15, tzinfo=timezone.utc),
+        valid_from=datetime(2026, 6, 15, tzinfo=UTC),
         scoring_version="v0.1.0",
         classifier_revision="proxy-heuristic-0.1",
         policy_revision="git:test",
@@ -76,7 +117,7 @@ def test_gold_roundtrip() -> None:
 def test_decon_roundtrip_canonical_bytes() -> None:
     rec = DeconAttestation(
         snapshot_id=1,
-        committed_at=datetime(2026, 6, 15, tzinfo=timezone.utc),
+        committed_at=datetime(2026, 6, 15, tzinfo=UTC),
         benchmark_set_version="v-test",
         benchmarks=["MMLU", "GSM8K", "HumanEval", "MATH", "GPQA"],
         tokens_scanned=10,

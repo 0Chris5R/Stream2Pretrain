@@ -10,8 +10,9 @@ Approximate yield is needs-measurement: research notes 5-50 GB.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urlparse
 
 from processor.seed.cursor import SeedCursor
@@ -78,8 +79,8 @@ def derive_valid_from(row: dict[str, Any]) -> datetime:
         try:
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
         except ValueError:
             pass
     dump = row.get("dump")
@@ -90,11 +91,11 @@ def derive_valid_from(row: dict[str, Any]) -> datetime:
             year = int(year_s)
             week = int(week_s)
             return datetime.fromisocalendar(year, max(1, min(52, week)), 1).replace(
-                tzinfo=timezone.utc
+                tzinfo=UTC
             )
         except (ValueError, IndexError):
             pass
-    return datetime(2024, 4, 1, tzinfo=timezone.utc)
+    return datetime(2024, 4, 1, tzinfo=UTC)
 
 
 def native_id_for(row: dict[str, Any]) -> str:
@@ -177,13 +178,13 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
 
 
 __all__ = [
+    "DEFAULT_URL_ALLOWLIST",
     "REPO_ID",
     "SPDX",
-    "DEFAULT_URL_ALLOWLIST",
-    "url_matches_allowlist",
     "derive_valid_from",
-    "native_id_for",
-    "to_seed_document",
     "iter_documents",
     "load_hf_stream",
+    "native_id_for",
+    "to_seed_document",
+    "url_matches_allowlist",
 ]

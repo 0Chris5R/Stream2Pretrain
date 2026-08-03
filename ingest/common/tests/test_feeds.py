@@ -58,6 +58,26 @@ def test_load_yaml_with_top_key(tmp_path: Path) -> None:
     }
 
 
+def test_sourcefeed_accepts_kubernetes_camel_case() -> None:
+    feed = SourceFeedSpec.model_validate(
+        {
+            "name": "rss-arxiv-cs-cl",
+            "protocol": "rss",
+            "endpoint": "https://rss.arxiv.org/rss/cs.CL",
+            "pollIntervalSeconds": 7200,
+            "rateLimit": {"requestsPerSecond": 1.0, "burst": 4},
+            "licenseDefault": "arxiv-non-exclusive-distribution",
+            "egressAllow": ["rss.arxiv.org"],
+            "acceptContentTypes": ["text/html"],
+        }
+    )
+
+    assert feed.poll_interval_seconds == 7200
+    assert feed.rate_limit.requests_per_second == 1.0
+    assert feed.license_default == "arxiv-non-exclusive-distribution"
+    assert feed.model_dump(by_alias=True)["pollIntervalSeconds"] == 7200
+
+
 def test_filter_protocol_excludes_disabled(tmp_path: Path) -> None:
     p = tmp_path / "feeds.yaml"
     p.write_text(yaml.safe_dump(_sample_feeds()), encoding="utf-8")

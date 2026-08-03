@@ -61,7 +61,7 @@ class ResiliparseExtractor:
     @staticmethod
     def _probe_resiliparse() -> bool:
         try:
-            import resiliparse.extract.html2text  # noqa: F401
+            import resiliparse.extract.html2text
             import resiliparse.parse.html  # noqa: F401
 
             return True
@@ -122,7 +122,7 @@ class ResiliparseExtractor:
         return ExtractedDocument(title=title, text=text, extracted_with=self.extracted_with)
 
 
-def _read_title(tree: "HTMLTree") -> str | None:
+def _read_title(tree: HTMLTree) -> str | None:
     """Best-effort title extraction; returns None when document has none."""
     try:
         title_el = tree.title

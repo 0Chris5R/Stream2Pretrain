@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from processor.seed import fineweb_edu_filter as ff
 from processor.seed.cursor import SeedCursor
@@ -35,7 +35,7 @@ def test_url_matches_allowlist_handles_invalid_url() -> None:
 
 def test_derive_valid_from_iso_date() -> None:
     row = {"date": "2024-09-15T00:00:00Z"}
-    assert ff.derive_valid_from(row) == datetime(2024, 9, 15, tzinfo=timezone.utc)
+    assert ff.derive_valid_from(row) == datetime(2024, 9, 15, tzinfo=UTC)
 
 
 def test_derive_valid_from_cc_dump() -> None:
@@ -48,7 +48,7 @@ def test_derive_valid_from_cc_dump() -> None:
 def test_derive_valid_from_falls_back_to_cutoff() -> None:
     row: dict[str, object] = {}
     dt = ff.derive_valid_from(row)
-    assert dt == datetime(2024, 4, 1, tzinfo=timezone.utc)
+    assert dt == datetime(2024, 4, 1, tzinfo=UTC)
 
 
 def test_to_seed_document_keeps_arxiv_url() -> None:

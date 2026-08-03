@@ -43,7 +43,6 @@ from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
 from schemas.silver import SilverRecord
 
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -103,6 +102,7 @@ class ProcessorConfig:
     bronze_bucket: str
     silver_bucket: str
     gold_bucket: str
+    decon_bucket: str
 
     polaris_uri: str
     polaris_warehouse: str
@@ -149,6 +149,7 @@ def load_config() -> ProcessorConfig:
         bronze_bucket=_env("MINIO_BRONZE_BUCKET", "bronze"),
         silver_bucket=_env("MINIO_SILVER_BUCKET", "silver"),
         gold_bucket=_env("MINIO_GOLD_BUCKET", "gold"),
+        decon_bucket=_env("MINIO_DECON_BUCKET", "decon"),
         polaris_uri=_env("POLARIS_URI", "http://polaris:8181/api/catalog"),
         polaris_warehouse=_env("POLARIS_WAREHOUSE", "stream2pretrain"),
         polaris_token=_env_optional("POLARIS_TOKEN"),
@@ -236,7 +237,7 @@ _TRACER_INITIALIZED = False
 
 def init_tracer(service_name: str, cfg: ProcessorConfig) -> trace.Tracer:
     """Idempotent tracer provider installer; returns a tracer for ``service_name``."""
-    global _TRACER_INITIALIZED  # noqa: PLW0603
+    global _TRACER_INITIALIZED
     if _TRACER_INITIALIZED:
         return trace.get_tracer(service_name)
     resource = Resource.create(
@@ -326,18 +327,18 @@ def decon_loads(payload: bytes) -> DeconAttestation:
 
 __all__ = [
     "ProcessorConfig",
-    "load_config",
-    "configure_logging",
-    "get_logger",
-    "init_tracer",
-    "current_trace_id_hex",
-    "new_trace_id",
     "bronze_loads",
     "bronze_loads_dict",
-    "silver_dumps",
-    "silver_loads",
-    "gold_dumps",
-    "gold_loads",
+    "configure_logging",
+    "current_trace_id_hex",
     "decon_dumps",
     "decon_loads",
+    "get_logger",
+    "gold_dumps",
+    "gold_loads",
+    "init_tracer",
+    "load_config",
+    "new_trace_id",
+    "silver_dumps",
+    "silver_loads",
 ]

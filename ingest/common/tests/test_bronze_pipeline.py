@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from ingest.common.bronze_pipeline import fetch_and_publish, parse_http_date
+from ingest.common.config import IngestConfig
 from ingest.common.http_client import build_async_client
 
 from .conftest import FakeMinio, FakeProducer
@@ -108,8 +109,7 @@ def test_parse_http_date_handles_none() -> None:
     assert dt.year == 2026 and dt.month == 6 and dt.day == 15
 
 
-def _cfg() -> "IngestConfig":  # type: ignore[name-defined]
-    from ingest.common.config import IngestConfig
+def _cfg() -> IngestConfig:
     return IngestConfig(
         env="dev",
         log_level="DEBUG",

@@ -39,7 +39,7 @@ export function QualityHistogramChart({ data, height = 220 }: Props) {
             borderRadius: 6,
             fontSize: 12,
           }}
-          formatter={(value: number) => [value.toLocaleString(), 'documents']}
+          formatter={(value) => [Number(value ?? 0).toLocaleString(), 'documents']}
           labelFormatter={(score) => `score ${Number(score).toFixed(2)}`}
         />
         <Bar dataKey="count" fill="hsl(var(--primary))" radius={[2, 2, 0, 0]} />

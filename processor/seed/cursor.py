@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -75,7 +75,7 @@ class SeedCursor:
     last_native_id: str = ""
     rows_emitted: int = 0
     updated_at: datetime = field(
-        default_factory=lambda: datetime(1970, 1, 1, tzinfo=timezone.utc)
+        default_factory=lambda: datetime(1970, 1, 1, tzinfo=UTC)
     )
     namespaces: dict[str, str] = field(default_factory=dict)
     """Per-namespace last-seen suffix.
@@ -100,6 +100,10 @@ class SeedCursor:
         ns = _namespace_of(native_id)
         suffix = native_id[len(ns) + 1 :] if ns else native_id
         last = self.namespaces.get(ns, "")
+        if not last and self.last_native_id:
+            legacy_ns = _namespace_of(self.last_native_id)
+            if legacy_ns == ns:
+                last = self.last_native_id[len(legacy_ns) + 1 :] if legacy_ns else self.last_native_id
         if not last:
             return False
         return suffix <= last
@@ -114,7 +118,7 @@ class SeedCursor:
         # should_skip.
         self.last_native_id = native_id
         self.rows_emitted += 1
-        self.updated_at = datetime.now(tz=timezone.utc)
+        self.updated_at = datetime.now(tz=UTC)
 
     def to_json(self) -> bytes:
         """Serialize to canonical JSON bytes."""
@@ -128,7 +132,7 @@ class SeedCursor:
         return json.dumps(payload, sort_keys=True).encode("utf-8")
 
     @classmethod
-    def from_json(cls, payload: bytes | str, *, repo_id: str) -> "SeedCursor":
+    def from_json(cls, payload: bytes | str, *, repo_id: str) -> SeedCursor:
         """Parse a JSON payload into a :class:`SeedCursor`.
 
         Tolerates a missing or malformed ``updated_at`` by falling back to
@@ -150,12 +154,12 @@ class SeedCursor:
             updated_at = (
                 datetime.fromisoformat(updated_raw)
                 if isinstance(updated_raw, str)
-                else datetime(1970, 1, 1, tzinfo=timezone.utc)
+                else datetime(1970, 1, 1, tzinfo=UTC)
             )
         except ValueError:
-            updated_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            updated_at = datetime(1970, 1, 1, tzinfo=UTC)
         if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
+            updated_at = updated_at.replace(tzinfo=UTC)
         ns_obj = obj.get("namespaces")
         namespaces: dict[str, str] = {}
         if isinstance(ns_obj, dict):

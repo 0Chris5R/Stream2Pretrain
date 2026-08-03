@@ -17,8 +17,9 @@ shard; the keyword list is conservative on purpose.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
@@ -133,16 +134,16 @@ def derive_valid_from(row: dict[str, Any]) -> datetime:
             try:
                 dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
+                return dt.astimezone(UTC)
             except ValueError:
                 continue
         if isinstance(raw, datetime):
             dt = raw
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
-    return datetime(2024, 6, 1, tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
+    return datetime(2024, 6, 1, tzinfo=UTC)
 
 
 def native_id_for(row: dict[str, Any]) -> str:
@@ -247,17 +248,17 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
 
 
 __all__ = [
+    "LANGUAGES",
+    "ML_KEYWORDS",
+    "ML_REPOS",
     "REPO_ID",
     "SPDX_WRAPPER",
-    "LANGUAGES",
-    "ML_REPOS",
-    "ML_KEYWORDS",
-    "is_python",
-    "is_ml_relevant",
     "derive_valid_from",
-    "native_id_for",
-    "license_for",
-    "to_seed_document",
+    "is_ml_relevant",
+    "is_python",
     "iter_documents",
+    "license_for",
     "load_hf_stream",
+    "native_id_for",
+    "to_seed_document",
 ]

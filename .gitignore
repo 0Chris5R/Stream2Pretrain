@@ -16,6 +16,7 @@ build/
 node_modules/
 .next/
 .turbo/
+*.tsbuildinfo
 
 # OS
 .DS_Store
@@ -31,6 +32,8 @@ Thumbs.db
 .env.local
 *.pem
 *.key
+kubeconfig*.yaml
+infra/kubeconfig-*.yaml
 
 # Build outputs
 target/

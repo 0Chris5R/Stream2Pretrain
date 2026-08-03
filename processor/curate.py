@@ -12,22 +12,25 @@ End-to-end FineWeb-style curation. The dataflow:
 6. Runs the FineWeb-Edu ONNX classifier (or proxy heuristic).
 7. Runs the PII regex pack.
 8. Runs the Decon-Gate (n-gram Bloom + optional embedding sketch).
-9. Emits a :class:`GoldRecord` on ``docs.curated``.
+9. Emits a trainable :class:`GoldRecord` on ``docs.curated``.
 
-Records that fail any rule are still emitted, with ``reject_reasons`` and
-``risk_tier`` populated. The Iceberg writer downstream is the only
-component that decides whether a row enters the gold table.
+Records that fail any rule are scored locally, then dropped before the
+``docs.curated`` topic. The Iceberg writer treats every received row as
+eligible for the Gold training table, so this dataflow owns the clean-only
+publication contract.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timezone
-from typing import Any
+from datetime import UTC
+from typing import Any, cast
 
 from processor import common
 from processor.decon_gate import DeconGate, _EmbeddingSketch  # type: ignore[attr-defined]
+from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.operators.c4 import C4Filter
 from processor.operators.gopher import GopherFilter
 from processor.operators.kenlm_score import KenLMScorer
@@ -35,12 +38,15 @@ from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher, MinHashSignature
 from processor.operators.pii import PiiScanner
 from processor.operators.quality import QualityClassifier
+from processor.probes import start_probe_server
 from processor.tokenize import Tokenizer
-from schemas.gold import GoldRecord, RejectReason, RiskTier
+from schemas.decon import BenchmarkName
+from schemas.gold import GoldRecord, PiiFlag, RejectReason, RiskTier
 from schemas.silver import SilverRecord
 
 POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
+PERMISSIVE_CODE_LICENSES = {"MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "MPL-2.0"}
 
 
 @dataclass(slots=True)
@@ -90,7 +96,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     )
 
 
-def _load_benchmark_corpus(path: str | None) -> dict[str, list[str]] | None:
+def _load_benchmark_corpus(path: str | None) -> dict[BenchmarkName, list[str]] | None:
     """Read benchmark prompts from a JSON file, or return ``None``."""
     if not path or not os.path.isfile(path):
         return None
@@ -100,19 +106,19 @@ def _load_benchmark_corpus(path: str | None) -> dict[str, list[str]] | None:
         data = orjson.loads(fh.read())
     if not isinstance(data, dict):
         return None
-    return {str(k): list(v) for k, v in data.items()}
+    valid = {"MMLU", "GSM8K", "HumanEval", "MATH", "GPQA"}
+    return {cast(BenchmarkName, k): list(v) for k, v in data.items() if k in valid}
 
 
 def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     """Run the full curation pipeline on one silver record.
 
-    Always returns a GoldRecord - rejected docs carry ``reject_reasons``
-    and an elevated ``risk_tier``.
+    Always returns a scored GoldRecord. Callers must use
+    :func:`is_trainable_gold` before publishing the record to ``docs.curated``.
     """
     text = silver.text
     reject: list[RejectReason] = []
     # Gopher
-    gstats = state.gopher.stats(text)
     gopher_pass = state.gopher.passes(text)
     if not gopher_pass:
         reject.append("gopher_filter")
@@ -128,20 +134,20 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     ppl = state.kenlm.score(text)
     if ppl.bucket == "tail":
         reject.append("high_perplexity")
-    # Near-dup. We refuse to LSH-band a signature whose backend differs
-    # from the curator's local MinHasher: the byte layouts (uint32 LE vs
-    # rensa-native vs datasketch) are not interchangeable, so banding
-    # across backends would silently produce wrong cluster assignments.
+    # Near-dup. Silver rows can arrive from the seed loader with placeholder
+    # signatures, or from an older fetcher with a different backend. Recompute
+    # locally before LSH banding so the index only sees one byte layout.
     if (
         silver.minhash_backend != state.minhasher.backend
         or silver.minhash_num_perms != state.minhasher.num_perms
     ):
-        reject.append("minhash_backend_mismatch")
-    sig = MinHashSignature(
-        digest=silver.minhash_sig,
-        num_perms=silver.minhash_num_perms,
-        backend=silver.minhash_backend,
-    )
+        sig = state.minhasher.signature(text)
+    else:
+        sig = MinHashSignature(
+            digest=silver.minhash_sig,
+            num_perms=silver.minhash_num_perms,
+            backend=silver.minhash_backend,
+        )
     near = state.lsh.observe(silver.doc_id, sig)
     if near.is_near_duplicate:
         reject.append("near_duplicate")
@@ -149,12 +155,17 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     quality = state.quality.score(text)
     if quality.quality_score < 1.0:
         reject.append("low_quality_score")
+    # License. Missing license metadata is risk-tier 2 by schema contract.
+    # Code is stricter: only the Apache-release whitelist enters Gold.
+    if _license_reject_reason(silver) is not None:
+        reject.append("license_excluded")
     # PII
     pii_flags = state.pii.flags(text)
     if pii_flags:
         reject.append("pii_detected")
     # Decon-Gate
     risk = _risk_from_reject(reject, pii_flags)
+    license_id = silver.spdx_license or "unknown"
     pre_record = GoldRecord(
         doc_id=silver.doc_id,
         text=text,
@@ -162,7 +173,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         tokens=state.tokenizer.count(text).tokens,
         quality_score=quality.quality_score,
         edu_score=quality.edu_score,
-        license="unknown",
+        license=license_id,
         license_source="unknown",
         risk_tier=risk,
         pii_flags=pii_flags,
@@ -175,6 +186,11 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         policy_revision=state.policy_revision,
         snapshot_id=None,
         trace_id=silver.trace_id,
+        source_feed=silver.source_feed,
+        source_format=silver.source_format,
+        extraction_pipeline=silver.extraction_pipeline,
+        spdx_license=silver.spdx_license,
+        spdx_license_source=silver.spdx_license_source,
     )
     post_record, hits = state.decon.scan(pre_record)
     if hits:
@@ -185,7 +201,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     return post_record
 
 
-def _risk_from_reject(reject: list[RejectReason], pii_flags: list[str]) -> RiskTier:
+def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFlag]) -> RiskTier:
     """Map current reject signals onto the 1/2/3 risk-tier ladder."""
     if "decontamination_hit" in reject or pii_flags:
         return 3
@@ -194,18 +210,54 @@ def _risk_from_reject(reject: list[RejectReason], pii_flags: list[str]) -> RiskT
     return 1
 
 
-def process_silver_payload(state: CurateState, payload: bytes) -> bytes | None:
-    """Deserialize a SilverRecord payload, curate, return GoldRecord JSON."""
+def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
+    """Return the license reject reason, if this row is not trainable."""
+    license_id = silver.spdx_license
+    if license_id is None or license_id.lower() == "unknown":
+        return "license_excluded"
+    if silver.source_format == "code" and license_id not in PERMISSIVE_CODE_LICENSES:
+        return "license_excluded"
+    return None
+
+
+def is_trainable_gold(record: GoldRecord) -> bool:
+    """True when a GoldRecord is allowed onto ``docs.curated`` and Gold."""
+    return (
+        record.risk_tier == 1
+        and not record.reject_reasons
+        and not record.pii_flags
+        and not record.contaminated_with
+    )
+
+
+def process_silver_payload(
+    state: CurateState,
+    payload: bytes,
+    *,
+    metrics: ProcessorMetrics | None = None,
+) -> bytes | None:
+    """Deserialize a SilverRecord payload and return trainable Gold JSON."""
     silver = common.silver_loads(payload)
     gold = curate_one(state, silver)
+    if metrics is not None:
+        metrics.record_decon_scan(benchmarks=gold.contaminated_with)
+    if not is_trainable_gold(gold):
+        if metrics is not None:
+            metrics.record_dropped(
+                reasons=gold.reject_reasons,
+                quality_score=gold.quality_score,
+            )
+        return None
+    if metrics is not None:
+        metrics.record_curated(source_feed=gold.source_feed, quality_score=gold.quality_score)
     return common.gold_dumps(gold)
 
 
 def build_dataflow(cfg: common.ProcessorConfig) -> object:
     """Build the Bytewax dataflow object."""
+    from bytewax import operators as op
     from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage, KafkaSource
     from bytewax.dataflow import Dataflow
-    from bytewax import operators as op
 
     tracer = common.init_tracer("s2p-curate", cfg)
     state = build_state(cfg)
@@ -229,8 +281,8 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
             if payload is None:
                 return None
             try:
-                out = process_silver_payload(state, payload)
-            except Exception as exc:  # noqa: BLE001
+                out = process_silver_payload(state, payload, metrics=PROCESSOR_METRICS)
+            except Exception as exc:
                 span.record_exception(exc)
                 return None
             if out is None:
@@ -254,6 +306,7 @@ def main() -> None:
         brokers=cfg.redpanda_brokers,
         topic=cfg.normalized_topic,
     )
+    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
     from bytewax.run import cli_main
 
@@ -264,4 +317,4 @@ def now_utc() -> Any:
     """Re-exported for tests; returns a tz-aware UTC datetime."""
     from datetime import datetime
 
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

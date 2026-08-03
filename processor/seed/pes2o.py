@@ -15,8 +15,9 @@ License: ODC-By-1.0 (inherited from the Dolma collection).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
@@ -25,7 +26,7 @@ REPO_ID: str = "allenai/peS2o"
 SPDX: str = "ODC-By-1.0"
 
 # v2 knowledge cutoff per the dataset card.
-_V2_CUTOFF = datetime(2023, 1, 3, tzinfo=timezone.utc)
+_V2_CUTOFF = datetime(2023, 1, 3, tzinfo=UTC)
 
 # Fields of study the cs.* filter accepts. Matches peS2o's S2ORC tagging:
 # rows that contain ANY of these are kept.
@@ -88,8 +89,8 @@ def derive_valid_from(row: dict[str, Any]) -> datetime:
         try:
             dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
         except ValueError:
             pass
     year_raw = row.get("year")
@@ -102,7 +103,7 @@ def derive_valid_from(row: dict[str, Any]) -> datetime:
             if 1 <= month_int <= 12:
                 month = month_int
         try:
-            return datetime(year, month, 1, tzinfo=timezone.utc)
+            return datetime(year, month, 1, tzinfo=UTC)
         except ValueError:
             pass
     return _V2_CUTOFF
@@ -209,14 +210,14 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
 
 
 __all__ = [
+    "ARXIV_CS_PREFIXES",
+    "CS_FIELDS",
     "REPO_ID",
     "SPDX",
-    "CS_FIELDS",
-    "ARXIV_CS_PREFIXES",
-    "is_cs_row",
     "derive_valid_from",
-    "native_id_for",
-    "to_seed_document",
+    "is_cs_row",
     "iter_documents",
     "load_hf_stream",
+    "native_id_for",
+    "to_seed_document",
 ]

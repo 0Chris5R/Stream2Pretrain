@@ -97,6 +97,12 @@ class SilverRecord(BaseModel):
     )
     valid_from_source: ValidFromSource
     trace_id: TraceId
+    source_feed: str = Field(
+        default="unknown",
+        min_length=1,
+        max_length=128,
+        description="SourceFeed CRD name propagated from Bronze.",
+    )
 
     # v0.2.0 classifier columns (mirrored from Bronze; kept on Silver so
     # downstream Iceberg writers do not need to re-join with the bronze topic).

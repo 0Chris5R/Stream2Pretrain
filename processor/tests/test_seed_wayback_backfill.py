@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from processor.seed import wayback_backfill as wb
 from processor.seed.cursor import SeedCursor
-
 
 _TIMEMAP = (
     '<https://web.archive.org/web/timemap/link/https://example.com/feed.xml>;'
@@ -29,7 +27,7 @@ def test_parse_timemap_returns_only_mementos() -> None:
 
 def test_snapshot_captured_at_round_trip() -> None:
     snap = wb.Snapshot(timestamp="20250515123456", url="https://x")
-    assert snap.captured_at() == datetime(2025, 5, 15, 12, 34, 56, tzinfo=timezone.utc)
+    assert snap.captured_at() == datetime(2025, 5, 15, 12, 34, 56, tzinfo=UTC)
 
 
 def test_snapshot_playback_url_uses_id_modifier() -> None:
@@ -39,7 +37,7 @@ def test_snapshot_playback_url_uses_id_modifier() -> None:
 
 
 def test_filter_recent_drops_old_snapshots() -> None:
-    now = datetime(2026, 6, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 15, tzinfo=UTC)
     snaps = [
         wb.Snapshot(timestamp="20200101000000", url="https://x"),  # 6+ years ago
         wb.Snapshot(timestamp="20250101000000", url="https://x"),
@@ -89,7 +87,7 @@ def test_iter_documents_emits_recent_snapshots_only() -> None:
             cursor,
             feeds=[feed],
             months=24,
-            now=datetime(2026, 6, 15, tzinfo=timezone.utc),
+            now=datetime(2026, 6, 15, tzinfo=UTC),
             client=client,
         )
     )
@@ -113,7 +111,7 @@ def test_iter_documents_drops_empty_body() -> None:
             cursor,
             feeds=[feed],
             months=24,
-            now=datetime(2026, 6, 15, tzinfo=timezone.utc),
+            now=datetime(2026, 6, 15, tzinfo=UTC),
             client=client,
         )
     )
@@ -143,7 +141,7 @@ def test_iter_documents_respects_cursor() -> None:
             cursor,
             feeds=[feed],
             months=24,
-            now=datetime(2026, 6, 15, tzinfo=timezone.utc),
+            now=datetime(2026, 6, 15, tzinfo=UTC),
             client=client,
         )
     )

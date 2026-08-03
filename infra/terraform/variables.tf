@@ -1,29 +1,31 @@
-# Variables for Stream2Pretrain OpenStack bootstrap.
-# Required vars must be supplied via terraform.tfvars (gitignored) or TF_VAR_* env.
-# Defaults reflect the DHBWCloud assumptions in CLAUDE.md (1 control + 2 workers).
+# Variables for the DHBWCloud VM bootstrap.
+#
+# Defaults mirror the already-working demo project in ~/DHBW/cloud: VMs are
+# attached directly to the existing DHBWV6 network and k3s is installed later
+# through Ansible.
 
 variable "cluster_name" {
-  description = "Logical cluster name; used as prefix for all resources."
+  description = "Logical cluster name; used as prefix for all VM names."
   type        = string
   default     = "stream2pretrain"
 }
 
-variable "image_name" {
-  description = "Glance image name for control + workers. Ubuntu 24.04 LTS expected."
+variable "image_id" {
+  description = "OpenStack Glance image id for all VMs."
   type        = string
-  default     = "Ubuntu 24.04 LTS"
+  default     = "7842eb53-0ac7-4677-9160-2466371b4302"
 }
 
 variable "control_flavor" {
   description = "Nova flavor for the k3s control-plane VM."
   type        = string
-  default     = "m1.large"
+  default     = "k8s.node"
 }
 
 variable "worker_flavor" {
   description = "Nova flavor for k3s worker VMs."
   type        = string
-  default     = "m1.xlarge"
+  default     = "k8s.node"
 }
 
 variable "worker_count" {
@@ -32,85 +34,55 @@ variable "worker_count" {
   default     = 2
 }
 
-variable "external_network" {
-  description = "Name of the external/floating-IP network (e.g. ext-net)."
+variable "key_pair" {
+  description = "Existing OpenStack keypair name used for SSH access."
   type        = string
+  default     = "Julian"
 }
 
-variable "tenant_network_cidr" {
-  description = "CIDR for the internal tenant subnet."
+variable "network_name" {
+  description = "Existing OpenStack network name. DHBWCloud demo uses DHBWV6."
   type        = string
-  default     = "10.123.0.0/24"
+  default     = "DHBWV6"
 }
 
-variable "dns_nameservers" {
-  description = "Resolvers used by the tenant subnet."
-  type        = list(string)
-  default     = ["1.1.1.1", "9.9.9.9"]
-}
-
-variable "ssh_public_key" {
-  description = "SSH public key (OpenSSH format) injected into all nodes."
+variable "ip_family" {
+  description = "Address family used in the generated Ansible inventory."
   type        = string
+  default     = "ipv6"
+
+  validation {
+    condition     = contains(["ipv4", "ipv6"], var.ip_family)
+    error_message = "ip_family must be either ipv4 or ipv6."
+  }
 }
 
 variable "ssh_user" {
-  description = "Default cloud user on the image (Ubuntu 24.04 = ubuntu)."
+  description = "Default cloud user on the image."
   type        = string
   default     = "ubuntu"
 }
 
-variable "control_data_volume_gb" {
-  description = "Size of /var/lib/rancher/k3s data volume on the control plane."
-  type        = number
-  default     = 50
-}
-
-variable "worker_data_volume_gb" {
-  description = "Size of /var/lib/rancher/k3s data volume on each worker."
-  type        = number
-  default     = 100
-}
-
-variable "k3s_version" {
-  description = "k3s release channel or pinned version (e.g. v1.30.3+k3s1)."
+variable "interpreter_python" {
+  description = "Python interpreter path used by Ansible on the VMs."
   type        = string
-  default     = "v1.30.3+k3s1"
+  default     = "/usr/bin/python3"
 }
 
-variable "k3s_token" {
-  description = "Cluster join token. If empty, a random one is generated."
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "allowed_admin_cidrs" {
-  description = "CIDRs allowed to reach the k3s API (6443) and SSH (22)."
+variable "security_groups" {
+  description = "OpenStack security groups attached to all VMs."
   type        = list(string)
-  default     = ["0.0.0.0/0"]
-}
-
-variable "ingress_cidrs" {
-  description = "CIDRs allowed to reach Traefik (80/443)."
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
-}
-
-variable "node_metrics_cidrs" {
-  description = "CIDRs allowed to scrape node-exporter / kubelet metrics. Defaults to in-cluster only."
-  type        = list(string)
-  default     = ["10.123.0.0/24"]
+  default     = ["default"]
 }
 
 variable "availability_zone" {
-  description = "Nova/Cinder AZ. Empty string lets the cloud decide."
+  description = "Nova availability zone. Empty string lets the cloud decide."
   type        = string
   default     = ""
 }
 
-variable "extra_tags" {
-  description = "Additional metadata tags written onto every server."
+variable "extra_metadata" {
+  description = "Additional OpenStack metadata written onto every VM."
   type        = map(string)
   default     = {}
 }

@@ -16,16 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
 from ingest.common.kafka_producer import BronzeProducer
 from ingest.common.logging import configure_logging, get_logger
+from ingest.common.metrics import INGEST_METRICS
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
+from ingest.common.probes import start_probe_server
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 from ingest.common.state import FeedStateStore
 from schemas.bronze import BronzeRecord
@@ -57,7 +58,7 @@ async def _emit_payload(
     extra_meta: dict[str, str] | None = None,
 ) -> bool:
     doc_id = doc_id_for_url(url)
-    fetched_at = datetime.now(tz=timezone.utc)
+    fetched_at = datetime.now(tz=UTC)
     key = bronze_object_key(
         source_feed=source_feed,
         doc_id=doc_id,
@@ -115,9 +116,12 @@ async def poll_models(
         resp = await client.get(f"{HF_API_BASE}{MODELS_ENDPOINT}", params=params)
         if resp.status_code >= 400:
             log.warning("hf_models.bad_status", status=resp.status_code)
+            INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
             return 0
+        INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="success")
         items = resp.json()
         if not isinstance(items, list):
+            INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
             return 0
         for item in items:
             if not isinstance(item, dict):
@@ -141,7 +145,7 @@ async def poll_models(
                     minio=minio,
                     extra_meta={"hf_model_id": model_id, "hf_last_modified": last_modified},
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("hf_models.emit_failed", model=model_id, err=str(exc))
                 continue
             seen[model_id] = last_modified
@@ -163,6 +167,7 @@ async def poll_daily_papers(
     """HF Daily Papers (bearer required)."""
     if not cfg.hf_token:
         log.warning("hf_daily_papers.skipped_no_token")
+        INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="skipped")
         return 0
     headers = build_headers(
         cfg,
@@ -181,9 +186,12 @@ async def poll_daily_papers(
         resp = await client.get(f"{HF_API_BASE}{DAILY_PAPERS_ENDPOINT}", params=params)
         if resp.status_code >= 400:
             log.warning("hf_papers.bad_status", status=resp.status_code)
+            INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="error")
             return 0
+        INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="success")
         items = resp.json()
         if not isinstance(items, list):
+            INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="error")
             return 0
         for item in items:
             if not isinstance(item, dict):
@@ -207,7 +215,7 @@ async def poll_daily_papers(
                     minio=minio,
                     extra_meta={"hf_paper_id": arxiv_id},
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("hf_papers.emit_failed", paper=arxiv_id, err=str(exc))
                 continue
             seen_ids.add(arxiv_id)
@@ -238,6 +246,7 @@ def main() -> None:
     configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     init_tracer("ingest.hf_poller", cfg)
     log.info("hf_poller.start")
+    start_probe_server()
     models, papers = asyncio.run(run_pass(cfg))
     log.info("hf_poller.done", models=models, papers=papers)
 

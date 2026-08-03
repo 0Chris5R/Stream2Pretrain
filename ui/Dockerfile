@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Stream2Pretrain cockpit (Next.js 14, App Router).
+# Stream2Pretrain cockpit (Next.js 16, App Router).
 #
 # Multi-stage build:
 #   1) deps    - install npm dependencies under a clean cache
@@ -10,7 +10,7 @@
 #
 # The runner image runs as a non-root user and exposes port 3000.
 
-ARG NODE_VERSION=20.16.0
+ARG NODE_VERSION=20.19.0
 ARG ALPINE_VERSION=3.20
 ARG COSIGN_VERSION=2.4.0
 

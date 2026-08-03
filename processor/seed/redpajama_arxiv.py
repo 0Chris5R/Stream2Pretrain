@@ -11,8 +11,9 @@ SilverRecord ``extra`` map - downstream operators decide).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
@@ -23,7 +24,7 @@ SPDX: str = "Apache-2.0"
 
 # RedPajama v1 release date: April 17 2023. Used as a hard fallback when
 # meta.timestamp is absent from a row.
-_RELEASE_CUTOFF = datetime(2023, 4, 17, tzinfo=timezone.utc)
+_RELEASE_CUTOFF = datetime(2023, 4, 17, tzinfo=UTC)
 
 
 def parse_meta_timestamp(meta: object) -> datetime | None:
@@ -55,8 +56,8 @@ def parse_meta_timestamp(meta: object) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def derive_valid_from(row: dict[str, Any]) -> datetime:
@@ -164,13 +165,13 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
 
 
 __all__ = [
-    "REPO_ID",
     "CONFIG_NAME",
+    "REPO_ID",
     "SPDX",
-    "parse_meta_timestamp",
     "derive_valid_from",
-    "native_id_for",
-    "to_seed_document",
     "iter_documents",
     "load_hf_stream",
+    "native_id_for",
+    "parse_meta_timestamp",
+    "to_seed_document",
 ]

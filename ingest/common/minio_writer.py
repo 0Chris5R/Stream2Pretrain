@@ -36,7 +36,7 @@ class MinioWriter:
         self._secret_key = secret_key
         self._region = region
         self._bucket = bucket
-        self._client: "S3Client | None" = None
+        self._client: S3Client | None = None
         self._exit_stack = None  # type: ignore[var-annotated]
 
     @property

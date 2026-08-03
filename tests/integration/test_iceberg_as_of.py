@@ -15,7 +15,7 @@ Skip rules:
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -67,7 +67,7 @@ def gold_table() -> tuple[SqlCatalog, str]:
         "gold.curated", schema=_iceberg_schema()
     )
 
-    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
     rows = [
         {
             "doc_id": "sha256:" + "a" * 64,
@@ -124,7 +124,7 @@ def test_validity_interval_filter_returns_in_window_rows(
     """
     catalog, name = gold_table
     table = catalog.load_table(name)
-    target = datetime(2026, 2, 15, tzinfo=timezone.utc)
+    target = datetime(2026, 2, 15, tzinfo=UTC)
     target_iso = target.isoformat()
     arrow = (
         table.scan(

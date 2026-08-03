@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from processor.seed import pes2o
@@ -31,22 +31,22 @@ def test_is_cs_row_falls_back_to_keep_when_no_metadata() -> None:
 def test_derive_valid_from_iso_created() -> None:
     row = {"created": "2024-09-15T00:00:00Z"}
     dt = pes2o.derive_valid_from(row)
-    assert dt == datetime(2024, 9, 15, tzinfo=timezone.utc)
+    assert dt == datetime(2024, 9, 15, tzinfo=UTC)
 
 
 def test_derive_valid_from_year_month() -> None:
     row = {"year": 2025, "month": 3}
-    assert pes2o.derive_valid_from(row) == datetime(2025, 3, 1, tzinfo=timezone.utc)
+    assert pes2o.derive_valid_from(row) == datetime(2025, 3, 1, tzinfo=UTC)
 
 
 def test_derive_valid_from_year_only() -> None:
     row = {"year": "2025"}
-    assert pes2o.derive_valid_from(row) == datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert pes2o.derive_valid_from(row) == datetime(2025, 1, 1, tzinfo=UTC)
 
 
 def test_derive_valid_from_falls_back_to_v2_cutoff() -> None:
     row: dict[str, Any] = {}
-    assert pes2o.derive_valid_from(row) == datetime(2023, 1, 3, tzinfo=timezone.utc)
+    assert pes2o.derive_valid_from(row) == datetime(2023, 1, 3, tzinfo=UTC)
 
 
 def test_native_id_for_zero_pads_numeric_id() -> None:
@@ -76,7 +76,7 @@ def test_to_seed_document_basic() -> None:
     assert doc.source_format == "latex"
     assert doc.spdx_license == "ODC-By-1.0"
     assert doc.spdx_license_source == "dataset_metadata"
-    assert doc.valid_from == datetime(2024, 9, 1, tzinfo=timezone.utc)
+    assert doc.valid_from == datetime(2024, 9, 1, tzinfo=UTC)
 
 
 def test_to_seed_document_drops_non_cs_rows() -> None:

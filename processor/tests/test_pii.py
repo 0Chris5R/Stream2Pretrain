@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from processor.operators.pii import PiiScanner, luhn_ok, is_valid_ipv4
+from processor.operators.pii import PiiScanner, is_valid_ipv4, luhn_ok
 
 
 def test_luhn_validator() -> None:

@@ -19,11 +19,11 @@ from ingest.common.robots import RobotsCache
 from ingest.common.s3 import bronze_s3_uri
 
 __all__ = [
-    "IngestConfig",
-    "load_config",
     "BronzeProducer",
+    "IngestConfig",
     "MinioWriter",
     "RobotsCache",
+    "bronze_s3_uri",
     "build_async_client",
     "build_headers",
     "canonical_url",
@@ -32,5 +32,5 @@ __all__ = [
     "doc_id_for_url",
     "get_logger",
     "init_tracer",
-    "bronze_s3_uri",
+    "load_config",
 ]

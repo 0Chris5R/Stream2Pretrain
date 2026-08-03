@@ -18,7 +18,7 @@ export const UPSTREAM = {
   /** SourceFeed CRUD upstream (mixture-controller REST surface). */
   sourcesApi: process.env.SOURCES_API_URL ?? 'http://stream2pretrain-mixture-controller.stream2pretrain.svc:8080',
   /** Decon-Gate REST: per-snapshot attestation lookup, decon stats. */
-  deconGate: process.env.DECON_GATE_URL ?? 'http://decon-gate.stream2pretrain.svc:8081',
+  deconGate: process.env.DECON_GATE_URL ?? 'http://stream2pretrain-decon-gate.stream2pretrain.svc:8081',
   /** Mixture controller REST: shadow-mode A/B comparison. */
   mixture: process.env.MIXTURE_API_URL ?? 'http://stream2pretrain-mixture-controller.stream2pretrain.svc:8080',
   /** DuckDB-server: lakehouse temporal queries (as_of, mixture). */

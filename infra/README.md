@@ -2,16 +2,18 @@
 
 This directory bootstraps the cluster the project chart runs on. The control
 plane is one VM running `k3s server`; data-plane workloads run on two `k3s agent`
-VMs. All VMs are created via Terraform on DHBWCloud OpenStack.
+VMs. Terraform creates the VMs on DHBWCloud OpenStack using the same DHBWV6
+pattern as the working demo project in `~/DHBW/cloud`; Ansible installs k3s
+afterwards.
 
 ```
 +--------------------+
-|  Terraform (here)  |   creates 3 OpenStack VMs + volumes + secgroups + FIPs
+|  Terraform (here)  |   creates 3 OpenStack VMs on DHBWV6 + inventory
 +----------+---------+
-           | cloud-init renders k3s-{server,agent}.sh
+           | ansible -i generated-inventory.yml infra/ansible/deploy.yaml
            v
 +--------------------+
-|  k3s cluster       |   1 control + 2 workers, Traefik disabled (Helmfile owns it)
+|  k3s cluster       |   1 control + 2 workers, installed by k3s-dhbw-cloud-role
 +----------+---------+
            |
            | helmfile -e dev apply
@@ -28,15 +30,19 @@ VMs. All VMs are created via Terraform on DHBWCloud OpenStack.
 infra/
   terraform/
     versions.tf              provider pins (terraform-provider-openstack ~> 3.0)
-    variables.tf             all knobs, defaults sane for DHBWCloud
-    main.tf                  network, secgroups, keypair, VMs, volumes, FIPs
-    outputs.tf               kubeconfig fetch command, IPs, k3s token
+    variables.tf             all knobs, defaults matching the DHBWV6 demo
+    main.tf                  1 master + 2 workers on the existing DHBWV6 network
+    outputs.tf               VM IPs + Ansible inventory path
     terraform.tfvars.example copy to terraform.tfvars (gitignored)
+  ansible/
+    deploy.yaml              installs k3s with the DHBW role, without
+                             Gridflex-specific post-tasks
+    requirements.yml         role dependency for ansible-galaxy
   k3s-install/
-    cloud-init-server.yaml   base cloud-config, sysctl, package install
-    cloud-init-agent.yaml    same, agent variant
-    k3s-server.sh            templated by Terraform; installs k3s server
-    k3s-agent.sh             templated by Terraform; joins workers
+    cloud-init-server.yaml   legacy direct-k3s bootstrap assets, not used by
+    cloud-init-agent.yaml    the DHBWV6 Terraform path
+    k3s-server.sh            legacy direct-k3s bootstrap script
+    k3s-agent.sh             legacy direct-k3s bootstrap script
   dns/
     cert-manager-issuer.yaml letsencrypt + rfc2136 webhook, wildcard cert
   helmfile-values/
@@ -50,45 +56,82 @@ and `./charts/polaris-lite`).
 ## Prerequisites
 
 1. DHBWCloud OpenStack project with quota for:
-   - 3 VMs (1 x m1.large + 2 x m1.xlarge by default; 20 vCPU, 40 GB RAM total)
-   - 3 Cinder volumes (50 GB + 2 x 100 GB)
-   - 2 floating IPs from `ext-net`
-   The exact quota is `needs-measurement` until the team logs in (CLAUDE.md).
+   - 3 VMs (default: 3 x `k8s.node`, conservative demo sizing)
+   - Access to the existing `DHBWV6` network
+   The exact quota still needs to be measured on the target project before
+   increasing worker count or resource requests.
 2. A wildcard DNS zone (the team needs to confirm; CLAUDE.md open question).
 3. Local tools:
    - Terraform >= 1.7
+   - Ansible with `kubernetes.core` and the `k3s-dhbw-cloud-role`
    - `helmfile` >= 0.165 + `helm` >= 3.14 (`helm plugin install
      https://github.com/databus23/helm-diff` is recommended)
    - `kubectl` >= 1.30
+   - `jq`
    - `openstack` CLI configured via `clouds.yaml` or `source openrc.sh`
 
 ## Bootstrap
+
+### Fast path: DHBW demo setup
+
+For the DHBWCloud demo, use the repo script instead of replaying the Terraform,
+Ansible and Helm steps by hand:
+
+```bash
+./scripts/setup_dhbw_demo.sh
+```
+
+The script is idempotent and does the current demo-safe path end to end:
+
+- sources the OpenStack app credential from `/Users/I749974/DHBW/cloud/app-cred-Julian-openrc.sh` when present
+- applies the Terraform VM plan
+- installs k3s with `infra/ansible/deploy.yaml`
+- installs kube-prometheus-stack, cert-manager, Traefik, KEDA, Gatekeeper and Redpanda
+- patches Redpanda listener bind addresses for the IPv6-only pod network
+- creates the Stream2Pretrain Redpanda topics with replication factor 1
+- installs standalone MinIO demo storage and creates the required buckets
+- creates local demo Secrets in the `stream2pretrain` namespace
+
+To resume only part of the setup while debugging:
+
+```bash
+RUN_TERRAFORM=0 RUN_ANSIBLE=0 ./scripts/setup_dhbw_demo.sh
+RUN_TERRAFORM=0 RUN_ANSIBLE=0 RUN_PLATFORM=0 RUN_STORAGE=1 ./scripts/setup_dhbw_demo.sh
+```
+
+The script does not destroy OpenStack resources and does not deploy the project
+application images yet. The app chart still needs AMD64 images accessible from
+the cluster and the missing Polaris deployment path resolved.
 
 ### 1. Provision VMs
 
 ```bash
 cd infra/terraform
 cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars                    # set external_network + ssh_public_key
+$EDITOR terraform.tfvars                    # adjust image_id/key_pair/flavors if needed
 source ~/dhbwcloud-openrc.sh                # OS_AUTH_URL etc.
 terraform init
 terraform plan
 terraform apply
 ```
 
-`terraform output kubeconfig_fetch_command` prints the exact one-liner that
-copies the `k3s.yaml` from the control node and rewrites the cluster server URL
-from `127.0.0.1:6443` to the control floating IP.
+Terraform writes `infra/terraform/generated-inventory.yml`, shaped like the
+working demo inventory.
 
-### 2. Fetch kubeconfig
+### 2. Install k3s with Ansible
 
 ```bash
-$(terraform output -raw kubeconfig_fetch_command)
-kubectl get nodes      # 3 nodes Ready (one control, two workers)
+cd ../..
+ansible-galaxy install -r infra/ansible/requirements.yml --force
+ansible-playbook \
+  -i infra/terraform/generated-inventory.yml \
+  infra/ansible/deploy.yaml
 ```
 
-The control node pre-stages the kubeconfig in `~ubuntu/.kube/config` for SSH
-debugging. Treat the file as a secret.
+The Ansible role writes `infra/kubeconfig-stream2pretrain.yaml`. Treat it as a
+secret. The repo-specific playbook deliberately does not reuse the demo
+`tasks/k3s-configure.yaml`, because that file contains Gridflex node names and
+an overly broad default-ServiceAccount ClusterRoleBinding.
 
 ### 3. Install platform releases
 
@@ -150,8 +193,8 @@ OpenStack first if you want to keep state.
 
 ## Decisions you must still make (from CLAUDE.md open questions)
 
-- DHBWCloud project quota (vCPU/RAM/disk per VM): if `m1.xlarge` is unavailable,
-  set `worker_flavor` to whatever the team has and revisit the resource
+- DHBWCloud project quota (vCPU/RAM/disk per VM): if `k8s.node` is unavailable,
+  set `control_flavor` / `worker_flavor` to whatever the team has and revisit the resource
   presets in `helmfile-values/*.dev.yaml` and `*.prod.yaml`.
 - DNS zone for the wildcard cert: replace every `stream2pretrain.example.org`
   marker in `infra/dns/cert-manager-issuer.yaml`,

@@ -1,0 +1,4 @@
+---
+- name: k3s-dhbw-cloud-role
+  src: https://github.com/pfisterer/k3s-dhbw-cloud-role.git
+  scm: git

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import io
 import tarfile
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -18,12 +17,14 @@ from ingest.github_release_tarball_fetcher.fetcher import (
     DEFAULT_ALLOWED_LICENSES,
     FetcherConfig,
     ReleaseRef,
+    TarballMetrics,
     code_object_key,
     code_s3_uri,
     parse_release_url,
     process_release,
 )
-from schemas.code import CodeFileRecord
+from processor.common import bronze_loads
+from schemas.bronze import BronzeRecord
 
 
 def _cfg() -> IngestConfig:
@@ -47,11 +48,11 @@ def _cfg() -> IngestConfig:
 
 class _FakeCodeProducer:
     def __init__(self) -> None:
-        self.sent: list[CodeFileRecord] = []
+        self.sent: list[BronzeRecord] = []
         self.headers: list[dict[str, str] | None] = []
 
     async def send(
-        self, record: CodeFileRecord, *, headers: dict[str, str] | None = None
+        self, record: BronzeRecord, *, headers: dict[str, str] | None = None
     ) -> None:
         self.sent.append(record)
         self.headers.append(headers)
@@ -144,7 +145,7 @@ async def test_process_release_emits_records_and_writes_minio() -> None:
     producer = _FakeCodeProducer()
     bucket = TokenBucket(rate=100.0, burst=8)
     fetcher_cfg = FetcherConfig()
-    valid_from = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    valid_from = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
     try:
         emitted = await process_release(
             ref,
@@ -160,15 +161,17 @@ async def test_process_release_emits_records_and_writes_minio() -> None:
         await client.aclose()
 
     assert emitted == 2
-    paths = {r.path for r in producer.sent}
+    paths = {h["github_path"] for h in producer.headers if h is not None}
     assert paths == {"src/foo.py", "README.md"}
     for r in producer.sent:
-        assert r.repo_full_name == "huggingface/transformers"
-        assert r.ref == "v5.0.0"
-        assert r.license == "Apache-2.0"
-        assert r.license_source == "github_api"
-        assert r.valid_from == valid_from
-        assert r.raw_s3_uri.startswith("s3://bronze/code/repo=huggingface__transformers/")
+        assert r.source_feed == "github-release-tarballs"
+        assert r.source_format == "code"
+        assert r.extraction_pipeline == "github-release-tarball-2026-06"
+        assert r.spdx_license == "Apache-2.0"
+        assert r.spdx_license_source == "github_api"
+        assert r.fetched_at == valid_from
+        assert r.raw_html_s3_uri.startswith("s3://bronze/code/repo=huggingface__transformers/")
+        assert bronze_loads(r.model_dump_json().encode("utf-8")).source_format == "code"
     # And one MinIO object per emitted file.
     keys = list(minio.objects.keys())
     assert len(keys) == 2
@@ -277,3 +280,18 @@ def test_release_ref_tarball_url() -> None:
     ref = ReleaseRef("hf", "transformers", "v5.0.0")
     assert ref.tarball_url == "https://api.github.com/repos/hf/transformers/tarball/v5.0.0"
     assert ref.full_name == "hf/transformers"
+
+
+def test_tarball_metrics_render_prometheus() -> None:
+    metrics = TarballMetrics()
+
+    metrics.release_started()
+    body = metrics.render_prometheus().decode("utf-8")
+    assert "s2p_github_releases_seen_total 1" in body
+    assert "s2p_github_releases_unprocessed 1" in body
+
+    metrics.release_finished(emitted=3, failed=False)
+    body = metrics.render_prometheus().decode("utf-8")
+    assert "s2p_github_releases_unprocessed 0" in body
+    assert "s2p_github_releases_processed_total 1" in body
+    assert "s2p_github_code_records_emitted_total 3" in body

@@ -21,7 +21,7 @@ The dataflow is:
 ```
 SourceFeed pollers --> Redpanda --> Bytewax curator --> Iceberg lakehouse
                                        |
-                                       +--> Decon-Gate sidecar --> attestation topic
+                                       +--> Decon-Gate API --> attestation topic
 ```
 
 Every hop is idempotent on `doc_id` (sha256 of the canonical URL), so
@@ -79,7 +79,7 @@ A Python streaming dataflow with the Rust core. The pipeline is wired in
 7. `quality_classifier` - FineWeb-Edu ONNX INT8 inference (CPU).
 8. `kenlm_perplexity` - mmap'd binary KenLM model.
 9. `pii_regex` - email / phone / SSN / credit-card / IP scan.
-10. `decon_gate` - 13-gram Bloom + E5 embedding sketch (also runs as sidecar).
+10. `decon_gate` - 13-gram Bloom + E5 embedding sketch plus signed attestation API.
 11. `validity_interval_enricher` - populates `[valid_from, valid_to)` from
     `http_last_modified`, `schema.org datePublished`, Wayback first-seen,
     license effective date, retraction date. Precedence rule documented in
@@ -100,9 +100,9 @@ handles partitioning, state, and recovery.
 
 ### Serving: DuckDB + Next.js UI
 
-DuckDB runs as a single Pod with the `iceberg` extension loaded, serving the
-UI's queries via a thin HTTP wrapper (`ui/lib/duckdb-client.ts`). The Next.js
-14 App Router app exposes:
+DuckDB runs as a single `s2p-duckdb-api` Pod with the `iceberg` extension loaded,
+serving the UI's `/as-of`, quality histogram, and safe read-only query routes.
+The Next.js 14 App Router app exposes:
 
 - `/dashboard` - live throughput, KEDA replica counts, per-source rates.
 - `/sources` - SourceFeed CRD list with status + tail of `raw.fetched`.

@@ -39,14 +39,8 @@ spec:
               value: production
             - name: PORT
               value: {{ .Values.ui.port | quote }}
-            - name: S2P_REDPANDA_BROKERS
-              value: {{ .Values.redpanda.bootstrapServers | quote }}
-            - name: S2P_ICEBERG_REST_URL
-              value: {{ .Values.iceberg.polarisUrl | quote }}
-            - name: S2P_MINIO_ENDPOINT
-              value: {{ .Values.minio.endpoint | quote }}
-            - name: S2P_DUCKDB_CACHE_SECONDS
-              value: {{ .Values.ui.env.duckdbCacheSeconds | quote }}
+            - name: DECON_GATE_URL
+              value: {{ printf "http://%s-decon-gate.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.processor.deconGate.apiPort | quote }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

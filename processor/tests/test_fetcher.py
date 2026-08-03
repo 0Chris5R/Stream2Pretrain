@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import gzip
-from datetime import datetime, timezone
 from typing import Any
 
-from processor.common import ProcessorConfig
 from processor.fetcher import (
     FetcherState,
     fetch_raw_bytes,
@@ -80,6 +78,25 @@ def test_normalize_returns_silver(bronze_record: BronzeRecord) -> None:
         "license_effective_date",
         "wayback_first_seen",
     }
+
+
+def test_normalize_code_bronze_decodes_plain_text(bronze_record: BronzeRecord) -> None:
+    state = _state(_FakeS3(b""))
+    code_bronze = bronze_record.model_copy(
+        update={
+            "url": "https://github.com/org/repo/blob/v1/src/foo.py",
+            "source_format": "code",
+            "extraction_pipeline": "github-release-tarball-2026-06",
+            "spdx_license": "Apache-2.0",
+            "spdx_license_source": "github_api",
+        }
+    )
+    silver = normalize(state, code_bronze, b"def fit_model(x):\n    return x\n")
+    assert silver is not None
+    assert silver.source_format == "code"
+    assert silver.extraction_pipeline == "github-release-tarball-2026-06"
+    assert silver.spdx_license == "Apache-2.0"
+    assert "def fit_model" in silver.text
 
 
 def test_normalize_returns_none_on_empty_html(bronze_record: BronzeRecord) -> None:

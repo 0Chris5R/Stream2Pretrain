@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterable
+from datetime import UTC, datetime
 
 import httpx
 
@@ -56,8 +57,8 @@ def parse_iso8601(value: str | None) -> datetime | None:
         except Exception:
             return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def first_schema_date(html: str) -> datetime | None:
@@ -120,7 +121,7 @@ class ValidityEnricher:
     def __init__(
         self,
         *,
-        wayback_lookup: "WaybackLookup | None" = None,
+        wayback_lookup: WaybackLookup | None = None,
     ) -> None:
         self._wayback = wayback_lookup
 
@@ -204,8 +205,8 @@ class ValidityEnricher:
 def _ensure_utc(dt: datetime) -> datetime:
     """Force a tz-aware UTC datetime; treat naive as already UTC."""
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 class WaybackLookup:
@@ -244,7 +245,7 @@ class WaybackLookup:
             return None
         ts = snap["timestamp"]  # YYYYMMDDhhmmss
         try:
-            dt = datetime.strptime(ts, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(ts, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
         except Exception:
             dt = None
         self._cache[url] = dt
@@ -252,7 +253,5 @@ class WaybackLookup:
 
     def close(self) -> None:
         """Release the underlying httpx client."""
-        try:
+        with suppress(Exception):
             self._client.close()
-        except Exception:
-            pass

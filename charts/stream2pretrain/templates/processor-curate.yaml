@@ -1,5 +1,7 @@
 {{- $component := "processor-curate" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
+{{- $signingMount := "/var/run/secrets/stream2pretrain/decon-signing" }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -84,13 +86,14 @@ spec:
               value: {{ .Values.processor.curate.minHashRowsPerBand | quote }}
             - name: S2P_CONSUMER_GROUP
               value: s2p-curate
-            {{- if .Values.processor.deconGate.signingKeySecret }}
             - name: S2P_DECON_SIGNING_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.processor.deconGate.signingKeySecret | quote }}
-                  key: {{ .Values.processor.deconGate.signingKeyKey | quote }}
-            {{- end }}
+              value: {{ printf "%s/%s" $signingMount .Values.processor.deconGate.signingKeyKey | quote }}
+            - name: S2P_DECON_SIGNING_CERT
+              value: {{ printf "%s/%s" $signingMount .Values.processor.deconGate.signingCertKey | quote }}
+            - name: S2P_BENCH_CORPUS_PATH
+              value: {{ printf "%s/%s" $bench.mountPath $bench.fileName | quote }}
+            - name: S2P_BENCH_SET_VERSION
+              value: {{ .Values.processor.deconGate.benchmarkSetVersion | quote }}
             - name: S2P_DECON_BLOOM_BITS
               value: {{ .Values.processor.deconGate.bloomBits | quote }}
             - name: S2P_DECON_BLOOM_HASHES
@@ -113,19 +116,29 @@ spec:
             - name: models
               mountPath: /models
               readOnly: true
-        # Decon-Gate runs in-process inside the curate container (see
-        # processor/curate.py::build_state -> DeconGate(...)). The earlier
-        # `decon-gate` sidecar shape from RESEARCH.md called for a separate
-        # FastAPI server; that server is not implemented today, and shipping
-        # the container with --listen flags it does not understand would
-        # crash the Pod on startup. The signing-key secret is consumed
-        # directly by the curate container via S2P_DECON_SIGNING_KEY above.
+            - name: decon-signing
+              mountPath: {{ $signingMount | quote }}
+              readOnly: true
+            - name: decon-benchmarks
+              mountPath: {{ $bench.mountPath | quote }}
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
         - name: models
           emptyDir:
             sizeLimit: {{ printf "%dMi" (int .Values.processor.curate.modelBundle.sizeMi) | quote }}
+        - name: decon-signing
+          secret:
+            secretName: {{ .Values.processor.deconGate.signingKeySecret | quote }}
+        - name: decon-benchmarks
+          {{- if $bench.secret }}
+          secret:
+            secretName: {{ $bench.secret | quote }}
+          {{- else }}
+          configMap:
+            name: {{ $bench.configMap | quote }}
+          {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: checkpoint

@@ -35,7 +35,7 @@ import json
 import re
 import secrets
 from collections.abc import AsyncIterator, Callable, Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,15 +91,15 @@ class FetchOutcome:
     """Compact result from :func:`fetch_one`. Tagged-union via attributes."""
 
     __slots__ = (
-        "status",
-        "url",
-        "html",
+        "etag",
         "extracted",
         "extraction_pipeline",
         "fallback_used",
         "fetched_at",
-        "etag",
+        "html",
         "last_modified",
+        "status",
+        "url",
     )
 
     def __init__(
@@ -138,7 +138,7 @@ def _parse_last_modified(value: str | None) -> datetime | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -159,7 +159,7 @@ async def fetch_one(
     await bucket.acquire()
     if min_sleep_s > 0:
         await asyncio.sleep(min_sleep_s)
-    fetched_at = datetime.now(tz=timezone.utc)
+    fetched_at = datetime.now(tz=UTC)
     resp = await client.get(primary_url)
 
     if resp.status_code == 200 and resp.content:
@@ -196,7 +196,7 @@ async def fetch_one(
     await bucket.acquire()
     if min_sleep_s > 0:
         await asyncio.sleep(min_sleep_s)
-    fb_fetched_at = datetime.now(tz=timezone.utc)
+    fb_fetched_at = datetime.now(tz=UTC)
     fb_resp = await client.get(fallback_url)
 
     if fb_resp.status_code == 200 and fb_resp.content:
@@ -604,7 +604,7 @@ async def _async_main(args: argparse.Namespace) -> int:
         if consumer is not None and emitted > 0:
             try:
                 await consumer.commit()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("arxiv_html.commit_failed", err=str(exc))
         return emitted
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from processor.decon_gate import DeconGate, shingle_ngrams
 from processor.sign import AttestationSigner, verify_signature
@@ -22,7 +22,7 @@ def _gold(text: str, doc_id_suffix: str = "0") -> GoldRecord:
         risk_tier=1,
         pii_flags=[],
         contaminated_with=[],
-        valid_from=datetime(2026, 6, 15, tzinfo=timezone.utc),
+        valid_from=datetime(2026, 6, 15, tzinfo=UTC),
         valid_to=None,
         reject_reasons=[],
         scoring_version="v0.1.0",
@@ -63,7 +63,7 @@ def test_attestation_is_signed_and_verifiable() -> None:
     signer = AttestationSigner()
     gate = DeconGate(benchmark_set_version="v-test", signer=signer)
     gate.scan(_gold("clean prose without any benchmark overlap"))
-    att = gate.flush_attestation(snapshot_id=42, committed_at=datetime(2026, 6, 15, tzinfo=timezone.utc))
+    att = gate.flush_attestation(snapshot_id=42, committed_at=datetime(2026, 6, 15, tzinfo=UTC))
     assert att.snapshot_id == 42
     # Reconstruct canonical payload and verify the embedded signature.
     import json

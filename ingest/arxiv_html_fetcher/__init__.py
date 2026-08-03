@@ -12,4 +12,4 @@ Deployment ENTRYPOINT).
 
 from __future__ import annotations
 
-__all__ = ["fetcher", "extractor"]
+__all__ = ["extractor", "fetcher"]

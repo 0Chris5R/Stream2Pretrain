@@ -19,7 +19,8 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
-from datetime import datetime, timezone
+from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -29,8 +30,10 @@ from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
 from ingest.common.kafka_producer import BronzeProducer
 from ingest.common.logging import configure_logging, get_logger
+from ingest.common.metrics import INGEST_METRICS
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
+from ingest.common.probes import start_probe_server
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 from ingest.common.state import FeedStateStore
 from ingest.github_events.repo_filter import is_relevant_repo
@@ -67,10 +70,9 @@ def _event_url(evt: dict[str, Any]) -> str | None:
         if ok and isinstance(cur, str):
             return cur
     repo = evt.get("repo") or {}
-    if isinstance(repo, dict):
-        if isinstance(repo.get("url"), str):
-            api = repo["url"]
-            return api.replace("https://api.github.com/repos/", "https://github.com/")
+    if isinstance(repo, dict) and isinstance(repo.get("url"), str):
+        api = repo["url"]
+        return api.replace("https://api.github.com/repos/", "https://github.com/")
     return None
 
 
@@ -99,7 +101,7 @@ async def _process_events(
         if doc_id in seen:
             continue
         seen.add(doc_id)
-        fetched_at = datetime.now(tz=timezone.utc)
+        fetched_at = datetime.now(tz=UTC)
         body = json.dumps(evt, sort_keys=True).encode("utf-8")
         key = bronze_object_key(
             source_feed=SOURCE_FEED,
@@ -177,10 +179,8 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
+        with suppress(NotImplementedError):
             loop.add_signal_handler(sig, _trigger_stop)
-        except NotImplementedError:
-            pass  # Windows or restricted env.
 
     iteration = 0
     total_emitted = 0
@@ -200,13 +200,16 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
                 resp = await client.get(GITHUB_EVENTS_URL, headers=req_headers)
             except httpx.HTTPError as exc:
                 log.warning("github_events.transport_error", err=str(exc))
+                INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="error")
                 await _sleep_or_stop(stop, DEFAULT_POLL_INTERVAL)
                 continue
 
             poll_interval = float(resp.headers.get("x-poll-interval", DEFAULT_POLL_INTERVAL))
             if resp.status_code == 304:
                 log.debug("github_events.not_modified")
+                INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="not_modified")
             elif resp.status_code == 200:
+                INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="success")
                 last_etag = resp.headers.get("etag", last_etag)
                 try:
                     events = resp.json()
@@ -235,10 +238,12 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
                     status=resp.status_code,
                     retry_after=retry_after,
                 )
+                INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="rate_limited")
                 await _sleep_or_stop(stop, retry_after)
                 continue
             else:
                 log.warning("github_events.unexpected_status", status=resp.status_code)
+                INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="error")
 
             # Persist truncated seen-set so memory stays bounded across restarts.
             if len(seen) > 5000:
@@ -258,10 +263,8 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
 
 
 async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
-    try:
+    with suppress(TimeoutError):
         await asyncio.wait_for(stop.wait(), timeout=max(0.1, seconds))
-    except asyncio.TimeoutError:
-        pass
 
 
 def main() -> None:
@@ -269,6 +272,7 @@ def main() -> None:
     configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     init_tracer("ingest.github_events", cfg)
     log.info("github_events.start")
+    start_probe_server()
     total = asyncio.run(run_loop(cfg))
     log.info("github_events.exit", total_emitted=total)
 

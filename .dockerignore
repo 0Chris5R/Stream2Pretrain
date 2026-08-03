@@ -42,12 +42,10 @@ out
 lecture_slides
 docs
 RESEARCH.md
-README.md
 CLAUDE.md
 SOURCES.md
 
 # Test fixtures and notebooks
-tests
 *.ipynb
 
 # Helm / Terraform state (built separately)

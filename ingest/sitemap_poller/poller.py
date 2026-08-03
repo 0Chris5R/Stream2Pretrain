@@ -16,8 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-import io
-from typing import Any
+from contextlib import suppress
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -82,11 +81,8 @@ async def fetch_sitemap(client: httpx.AsyncClient, url: str) -> str | None:
         return None
     payload = resp.content
     if url.endswith(".gz") or resp.headers.get("content-type", "").endswith("gzip"):
-        try:
+        with suppress(OSError):
             payload = gzip.decompress(payload)
-        except OSError:
-            # Some servers already decompress on the wire when ce=gzip is set.
-            pass
     try:
         return payload.decode("utf-8")
     except UnicodeDecodeError:
@@ -187,7 +183,7 @@ async def run_pass(cfg: IngestConfig, feeds: list[SourceFeedSpec]) -> int:
                     bucket=cfg.minio_bronze_bucket,
                     state_store=state_store,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception("sitemap.feed_error", feed=feed.name, err=str(exc))
     return total
 

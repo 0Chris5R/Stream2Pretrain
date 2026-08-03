@@ -44,7 +44,6 @@ spec:
           properties:
             spec:
               type: object
-              additionalProperties: false
               required: [name, branch, sources]
               properties:
                 name:
@@ -61,7 +60,6 @@ spec:
                   minItems: 1
                   items:
                     type: object
-                    additionalProperties: false
                     required: [sourceFeed, weight]
                     properties:
                       sourceFeed:

@@ -12,6 +12,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
+
+def _to_lower_camel(name: str) -> str:
+    head, *tail = name.split("_")
+    return head + "".join(part.capitalize() for part in tail)
+
 FeedProtocol = Literal[
     "rss",
     "atom",
@@ -36,7 +41,7 @@ LicenseDefault = Literal[
 class RateLimitSpec(BaseModel):
     """Politeness limits for a single SourceFeed."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
 
     requests_per_second: float = Field(..., gt=0.0)
     burst: int = Field(..., gt=0)
@@ -49,7 +54,7 @@ class RateLimitSpec(BaseModel):
 class AuthSpec(BaseModel):
     """Reference to a Secret holding the auth token."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
 
     type: Literal["none", "bearer", "header", "basic"] = "none"
     secret_name: str | None = None
@@ -60,7 +65,7 @@ class AuthSpec(BaseModel):
 class SourceFeedSpec(BaseModel):
     """Spec of a single SourceFeed CRD instance."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
 
     name: str = Field(..., min_length=1, max_length=63)
     protocol: FeedProtocol
@@ -82,7 +87,7 @@ class SourceFeedSpec(BaseModel):
     accept_content_types: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _check_auth_consistency(self) -> "SourceFeedSpec":
+    def _check_auth_consistency(self) -> SourceFeedSpec:
         if self.auth.type == "none":
             return self
         if not self.auth.secret_name or not self.auth.secret_key:
@@ -95,7 +100,7 @@ class SourceFeedSpec(BaseModel):
 class MixtureSourceWeight(BaseModel):
     """A single source's weight within a mixture."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
 
     source_feed: str = Field(..., min_length=1, max_length=63)
     weight: float = Field(..., gt=0.0, le=1.0)
@@ -109,7 +114,7 @@ class MixtureRecipeSpec(BaseModel):
     proxy LM is trained on each branch in rolling windows.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
 
     name: str = Field(..., min_length=1, max_length=63)
     branch: str = Field(
@@ -133,7 +138,7 @@ class MixtureRecipeSpec(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _check_weights_sum(self) -> "MixtureRecipeSpec":
+    def _check_weights_sum(self) -> MixtureRecipeSpec:
         total = sum(s.weight for s in self.sources)
         # Allow small floating point slack but reject obvious misconfigurations.
         if not (0.999 <= total <= 1.001):

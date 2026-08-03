@@ -127,38 +127,54 @@ Render the env block shared by every Stream2Pretrain pod (Redpanda + MinIO +
 Iceberg + observability).
 */}}
 {{- define "stream2pretrain.commonEnv" -}}
-- name: S2P_REDPANDA_BROKERS
+- name: S2P_ENV
+  value: {{ .Values.profile | quote }}
+- name: LOG_LEVEL
+  value: "INFO"
+- name: REDPANDA_BROKERS
   value: {{ .Values.redpanda.bootstrapServers | quote }}
-- name: S2P_REDPANDA_SCHEMA_REGISTRY
+- name: REDPANDA_SCHEMA_REGISTRY
   value: {{ .Values.redpanda.schemaRegistry | quote }}
-- name: S2P_TOPIC_RAW
+- name: S2P_RAW_TOPIC
   value: {{ .Values.redpanda.topics.rawFetched | quote }}
-- name: S2P_TOPIC_NORMALIZED
+- name: S2P_NORMALIZED_TOPIC
   value: {{ .Values.redpanda.topics.docsNormalized | quote }}
-- name: S2P_TOPIC_CURATED
+- name: S2P_CURATED_TOPIC
   value: {{ .Values.redpanda.topics.docsCurated | quote }}
-- name: S2P_TOPIC_DECON
+- name: S2P_DECON_TOPIC
   value: {{ .Values.redpanda.topics.deconAttest | quote }}
-- name: S2P_MINIO_ENDPOINT
+- name: MINIO_ENDPOINT
   value: {{ .Values.minio.endpoint | quote }}
-- name: S2P_MINIO_REGION
+- name: AWS_DEFAULT_REGION
   value: {{ .Values.minio.region | quote }}
-- name: S2P_MINIO_BUCKET_BRONZE
+- name: MINIO_BRONZE_BUCKET
   value: {{ .Values.minio.buckets.bronze | quote }}
-- name: S2P_MINIO_BUCKET_SILVER
+- name: MINIO_SILVER_BUCKET
   value: {{ .Values.minio.buckets.silver | quote }}
-- name: S2P_MINIO_BUCKET_GOLD
+- name: MINIO_GOLD_BUCKET
   value: {{ .Values.minio.buckets.gold | quote }}
-- name: S2P_MINIO_BUCKET_DECON
+- name: MINIO_DECON_BUCKET
   value: {{ .Values.minio.buckets.decon | quote }}
-- name: S2P_ICEBERG_CATALOG
+- name: ICEBERG_CATALOG
   value: {{ .Values.iceberg.catalog | quote }}
-- name: S2P_ICEBERG_NAMESPACE
+- name: ICEBERG_NAMESPACE
   value: {{ .Values.iceberg.namespace | quote }}
-- name: S2P_ICEBERG_REST_URL
+- name: S2P_ICEBERG_GOLD_TABLE
+  value: {{ .Values.iceberg.goldTable | quote }}
+- name: POLARIS_URI
   value: {{ .Values.iceberg.polarisUrl | quote }}
-- name: S2P_ICEBERG_WAREHOUSE
+- name: POLARIS_WAREHOUSE
   value: {{ .Values.iceberg.warehouse | quote }}
+- name: POLARIS_CREDENTIAL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.iceberg.credentialSecret | quote }}
+      key: {{ .Values.iceberg.credentialKey | quote }}
+- name: POLARIS_SCOPE
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.iceberg.credentialSecret | quote }}
+      key: {{ .Values.iceberg.scopeKey | quote }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ .Values.observability.tracing.otlpEndpoint | quote }}
 - name: OTEL_TRACES_SAMPLER
@@ -171,6 +187,16 @@ Iceberg + observability).
       name: {{ .Values.minio.credentialsSecret | quote }}
       key: accessKey
 - name: AWS_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.minio.credentialsSecret | quote }}
+      key: secretKey
+- name: MINIO_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.minio.credentialsSecret | quote }}
+      key: accessKey
+- name: MINIO_SECRET_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Values.minio.credentialsSecret | quote }}

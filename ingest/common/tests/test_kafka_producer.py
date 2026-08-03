@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -19,7 +19,7 @@ def _record() -> BronzeRecord:
     return BronzeRecord(
         doc_id="sha256:" + "a" * 64,
         url="https://example.com/abs/123",  # type: ignore[arg-type]
-        fetched_at=datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
         http_status=200,
         content_type="text/html",
         raw_html_s3_uri="s3://bronze/year=2026/month=06/day=15/source=t/abc.html.gz",

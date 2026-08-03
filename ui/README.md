@@ -54,7 +54,7 @@ The `dev` server expects two backends to be reachable:
 | `PROMETHEUS_URL` | `http://kube-prometheus-stack-prometheus.monitoring.svc:9090` | base URL for the SSE throughput stream |
 | `THROUGHPUT_TICK_MS` | `5000` | min `1000`; cadence of SSE frames |
 | `THROUGHPUT_RANGE` | `1m` | PromQL range selector for `rate()` |
-| `DECON_GATE_URL` | `http://decon-gate.stream2pretrain.svc:8081` | source for attestation payloads |
+| `DECON_GATE_URL` | `http://stream2pretrain-decon-gate.stream2pretrain.svc:8081` | source for attestation payloads |
 | `COSIGN_BIN` | `cosign` | absolute path to cosign binary in container |
 | `DUCKDB_MODE` | unset | set to `proxy` to forward queries to in-cluster DuckDB-server |
 
@@ -72,7 +72,7 @@ the implemented routes are:
 
 The other routes referenced by pages (`/api/dashboard`, `/api/sources`,
 `/api/decon`, `/api/as-of`, `/api/mixture/compare`) are served by the cluster
-control plane (FastAPI + Kubernetes API) reachable through Traefik. Wiring
+control plane (SourceFeed REST API + Kubernetes API) reachable through Traefik. Wiring
 them through Next.js is intentionally deferred so we do not duplicate
 authentication/authorisation logic in two places.
 
@@ -132,7 +132,7 @@ ui/
 docker build -t stream2pretrain/ui:dev ui/
 docker run --rm -p 3000:3000 \
   -e PROMETHEUS_URL=http://prom:9090 \
-  -e DECON_GATE_URL=http://decon-gate:8081 \
+  -e DECON_GATE_URL=http://stream2pretrain-decon-gate:8081 \
   stream2pretrain/ui:dev
 ```
 

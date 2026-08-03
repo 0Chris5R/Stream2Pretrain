@@ -19,11 +19,9 @@ from dataclasses import dataclass
 # Common English stopwords - list deliberately short so the rule is cheap.
 # Source: DeepMind Gopher paper appendix table.
 _STOPWORDS: frozenset[str] = frozenset(
-    "the be to of and a in that have I it for not on with he as you do at this "
-    "but his by from they we say her she or an will my one all would there their "
-    "what so up out if about who get which go me".split()
+    ["the", "be", "to", "of", "and", "a", "in", "that", "have", "I", "it", "for", "not", "on", "with", "he", "as", "you", "do", "at", "this", "but", "his", "by", "from", "they", "we", "say", "her", "she", "or", "an", "will", "my", "one", "all", "would", "there", "their", "what", "so", "up", "out", "if", "about", "who", "get", "which", "go", "me"]
 )
-_BULLET_PREFIXES: tuple[str, ...] = ("•", "*", "-", "●", "▪", "‣", "⁃")
+_BULLET_PREFIXES: tuple[str, ...] = ("\u2022", "*", "-", "\u25cf", "\u25aa", "\u2023", "\u2043")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +117,4 @@ class GopherFilter:
             return False
         if s.bullet_line_ratio > self.max_bullet_line_ratio:
             return False
-        if s.ellipsis_line_ratio > self.max_ellipsis_line_ratio:
-            return False
-        return True
+        return s.ellipsis_line_ratio <= self.max_ellipsis_line_ratio

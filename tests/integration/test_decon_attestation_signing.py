@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 
@@ -63,9 +63,7 @@ def test_canonical_json_is_stable_across_key_orders() -> None:
 
 def test_attestation_signature_roundtrip() -> None:
     """Sign with Ed25519, verify, and confirm tampering breaks verification."""
-    cryptography = pytest.importorskip(
-        "cryptography", reason="cryptography not installed"
-    )
+    pytest.importorskip("cryptography", reason="cryptography not installed")
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import ed25519
 

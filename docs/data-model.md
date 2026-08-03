@@ -113,8 +113,11 @@ Gold partitioning: `PARTITION BY lang, risk_tier, month(valid_from)`. The
 | 2 | caution | heuristic uncertainty: missing licence, partial PII match, ambiguous date |
 | 3 | drop | hard fail: explicit dirty signal, dropped before mixture |
 
-Tier 3 rows still land in `gold` with `reject_reasons` populated; the
-mixture controller filters them out at read time so the lineage survives.
+Only tier 1 rows with empty `reject_reasons`, empty `pii_flags`, and no
+`contaminated_with` marks are published to `docs.curated` and committed to
+`gold`. Tier 2 and tier 3 records are dropped by the curation dataflow before
+the training table boundary; rejected-row observability is tracked separately
+from the Gold table contract.
 
 ## Decon attestations
 
@@ -150,7 +153,8 @@ Attestation table partitioning: `PARTITION BY month(committed_at)`.
 DuckDB views:
 
 - `gold_as_of(ts)` -> rows where `valid_from <= ts AND (valid_to IS NULL OR valid_to > ts)`.
-- `gold_clean` -> `WHERE risk_tier = 1 AND cardinality(pii_flags) = 0`.
-- `gold_uncontaminated` -> `WHERE cardinality(contaminated_with) = 0`.
+- `gold_clean` -> defensive alias for the Gold table contract:
+  `WHERE risk_tier = 1 AND cardinality(pii_flags) = 0 AND cardinality(reject_reasons) = 0`.
+- `gold_uncontaminated` -> defensive alias for `WHERE cardinality(contaminated_with) = 0`.
 
 The exact SQL lives in `ui/lib/duckdb-client.ts`.

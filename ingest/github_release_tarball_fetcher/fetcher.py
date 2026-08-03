@@ -14,7 +14,7 @@ A long-running consumer that:
    stream-extraction.
 4. For each extracted file, writes the raw bytes to MinIO under
    ``s3://<bronze-bucket>/code/repo=<owner>__<repo>/ref=<tag>/<path>`` and
-   emits one :class:`schemas.code.CodeFileRecord`.
+   emits one :class:`schemas.bronze.BronzeRecord` with ``source_format="code"``.
 
 Rate budget
 -----------
@@ -30,9 +30,10 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -44,6 +45,7 @@ from ingest.common.http_client import build_async_client, build_headers
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
+from ingest.common.probes import start_probe_server
 from ingest.common.rate_limit import TokenBucket
 from ingest.github_release_tarball_fetcher.extractor import (
     DEFAULT_ALLOWED_EXTENSIONS,
@@ -51,7 +53,7 @@ from ingest.github_release_tarball_fetcher.extractor import (
     ExtractedFile,
     iter_tarball_files,
 )
-from schemas.code import CodeFileRecord
+from schemas.bronze import BronzeRecord
 
 if TYPE_CHECKING:
     from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
@@ -110,6 +112,56 @@ class FetcherConfig:
     request_rate_per_second: float = 1.0
     request_burst: int = 4
     consumer_group: str = "s2p-github-tarball-fetcher"
+
+
+class TarballMetrics:
+    """Prometheus text metrics for the GitHub release tarball worker."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seen = 0
+        self._inflight = 0
+        self._processed = 0
+        self._failed = 0
+        self._emitted = 0
+
+    def release_started(self) -> None:
+        with self._lock:
+            self._seen += 1
+            self._inflight += 1
+
+    def release_finished(self, *, emitted: int, failed: bool) -> None:
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+            if failed:
+                self._failed += 1
+            else:
+                self._processed += 1
+                self._emitted += emitted
+
+    def render_prometheus(self) -> bytes:
+        with self._lock:
+            lines = [
+                "# HELP s2p_process_up Process-level liveness.",
+                "# TYPE s2p_process_up gauge",
+                "s2p_process_up 1",
+                "# HELP s2p_github_releases_seen_total GitHub release records accepted by the tarball fetcher.",
+                "# TYPE s2p_github_releases_seen_total counter",
+                f"s2p_github_releases_seen_total {self._seen}",
+                "# HELP s2p_github_releases_unprocessed GitHub release records currently being processed by this worker.",
+                "# TYPE s2p_github_releases_unprocessed gauge",
+                f"s2p_github_releases_unprocessed {self._inflight}",
+                "# HELP s2p_github_releases_processed_total GitHub release records completed successfully by the tarball fetcher.",
+                "# TYPE s2p_github_releases_processed_total counter",
+                f"s2p_github_releases_processed_total {self._processed}",
+                "# HELP s2p_github_releases_failed_total GitHub release records that failed tarball processing.",
+                "# TYPE s2p_github_releases_failed_total counter",
+                f"s2p_github_releases_failed_total {self._failed}",
+                "# HELP s2p_github_code_records_emitted_total Code BronzeRecords emitted by GitHub tarball fetcher.",
+                "# TYPE s2p_github_code_records_emitted_total counter",
+                f"s2p_github_code_records_emitted_total {self._emitted}",
+            ]
+        return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def parse_release_url(url: str) -> ReleaseRef | None:
@@ -211,11 +263,11 @@ async def process_release(
     fetcher_cfg: FetcherConfig,
     client: httpx.AsyncClient,
     minio: MinioWriter,
-    producer: "BronzeProducerProtocol",
+    producer: BronzeProducerProtocol,
     bucket: TokenBucket,
     valid_from: datetime | None = None,
 ) -> int:
-    """Fetch the tarball for ``ref`` and emit one CodeFileRecord per file.
+    """Fetch the tarball for ``ref`` and emit one code BronzeRecord per file.
 
     Returns the number of records emitted. The ``valid_from`` argument
     populates the per-document validity interval; it should be the release
@@ -238,7 +290,7 @@ async def process_release(
     if tar_bytes is None:
         return 0
 
-    valid_from = valid_from or datetime.now(tz=timezone.utc)
+    valid_from = valid_from or datetime.now(tz=UTC)
 
     emitted = 0
     for extracted in iter_tarball_files(
@@ -256,7 +308,7 @@ async def process_release(
                 producer=producer,
                 valid_from=valid_from,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception(
                 "tarball.emit_failed",
                 repo=ref.full_name,
@@ -284,7 +336,7 @@ async def _emit_one_file(
     spdx: str,
     cfg: IngestConfig,
     minio: MinioWriter,
-    producer: "BronzeProducerProtocol",
+    producer: BronzeProducerProtocol,
     valid_from: datetime,
 ) -> None:
     file_url = (
@@ -306,27 +358,38 @@ async def _emit_one_file(
             "language": extracted.language,
         },
     )
-    record = CodeFileRecord(
+    record = BronzeRecord(
         doc_id=doc_id,
-        repo_full_name=ref.full_name,
-        ref=ref.tag,
-        path=extracted.path,
-        language=extracted.language,
-        sloc=extracted.sloc,
-        license=spdx,
-        license_source="github_api",
-        raw_s3_uri=code_s3_uri(
+        url=file_url,
+        fetched_at=valid_from,
+        http_status=200,
+        http_last_modified=None,
+        content_type="text/plain",
+        raw_html_s3_uri=code_s3_uri(
             bucket=cfg.minio_bronze_bucket,
             owner=ref.owner,
             repo=ref.repo,
             ref=ref.tag,
             path=extracted.path,
         ),
-        valid_from=valid_from,
-        valid_to=None,
+        source_feed=SOURCE_FEED,
         trace_id=_trace_id(),
+        bytes_size=len(extracted.data),
+        source_format="code",
+        extraction_pipeline="github-release-tarball-2026-06",
+        spdx_license=spdx,
+        spdx_license_source="github_api",
     )
-    await producer.send(record, headers={"github_repo": ref.full_name})
+    await producer.send(
+        record,
+        headers={
+            "github_repo": ref.full_name,
+            "github_ref": ref.tag,
+            "github_path": extracted.path,
+            "language": extracted.language,
+            "sloc": str(extracted.sloc),
+        },
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -337,21 +400,17 @@ async def _emit_one_file(
 class BronzeProducerProtocol:
     """Structural type accepted by :func:`process_release`.
 
-    Tests substitute a fake; production wires :class:`CodeRecordProducer`.
+    Tests substitute a fake; production wires :class:`BronzeRecordProducer`.
     """
 
     async def send(
-        self, record: CodeFileRecord, *, headers: dict[str, str] | None = None
+        self, record: BronzeRecord, *, headers: dict[str, str] | None = None
     ) -> None:  # pragma: no cover - protocol
         raise NotImplementedError
 
 
-class CodeRecordProducer:
-    """aiokafka producer that emits :class:`CodeFileRecord` to ``raw.fetched``.
-
-    The CodeFileRecord wire schema header is ``CodeFileRecord/v1``; downstream
-    operators dispatch on this header alongside the BronzeRecord header.
-    """
+class BronzeRecordProducer:
+    """aiokafka producer that emits code :class:`BronzeRecord` rows."""
 
     def __init__(
         self,
@@ -359,7 +418,7 @@ class CodeRecordProducer:
         topic: str = "raw.fetched",
         *,
         client_id: str = "s2p-gh-tarball",
-        producer: "AIOKafkaProducer | None" = None,
+        producer: AIOKafkaProducer | None = None,
     ) -> None:
         self._bootstrap = bootstrap_servers
         self._topic = topic
@@ -367,7 +426,7 @@ class CodeRecordProducer:
         self._producer = producer
         self._owns_producer = producer is None
 
-    async def __aenter__(self) -> "CodeRecordProducer":
+    async def __aenter__(self) -> BronzeRecordProducer:
         await self.start()
         return self
 
@@ -399,16 +458,16 @@ class CodeRecordProducer:
             self._producer = None
 
     async def send(
-        self, record: CodeFileRecord, *, headers: dict[str, str] | None = None
+        self, record: BronzeRecord, *, headers: dict[str, str] | None = None
     ) -> None:
         if self._producer is None:
-            raise RuntimeError("CodeRecordProducer.send called before start()")
+            raise RuntimeError("BronzeRecordProducer.send called before start()")
         payload = record.model_dump_json(by_alias=True).encode("utf-8")
         key = record.doc_id.encode("utf-8")
         kafka_headers: list[tuple[str, bytes]] = [
             ("trace_id", record.trace_id.encode("ascii")),
             ("source_feed", SOURCE_FEED.encode("utf-8")),
-            ("schema", b"CodeFileRecord/v1"),
+            ("schema", b"BronzeRecord/v1"),
         ]
         if headers:
             for k, v in headers.items():
@@ -450,18 +509,19 @@ async def _consume_loop(
     cfg: IngestConfig,
     fetcher_cfg: FetcherConfig,
     *,
-    consumer: "AIOKafkaConsumer",
+    consumer: AIOKafkaConsumer,
     client: httpx.AsyncClient,
     producer: BronzeProducerProtocol,
     minio: MinioWriter,
     bucket: TokenBucket,
     stop_event: asyncio.Event,
+    metrics: TarballMetrics | None = None,
 ) -> int:
     """Inner consume-loop, broken out for tests to drive deterministically.
 
     Auto-commit is OFF on the consumer (see :func:`run`); we commit only
     after :func:`process_release` has finished landing the tarball + every
-    extracted CodeFileRecord. A pod kill or KEDA scale-down mid-tarball
+    extracted code BronzeRecord. A pod kill or KEDA scale-down mid-tarball
     therefore replays the entire release on the next worker rather than
     silently dropping it. Filtered messages (non-upstream source_feed,
     bad JSON, non-release URLs) are committed too, since their advancement
@@ -476,7 +536,7 @@ async def _consume_loop(
             return
         try:
             await consumer.commit()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("tarball.commit_failed", err=str(exc))
 
     total = 0
@@ -503,8 +563,11 @@ async def _consume_loop(
             continue
         valid_from = _published_at_from_payload(payload)
         succeeded = False
+        emitted = 0
+        if metrics is not None:
+            metrics.release_started()
         try:
-            total += await process_release(
+            emitted = await process_release(
                 ref,
                 cfg=cfg,
                 fetcher_cfg=fetcher_cfg,
@@ -514,16 +577,20 @@ async def _consume_loop(
                 bucket=bucket,
                 valid_from=valid_from,
             )
+            total += emitted
             succeeded = True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception(
                 "tarball.release_error",
                 repo=ref.full_name,
                 tag=ref.tag,
                 err=str(exc),
             )
+        finally:
+            if metrics is not None:
+                metrics.release_finished(emitted=emitted, failed=not succeeded)
         # Only commit once the release was fully processed (tarball
-        # downloaded, all CodeFileRecords emitted). On exception we leave
+        # downloaded, all code BronzeRecords emitted). On exception we leave
         # the offset uncommitted so the next worker will replay the
         # release. process_release is idempotent at the doc_id level so a
         # rare double-fetch is harmless.
@@ -532,7 +599,12 @@ async def _consume_loop(
     return total
 
 
-async def run(cfg: IngestConfig, fetcher_cfg: FetcherConfig) -> int:
+async def run(
+    cfg: IngestConfig,
+    fetcher_cfg: FetcherConfig,
+    *,
+    metrics: TarballMetrics | None = None,
+) -> int:
     """Wire production dependencies and drive :func:`_consume_loop` to exit."""
     from aiokafka import AIOKafkaConsumer
 
@@ -557,12 +629,13 @@ async def run(cfg: IngestConfig, fetcher_cfg: FetcherConfig) -> int:
     bucket = TokenBucket(
         rate=fetcher_cfg.request_rate_per_second, burst=fetcher_cfg.request_burst
     )
+    metrics = metrics or TarballMetrics()
     stop_event = asyncio.Event()
     await consumer.start()
     try:
         async with build_async_client(
             cfg, headers=headers
-        ) as client, CodeRecordProducer(
+        ) as client, BronzeRecordProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic
         ) as producer, MinioWriter(
             cfg.minio_endpoint,
@@ -579,6 +652,7 @@ async def run(cfg: IngestConfig, fetcher_cfg: FetcherConfig) -> int:
                 minio=minio,
                 bucket=bucket,
                 stop_event=stop_event,
+                metrics=metrics,
             )
     finally:
         await consumer.stop()
@@ -646,7 +720,9 @@ def main() -> None:
         max_file_size_bytes=fetcher_cfg.max_file_size_bytes,
         rate=fetcher_cfg.request_rate_per_second,
     )
-    total = asyncio.run(run(cfg, fetcher_cfg))
+    metrics = TarballMetrics()
+    start_probe_server(metrics_provider=metrics.render_prometheus)
+    total = asyncio.run(run(cfg, fetcher_cfg, metrics=metrics))
     log.info("tarball.done", emitted=total)
 
 

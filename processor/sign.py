@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
@@ -102,6 +103,8 @@ class AttestationSigner:
     def _load_or_create_key(self) -> Ed25519PrivateKey:
         if self._key_path and self._key_path.is_file():
             data = self._key_path.read_bytes()
+            if len(data) == 32:
+                return Ed25519PrivateKey.from_private_bytes(data)
             key = load_pem_private_key(data, password=None)
             if not isinstance(key, Ed25519PrivateKey):
                 raise TypeError(f"Expected Ed25519PrivateKey at {self._key_path}, got {type(key)}")
@@ -113,7 +116,7 @@ class AttestationSigner:
             return self._cert_path.read_text()
         # Build a self-signed X.509 wrapper around the public key so verifiers
         # can pin "this is the Stream2Pretrain Decon-Gate signing identity".
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         public_key = self._private.public_key()
         subject = issuer = Name(
@@ -122,7 +125,7 @@ class AttestationSigner:
                 NameAttribute(NameOID.COMMON_NAME, "decon-gate"),
             ]
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cert = (
             CertificateBuilder()
             .subject_name(subject)
@@ -195,15 +198,20 @@ def verify_signature(payload: bytes, signature_b64: str, cert_pem: str) -> bool:
         from cryptography import x509
 
         cert = x509.load_pem_x509_certificate(cert_pem.encode("ascii"))
-        public_key = cert.public_key()
-        if not isinstance(public_key, Ed25519PublicKey):
+        cert_public_key = cert.public_key()
+        if isinstance(cert_public_key, Ed25519PublicKey):
+            public_key = cert_public_key
+        else:
             # Try to load the PEM as a raw public key if the cert is missing.
             try:
-                public_key = load_pem_public_key(cert_pem.encode("ascii"))
+                loaded_public_key = load_pem_public_key(cert_pem.encode("ascii"))
             except Exception:
                 return False
+            if not isinstance(loaded_public_key, Ed25519PublicKey):
+                return False
+            public_key = loaded_public_key
         signature = base64.b64decode(signature_b64)
-        public_key.verify(signature, payload)  # type: ignore[union-attr]
+        public_key.verify(signature, payload)
         return True
     except (InvalidSignature, ValueError, TypeError):
         return False

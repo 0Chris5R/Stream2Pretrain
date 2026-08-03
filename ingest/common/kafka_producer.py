@@ -30,7 +30,7 @@ class BronzeProducer:
         topic: str = "raw.fetched",
         *,
         client_id: str = "s2p-ingest",
-        producer: "AIOKafkaProducer | None" = None,
+        producer: AIOKafkaProducer | None = None,
     ) -> None:
         self._bootstrap = bootstrap_servers
         self._topic = topic

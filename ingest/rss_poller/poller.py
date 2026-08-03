@@ -154,7 +154,7 @@ async def run_pass(cfg: IngestConfig, feeds: Iterable[SourceFeedSpec]) -> int:
                     bucket=cfg.minio_bronze_bucket,
                     state_store=state_store,
                 )
-            except Exception as exc:  # noqa: BLE001 - one bad feed must not kill the pass
+            except Exception as exc:
                 log.exception("feed.unhandled_error", feed=feed.name, err=str(exc))
     return total
 

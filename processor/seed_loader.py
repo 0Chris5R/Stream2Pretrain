@@ -53,9 +53,10 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable, Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 import boto3
 
@@ -136,7 +137,7 @@ def load_seed_config() -> SeedLoaderConfig:
 
 def _doc_id_for(repo_id: str, native_id: str) -> str:
     """sha256 of ``<repo_id>:<native_id>`` matched to schemas.bronze.DocId."""
-    payload = f"{repo_id}:{native_id}".encode("utf-8")
+    payload = f"{repo_id}:{native_id}".encode()
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
@@ -207,7 +208,7 @@ def to_silver(doc: SeedDocument, *, trace_id: str | None = None) -> SilverRecord
         minhash_backend="placeholder",
         minhash_num_perms=112,
         near_dup_cluster_id=None,
-        valid_from=doc.valid_from.astimezone(timezone.utc),
+        valid_from=doc.valid_from.astimezone(UTC),
         valid_to=None,
         valid_from_source="dataset_metadata",
         trace_id=trace_id or _new_trace_id(),
@@ -324,10 +325,10 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
     unit tests can import :mod:`processor.seed_loader` on a CI image
     without the runtime extra installed.
     """
+    from bytewax import operators as op
     from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage
     from bytewax.dataflow import Dataflow
-    from bytewax import operators as op
-    from bytewax.inputs import StatelessSourcePartition, FixedPartitionedSource
+    from bytewax.inputs import FixedPartitionedSource, StatelessSourcePartition
 
     s3 = boto3.client(
         "s3",
@@ -393,7 +394,7 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
         repo_id, rec = item
         headers = [
             ("trace_id", rec.trace_id.encode("ascii")),
-            ("source_feed", f"seed:{repo_id}".encode("utf-8")),
+            ("source_feed", f"seed:{repo_id}".encode()),
         ]
         return KafkaSinkMessage(
             key=rec.doc_id.encode("utf-8"),
@@ -437,7 +438,7 @@ def run_inprocess(
         )
         stats[name] = cursor.rows_emitted
     return {
-        "started_at": datetime.now(tz=timezone.utc).isoformat(),
+        "started_at": datetime.now(tz=UTC).isoformat(),
         "components": stats,
     }
 
@@ -471,7 +472,7 @@ def _build_sink(
     def _produce(repo_id: str, rec: SilverRecord) -> None:
         headers = [
             ("trace_id", rec.trace_id.encode("ascii")),
-            ("source_feed", f"seed:{repo_id}".encode("utf-8")),
+            ("source_feed", f"seed:{repo_id}".encode()),
         ]
         producer.produce(
             cfg.normalized_topic,
@@ -508,14 +509,14 @@ def main() -> None:
 
 
 __all__ = [
+    "COMPONENTS",
     "CURSOR_FLUSH_INTERVAL",
     "DEFAULT_COMPONENTS",
     "SeedLoaderConfig",
-    "load_seed_config",
-    "to_silver",
-    "stream_component",
     "build_dataflow",
-    "run_inprocess",
+    "load_seed_config",
     "main",
-    "COMPONENTS",
+    "run_inprocess",
+    "stream_component",
+    "to_silver",
 ]

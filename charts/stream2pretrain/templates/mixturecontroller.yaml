@@ -34,6 +34,8 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
+            - name: http
+              containerPort: 8080
             - name: metrics
               containerPort: 9090
           env:
@@ -44,6 +46,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: S2P_CONTROL_API_PORT
+              value: "8080"
             - name: S2P_RECONCILE_INTERVAL_SECONDS
               value: {{ .Values.mixtureController.reconcileIntervalSeconds | quote }}
             - name: S2P_ICEBERG_BRANCH_SHADOW_A
@@ -78,6 +82,9 @@ spec:
   type: ClusterIP
   clusterIP: None
   ports:
+    - name: http
+      port: 8080
+      targetPort: http
     - name: metrics
       port: 9090
       targetPort: metrics

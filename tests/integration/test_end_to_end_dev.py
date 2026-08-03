@@ -27,7 +27,6 @@ from typing import Any
 import pytest
 
 from schemas.topics import DOCS_CURATED, RAW_FETCHED
-
 from tests.conftest import StackEndpoints
 
 pytestmark = pytest.mark.integration

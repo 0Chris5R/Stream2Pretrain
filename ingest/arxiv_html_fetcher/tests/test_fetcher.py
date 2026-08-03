@@ -15,6 +15,7 @@ dependency.
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Any
 
 import httpx
@@ -228,10 +229,10 @@ async def test_fetch_one_returns_404_outcome_when_both_fail() -> None:
 
 
 def test_make_bronze_record_html_branch() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    from ingest.arxiv_html_fetcher.fetcher import FetchOutcome
     from ingest.arxiv_html_fetcher.extractor import extract_arxiv_html
+    from ingest.arxiv_html_fetcher.fetcher import FetchOutcome
 
     extracted = extract_arxiv_html(ARXIV_HTML_SAMPLE)
     outcome = FetchOutcome(
@@ -241,7 +242,7 @@ def test_make_bronze_record_html_branch() -> None:
         extracted=extracted,
         extraction_pipeline="arxiv-html-2026-06",
         fallback_used=False,
-        fetched_at=datetime(2026, 6, 15, 8, 30, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 15, 8, 30, tzinfo=UTC),
         etag=None,
         last_modified=None,
     )
@@ -264,7 +265,7 @@ def test_make_bronze_record_html_branch() -> None:
 
 
 def test_make_bronze_record_metadata_stub_branch() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from ingest.arxiv_html_fetcher.fetcher import FetchOutcome
 
@@ -275,7 +276,7 @@ def test_make_bronze_record_metadata_stub_branch() -> None:
         extracted=None,
         extraction_pipeline="ar5iv-2026-06",
         fallback_used=True,
-        fetched_at=datetime(2026, 6, 15, 9, 0, tzinfo=timezone.utc),
+        fetched_at=datetime(2026, 6, 15, 9, 0, tzinfo=UTC),
         etag=None,
         last_modified=None,
     )

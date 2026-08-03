@@ -19,27 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-try:
-    from prometheus_client import CollectorRegistry, Counter, Gauge
-except Exception:  # pragma: no cover - optional dep at unit-test time
-    CollectorRegistry = object  # type: ignore[assignment, misc]
-
-    class _StubMetric:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            self.value = 0.0
-
-        def labels(self, *args: object, **kwargs: object) -> "_StubMetric":
-            return self
-
-        def set(self, value: float) -> None:
-            self.value = value
-
-        def inc(self, amount: float = 1.0) -> None:
-            self.value += amount
-
-    Counter = _StubMetric  # type: ignore[assignment, misc]
-    Gauge = _StubMetric  # type: ignore[assignment, misc]
-
+from prometheus_client import CollectorRegistry, Counter, Gauge
 
 PromotionDecision = Literal["promote", "hold", "rollback"]
 
@@ -48,11 +28,11 @@ PromotionDecision = Literal["promote", "hold", "rollback"]
 class MixtureMetrics:
     """Bundle of Prometheus instruments scoped to one controller process."""
 
-    registry: object = field(default_factory=lambda: CollectorRegistry())
-    branch_perplexity: object = field(init=False)
-    perplexity_delta: object = field(init=False)
-    promotion_total: object = field(init=False)
-    branch_tokens_total: object = field(init=False)
+    registry: CollectorRegistry = field(default_factory=CollectorRegistry)
+    branch_perplexity: Gauge = field(init=False)
+    perplexity_delta: Gauge = field(init=False)
+    promotion_total: Counter = field(init=False)
+    branch_tokens_total: Counter = field(init=False)
 
     def __post_init__(self) -> None:
         self.branch_perplexity = Gauge(
@@ -82,11 +62,11 @@ class MixtureMetrics:
 
     def observe_branch(self, recipe: str, branch: str, perplexity: float, tokens: int) -> None:
         """Record one training-window observation for a branch."""
-        self.branch_perplexity.labels(recipe=recipe, branch=branch).set(perplexity)  # type: ignore[union-attr]
-        self.branch_tokens_total.labels(recipe=recipe, branch=branch).inc(tokens)  # type: ignore[union-attr]
+        self.branch_perplexity.labels(recipe=recipe, branch=branch).set(perplexity)
+        self.branch_tokens_total.labels(recipe=recipe, branch=branch).inc(tokens)
 
     def observe_delta(self, recipe: str, delta: float) -> None:
-        self.perplexity_delta.labels(recipe=recipe).set(delta)  # type: ignore[union-attr]
+        self.perplexity_delta.labels(recipe=recipe).set(delta)
 
     def record_decision(self, recipe: str, decision: PromotionDecision) -> None:
-        self.promotion_total.labels(recipe=recipe, decision=decision).inc()  # type: ignore[union-attr]
+        self.promotion_total.labels(recipe=recipe, decision=decision).inc()

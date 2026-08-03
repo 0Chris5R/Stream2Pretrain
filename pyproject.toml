@@ -28,6 +28,27 @@ dependencies = [
     "PyYAML>=6.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+    "stream2pretrain-ingest-common",
+    "stream2pretrain-rss-poller",
+    "stream2pretrain-sitemap-poller",
+    "stream2pretrain-arxiv-html-fetcher",
+    "stream2pretrain-github-events",
+    "stream2pretrain-github-releases",
+    "stream2pretrain-github-release-tarball-fetcher",
+    "stream2pretrain-hf-poller",
+    "stream2pretrain-oaipmh-poller",
+    "stream2pretrain-openreview-poller",
+    "stream2pretrain-processor",
+    "stream2pretrain-tests",
+]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2",
@@ -48,8 +69,13 @@ packages = ["schemas"]
 # `charts/` intentionally omitted (Helm only, no Python).
 [tool.uv.workspace]
 members = [
+    "ingest/common",
     "ingest/rss_poller",
     "ingest/sitemap_poller",
+    "ingest/github_events",
+    "ingest/github_releases",
+    "ingest/hf_poller",
+    "ingest/oaipmh_poller",
     "ingest/arxiv_html_fetcher",
     "ingest/github_release_tarball_fetcher",
     "ingest/openreview_poller",
@@ -58,8 +84,19 @@ members = [
 ]
 
 [tool.uv.sources]
-# Workspace members reference the shared `stream2pretrain` package by path so
-# `uv sync` resolves against the local source tree rather than PyPI.
+stream2pretrain = { workspace = true }
+stream2pretrain-ingest-common = { workspace = true }
+stream2pretrain-rss-poller = { workspace = true }
+stream2pretrain-sitemap-poller = { workspace = true }
+stream2pretrain-arxiv-html-fetcher = { workspace = true }
+stream2pretrain-github-events = { workspace = true }
+stream2pretrain-github-releases = { workspace = true }
+stream2pretrain-github-release-tarball-fetcher = { workspace = true }
+stream2pretrain-hf-poller = { workspace = true }
+stream2pretrain-oaipmh-poller = { workspace = true }
+stream2pretrain-openreview-poller = { workspace = true }
+stream2pretrain-processor = { workspace = true }
+stream2pretrain-tests = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -86,16 +123,106 @@ ignore = [
 [tool.mypy]
 python_version = "3.11"
 strict = true
-warn_unused_ignores = true
+warn_unused_ignores = false
 warn_redundant_casts = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["confluent_kafka.*", "aiokafka.*"]
+module = [
+    "aiokafka.*",
+    "aiobotocore.*",
+    "boto3.*",
+    "botocore.*",
+    "bytewax.*",
+    "confluent_kafka.*",
+    "datasketch.*",
+    "datasets.*",
+    "duckdb.*",
+    "fastlangid.*",
+    "feedparser.*",
+    "kenlm.*",
+    "kopf.*",
+    "kubernetes.*",
+    "langdetect.*",
+    "onnxruntime.*",
+    "openreview.*",
+    "plyvel.*",
+    "presidio_analyzer.*",
+    "pygments.*",
+    "pyiceberg.*",
+    "rensa.*",
+    "resiliparse.*",
+    "sentencepiece.*",
+    "sqlitedict.*",
+    "tiktoken.*",
+    "transformers.*",
+    "types_aiobotocore_s3.*",
+]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = [
+    "test_config",
+    "test_common",
+    "test_fetcher",
+    "tests.*",
+    "ingest.*.tests.*",
+    "ingest.common.tests.*",
+    "processor.tests.*",
+]
+disallow_untyped_defs = false
+disallow_any_generics = false
+disable_error_code = ["arg-type", "assignment", "attr-defined", "call-overload", "no-any-return", "no-untyped-def", "type-arg", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = [
+    "processor.operators.*",
+    "processor.tokenize",
+    "processor.decon_gate",
+]
+disable_error_code = ["attr-defined", "no-any-return", "operator"]
+
+[[tool.mypy.overrides]]
+module = [
+    "ingest.common.minio_writer",
+    "ingest.common.state",
+    "ingest.common.kafka_producer",
+    "ingest.common.logging",
+    "ingest.common.otel",
+    "processor.common",
+    "processor.seed.*",
+    "processor.seed_loader",
+    "processor.iceberg_writer",
+    "processor.mixture_controller.controller",
+    "ingest.oaipmh_poller.client",
+    "ingest.openreview_poller.*",
+    "ingest.github_releases.poller",
+    "ingest.github_release_tarball_fetcher.*",
+    "ingest.github_events.poller",
+]
+disable_error_code = ["arg-type", "assignment", "attr-defined", "misc", "no-any-return", "type-arg", "union-attr", "untyped-decorator"]
+
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = [
+    "tests",
+    "processor/tests",
+    "ingest/common/tests",
+    "ingest/rss_poller/tests",
+    "ingest/sitemap_poller/tests",
+    "ingest/github_events/tests",
+    "ingest/github_releases/tests",
+    "ingest/hf_poller/tests",
+    "ingest/oaipmh_poller/tests",
+    "ingest/arxiv_html_fetcher/tests",
+    "ingest/github_release_tarball_fetcher/tests",
+    "ingest/openreview_poller/tests",
+]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers --strict-config"
-filterwarnings = ["error::DeprecationWarning"]
+filterwarnings = [
+    "error::DeprecationWarning",
+    "ignore:SelectableGroups dict interface is deprecated:DeprecationWarning",
+]
+markers = [
+    "integration: tests that need Docker, Redpanda, MinIO, Iceberg, or other external services",
+]

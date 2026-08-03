@@ -84,7 +84,7 @@ class _RetryTransport(httpx.AsyncBaseTransport):
 
 
 def build_headers(
-    cfg: "IngestConfig",
+    cfg: IngestConfig,
     *,
     accept: str | None = None,
     extra: dict[str, str] | None = None,
@@ -102,7 +102,7 @@ def build_headers(
 
 
 def build_async_client(
-    cfg: "IngestConfig",
+    cfg: IngestConfig,
     *,
     headers: dict[str, str] | None = None,
     base_url: str | None = None,
