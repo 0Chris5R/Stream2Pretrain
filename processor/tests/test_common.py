@@ -10,6 +10,8 @@ from processor.common import (
     decon_loads,
     gold_dumps,
     gold_loads,
+    kafka_consumer_config,
+    kafka_starting_offset,
     load_config,
     new_trace_id,
     silver_dumps,
@@ -67,6 +69,24 @@ def test_load_config_reads_kubernetes_env_contract(monkeypatch) -> None:
     assert cfg.polaris_warehouse == "s3://gold/warehouse"
 
 
+def test_kafka_starting_offset_maps_names(monkeypatch) -> None:
+    monkeypatch.delenv("S2P_KAFKA_START_OFFSET", raising=False)
+    assert kafka_starting_offset() == -2
+
+    monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "latest")
+    assert kafka_starting_offset() == -1
+
+    monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "42")
+    assert kafka_starting_offset() == 42
+
+
+def test_kafka_consumer_config_sets_group_id() -> None:
+    assert kafka_consumer_config("s2p-fetcher") == {
+        "group.id": "s2p-fetcher",
+        "auto.offset.reset": "earliest",
+    }
+
+
 def test_bronze_roundtrip() -> None:
     rec = BronzeRecord(
         doc_id="sha256:" + "0" * 64,
@@ -86,10 +106,14 @@ def test_bronze_roundtrip() -> None:
 
 
 def test_silver_roundtrip(silver_record: SilverRecord) -> None:
+    silver_record = silver_record.model_copy(
+        update={"minhash_sig": b"\x00\xff\x80\x01" * 112}
+    )
     payload = silver_dumps(silver_record)
     parsed = silver_loads(payload)
     assert parsed.doc_id == silver_record.doc_id
     assert parsed.lang == silver_record.lang
+    assert parsed.minhash_sig == silver_record.minhash_sig
 
 
 def test_gold_roundtrip() -> None:

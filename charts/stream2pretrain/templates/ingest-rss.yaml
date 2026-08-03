@@ -33,6 +33,7 @@ spec:
             - name: rss
               image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.rss.image) | quote }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "ingest.rss_poller.poller"]
               {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
               args:
                 - --config
@@ -43,6 +44,8 @@ spec:
                 {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
                 - name: S2P_COMPONENT
                   value: {{ $component | quote }}
+                - name: S2P_FEED_CONFIG
+                  value: /etc/s2p/feeds/arxiv.json
               volumeMounts:
                 - name: feeds
                   mountPath: /etc/s2p/feeds
@@ -92,6 +95,7 @@ spec:
             - name: blogs
               image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.rss.image) | quote }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "ingest.rss_poller.poller"]
               {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
               args:
                 - --config
@@ -100,6 +104,8 @@ spec:
                 {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
                 - name: S2P_COMPONENT
                   value: ingest-blogs
+                - name: S2P_FEED_CONFIG
+                  value: /etc/s2p/feeds/blogs.json
               volumeMounts:
                 - name: feeds
                   mountPath: /etc/s2p/feeds

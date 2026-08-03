@@ -30,3 +30,11 @@ def test_overwrite_atomic(tmp_path: Path) -> None:
     store.put("f", {"v": 1})
     store.put("f", {"v": 2})
     assert store.get("f") == {"v": 2}
+
+
+def test_dev_state_root_override(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("S2P_STATE_ROOT", str(tmp_path / "state"))
+    store = FeedStateStore(".s2p-state/hf")
+    store.put("feed", {"cursor": "x"})
+
+    assert (tmp_path / "state" / "hf" / "feed.json").exists()

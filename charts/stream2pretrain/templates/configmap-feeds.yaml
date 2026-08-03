@@ -9,6 +9,20 @@ data:
   arxiv.json: |-
     {{- $oai := .Values.sources.arxiv.oaiPmh }}
     {
+      "feeds": [
+        {{- range $idx, $cat := .Values.sources.arxiv.rss.categories }}
+        {{- if $idx }},{{ end }}
+        {
+          "name": {{ printf "rss-arxiv-%s" ($cat | lower | replace "." "-") | quote }},
+          "protocol": "rss",
+          "endpoint": {{ printf "https://rss.arxiv.org/rss/%s" $cat | quote }},
+          "pollIntervalSeconds": {{ $.Values.sources.arxiv.rss.pollIntervalSeconds }},
+          "rateLimit": {"requestsPerSecond": 1, "burst": 4},
+          "licenseDefault": {{ $.Values.sources.arxiv.rss.licenseDefault | quote }},
+          "enabled": true
+        }
+        {{- end }}
+      ],
       "oai_pmh": {
         "name": {{ $oai.name | quote }},
         "endpoint": {{ $oai.endpoint | quote }},
@@ -47,7 +61,24 @@ data:
     }
   blogs.json: |-
     {
-      "feeds": {{ toJson .Values.sources.blogs.feeds }},
+      "feeds": [
+        {{- range $idx, $feed := .Values.sources.blogs.feeds }}
+        {{- if $idx }},{{ end }}
+        {
+          "name": {{ printf "rss-%s" $feed.name | quote }},
+          "protocol": "rss",
+          "endpoint": {{ $feed.url | quote }},
+          "pollIntervalSeconds": {{ $.Values.sources.blogs.pollIntervalSeconds }},
+          {{- if or (eq $feed.name "openai-news") (eq $feed.name "deepmind") (eq $feed.name "hf-blog") }}
+          "rateLimit": {"requestsPerSecond": 1, "burst": 2},
+          {{- else }}
+          "rateLimit": {"requestsPerSecond": 0.5, "burst": 1},
+          {{- end }}
+          "licenseDefault": "unknown",
+          "enabled": true
+        }
+        {{- end }}
+      ],
       "poll_interval_seconds": {{ .Values.sources.blogs.pollIntervalSeconds }}
     }
   sitemap.json: |-

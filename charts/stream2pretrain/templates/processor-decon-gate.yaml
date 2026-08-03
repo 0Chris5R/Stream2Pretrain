@@ -70,6 +70,6 @@ spec:
   ports:
     - name: metrics
       port: {{ .Values.processor.deconGate.apiPort }}
-      targetPort: metrics
+      targetPort: {{ .Values.processor.deconGate.apiPort }}
   selector:
-    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}

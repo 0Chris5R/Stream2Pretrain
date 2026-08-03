@@ -104,7 +104,7 @@ class MinHasher:
         rminhash_cls = self._impl
         m = rminhash_cls(num_perm=self._num_perms, seed=self._seed)
         m.update(shingles)
-        digest = bytes(m.digest())  # rensa returns bytes-like uint32 array
+        digest = _uint32_digest_to_bytes(m.digest(), expected_perms=self._num_perms)
         return MinHashSignature(digest=digest, num_perms=self._num_perms, backend="rensa")
 
     def _signature_datasketch(self, shingles: list[str]) -> MinHashSignature:
@@ -141,3 +141,21 @@ class MinHasher:
         return MinHashSignature(
             digest=bytes(out), num_perms=self._num_perms, backend="fallback-pyhash"
         )
+
+
+def _uint32_digest_to_bytes(raw: object, *, expected_perms: int) -> bytes:
+    """Normalize backend MinHash digests to little-endian uint32 bytes."""
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        digest = bytes(raw)
+        if len(digest) == expected_perms * 4:
+            return digest
+
+    values = list(raw)  # type: ignore[arg-type]
+    if len(values) == expected_perms * 4 and all(0 <= int(v) <= 0xFF for v in values):
+        return bytes(int(v) for v in values)
+    if len(values) != expected_perms:
+        raise ValueError(
+            f"MinHash digest length must be {expected_perms} uint32 values or "
+            f"{expected_perms * 4} bytes, got {len(values)} values"
+        )
+    return b"".join(int(v).to_bytes(4, "little", signed=False) for v in values)

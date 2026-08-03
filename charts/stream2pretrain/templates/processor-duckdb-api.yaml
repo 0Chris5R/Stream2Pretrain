@@ -71,4 +71,4 @@ spec:
       port: {{ .Values.processor.duckdbApi.apiPort }}
       targetPort: http
   selector:
-    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}

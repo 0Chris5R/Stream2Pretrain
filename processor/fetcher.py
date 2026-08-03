@@ -186,12 +186,12 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     # ``beginning`` ensures a fresh deploy or offset reset replays from the
     # topic's retention window (at-least-once). Override via env if a debug
     # run needs to skip backlog: ``S2P_KAFKA_START_OFFSET=end``.
-    start_offset = os.environ.get("S2P_KAFKA_START_OFFSET", "beginning")
+    start_offset = common.kafka_starting_offset()
     source = KafkaSource(
         brokers=cfg.redpanda_brokers.split(","),
         topics=[cfg.raw_topic],
-        consumer_group=cfg.consumer_group + "-fetcher",
         starting_offset=start_offset,
+        add_config=common.kafka_consumer_config(cfg.consumer_group),
     )
     inp = op.input("raw_fetched", flow, source)
 
@@ -215,13 +215,13 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 headers=[("trace_id", silver.trace_id.encode("ascii"))],
             )
 
-    mapped = op.map("fetcher.normalize", inp, _step)
-    filtered = op.filter("fetcher.drop_none", mapped, lambda m: m is not None)
+    mapped = op.map("fetcher_normalize", inp, _step)
+    filtered = op.filter("fetcher_drop_none", mapped, lambda m: m is not None)
     sink = KafkaSink(
         brokers=cfg.redpanda_brokers.split(","),
         topic=cfg.normalized_topic,
     )
-    op.output("fetcher.sink", filtered, sink)
+    op.output("fetcher_sink", filtered, sink)
     return flow
 
 

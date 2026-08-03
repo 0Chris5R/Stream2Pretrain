@@ -553,12 +553,12 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     flow = Dataflow("s2p-iceberg-writer")
     # ``beginning`` keeps the writer at-least-once across restarts (the
     # consumer group offset advances from there). See processor/curate.py.
-    start_offset = os.environ.get("S2P_KAFKA_START_OFFSET", "beginning")
+    start_offset = common.kafka_starting_offset()
     source = KafkaSource(
         brokers=cfg.redpanda_brokers.split(","),
         topics=[cfg.curated_topic],
-        consumer_group=cfg.consumer_group + "-iceberg",
         starting_offset=start_offset,
+        add_config=common.kafka_consumer_config(cfg.consumer_group),
     )
     inp = op.input("docs_curated", flow, source)
 
@@ -580,7 +580,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                     stats.snapshot_id if stats.snapshot_id is not None else -1,
                 )
 
-    op.inspect("iceberg.write", inp, lambda _step, msg: _ingest(msg))
+    op.inspect("iceberg_write", inp, lambda _step, msg: _ingest(msg))
     return flow
 
 

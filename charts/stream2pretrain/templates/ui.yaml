@@ -41,6 +41,14 @@ spec:
               value: {{ .Values.ui.port | quote }}
             - name: DECON_GATE_URL
               value: {{ printf "http://%s-decon-gate.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.processor.deconGate.apiPort | quote }}
+            - name: MIXTURE_API_URL
+              value: {{ printf "http://%s-mixture-controller.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.mixtureController.apiPort | quote }}
+            - name: SOURCES_API_URL
+              value: {{ printf "http://%s-mixture-controller.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.mixtureController.apiPort | quote }}
+            - name: DUCKDB_URL
+              value: {{ printf "http://%s-duckdb.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.processor.duckdbApi.apiPort | quote }}
+            - name: PROMETHEUS_URL
+              value: {{ .Values.observability.prometheus.serverAddress | quote }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -86,7 +94,7 @@ spec:
       port: 80
       targetPort: http
   selector:
-    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 {{- if .Values.ui.ingress.enabled }}
 ---
 apiVersion: traefik.io/v1alpha1

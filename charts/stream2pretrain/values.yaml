@@ -70,7 +70,9 @@ iceberg:
   namespace: gold
   goldTable: curated
   polarisUrl: http://polaris.polaris.svc.cluster.local:8181/api/catalog
-  warehouse: s3://s2p-gold/warehouse
+  # Polaris expects the Iceberg REST "warehouse" value to be the catalog name.
+  # The physical object-store base location is configured on the Polaris catalog.
+  warehouse: stream2pretrain
   credentialSecret: stream2pretrain-polaris
   credentialKey: credential
   scopeKey: scope
@@ -510,6 +512,7 @@ processor:
 mixtureController:
   image: stream2pretrain/mixture-controller
   replicas: 1
+  apiPort: 8080
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: 500m, memory: 512Mi}
@@ -605,7 +608,7 @@ keda:
   pollingInterval: 15
   cooldownPeriod: 60
   prometheus:
-    serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+    serverAddress: http://kps-prometheus.monitoring.svc:9090
   fetcher:
     minReplicas: 1
     maxReplicas: 10
@@ -631,6 +634,8 @@ keda:
 # Observability
 # -----------------------------------------------------------------------------
 observability:
+  prometheus:
+    serverAddress: http://kps-prometheus.monitoring.svc:9090
   serviceMonitor:
     enabled: true
     namespace: monitoring

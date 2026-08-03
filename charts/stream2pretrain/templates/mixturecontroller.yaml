@@ -89,4 +89,4 @@ spec:
       port: 9090
       targetPort: metrics
   selector:
-    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}

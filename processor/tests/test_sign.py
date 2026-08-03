@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -44,6 +45,23 @@ def test_loads_raw_32_byte_secret_key(tmp_path: Path) -> None:
 
     signer = AttestationSigner(key_path=key_path, cosign_binary=None)
     payload = b'{"snapshot_id":43}'
+    res = signer.sign(payload)
+
+    assert verify_signature(payload, res.signature_b64, res.cert_pem)
+
+
+def test_loads_base64_32_byte_secret_key(tmp_path: Path) -> None:
+    key_path = tmp_path / "ed25519.key"
+    private = Ed25519PrivateKey.generate()
+    raw = private.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    key_path.write_text(base64.b64encode(raw).decode("ascii"), encoding="ascii")
+
+    signer = AttestationSigner(key_path=key_path, cosign_binary=None)
+    payload = b'{"snapshot_id":44}'
     res = signer.sign(payload)
 
     assert verify_signature(payload, res.signature_b64, res.cert_pem)

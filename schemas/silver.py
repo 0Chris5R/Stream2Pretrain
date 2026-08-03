@@ -51,7 +51,12 @@ class SilverTags(BaseModel):
 class SilverRecord(BaseModel):
     """Normalized, language-tagged, heuristically-scored document."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
+    )
 
     doc_id: DocId
     url: HttpUrl

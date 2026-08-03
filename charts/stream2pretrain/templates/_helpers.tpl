@@ -72,6 +72,17 @@ app.kubernetes.io/part-of: stream2pretrain
 {{- end -}}
 
 {{/*
+Per-component service selector labels. Keep this intentionally smaller than
+the workload selector so Services keep matching pods after non-Helm smoke
+deployments that only stamp the stable name + component labels.
+*/}}
+{{- define "stream2pretrain.componentServiceSelectorLabels" -}}
+{{- $ctx := .ctx -}}
+app.kubernetes.io/name: {{ include "stream2pretrain.name" $ctx }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{/*
 Per-component common labels. Caller passes (dict "ctx" . "component" "<name>").
 */}}
 {{- define "stream2pretrain.componentLabels" -}}
@@ -131,6 +142,8 @@ Iceberg + observability).
   value: {{ .Values.profile | quote }}
 - name: LOG_LEVEL
   value: "INFO"
+- name: S2P_STATE_ROOT
+  value: "/tmp/s2p-state"
 - name: REDPANDA_BROKERS
   value: {{ .Values.redpanda.bootstrapServers | quote }}
 - name: REDPANDA_SCHEMA_REGISTRY

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from processor.operators.minhash import MinHasher, shingle
+from processor.operators.minhash import MinHasher, _uint32_digest_to_bytes, shingle
 
 
 def test_shingle_basic() -> None:
@@ -18,6 +18,12 @@ def test_signature_is_deterministic() -> None:
     assert a.digest == b.digest
     assert a.num_perms == 64
     assert len(a.digest) == 64 * 4
+
+
+def test_uint32_digest_sequence_is_packed_little_endian() -> None:
+    digest = _uint32_digest_to_bytes([1, 256, 0xFFFFFFFF], expected_perms=3)
+
+    assert digest == b"\x01\x00\x00\x00\x00\x01\x00\x00\xff\xff\xff\xff"
 
 
 def test_signature_diverges_for_different_text() -> None:

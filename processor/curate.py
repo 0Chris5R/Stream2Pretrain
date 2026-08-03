@@ -266,12 +266,12 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     # replays the topic instead of dropping in-flight bytes (at-least-once
     # semantics; matches the Kappa/streaming-first contract). Operators can
     # override via ``S2P_KAFKA_START_OFFSET=end`` for short-lived debug runs.
-    start_offset = os.environ.get("S2P_KAFKA_START_OFFSET", "beginning")
+    start_offset = common.kafka_starting_offset()
     source = KafkaSource(
         brokers=cfg.redpanda_brokers.split(","),
         topics=[cfg.normalized_topic],
-        consumer_group=cfg.consumer_group + "-curate",
         starting_offset=start_offset,
+        add_config=common.kafka_consumer_config(cfg.consumer_group),
     )
     inp = op.input("docs_normalized", flow, source)
 
@@ -289,10 +289,10 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 return None
             return KafkaSinkMessage(key=getattr(msg, "key", None) or b"", value=out)
 
-    mapped = op.map("curate.run", inp, _step)
-    filtered = op.filter("curate.drop_none", mapped, lambda m: m is not None)
+    mapped = op.map("curate_run", inp, _step)
+    filtered = op.filter("curate_drop_none", mapped, lambda m: m is not None)
     sink = KafkaSink(brokers=cfg.redpanda_brokers.split(","), topic=cfg.curated_topic)
-    op.output("curate.sink", filtered, sink)
+    op.output("curate_sink", filtered, sink)
     return flow
 
 

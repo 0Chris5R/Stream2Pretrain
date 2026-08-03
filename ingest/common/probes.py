@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import socket
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ingest.common.metrics import INGEST_METRICS
@@ -19,6 +21,15 @@ MetricsProvider = Callable[[], bytes]
 
 class ProbeServer(ThreadingHTTPServer):
     metrics_provider: MetricsProvider | None = None
+
+
+class IPv6ProbeServer(ProbeServer):
+    address_family = socket.AF_INET6
+
+    def server_bind(self) -> None:
+        with suppress(OSError):
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
 
 
 class _ProbeHandler(BaseHTTPRequestHandler):
@@ -47,14 +58,15 @@ class _ProbeHandler(BaseHTTPRequestHandler):
 
 
 def start_probe_server(
-    host: str = "0.0.0.0",
+    host: str = "::",
     port: int | None = None,
     *,
     metrics_provider: MetricsProvider | None = None,
 ) -> ProbeServer:
     """Start `/healthz`, `/readyz`, and `/metrics` in a daemon thread."""
     resolved_port = port if port is not None else int(os.environ.get("S2P_PROBE_PORT", "9090"))
-    server = ProbeServer((host, resolved_port), _ProbeHandler)
+    server_cls = IPv6ProbeServer if ":" in host else ProbeServer
+    server = server_cls((host, resolved_port), _ProbeHandler)
     server.metrics_provider = metrics_provider
     thread = threading.Thread(target=server.serve_forever, name="s2p-probes", daemon=True)
     thread.start()

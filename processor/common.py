@@ -171,6 +171,31 @@ def load_config() -> ProcessorConfig:
     )
 
 
+def kafka_starting_offset() -> int:
+    """Return Bytewax Kafka offset constant from ``S2P_KAFKA_START_OFFSET``."""
+    raw = os.environ.get("S2P_KAFKA_START_OFFSET", "beginning").strip().lower()
+    offsets = {
+        "beginning": -2,
+        "earliest": -2,
+        "start": -2,
+        "end": -1,
+        "latest": -1,
+    }
+    if raw in offsets:
+        return offsets[raw]
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "S2P_KAFKA_START_OFFSET must be beginning/earliest/end/latest or an int"
+        ) from exc
+
+
+def kafka_consumer_config(group_id: str) -> dict[str, str]:
+    """Config passed to Bytewax KafkaSource for Redpanda consumer groups."""
+    return {"group.id": group_id, "auto.offset.reset": "earliest"}
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------

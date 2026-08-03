@@ -32,6 +32,7 @@ spec:
         - name: hf-models
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.hf.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "ingest.hf_poller.poller"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           args:
             - --mode
@@ -124,6 +125,7 @@ spec:
             - name: daily-papers
               image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.hf.image) | quote }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "ingest.hf_poller.poller"]
               {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
               args:
                 - --mode

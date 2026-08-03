@@ -34,6 +34,7 @@ spec:
         - name: fetcher
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["s2p-fetcher"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics

@@ -19,9 +19,11 @@ RUN pip install --no-cache-dir uv==0.4.27
 
 WORKDIR /src
 COPY pyproject.toml /src/pyproject.toml
+COPY README.md /src/README.md
 COPY schemas /src/schemas
-COPY ingest/common /src/ingest/common
-COPY ingest/rss_poller /src/ingest/rss_poller
+COPY ingest /src/ingest
+COPY processor /src/processor
+COPY tests /src/tests
 
 RUN uv pip install --system --no-cache \
         ./schemas/.. \

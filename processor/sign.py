@@ -105,6 +105,13 @@ class AttestationSigner:
             data = self._key_path.read_bytes()
             if len(data) == 32:
                 return Ed25519PrivateKey.from_private_bytes(data)
+            stripped = data.strip()
+            try:
+                decoded = base64.b64decode(stripped, validate=True)
+            except Exception:
+                decoded = b""
+            if len(decoded) == 32:
+                return Ed25519PrivateKey.from_private_bytes(decoded)
             key = load_pem_private_key(data, password=None)
             if not isinstance(key, Ed25519PrivateKey):
                 raise TypeError(f"Expected Ed25519PrivateKey at {self._key_path}, got {type(key)}")

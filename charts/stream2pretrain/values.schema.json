@@ -450,6 +450,12 @@
     "observability": {
       "type": "object",
       "properties": {
+        "prometheus": {
+          "type": "object",
+          "properties": {
+            "serverAddress": {"type": "string", "format": "uri"}
+          }
+        },
         "serviceMonitor": {"type": "object"},
         "grafana": {"type": "object"},
         "tracing": {"type": "object"},
