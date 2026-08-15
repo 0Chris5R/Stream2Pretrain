@@ -206,3 +206,12 @@ cadence on MinIO bronze, and DHBWCloud quotas.
   component READMEs) deliberately not refreshed in this pass - they were
   written by the v0.1 / v0.2 implementation workflows and are still
   internally consistent. Touch them only when content actually changes.
+
+### 2026-08-15 - Provisional missing-license policy
+
+- Admit non-code documents when no machine-readable license is available.
+  Preserve `spdx_license=None` / `unknown` provenance in Gold rather than
+  fabricating an identifier.
+- Keep code strict: missing licenses and SPDX identifiers outside MIT,
+  BSD-2-Clause, BSD-3-Clause, Apache-2.0, and MPL-2.0 remain excluded.
+- This is a curation policy for the demo, not a legal-compliance determination.

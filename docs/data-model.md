@@ -109,8 +109,8 @@ Gold partitioning: `PARTITION BY lang, risk_tier, month(valid_from)`. The
 
 | Tier | Meaning | Example trigger |
 |---|---|---|
-| 1 | clean | permissive licence, no PII flag, no contamination hit |
-| 2 | caution | heuristic uncertainty: missing licence, partial PII match, ambiguous date |
+| 1 | trainable under current policy | no PII flag or contamination hit; non-code licence may be unknown |
+| 2 | caution | heuristic uncertainty or a rejected code licence |
 | 3 | drop | hard fail: explicit dirty signal, dropped before mixture |
 
 Only tier 1 rows with empty `reject_reasons`, empty `pii_flags`, and no
@@ -118,6 +118,10 @@ Only tier 1 rows with empty `reject_reasons`, empty `pii_flags`, and no
 `gold`. Tier 2 and tier 3 records are dropped by the curation dataflow before
 the training table boundary; rejected-row observability is tracked separately
 from the Gold table contract.
+
+The provisional demo policy admits non-code records with no machine-readable
+license. Their `license` remains `unknown`; the pipeline does not invent an
+SPDX identifier. Code still requires a configured permissive SPDX license.
 
 ## Decon attestations
 

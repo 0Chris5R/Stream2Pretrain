@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from processor.common import ProcessorConfig, silver_dumps
+from processor.common import ProcessorConfig, gold_loads, silver_dumps
 from processor.curate import build_state, curate_one, is_trainable_gold, process_silver_payload
 from schemas.silver import SilverRecord, SilverTags
 
@@ -147,7 +147,7 @@ def test_process_silver_payload_drops_rejected_rows(
         state.close()
 
 
-def test_missing_license_is_not_trainable(
+def test_missing_license_is_trainable_for_non_code(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
     state = build_state(cfg)
@@ -155,11 +155,32 @@ def test_missing_license_is_not_trainable(
         silver = _silver(long_english_text, doc_id="sha256:" + "6" * 64).model_copy(
             update={"spdx_license": None, "spdx_license_source": "unknown"}
         )
+        payload = process_silver_payload(state, silver_dumps(silver))
+        assert payload is not None
+        gold = gold_loads(payload)
+        assert "license_excluded" not in gold.reject_reasons
+        assert gold.license == "unknown"
+        assert gold.risk_tier == 1
+        assert is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_missing_code_license_is_not_trainable(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(long_english_text, doc_id="sha256:" + "8" * 64).model_copy(
+            update={
+                "source_format": "code",
+                "spdx_license": None,
+                "spdx_license_source": "unknown",
+            }
+        )
         gold = curate_one(state, silver)
         assert "license_excluded" in gold.reject_reasons
-        assert gold.risk_tier == 2
         assert not is_trainable_gold(gold)
-        assert process_silver_payload(state, silver_dumps(silver)) is None
     finally:
         state.close()
 

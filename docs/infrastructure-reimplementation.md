@@ -98,7 +98,9 @@ The fetcher path is working. `docs.curated` and `decon.attest` remain at zero.
 A local evaluation of five captured Silver records measured two rejection
 reasons on every record: `c4_nopunc_filter` and `license_excluded`. All five had
 missing SPDX metadata. This is a data and curation-policy mismatch, not a cloud
-transport failure. The rewrite does not weaken the policy or invent licenses.
+transport failure. The subsequent provisional policy allows missing licenses
+for non-code documents while preserving `unknown` provenance; code remains on
+the permissive SPDX allowlist.
 
 ## Target ownership model
 

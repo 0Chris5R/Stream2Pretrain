@@ -84,8 +84,8 @@ SpdxLicenseSource = Literal[
   (``the-stack-v2``, ``stack-edu``, etc.).
 - ``manual_override``: a SourceFeed CRD ``license_default`` value applied
   because the source publishes no machine-readable license.
-- ``unknown``: classifier could not determine a license; risk-tier 2 by
-  default.
+- ``unknown``: classifier could not determine a license. The provisional
+  policy admits unknown non-code content but keeps code on the SPDX allowlist.
 """
 
 

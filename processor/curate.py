@@ -155,8 +155,8 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     quality = state.quality.score(text)
     if quality.quality_score < 1.0:
         reject.append("low_quality_score")
-    # License. Missing license metadata is risk-tier 2 by schema contract.
-    # Code is stricter: only the Apache-release whitelist enters Gold.
+    # License. Missing metadata is provisionally allowed for non-code content.
+    # Code remains strict: only the Apache-release whitelist enters Gold.
     if _license_reject_reason(silver) is not None:
         reject.append("license_excluded")
     # PII
@@ -212,10 +212,12 @@ def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFla
 
 def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
     """Return the license reject reason, if this row is not trainable."""
+    if silver.source_format != "code":
+        return None
     license_id = silver.spdx_license
     if license_id is None or license_id.lower() == "unknown":
         return "license_excluded"
-    if silver.source_format == "code" and license_id not in PERMISSIVE_CODE_LICENSES:
+    if license_id not in PERMISSIVE_CODE_LICENSES:
         return "license_excluded"
     return None
 

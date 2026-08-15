@@ -23,7 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
 
 # Risk-tier follows the MixtureVitae / Common Pile convention:
-#   1 = clean (permissive license, low PII, low contamination)
+#   1 = trainable under current policy (license may be unknown for non-code,
+#       with low PII and low contamination)
 #   2 = caution (heuristic uncertainty, restricted licence, partial PII)
 #   3 = drop (explicit dirty signal; should not enter training mixture)
 RiskTier = Literal[1, 2, 3]

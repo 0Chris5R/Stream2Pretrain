@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Missing or `unknown` machine-readable licenses no longer reject non-code
+  documents. Code remains restricted to the permissive SPDX allowlist, and
+  unknown license provenance remains visible in Gold records.
 - Reimplemented the DHBW deployment as measured `platform`, `catalog`,
   `topics`, and `application` stages with Helm 3 validation and pinned charts.
 - Replaced the missing local Polaris chart with official Apache Polaris 1.7.0

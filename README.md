@@ -260,7 +260,11 @@ The lecture stack does not include a streaming bus or stream engine. This projec
 
 ## License
 
-Apache-2.0 - see [`LICENSE`](LICENSE). License detection on ingested documents is **heuristic**; Stream2Pretrain is best-effort, not a legal-compliance product.
+Apache-2.0 - see [`LICENSE`](LICENSE). License detection on ingested documents
+is **heuristic**; Stream2Pretrain is best-effort, not a legal-compliance
+product. The provisional policy admits non-code documents without a
+machine-readable license while preserving `unknown` provenance. Code remains
+restricted to the configured permissive SPDX allowlist.
 
 ## Project framing
 
