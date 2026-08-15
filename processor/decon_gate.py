@@ -125,7 +125,9 @@ class DeconGate:
         self._set_version = benchmark_set_version
         self._ngram = ngram
         self._signer = signer or AttestationSigner()
-        self._blooms: dict[BenchmarkName, _Bloom] = {benchmark: _Bloom() for benchmark in BENCHMARKS}
+        self._blooms: dict[BenchmarkName, _Bloom] = {
+            benchmark: _Bloom() for benchmark in BENCHMARKS
+        }
         # Track every shingle width we have indexed so ``scan`` knows which
         # window sizes to try. The default n is always present; short
         # benchmark prompts add their own sub-13 token window.
@@ -178,6 +180,9 @@ class DeconGate:
         # the denominator without adding signal.
         tokens_scanned = max(1, sum(1 for _ in shingle_ngrams(text, self._ngram)))
         hits: list[BenchmarkName] = []
+        exact_hits: list[BenchmarkName] = []
+        semantic_hits: list[BenchmarkName] = []
+        max_similarity = 0.0
         flagged_shingles: set[str] = set()
         for bench, bf in self._blooms.items():
             matched = False
@@ -185,15 +190,19 @@ class DeconGate:
                 for shingle in shingle_ngrams(text, n=width):
                     if shingle.encode("utf-8") in bf:
                         hits.append(bench)
+                        exact_hits.append(bench)
                         flagged_shingles.add(shingle)
                         matched = True
                         break
                 if matched:
                     break
         if self._embedding is not None:
-            for bench, sim in self._embedding.query(text):
-                if sim >= DEFAULT_EMBED_THRESHOLD and bench not in hits:
-                    hits.append(bench)
+            for chunk in _semantic_chunks(text):
+                for bench, sim in self._embedding.query(chunk):
+                    max_similarity = max(max_similarity, float(sim))
+                    if sim >= DEFAULT_EMBED_THRESHOLD and bench not in hits:
+                        hits.append(bench)
+                        semantic_hits.append(bench)
         # Update accumulators. ``tokens_flagged`` is the count of unique
         # shingles that actually fired - bounded above by tokens_scanned so
         # the ratio remains a meaningful "fraction of corpus contaminated".
@@ -204,11 +213,25 @@ class DeconGate:
             self._state.rejected_doc_hashes.append(record.doc_id)
             for bench in hits:
                 self._state.per_benchmark_hits[bench] += 1
+        diagnostic_record = record.model_copy(
+            update={
+                "decon_exact_matches": sorted(set(exact_hits)),
+                "decon_semantic_matches": sorted(set(semantic_hits)),
+                "decon_max_similarity": max_similarity,
+                "decon_ngram_size": self._ngram,
+                "decon_embedding_revision": (
+                    f"{self._embedding.revision}/{self._embedding.backend}"
+                    if self._embedding is not None
+                    else "disabled"
+                ),
+                "benchmark_set_version": self._set_version,
+            }
+        )
         # Make a tagged copy with the hits appended.
         if not hits:
-            return record, []
-        new_marks = sorted(set(record.contaminated_with) | set(hits))
-        tagged = record.model_copy(update={"contaminated_with": new_marks})
+            return diagnostic_record, []
+        new_marks = sorted(set(diagnostic_record.contaminated_with) | set(hits))
+        tagged = diagnostic_record.model_copy(update={"contaminated_with": new_marks})
         return tagged, hits
 
     def flush_attestation(
@@ -288,10 +311,35 @@ class _EmbeddingSketch:
     development environments.
     """
 
-    def __init__(self, model_dir: str | Path | None) -> None:
+    def __init__(
+        self,
+        model_dir: str | Path | None,
+        *,
+        revision: str | None = None,
+        allow_fallback: bool = True,
+    ) -> None:
         self._model_dir = Path(model_dir) if model_dir else None
+        self._allow_fallback = allow_fallback
         self._session, self._tokenizer = self._load(self._model_dir)
+        if not allow_fallback and not self.is_model_loaded:
+            raise RuntimeError("the pinned E5-small-v2 ONNX model is required")
         self._index: dict[BenchmarkName, list[list[float]]] = {}
+        self._revision = revision or (
+            "intfloat/e5-small-v2-onnx" if self.is_model_loaded else "hash-fallback"
+        )
+
+    @property
+    def is_model_loaded(self) -> bool:
+        """Whether the semantic gate is backed by the real E5 model."""
+        return self._session is not None and self._tokenizer is not None
+
+    @property
+    def revision(self) -> str:
+        return self._revision
+
+    @property
+    def backend(self) -> str:
+        return "onnxruntime-cpu" if self.is_model_loaded else "hash-fallback"
 
     @staticmethod
     def _load(model_dir: Path | None) -> tuple[object | None, object | None]:
@@ -306,7 +354,7 @@ class _EmbeddingSketch:
         if not model_file.is_file():
             return None, None
         sess = ort.InferenceSession(str(model_file), providers=["CPUExecutionProvider"])
-        tok = AutoTokenizer.from_pretrained(str(model_dir))
+        tok = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
         return sess, tok
 
     def add(self, benchmark: BenchmarkName, text: str) -> None:
@@ -338,19 +386,27 @@ class _EmbeddingSketch:
                 padding="max_length",
                 return_tensors="np",
             )
-            outputs = self._session.run(  # type: ignore[union-attr]
-                None,
-                {
-                    "input_ids": encoded["input_ids"].astype("int64"),
-                    "attention_mask": encoded["attention_mask"].astype("int64"),
-                },
-            )
-            arr = outputs[0].mean(axis=1).reshape(-1)
+            input_names = {
+                value.name
+                for value in self._session.get_inputs()  # type: ignore[union-attr]
+            }
+            feeds = {
+                key: encoded[key].astype("int64")
+                for key in ("input_ids", "attention_mask", "token_type_ids")
+                if key in encoded and key in input_names
+            }
+            outputs = self._session.run(None, feeds)  # type: ignore[union-attr]
+            hidden = outputs[0]
+            mask = encoded["attention_mask"].astype("float32")[:, :, None]
+            denominator = mask.sum(axis=1).clip(1.0, None)
+            arr = ((hidden * mask).sum(axis=1) / denominator).reshape(-1)
             norm = math.sqrt(float((arr * arr).sum()))
             if norm == 0:
                 return [0.0] * len(arr)
             return list((arr / norm).tolist())
         except Exception:
+            if not self._allow_fallback:
+                raise
             return _hash_embedding(text)
 
 
@@ -363,6 +419,27 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if da == 0 or db == 0:
         return 0.0
     return num / (da * db)
+
+
+def _semantic_chunks(text: str, *, max_chunks: int = 8, target_words: int = 320) -> list[str]:
+    """Build bounded section/paragraph chunks for E5 instead of truncating a paper."""
+    paragraphs = [value.strip() for value in text.split("\n\n") if value.strip()]
+    chunks: list[str] = []
+    current: list[str] = []
+    words = 0
+    for paragraph in paragraphs:
+        count = len(_WORD.findall(paragraph))
+        if current and words + count > target_words:
+            chunks.append("\n\n".join(current))
+            current = []
+            words = 0
+            if len(chunks) >= max_chunks:
+                break
+        current.append(paragraph)
+        words += count
+    if current and len(chunks) < max_chunks:
+        chunks.append("\n\n".join(current))
+    return chunks or [text]
 
 
 def _hash_embedding(text: str, dim: int = 64) -> list[float]:

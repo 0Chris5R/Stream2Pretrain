@@ -1,0 +1,821 @@
+{
+  "$defs": {
+    "ScientificCitation": {
+      "additionalProperties": false,
+      "description": "A source citation or internal bibliography reference.",
+      "properties": {
+        "citation_id": {
+          "title": "Citation Id",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "citation_id",
+        "text"
+      ],
+      "title": "ScientificCitation",
+      "type": "object"
+    },
+    "ScientificEquation": {
+      "additionalProperties": false,
+      "description": "MathML or TeX representation retained from the source.",
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "display": {
+          "default": false,
+          "title": "Display",
+          "type": "boolean"
+        },
+        "equation_id": {
+          "title": "Equation Id",
+          "type": "string"
+        },
+        "latex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latex"
+        },
+        "mathml": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mathml"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        }
+      },
+      "required": [
+        "equation_id"
+      ],
+      "title": "ScientificEquation",
+      "type": "object"
+    },
+    "ScientificFigure": {
+      "additionalProperties": false,
+      "description": "Figure asset plus deterministic CPU enrichment and provenance.",
+      "properties": {
+        "alt_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alt Text"
+        },
+        "asset_s3_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset S3 Uri"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "classifier_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Classifier Revision"
+        },
+        "figure_id": {
+          "title": "Figure Id",
+          "type": "string"
+        },
+        "figure_type": {
+          "default": "unknown",
+          "enum": [
+            "logo",
+            "photograph",
+            "icon",
+            "engineering_drawing",
+            "line_chart",
+            "bar_chart",
+            "other",
+            "table",
+            "flow_chart",
+            "screenshot_from_computer",
+            "signature",
+            "screenshot_from_manual",
+            "geographical_map",
+            "pie_chart",
+            "page_thumbnail",
+            "stamp",
+            "music",
+            "calendar",
+            "qr_code",
+            "bar_code",
+            "full_page_image",
+            "scatter_plot",
+            "chemistry_structure",
+            "topographical_map",
+            "crossword_puzzle",
+            "box_plot",
+            "unknown"
+          ],
+          "title": "Figure Type",
+          "type": "string"
+        },
+        "figure_type_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Figure Type Confidence"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height"
+        },
+        "image_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image Sha256"
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mime Type"
+        },
+        "nearby_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nearby Text"
+        },
+        "ocr_policy_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Policy Revision"
+        },
+        "ocr_quality_score": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Quality Score"
+        },
+        "ocr_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Revision"
+        },
+        "ocr_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Text"
+        },
+        "ocr_training_eligible": {
+          "default": false,
+          "description": "True only after a versioned OCR quality policy has accepted this output for the text training projection. Raw OCR is audit-only by default.",
+          "title": "Ocr Training Eligible",
+          "type": "boolean"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        },
+        "source_element_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Element Id"
+        },
+        "source_url": {
+          "title": "Source Url",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Width"
+        }
+      },
+      "required": [
+        "figure_id",
+        "source_url"
+      ],
+      "title": "ScientificFigure",
+      "type": "object"
+    },
+    "ScientificParagraph": {
+      "additionalProperties": false,
+      "description": "Stable paragraph-sized unit used to build the training projection.",
+      "properties": {
+        "exclusion_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exclusion Reason"
+        },
+        "include_in_training": {
+          "default": true,
+          "title": "Include In Training",
+          "type": "boolean"
+        },
+        "paragraph_id": {
+          "title": "Paragraph Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "paragraph_id",
+        "text"
+      ],
+      "title": "ScientificParagraph",
+      "type": "object"
+    },
+    "ScientificSection": {
+      "additionalProperties": false,
+      "description": "One heading-delimited section from the source document.",
+      "properties": {
+        "exclusion_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exclusion Reason"
+        },
+        "include_in_training": {
+          "default": true,
+          "title": "Include In Training",
+          "type": "boolean"
+        },
+        "level": {
+          "maximum": 6,
+          "minimum": 1,
+          "title": "Level",
+          "type": "integer"
+        },
+        "paragraphs": {
+          "items": {
+            "$ref": "#/$defs/ScientificParagraph"
+          },
+          "title": "Paragraphs",
+          "type": "array"
+        },
+        "role": {
+          "default": "other",
+          "enum": [
+            "abstract",
+            "introduction",
+            "background",
+            "methods",
+            "results",
+            "discussion",
+            "conclusion",
+            "limitations",
+            "appendix",
+            "acknowledgements",
+            "references",
+            "metadata",
+            "other"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "section_id": {
+          "title": "Section Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "word_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Word Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "section_id",
+        "level",
+        "title",
+        "text"
+      ],
+      "title": "ScientificSection",
+      "type": "object"
+    },
+    "ScientificTable": {
+      "additionalProperties": false,
+      "description": "A table represented as ordered rows and cells.",
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "footnotes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Footnotes",
+          "type": "array"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        },
+        "rows": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "table_id": {
+          "title": "Table Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "table_id"
+      ],
+      "title": "ScientificTable",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned structured view whose plain-text projection enters curation.",
+  "properties": {
+    "abstract": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Abstract"
+    },
+    "author_metadata": {
+      "description": "Raw bounded author/affiliation blocks kept out of the training projection.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Author Metadata",
+      "type": "array"
+    },
+    "authors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Authors",
+      "type": "array"
+    },
+    "citations": {
+      "items": {
+        "$ref": "#/$defs/ScientificCitation"
+      },
+      "title": "Citations",
+      "type": "array"
+    },
+    "doc_id": {
+      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "equations": {
+      "items": {
+        "$ref": "#/$defs/ScientificEquation"
+      },
+      "title": "Equations",
+      "type": "array"
+    },
+    "excluded_section_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Excluded Section Count",
+      "type": "integer"
+    },
+    "excluded_sections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Excluded Sections",
+      "type": "array"
+    },
+    "extraction_pipeline": {
+      "title": "Extraction Pipeline",
+      "type": "string"
+    },
+    "figures": {
+      "items": {
+        "$ref": "#/$defs/ScientificFigure"
+      },
+      "title": "Figures",
+      "type": "array"
+    },
+    "included_section_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Included Section Count",
+      "type": "integer"
+    },
+    "license": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "License"
+    },
+    "projection_version": {
+      "default": "scientific-body-v2",
+      "title": "Projection Version",
+      "type": "string"
+    },
+    "publication_date": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Publication Date"
+    },
+    "raw_extractor_s3_uri": {
+      "anyOf": [
+        {
+          "pattern": "^s3://[^/]+/.+",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Lossless extractor-native artifact, such as Docling JSON.",
+      "title": "Raw Extractor S3 Uri"
+    },
+    "schema_version": {
+      "default": "scientific-document-v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sections": {
+      "items": {
+        "$ref": "#/$defs/ScientificSection"
+      },
+      "title": "Sections",
+      "type": "array"
+    },
+    "source_identifier": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Identifier"
+    },
+    "source_url": {
+      "title": "Source Url",
+      "type": "string"
+    },
+    "source_word_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Source Word Count",
+      "type": "integer"
+    },
+    "tables": {
+      "items": {
+        "$ref": "#/$defs/ScientificTable"
+      },
+      "title": "Tables",
+      "type": "array"
+    },
+    "text_sha256": {
+      "title": "Text Sha256",
+      "type": "string"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "training_word_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Training Word Count",
+      "type": "integer"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "doc_id",
+    "source_url",
+    "text_sha256",
+    "extraction_pipeline"
+  ],
+  "title": "ScientificDocument",
+  "type": "object"
+}

@@ -14,7 +14,7 @@ Modules
 - :mod:`processor.operators.kenlm_score`  - KenLM perplexity
 - :mod:`processor.operators.minhash`      - Rensa MinHash signature
 - :mod:`processor.operators.lshbloom`     - band-partitioned Bloom near-dup
-- :mod:`processor.operators.quality`      - FineWeb-Edu ONNX classifier
+- :mod:`processor.operators.quality`      - FinePDFs/FineWeb CPU classifiers
 - :mod:`processor.operators.pii`          - regex pack + optional Presidio
 - :mod:`processor.operators.validity`     - validity-interval enricher
 """

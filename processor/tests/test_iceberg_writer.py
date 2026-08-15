@@ -48,9 +48,7 @@ def test_to_arrow_includes_v2_provenance_columns() -> None:
     table = writer._to_arrow([_gold()])
 
     assert table.column("source_format").to_pylist() == ["code"]
-    assert table.column("extraction_pipeline").to_pylist() == [
-        "github-release-tarball-2026-06"
-    ]
+    assert table.column("extraction_pipeline").to_pylist() == ["github-release-tarball-2026-06"]
     assert table.column("spdx_license").to_pylist() == ["Apache-2.0"]
     assert table.column("spdx_license_source").to_pylist() == ["github_api"]
 
@@ -110,8 +108,61 @@ def test_attestation_sink_writes_decon_bucket_and_topic() -> None:
     assert producer.flushed
 
 
-def test_writer_drops_non_trainable_rows_before_buffering() -> None:
-    writer = IcebergWriter(
+class _Snapshot:
+    snapshot_id = 11
+
+
+class _MemoryTable:
+    def __init__(self) -> None:
+        self.rows = 0
+        self.tables: list[object] = []
+
+    def append(self, table: object) -> None:
+        self.rows += int(table.num_rows)
+        self.tables.append(table)
+
+    def current_snapshot(self) -> _Snapshot:
+        return _Snapshot()
+
+    def scan(self, *, selected_fields: tuple[str, ...]) -> object:
+        import pyarrow as pa
+
+        selected = [table.select(selected_fields) for table in self.tables]
+        arrow = (
+            pa.concat_tables(selected)
+            if selected
+            else pa.table({name: pa.array([], type=pa.string()) for name in selected_fields})
+        )
+
+        class _Scan:
+            def to_arrow(self) -> object:
+                return arrow
+
+        return _Scan()
+
+
+class _MemoryWriter(IcebergWriter):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.decisions = _MemoryTable()
+        self.gold = _MemoryTable()
+        self.benchmark_candidates = _MemoryTable()
+
+    def _ensure_decisions_table(self) -> _MemoryTable:
+        return self.decisions
+
+    def _ensure_table(self) -> _MemoryTable:
+        return self.gold
+
+    def _ensure_benchmark_candidates_table(self) -> _MemoryTable:
+        return self.benchmark_candidates
+
+    def _set_snapshot_props(self, *_args: object) -> None:
+        return None
+
+
+def test_writer_persists_rejected_decision_without_adding_it_to_gold() -> None:
+    writer = _MemoryWriter(
         catalog=object(),
         decon=DeconGate(benchmark_set_version="v-test"),
         scoring_version="v-test",
@@ -121,7 +172,94 @@ def test_writer_drops_non_trainable_rows_before_buffering() -> None:
     rejected = _gold().model_copy(update={"risk_tier": 2, "reject_reasons": ["license_excluded"]})
 
     assert writer.add(rejected) is None
-    assert writer.flush().rows_committed == 0
+    stats = writer.flush()
+    assert stats.rows_committed == 0
+    assert stats.decisions_committed == 1
+    assert writer.decisions.rows == 1
+    assert writer.gold.rows == 0
+    assert writer.benchmark_candidates.rows == 0
+
+
+def test_writer_isolates_benchmark_candidate_from_training_gold() -> None:
+    writer = _MemoryWriter(
+        catalog=object(),
+        decon=DeconGate(benchmark_set_version="v-test"),
+        scoring_version="v-test",
+        classifier_revision="classifier-test",
+        policy_revision="git:test",
+    )
+    candidate = _gold().model_copy(
+        update={
+            "route": "benchmark_candidate",
+            "eligible_routes": [
+                "broad_pretraining",
+                "reasoning_candidate",
+                "benchmark_candidate",
+            ],
+        }
+    )
+
+    assert writer.add(candidate) is None
+    stats = writer.flush()
+
+    assert stats.rows_committed == 0
+    assert stats.benchmark_candidates_committed == 1
+    assert writer.decisions.rows == 1
+    assert writer.gold.rows == 0
+    assert writer.benchmark_candidates.rows == 1
+
+
+def test_writer_ignores_replayed_decision_recipe() -> None:
+    writer = _MemoryWriter(
+        catalog=object(),
+        decon=DeconGate(benchmark_set_version="v-test"),
+        scoring_version="v-test",
+        classifier_revision="classifier-test",
+        policy_revision="git:test",
+    )
+    record = _gold().model_copy(update={"route": "broad_pretraining"})
+
+    writer.add(record)
+    first = writer.flush()
+    writer.add(record)
+    replay = writer.flush()
+
+    assert first.decisions_committed == 1
+    assert replay.decisions_committed == 0
+    assert replay.rows_committed == 0
+    assert writer.decisions.rows == 1
+    assert writer.gold.rows == 1
+
+
+def test_writer_ignores_replay_after_restart_by_scanning_iceberg_keys() -> None:
+    first_writer = _MemoryWriter(
+        catalog=object(),
+        decon=DeconGate(benchmark_set_version="v-test"),
+        scoring_version="v-test",
+        classifier_revision="classifier-test",
+        policy_revision="git:test",
+    )
+    record = _gold().model_copy(update={"route": "broad_pretraining"})
+    first_writer.add(record)
+    first_writer.flush()
+
+    restarted_writer = _MemoryWriter(
+        catalog=object(),
+        decon=DeconGate(benchmark_set_version="v-test"),
+        scoring_version="v-test",
+        classifier_revision="classifier-test",
+        policy_revision="git:test",
+    )
+    restarted_writer.decisions = first_writer.decisions
+    restarted_writer.gold = first_writer.gold
+    restarted_writer.benchmark_candidates = first_writer.benchmark_candidates
+    restarted_writer.add(record)
+    replay = restarted_writer.flush()
+
+    assert replay.decisions_committed == 0
+    assert replay.rows_committed == 0
+    assert restarted_writer.decisions.rows == 1
+    assert restarted_writer.gold.rows == 1
 
 
 def test_gold_identifier_follows_helm_namespace_env(monkeypatch: pytest.MonkeyPatch) -> None:

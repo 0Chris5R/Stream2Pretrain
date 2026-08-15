@@ -20,16 +20,87 @@ from dataclasses import dataclass
 # detector via the processor extras.
 _STOPWORDS: dict[str, frozenset[str]] = {
     "en": frozenset(
-        ["the", "and", "that", "have", "for", "not", "with", "you", "this", "but", "his", "they", "are", "from", "which", "one"]
+        [
+            "the",
+            "and",
+            "that",
+            "have",
+            "for",
+            "not",
+            "with",
+            "you",
+            "this",
+            "but",
+            "his",
+            "they",
+            "are",
+            "from",
+            "which",
+            "one",
+        ]
     ),
     "de": frozenset(
-        ["der", "die", "und", "das", "mit", "nicht", "ein", "eine", "ist", "auch", "sich", "auf", "zu", "von", "im", "sind"]
+        [
+            "der",
+            "die",
+            "und",
+            "das",
+            "mit",
+            "nicht",
+            "ein",
+            "eine",
+            "ist",
+            "auch",
+            "sich",
+            "auf",
+            "zu",
+            "von",
+            "im",
+            "sind",
+        ]
     ),
     "fr": frozenset(
-        ["le", "la", "les", "des", "une", "est", "pas", "que", "pour", "dans", "avec", "sur", "ne", "par", "plus", "mais", "ou"]
+        [
+            "le",
+            "la",
+            "les",
+            "des",
+            "une",
+            "est",
+            "pas",
+            "que",
+            "pour",
+            "dans",
+            "avec",
+            "sur",
+            "ne",
+            "par",
+            "plus",
+            "mais",
+            "ou",
+        ]
     ),
     "es": frozenset(
-        ["que", "de", "no", "la", "el", "en", "los", "se", "las", "por", "con", "para", "una", "su", "al", "lo", "como", "mas"]
+        [
+            "que",
+            "de",
+            "no",
+            "la",
+            "el",
+            "en",
+            "los",
+            "se",
+            "las",
+            "por",
+            "con",
+            "para",
+            "una",
+            "su",
+            "al",
+            "lo",
+            "como",
+            "mas",
+        ]
     ),
 }
 
@@ -54,9 +125,12 @@ class LangIdentifier:
         statistical LID).
     """
 
-    def __init__(self, *, min_chars: int = 64) -> None:
+    def __init__(self, *, min_chars: int = 64, allow_fallback: bool = True) -> None:
         self._min_chars = min_chars
+        self._allow_fallback = allow_fallback
         self._backend, self._detector = self._load_backend()
+        if not allow_fallback and self._detector == "fallback-stopword-0.1":
+            raise RuntimeError("fastlangid is required when fallbacks are disabled")
 
     @staticmethod
     def _load_backend() -> tuple[object | None, str]:
@@ -77,21 +151,31 @@ class LangIdentifier:
 
     def identify(self, text: str) -> LangResult:
         """Return language + confidence for ``text`` (never raises)."""
-        if not text or len(text) < self._min_chars:
+        if not text or (len(text) < self._min_chars and self._allow_fallback):
             return self._heuristic(text)
         if self._detector == "fastlangid-1" and self._backend is not None:
             try:
-                lang, score = self._backend.predict(text)  # type: ignore[union-attr]
+                # fastlangid returns only the label unless probability output
+                # is requested explicitly.
+                lang, score = self._backend.predict(text, prob=True)  # type: ignore[union-attr]
                 return LangResult(lang=str(lang), score=float(score), detector=self._detector)
             except Exception:
+                if not self._allow_fallback:
+                    raise
                 return self._heuristic(text)
         if self._detector.startswith("langdetect") and self._backend is not None:
             try:
                 results = self._backend.detect_langs(text)  # type: ignore[union-attr]
                 top = results[0]
-                return LangResult(lang=str(top.lang), score=float(top.prob), detector=self._detector)
+                return LangResult(
+                    lang=str(top.lang), score=float(top.prob), detector=self._detector
+                )
             except Exception:
+                if not self._allow_fallback:
+                    raise
                 return self._heuristic(text)
+        if not self._allow_fallback:
+            raise RuntimeError("no real language identifier is available")
         return self._heuristic(text)
 
     def _heuristic(self, text: str) -> LangResult:

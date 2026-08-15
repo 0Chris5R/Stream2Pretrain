@@ -1,0 +1,23 @@
+# Docker Hub independent console image from Redpanda's pinned Debian package.
+FROM python:3.11-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && architecture="$(dpkg --print-architecture)" \
+ && case "${architecture}" in \
+      arm64) \
+        package_file=redpanda-console_2.7.2_arm64_5492cec9d33efd1d1cd40b1c1a386c67.deb; \
+        package_sha=87ac1c96f5fb6b3adaa22159cccbe0c5c593bf1e65dace9025a75fa8aa124d6e ;; \
+      amd64) \
+        package_file=redpanda-console_2.7.2_amd64_d3a9bc2f5b681340aa156466dc67d36c.deb; \
+        package_sha=8c84ef86e2c87227df0c30f8d50f86023d8c3dc267664b2aea2790858beb118a ;; \
+      *) echo "unsupported architecture: ${architecture}" >&2; exit 1 ;; \
+    esac \
+ && base=https://linux.pkg.redpanda.com/apt/pool/redpanda-apt \
+ && curl -fsSL --retry 5 -o "/tmp/${package_file}" "${base}/${package_file}" \
+ && echo "${package_sha}  /tmp/${package_file}" | sha256sum -c - \
+ && apt-get install -y "/tmp/${package_file}" \
+ && apt-get purge -y --auto-remove curl \
+ && rm -rf /tmp/*.deb /var/lib/apt/lists/*
+
+ENTRYPOINT ["redpanda-console"]

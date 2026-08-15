@@ -96,9 +96,7 @@ class BronzeRecord(BaseModel):
 
     doc_id: DocId
     url: HttpUrl
-    fetched_at: datetime = Field(
-        ..., description="UTC instant the fetcher received the response."
-    )
+    fetched_at: datetime = Field(..., description="UTC instant the fetcher received the response.")
     http_status: int = Field(..., ge=100, le=599)
     http_last_modified: datetime | None = Field(
         default=None,
@@ -127,9 +125,7 @@ class BronzeRecord(BaseModel):
     # v0.2.0 classifier columns (carried forward to Silver and Gold).
     source_format: SourceFormat = Field(
         default="html",
-        description=(
-            "Wire shape of the document; downstream extractors dispatch on this."
-        ),
+        description=("Wire shape of the document; downstream extractors dispatch on this."),
     )
     extraction_pipeline: str = Field(
         default="raw-fetch",

@@ -1,0 +1,21 @@
+# Source-only refresh for an already-built faithful local processor image.
+#
+# The full Dockerfile.local owns system and Python dependency installation.
+# This file deliberately changes only /app, so UI/API/processor edits do not
+# duplicate the 2+ GB CPU runtime layer. Re-run the full build whenever
+# pyproject.toml, uv.lock, or a system dependency changes.
+ARG BASE_IMAGE=localhost/stream2pretrain-processor:local
+FROM ${BASE_IMAGE}
+
+USER root
+COPY schemas /app/schemas
+COPY ingest /app/ingest
+COPY processor /app/processor
+COPY scripts /app/scripts
+COPY tests /app/tests
+RUN chown -R root:root /app \
+ && find /app -type d -exec chmod 0755 {} + \
+ && find /app -type f -exec chmod 0644 {} +
+
+USER nonroot
+ENTRYPOINT ["s2p-curate"]

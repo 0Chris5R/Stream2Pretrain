@@ -90,9 +90,7 @@ def derive_valid_from(row: dict[str, Any]) -> datetime:
             _, _, year_s, week_s = dump.split("-", 3)
             year = int(year_s)
             week = int(week_s)
-            return datetime.fromisocalendar(year, max(1, min(52, week)), 1).replace(
-                tzinfo=UTC
-            )
+            return datetime.fromisocalendar(year, max(1, min(52, week)), 1).replace(tzinfo=UTC)
         except (ValueError, IndexError):
             pass
     return datetime(2024, 4, 1, tzinfo=UTC)

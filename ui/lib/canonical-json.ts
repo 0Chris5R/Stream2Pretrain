@@ -18,6 +18,9 @@
  *     Dates / Maps / Sets must be converted by the caller first.
  */
 export function canonicalJSONStringify(value: unknown): string {
+  if (typeof value === 'bigint') {
+    return value.toString(10);
+  }
   if (value === null || typeof value !== 'object') {
     return JSON.stringify(value);
   }

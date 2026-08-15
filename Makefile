@@ -9,6 +9,8 @@ SHELL := /usr/bin/env bash
 PY_DIRS := schemas ingest processor tests
 HELM_CHART := charts/stream2pretrain
 HELMFILE := helmfile.yaml
+CONTAINER_ENGINE ?= $(shell if command -v podman >/dev/null 2>&1; then echo podman; else echo docker; fi)
+LOCAL_COMPOSE := $(CONTAINER_ENGINE) compose -f compose.local.yml
 
 .PHONY: help
 help: ## Print this help.
@@ -55,8 +57,51 @@ dev-down: ## Stop and remove the local dev stack (volumes preserved).
 dev-reset: ## Stop the dev stack and remove volumes (destructive).
 	docker compose -f docker-compose.dev.yml down -v
 
+.PHONY: local-up
+local-up: ## Build and start the Podman-first local end-to-end profile.
+	$(CONTAINER_ENGINE) build -t stream2pretrain-redpanda:local -f local/redpanda/Dockerfile local/redpanda
+	$(CONTAINER_ENGINE) build -t stream2pretrain-redpanda-console:local -f local/redpanda/Dockerfile.console local/redpanda
+	$(CONTAINER_ENGINE) build -t stream2pretrain-processor:local -f processor/Dockerfile.local .
+	$(LOCAL_COMPOSE) --profile bootstrap run --rm --no-deps model-bootstrap
+	$(CONTAINER_ENGINE) build -t stream2pretrain-arxiv-fetcher:local -f ingest/arxiv_html_fetcher/Dockerfile .
+	$(CONTAINER_ENGINE) build -t stream2pretrain-ui:local -f ui/Dockerfile ui
+	$(LOCAL_COMPOSE) up -d --no-build
+	@echo "Cockpit:          http://localhost:3100"
+	@echo "Redpanda console: http://localhost:8080"
+	@echo "MinIO console:    http://localhost:9001 (minioadmin / minioadmin)"
+
+.PHONY: local-ingest-arxiv
+local-ingest-arxiv: ## Fetch the small local/arxiv_ids.txt sample into the live pipeline.
+	$(LOCAL_COMPOSE) --profile manual run --rm arxiv-ingest
+
+.PHONY: local-rebuild-processor
+local-rebuild-processor: ## Refresh processor source without duplicating the large CPU runtime.
+	tar -cf - schemas ingest processor scripts tests | \
+		$(CONTAINER_ENGINE) build -f processor/Dockerfile.local.incremental \
+		-t stream2pretrain-processor:local -
+
+.PHONY: local-ingest-fixtures
+local-ingest-fixtures: ## Emit six deterministic route and rejection fixtures.
+	$(LOCAL_COMPOSE) --profile manual run --rm controlled-fixtures
+
+.PHONY: local-status
+local-status: ## Show read-only local pipeline, topic, API, and UI status.
+	CONTAINER_ENGINE=$(CONTAINER_ENGINE) bash scripts/local_status.sh
+
+.PHONY: local-logs
+local-logs: ## Follow the local processor, API, and UI logs.
+	$(LOCAL_COMPOSE) logs -f processor-fetcher processor-curate processor-iceberg-writer decon-api duckdb-api ui
+
+.PHONY: local-down
+local-down: ## Stop the local end-to-end profile (volumes preserved).
+	$(LOCAL_COMPOSE) down
+
+.PHONY: local-reset
+local-reset: ## Stop the local end-to-end profile and remove its volumes (destructive).
+	$(LOCAL_COMPOSE) down -v
+
 .PHONY: seed-topics
-seed-topics: ## Create the four core Redpanda topics on the local dev cluster.
+seed-topics: ## Create the five core Redpanda topics on the local dev cluster.
 	bash scripts/seed_topics.sh
 
 .PHONY: helm-lint

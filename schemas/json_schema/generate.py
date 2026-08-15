@@ -21,6 +21,7 @@ from schemas.bronze import BronzeRecord
 from schemas.code import CodeFileRecord
 from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
+from schemas.scientific import ScientificDocument
 from schemas.silver import SilverRecord
 from schemas.sourcefeed import MixtureRecipeSpec, SourceFeedSpec
 
@@ -30,6 +31,7 @@ EXPORTS: Final[tuple[tuple[type[BaseModel], str], ...]] = (
     (BronzeRecord, "bronze_record"),
     (SilverRecord, "silver_record"),
     (GoldRecord, "gold_record"),
+    (ScientificDocument, "scientific_document"),
     (CodeFileRecord, "code_file_record"),
     (DeconAttestation, "decon_attestation"),
     (SourceFeedSpec, "source_feed_spec"),

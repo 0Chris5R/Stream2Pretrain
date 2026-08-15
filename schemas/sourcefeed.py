@@ -17,6 +17,7 @@ def _to_lower_camel(name: str) -> str:
     head, *tail = name.split("_")
     return head + "".join(part.capitalize() for part in tail)
 
+
 FeedProtocol = Literal[
     "rss",
     "atom",
@@ -41,7 +42,9 @@ LicenseDefault = Literal[
 class RateLimitSpec(BaseModel):
     """Politeness limits for a single SourceFeed."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel
+    )
 
     requests_per_second: float = Field(..., gt=0.0)
     burst: int = Field(..., gt=0)
@@ -54,7 +57,9 @@ class RateLimitSpec(BaseModel):
 class AuthSpec(BaseModel):
     """Reference to a Secret holding the auth token."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel
+    )
 
     type: Literal["none", "bearer", "header", "basic"] = "none"
     secret_name: str | None = None
@@ -65,7 +70,9 @@ class AuthSpec(BaseModel):
 class SourceFeedSpec(BaseModel):
     """Spec of a single SourceFeed CRD instance."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel
+    )
 
     name: str = Field(..., min_length=1, max_length=63)
     protocol: FeedProtocol
@@ -91,7 +98,9 @@ class SourceFeedSpec(BaseModel):
         if self.auth.type == "none":
             return self
         if not self.auth.secret_name or not self.auth.secret_key:
-            raise ValueError("auth.secret_name and auth.secret_key are required when auth.type != 'none'")
+            raise ValueError(
+                "auth.secret_name and auth.secret_key are required when auth.type != 'none'"
+            )
         if self.auth.type == "header" and not self.auth.header_name:
             raise ValueError("auth.header_name is required when auth.type == 'header'")
         return self
@@ -100,7 +109,9 @@ class SourceFeedSpec(BaseModel):
 class MixtureSourceWeight(BaseModel):
     """A single source's weight within a mixture."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel
+    )
 
     source_feed: str = Field(..., min_length=1, max_length=63)
     weight: float = Field(..., gt=0.0, le=1.0)
@@ -114,7 +125,9 @@ class MixtureRecipeSpec(BaseModel):
     proxy LM is trained on each branch in rolling windows.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel
+    )
 
     name: str = Field(..., min_length=1, max_length=63)
     branch: str = Field(

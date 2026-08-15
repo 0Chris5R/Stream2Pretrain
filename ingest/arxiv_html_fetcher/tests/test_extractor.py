@@ -54,29 +54,20 @@ NO_META = """<html><body><article><p>No metadata at all.</p></article></body></h
 
 
 def test_preserve_math_replaces_block_math_with_dollar_dollar() -> None:
-    src = (
-        '<math display="block"><annotation encoding="application/x-tex">'
-        "x+y</annotation></math>"
-    )
+    src = '<math display="block"><annotation encoding="application/x-tex">x+y</annotation></math>'
     out = preserve_math(src)
     assert "$$" in out
     assert "x+y" in out
 
 
 def test_preserve_math_replaces_inline_math_with_single_dollar() -> None:
-    src = (
-        '<math display="inline"><annotation encoding="application/x-tex">'
-        "z</annotation></math>"
-    )
+    src = '<math display="inline"><annotation encoding="application/x-tex">z</annotation></math>'
     out = preserve_math(src)
     assert "$z$" in out
 
 
 def test_map_license_url_resolves_creative_commons_to_spdx() -> None:
-    assert (
-        map_license_url("https://creativecommons.org/licenses/by/4.0/")
-        == "CC-BY-4.0"
-    )
+    assert map_license_url("https://creativecommons.org/licenses/by/4.0/") == "CC-BY-4.0"
     assert (
         map_license_url("http://arxiv.org/licenses/nonexclusive-distrib/1.0/")
         == "arxiv-non-exclusive-distribution"

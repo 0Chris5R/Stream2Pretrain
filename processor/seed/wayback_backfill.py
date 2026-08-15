@@ -39,7 +39,7 @@ TIMEMAP_TEMPLATE: str = "https://web.archive.org/web/timemap/link/{url}"
 PLAYBACK_TEMPLATE: str = "https://web.archive.org/web/{ts}id_/{url}"
 
 _LINK_DATETIME_RE = re.compile(r'datetime="([^"]+)"', re.IGNORECASE)
-_LINK_HREF_RE = re.compile(r'<([^>]+)>', re.IGNORECASE)
+_LINK_HREF_RE = re.compile(r"<([^>]+)>", re.IGNORECASE)
 _TIMESTAMP_IN_HREF_RE = re.compile(r"/web/(\d{14})/")
 
 
@@ -76,9 +76,7 @@ class Snapshot:
 
     def captured_at(self) -> datetime:
         """Parse :attr:`timestamp` to a timezone-aware UTC datetime."""
-        return datetime.strptime(self.timestamp, "%Y%m%d%H%M%S").replace(
-            tzinfo=UTC
-        )
+        return datetime.strptime(self.timestamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
 
     def playback_url(self) -> str:
         """Return the ``id_`` playback URL for the original payload."""
@@ -108,9 +106,7 @@ def parse_timemap(body: str, *, original_url: str) -> list[Snapshot]:
     return out
 
 
-def filter_recent(
-    snapshots: Iterable[Snapshot], *, months: int, now: datetime
-) -> list[Snapshot]:
+def filter_recent(snapshots: Iterable[Snapshot], *, months: int, now: datetime) -> list[Snapshot]:
     """Keep only snapshots within the last ``months`` months."""
     cutoff = now - timedelta(days=months * 30)
     return [s for s in snapshots if s.captured_at() >= cutoff]
@@ -161,9 +157,7 @@ def native_id_for(feed: WaybackFeed, snapshot: Snapshot) -> str:
     return f"{feed.name}:{snapshot.timestamp}"
 
 
-def to_seed_document(
-    feed: WaybackFeed, snapshot: Snapshot, body: str
-) -> SeedDocument | None:
+def to_seed_document(feed: WaybackFeed, snapshot: Snapshot, body: str) -> SeedDocument | None:
     """Build a :class:`SeedDocument` for one snapshot.
 
     The body is left as-is (HTML / RSS / Atom string); downstream operators

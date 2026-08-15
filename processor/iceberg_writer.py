@@ -1,4 +1,4 @@
-"""Iceberg writer: ``docs.curated`` -> Iceberg ``gold`` table.
+"""Iceberg writer: ``curation.decisions`` -> audit and clean Iceberg tables.
 
 Loads / creates the gold table via the Polaris REST catalog (pyiceberg
 ``RestCatalog``), buffers incoming :class:`GoldRecord` rows into PyArrow
@@ -8,7 +8,7 @@ snapshot properties:
 - ``watermark``               - max ``valid_from`` in the batch
 - ``policy_revision``         - git SHA of the policy bundle
 - ``scoring_version``         - the scoring recipe identifier
-- ``classifier_revision``     - the FineWeb-Edu ONNX revision
+- ``classifier_revision``     - the exact source-appropriate quality revision
 - ``decon_attestation_uri``   - s3 URI of the signed attestation
 
 The Bytewax sink wraps :class:`IcebergWriter` so the same class can be
@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import orjson
+
 from processor import common
 from processor.decon_gate import DeconGate
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
@@ -53,6 +55,7 @@ DEFAULT_GOLD_NAMESPACE: str = "gold"
 DEFAULT_GOLD_TABLE: str = "curated"
 DECON_TABLE: str = "decon_attestations"
 DEFAULT_BATCH_SIZE: int = 256
+DecisionKey = tuple[str, str, str, str]
 
 
 def gold_identifier() -> tuple[str, str]:
@@ -64,11 +67,31 @@ def gold_identifier() -> tuple[str, str]:
     return (namespace, table)
 
 
+def decisions_identifier() -> tuple[str, str]:
+    """Return the Iceberg identifier for every accepted/rejected decision."""
+    namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
+        "ICEBERG_NAMESPACE", DEFAULT_GOLD_NAMESPACE
+    )
+    table = os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
+    return (namespace, table)
+
+
+def benchmark_candidates_identifier() -> tuple[str, str]:
+    """Return the physically separate benchmark-reserve table identifier."""
+    namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
+        "ICEBERG_NAMESPACE", DEFAULT_GOLD_NAMESPACE
+    )
+    table = os.environ.get("S2P_ICEBERG_BENCHMARK_TABLE", "benchmark_candidates")
+    return (namespace, table)
+
+
 @dataclass(slots=True)
 class WriterStats:
     """Diagnostics returned by :meth:`IcebergWriter.flush`."""
 
     rows_committed: int = 0
+    decisions_committed: int = 0
+    benchmark_candidates_committed: int = 0
     snapshot_id: int | None = None
     attestation_signed: bool = False
     watermark: datetime | None = None
@@ -132,6 +155,7 @@ class IcebergWriter:
         self._batch_size = batch_size
         self._buffer = _Buffer()
         self._lock = threading.Lock()
+        self._known_keys: dict[str, set[DecisionKey]] = {}
 
     @classmethod
     def from_config(
@@ -147,40 +171,23 @@ class IcebergWriter:
         Constructs the Polaris REST catalog client lazily so importing the
         module costs nothing in tests.
         """
-        from pyiceberg.catalog import load_catalog
+        from processor.iceberg_catalog import load_runtime_catalog
 
-        props: dict[str, str] = {
-            "uri": cfg.polaris_uri,
-            "warehouse": cfg.polaris_warehouse,
-            "s3.endpoint": cfg.minio_endpoint,
-            "s3.access-key-id": cfg.minio_access_key,
-            "s3.secret-access-key": cfg.minio_secret_key,
-            "s3.region": "us-east-1",
-            "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
-        }
-        if cfg.polaris_token:
-            props["token"] = cfg.polaris_token
-        credential = os.environ.get("POLARIS_CREDENTIAL")
-        if credential:
-            props["credential"] = credential
-            props["scope"] = os.environ.get("POLARIS_SCOPE", "PRINCIPAL_ROLE:ALL")
-        catalog = load_catalog("polaris", **props)
+        catalog = load_runtime_catalog(cfg)
         sink = attestation_writer if attestation_writer is not None else build_attestation_sink(cfg)
         return cls(
             catalog=catalog,
             decon=decon,
             scoring_version=cfg.benchmark_set_version,
-            classifier_revision="fineweb-edu-onnx-int8",
-            policy_revision="git:dev",
+            classifier_revision=os.environ.get("S2P_FINEWEB_EDU_REVISION", "fineweb-edu-unset"),
+            policy_revision=os.environ.get("S2P_POLICY_REVISION", "git:dev"),
             attestation_writer=sink,
             metrics=metrics,
             batch_size=int(os.environ.get("S2P_FLUSH_RECORDS", DEFAULT_BATCH_SIZE)),
         )
 
     def add(self, record: GoldRecord) -> WriterStats | None:
-        """Buffer one record; auto-flush when ``batch_size`` is reached."""
-        if not _is_trainable_gold(record):
-            return None
+        """Buffer one scored decision; auto-flush at ``batch_size``."""
         with self._lock:
             self._buffer.add(record)
             if len(self._buffer) >= self._batch_size:
@@ -204,55 +211,191 @@ class IcebergWriter:
         """
         rows = list(self._buffer.rows)
         watermark = self._buffer.watermark
-        table = self._ensure_table()
-        arrow_table = self._to_arrow(rows)
-        started = time.perf_counter()
-        snapshot_id = self._append(table, arrow_table, watermark)
-        elapsed = time.perf_counter() - started
-        if snapshot_id is None:
-            # Append failed: keep the buffer intact so the next call retries.
-            raise RuntimeError(
-                f"iceberg append failed for {len(rows)} rows; buffer preserved for retry"
-            )
-        # Append committed; safe to drain the buffer and seal the attestation.
-        self._buffer.reset()
-        attestation = self._decon.flush_attestation(
-            snapshot_id=snapshot_id,
-            committed_at=datetime.now(UTC),
-            extra_per_benchmark_hits=_aggregate_per_benchmark_hits(rows),
-            extra_rejected_doc_hashes=_aggregate_rejected_doc_hashes(rows),
-            extra_tokens_scanned=_aggregate_tokens_scanned(rows),
-            extra_tokens_flagged=_aggregate_tokens_flagged(rows),
+        accepted_rows = [row for row in rows if _is_trainable_gold(row)]
+        benchmark_rows = [
+            row for row in rows if row.route == "benchmark_candidate" and not row.reject_reasons
+        ]
+        decisions_table = self._ensure_decisions_table()
+        decision_rows = self._uncommitted_rows("decisions", decisions_table, rows)
+        gold_table = self._ensure_table() if accepted_rows else None
+        gold_rows = (
+            self._uncommitted_rows("gold", gold_table, accepted_rows)
+            if gold_table is not None
+            else []
         )
-        attest_uri = None
-        if self._attestation_writer is not None:
-            attest_uri = self._attestation_writer.write(attestation)
-        self._set_snapshot_props(table, snapshot_id, attestation, attest_uri)
+        benchmark_table = self._ensure_benchmark_candidates_table() if benchmark_rows else None
+        benchmark_commit_rows = (
+            self._uncommitted_rows("benchmark", benchmark_table, benchmark_rows)
+            if benchmark_table is not None
+            else []
+        )
+        started = time.perf_counter()
+        decision_snapshot_id: int | None = None
+        attestation_signed = False
+        if decision_rows:
+            decision_snapshot_id = self._append(
+                decisions_table,
+                self._to_arrow(decision_rows),
+                _rows_watermark(decision_rows),
+            )
+            if decision_snapshot_id is None:
+                raise RuntimeError(
+                    f"iceberg decision append failed for {len(decision_rows)} rows; buffer preserved"
+                )
+            self._remember_rows("decisions", decision_rows)
+
+            # The decision snapshot is authoritative. Sign it immediately so
+            # a later Gold/benchmark repair cannot leave an unattested audit
+            # snapshot after an at-least-once replay.
+            attestation = self._decon.flush_attestation(
+                snapshot_id=decision_snapshot_id,
+                committed_at=datetime.now(UTC),
+                extra_per_benchmark_hits=_aggregate_per_benchmark_hits(decision_rows),
+                extra_rejected_doc_hashes=_aggregate_rejected_doc_hashes(decision_rows),
+                extra_tokens_scanned=_aggregate_tokens_scanned(decision_rows),
+                extra_tokens_flagged=_aggregate_tokens_flagged(decision_rows),
+            )
+            attest_uri = None
+            if self._attestation_writer is not None:
+                attest_uri = self._attestation_writer.write(attestation)
+            self._set_snapshot_props(
+                decisions_table,
+                decision_snapshot_id,
+                attestation,
+                attest_uri,
+            )
+            attestation_signed = bool(attestation.signature)
+
+        if gold_rows and gold_table is not None:
+            gold_snapshot_id = self._append(
+                gold_table,
+                self._to_arrow(gold_rows),
+                _rows_watermark(gold_rows),
+            )
+            if gold_snapshot_id is None:
+                raise RuntimeError(
+                    "gold append failed after the durable decision commit; replay is safe"
+                )
+            self._remember_rows("gold", gold_rows)
+        if benchmark_commit_rows and benchmark_table is not None:
+            benchmark_snapshot_id = self._append(
+                benchmark_table,
+                self._to_arrow(benchmark_commit_rows),
+                _rows_watermark(benchmark_commit_rows),
+            )
+            if benchmark_snapshot_id is None:
+                raise RuntimeError(
+                    "benchmark reserve append failed after the durable decision commit; replay is safe"
+                )
+            self._remember_rows("benchmark", benchmark_commit_rows)
+        elapsed = time.perf_counter() - started
+        self._buffer.reset()
         if self._metrics is not None:
-            self._metrics.record_iceberg_flush(rows=len(rows), seconds=elapsed)
+            self._metrics.record_iceberg_flush(
+                rows=len(gold_rows),
+                decisions=len(decision_rows),
+                benchmark_candidates=len(benchmark_commit_rows),
+                seconds=elapsed,
+            )
         return WriterStats(
-            rows_committed=len(rows),
-            snapshot_id=snapshot_id,
-            attestation_signed=bool(attestation.signature),
+            rows_committed=len(gold_rows),
+            decisions_committed=len(decision_rows),
+            benchmark_candidates_committed=len(benchmark_commit_rows),
+            snapshot_id=decision_snapshot_id,
+            attestation_signed=attestation_signed,
             watermark=watermark,
         )
 
+    def _uncommitted_rows(
+        self,
+        cache_name: str,
+        table: Table,
+        rows: list[GoldRecord],
+    ) -> list[GoldRecord]:
+        """Return one row per recipe key that the target table does not contain."""
+        existing = self._known_keys.get(cache_name)
+        if existing is None:
+            existing = self._load_existing_keys(table)
+            self._known_keys[cache_name] = existing
+        pending: set[DecisionKey] = set()
+        output: list[GoldRecord] = []
+        for row in rows:
+            key = _decision_key(row)
+            if key in existing or key in pending:
+                continue
+            pending.add(key)
+            output.append(row)
+        return output
+
+    def _load_existing_keys(self, table: Table) -> set[DecisionKey]:
+        """Load committed recipe keys after a writer restart.
+
+        Unit-test table doubles without a scan API start empty. Real Iceberg
+        tables must scan successfully; silently treating an unreadable table
+        as empty would recreate the duplicate-row bug this guard prevents.
+        """
+        scan = getattr(table, "scan", None)
+        if scan is None:
+            return set()
+        refresh = getattr(table, "refresh", None)
+        if callable(refresh):
+            refresh()
+        try:
+            arrow = scan(
+                selected_fields=(
+                    "doc_id",
+                    "scoring_version",
+                    "classifier_revision",
+                    "policy_revision",
+                )
+            ).to_arrow()
+            columns = [
+                arrow.column(name).to_pylist()
+                for name in (
+                    "doc_id",
+                    "scoring_version",
+                    "classifier_revision",
+                    "policy_revision",
+                )
+            ]
+            return {
+                (str(doc_id), str(scoring), str(classifier), str(policy))
+                for doc_id, scoring, classifier, policy in zip(*columns, strict=True)
+            }
+        except Exception as exc:
+            raise RuntimeError("failed to read committed Iceberg decision keys") from exc
+
+    def _remember_rows(self, cache_name: str, rows: list[GoldRecord]) -> None:
+        self._known_keys.setdefault(cache_name, set()).update(_decision_key(row) for row in rows)
+
     def _ensure_table(self) -> Table:
-        """Create the gold table if missing; return the loaded handle."""
+        """Create the accepted Gold table if missing."""
+        return self._ensure_table_at(gold_identifier())
+
+    def _ensure_decisions_table(self) -> Table:
+        """Create the authoritative accepted/rejected decision table."""
+        return self._ensure_table_at(decisions_identifier())
+
+    def _ensure_benchmark_candidates_table(self) -> Table:
+        """Create the restricted benchmark-candidate table if missing."""
+        return self._ensure_table_at(benchmark_candidates_identifier())
+
+    def _ensure_table_at(self, identifier: tuple[str, str]) -> Table:
+        """Create one Gold-shaped Iceberg table if missing."""
         from pyiceberg.partitioning import PartitionField, PartitionSpec
         from pyiceberg.schema import Schema
         from pyiceberg.transforms import IdentityTransform, MonthTransform
         from pyiceberg.types import (
+            BooleanType,
             DoubleType,
             IntegerType,
             ListType,
             LongType,
             NestedField,
             StringType,
-            TimestampType,
+            TimestamptzType,
         )
 
-        identifier = gold_identifier()
         try:
             return self._catalog.load_table(identifier)
         except Exception:
@@ -282,8 +425,8 @@ class IcebergWriter:
                 ListType(13, StringType(), element_required=False),
                 required=False,
             ),
-            NestedField(14, "valid_from", TimestampType(), required=True),
-            NestedField(15, "valid_to", TimestampType(), required=False),
+            NestedField(14, "valid_from", TimestamptzType(), required=True),
+            NestedField(15, "valid_to", TimestamptzType(), required=False),
             NestedField(
                 16,
                 "reject_reasons",
@@ -300,6 +443,106 @@ class IcebergWriter:
             NestedField(25, "extraction_pipeline", StringType(), required=True),
             NestedField(26, "spdx_license", StringType(), required=False),
             NestedField(27, "spdx_license_source", StringType(), required=True),
+            NestedField(28, "scientific_artifact_s3_uri", StringType(), required=False),
+            NestedField(29, "figure_count", IntegerType(), required=True),
+            NestedField(30, "table_count", IntegerType(), required=True),
+            NestedField(31, "equation_count", IntegerType(), required=True),
+            NestedField(32, "citation_count", IntegerType(), required=True),
+            NestedField(
+                33,
+                "extraction_warnings",
+                ListType(34, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(35, "lang_score", DoubleType(), required=True),
+            NestedField(36, "gopher_pass", BooleanType(), required=True),
+            NestedField(37, "c4_nopunc_pass", BooleanType(), required=True),
+            NestedField(38, "c4_curly_brace_pass", BooleanType(), required=True),
+            NestedField(39, "c4_lorem_ipsum_pass", BooleanType(), required=True),
+            NestedField(40, "c4_fraction_lines_with_punct", DoubleType(), required=True),
+            NestedField(41, "perplexity", DoubleType(), required=True),
+            NestedField(42, "perplexity_bucket", StringType(), required=True),
+            NestedField(43, "perplexity_scorer", StringType(), required=True),
+            NestedField(44, "near_duplicate", BooleanType(), required=True),
+            NestedField(45, "near_dup_cluster_id", StringType(), required=False),
+            NestedField(46, "minhash_backend", StringType(), required=True),
+            NestedField(47, "lsh_backend", StringType(), required=True),
+            NestedField(48, "minhash_num_perms", IntegerType(), required=True),
+            NestedField(49, "structural_quality_score", DoubleType(), required=True),
+            NestedField(50, "extraction_completeness", DoubleType(), required=True),
+            NestedField(51, "reasoning_score", DoubleType(), required=True),
+            NestedField(52, "benchmark_score", DoubleType(), required=True),
+            NestedField(53, "route", StringType(), required=True),
+            NestedField(
+                54,
+                "eligible_routes",
+                ListType(55, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(
+                56,
+                "route_reasons",
+                ListType(57, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(
+                58,
+                "content_tags",
+                ListType(59, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(60, "segment_scores_json", StringType(), required=True),
+            NestedField(61, "projection_version", StringType(), required=True),
+            NestedField(62, "source_word_count", IntegerType(), required=True),
+            NestedField(63, "training_word_count", IntegerType(), required=True),
+            NestedField(64, "included_section_count", IntegerType(), required=True),
+            NestedField(65, "excluded_section_count", IntegerType(), required=True),
+            NestedField(
+                66,
+                "excluded_sections",
+                ListType(67, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(
+                68,
+                "metadata_pii_flags",
+                ListType(69, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(
+                70,
+                "removed_body_pii_flags",
+                ListType(71, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(72, "pii_action", StringType(), required=True),
+            NestedField(73, "pii_scanner_revision", StringType(), required=True),
+            NestedField(74, "lang_detector_revision", StringType(), required=True),
+            NestedField(75, "tokenizer_revision", StringType(), required=True),
+            NestedField(76, "gopher_word_count", IntegerType(), required=True),
+            NestedField(77, "gopher_mean_word_len", DoubleType(), required=True),
+            NestedField(78, "gopher_stopword_ratio", DoubleType(), required=True),
+            NestedField(79, "gopher_bullet_line_ratio", DoubleType(), required=True),
+            NestedField(80, "gopher_ellipsis_line_ratio", DoubleType(), required=True),
+            NestedField(81, "gopher_symbol_word_ratio", DoubleType(), required=True),
+            NestedField(82, "gopher_alpha_word_ratio", DoubleType(), required=True),
+            NestedField(
+                83,
+                "decon_exact_matches",
+                ListType(84, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(
+                85,
+                "decon_semantic_matches",
+                ListType(86, StringType(), element_required=False),
+                required=False,
+            ),
+            NestedField(87, "decon_max_similarity", DoubleType(), required=True),
+            NestedField(88, "decon_ngram_size", IntegerType(), required=True),
+            NestedField(89, "decon_embedding_revision", StringType(), required=True),
+            NestedField(90, "benchmark_set_version", StringType(), required=True),
+            NestedField(91, "classifier_backend", StringType(), required=True),
         )
         partition_spec = PartitionSpec(
             PartitionField(source_id=3, field_id=1000, transform=IdentityTransform(), name="lang"),
@@ -348,8 +591,155 @@ class IcebergWriter:
             "extraction_pipeline": [r.extraction_pipeline for r in rows],
             "spdx_license": [r.spdx_license for r in rows],
             "spdx_license_source": [r.spdx_license_source for r in rows],
+            "scientific_artifact_s3_uri": [r.scientific_artifact_s3_uri for r in rows],
+            "figure_count": [r.figure_count for r in rows],
+            "table_count": [r.table_count for r in rows],
+            "equation_count": [r.equation_count for r in rows],
+            "citation_count": [r.citation_count for r in rows],
+            "extraction_warnings": [list(r.extraction_warnings) for r in rows],
+            "lang_score": [float(r.lang_score) for r in rows],
+            "gopher_pass": [r.gopher_pass for r in rows],
+            "c4_nopunc_pass": [r.c4_nopunc_pass for r in rows],
+            "c4_curly_brace_pass": [r.c4_curly_brace_pass for r in rows],
+            "c4_lorem_ipsum_pass": [r.c4_lorem_ipsum_pass for r in rows],
+            "c4_fraction_lines_with_punct": [float(r.c4_fraction_lines_with_punct) for r in rows],
+            "perplexity": [float(r.perplexity) for r in rows],
+            "perplexity_bucket": [r.perplexity_bucket for r in rows],
+            "perplexity_scorer": [r.perplexity_scorer for r in rows],
+            "near_duplicate": [r.near_duplicate for r in rows],
+            "near_dup_cluster_id": [r.near_dup_cluster_id for r in rows],
+            "minhash_backend": [r.minhash_backend for r in rows],
+            "lsh_backend": [r.lsh_backend for r in rows],
+            "minhash_num_perms": [r.minhash_num_perms for r in rows],
+            "structural_quality_score": [float(r.structural_quality_score) for r in rows],
+            "extraction_completeness": [float(r.extraction_completeness) for r in rows],
+            "reasoning_score": [float(r.reasoning_score) for r in rows],
+            "benchmark_score": [float(r.benchmark_score) for r in rows],
+            "route": [r.route for r in rows],
+            "eligible_routes": [list(r.eligible_routes) for r in rows],
+            "route_reasons": [list(r.route_reasons) for r in rows],
+            "content_tags": [list(r.content_tags) for r in rows],
+            "segment_scores_json": [
+                orjson.dumps([score.model_dump(mode="json") for score in r.segment_scores]).decode(
+                    "utf-8"
+                )
+                for r in rows
+            ],
+            "projection_version": [r.projection_version for r in rows],
+            "source_word_count": [r.source_word_count for r in rows],
+            "training_word_count": [r.training_word_count for r in rows],
+            "included_section_count": [r.included_section_count for r in rows],
+            "excluded_section_count": [r.excluded_section_count for r in rows],
+            "excluded_sections": [list(r.excluded_sections) for r in rows],
+            "metadata_pii_flags": [list(r.metadata_pii_flags) for r in rows],
+            "removed_body_pii_flags": [list(r.removed_body_pii_flags) for r in rows],
+            "pii_action": [r.pii_action for r in rows],
+            "pii_scanner_revision": [r.pii_scanner_revision for r in rows],
+            "lang_detector_revision": [r.lang_detector_revision for r in rows],
+            "tokenizer_revision": [r.tokenizer_revision for r in rows],
+            "gopher_word_count": [r.gopher_word_count for r in rows],
+            "gopher_mean_word_len": [float(r.gopher_mean_word_len) for r in rows],
+            "gopher_stopword_ratio": [float(r.gopher_stopword_ratio) for r in rows],
+            "gopher_bullet_line_ratio": [float(r.gopher_bullet_line_ratio) for r in rows],
+            "gopher_ellipsis_line_ratio": [float(r.gopher_ellipsis_line_ratio) for r in rows],
+            "gopher_symbol_word_ratio": [float(r.gopher_symbol_word_ratio) for r in rows],
+            "gopher_alpha_word_ratio": [float(r.gopher_alpha_word_ratio) for r in rows],
+            "decon_exact_matches": [list(r.decon_exact_matches) for r in rows],
+            "decon_semantic_matches": [list(r.decon_semantic_matches) for r in rows],
+            "decon_max_similarity": [float(r.decon_max_similarity) for r in rows],
+            "decon_ngram_size": [r.decon_ngram_size for r in rows],
+            "decon_embedding_revision": [r.decon_embedding_revision for r in rows],
+            "benchmark_set_version": [r.benchmark_set_version for r in rows],
+            "classifier_backend": [r.classifier_backend for r in rows],
         }
-        return pa.table(cols)
+        # PyIceberg validates Arrow nullability and timestamp timezone against
+        # the declared table schema.  Inferred Arrow schemas mark every field
+        # nullable and would make a fresh local table append fail even when all
+        # values are present, so keep the producer schema explicit.
+        arrow_schema = pa.schema(
+            [
+                pa.field("doc_id", pa.string(), nullable=False),
+                pa.field("text", pa.string(), nullable=False),
+                pa.field("lang", pa.string(), nullable=False),
+                pa.field("tokens", pa.int32(), nullable=False),
+                pa.field("quality_score", pa.float64(), nullable=False),
+                pa.field("edu_score", pa.float64(), nullable=False),
+                pa.field("license", pa.string(), nullable=False),
+                pa.field("license_source", pa.string(), nullable=False),
+                pa.field("risk_tier", pa.int32(), nullable=False),
+                pa.field("pii_flags", pa.list_(pa.string()), nullable=True),
+                pa.field("contaminated_with", pa.list_(pa.string()), nullable=True),
+                pa.field("valid_from", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("valid_to", pa.timestamp("us", tz="UTC"), nullable=True),
+                pa.field("reject_reasons", pa.list_(pa.string()), nullable=True),
+                pa.field("scoring_version", pa.string(), nullable=False),
+                pa.field("classifier_revision", pa.string(), nullable=False),
+                pa.field("policy_revision", pa.string(), nullable=False),
+                pa.field("snapshot_id", pa.int64(), nullable=True),
+                pa.field("trace_id", pa.string(), nullable=False),
+                pa.field("source_feed", pa.string(), nullable=False),
+                pa.field("source_format", pa.string(), nullable=False),
+                pa.field("extraction_pipeline", pa.string(), nullable=False),
+                pa.field("spdx_license", pa.string(), nullable=True),
+                pa.field("spdx_license_source", pa.string(), nullable=False),
+                pa.field("scientific_artifact_s3_uri", pa.string(), nullable=True),
+                pa.field("figure_count", pa.int32(), nullable=False),
+                pa.field("table_count", pa.int32(), nullable=False),
+                pa.field("equation_count", pa.int32(), nullable=False),
+                pa.field("citation_count", pa.int32(), nullable=False),
+                pa.field("extraction_warnings", pa.list_(pa.string()), nullable=True),
+                pa.field("lang_score", pa.float64(), nullable=False),
+                pa.field("gopher_pass", pa.bool_(), nullable=False),
+                pa.field("c4_nopunc_pass", pa.bool_(), nullable=False),
+                pa.field("c4_curly_brace_pass", pa.bool_(), nullable=False),
+                pa.field("c4_lorem_ipsum_pass", pa.bool_(), nullable=False),
+                pa.field("c4_fraction_lines_with_punct", pa.float64(), nullable=False),
+                pa.field("perplexity", pa.float64(), nullable=False),
+                pa.field("perplexity_bucket", pa.string(), nullable=False),
+                pa.field("perplexity_scorer", pa.string(), nullable=False),
+                pa.field("near_duplicate", pa.bool_(), nullable=False),
+                pa.field("near_dup_cluster_id", pa.string(), nullable=True),
+                pa.field("minhash_backend", pa.string(), nullable=False),
+                pa.field("lsh_backend", pa.string(), nullable=False),
+                pa.field("minhash_num_perms", pa.int32(), nullable=False),
+                pa.field("structural_quality_score", pa.float64(), nullable=False),
+                pa.field("extraction_completeness", pa.float64(), nullable=False),
+                pa.field("reasoning_score", pa.float64(), nullable=False),
+                pa.field("benchmark_score", pa.float64(), nullable=False),
+                pa.field("route", pa.string(), nullable=False),
+                pa.field("eligible_routes", pa.list_(pa.string()), nullable=True),
+                pa.field("route_reasons", pa.list_(pa.string()), nullable=True),
+                pa.field("content_tags", pa.list_(pa.string()), nullable=True),
+                pa.field("segment_scores_json", pa.string(), nullable=False),
+                pa.field("projection_version", pa.string(), nullable=False),
+                pa.field("source_word_count", pa.int32(), nullable=False),
+                pa.field("training_word_count", pa.int32(), nullable=False),
+                pa.field("included_section_count", pa.int32(), nullable=False),
+                pa.field("excluded_section_count", pa.int32(), nullable=False),
+                pa.field("excluded_sections", pa.list_(pa.string()), nullable=True),
+                pa.field("metadata_pii_flags", pa.list_(pa.string()), nullable=True),
+                pa.field("removed_body_pii_flags", pa.list_(pa.string()), nullable=True),
+                pa.field("pii_action", pa.string(), nullable=False),
+                pa.field("pii_scanner_revision", pa.string(), nullable=False),
+                pa.field("lang_detector_revision", pa.string(), nullable=False),
+                pa.field("tokenizer_revision", pa.string(), nullable=False),
+                pa.field("gopher_word_count", pa.int32(), nullable=False),
+                pa.field("gopher_mean_word_len", pa.float64(), nullable=False),
+                pa.field("gopher_stopword_ratio", pa.float64(), nullable=False),
+                pa.field("gopher_bullet_line_ratio", pa.float64(), nullable=False),
+                pa.field("gopher_ellipsis_line_ratio", pa.float64(), nullable=False),
+                pa.field("gopher_symbol_word_ratio", pa.float64(), nullable=False),
+                pa.field("gopher_alpha_word_ratio", pa.float64(), nullable=False),
+                pa.field("decon_exact_matches", pa.list_(pa.string()), nullable=True),
+                pa.field("decon_semantic_matches", pa.list_(pa.string()), nullable=True),
+                pa.field("decon_max_similarity", pa.float64(), nullable=False),
+                pa.field("decon_ngram_size", pa.int32(), nullable=False),
+                pa.field("decon_embedding_revision", pa.string(), nullable=False),
+                pa.field("benchmark_set_version", pa.string(), nullable=False),
+                pa.field("classifier_backend", pa.string(), nullable=False),
+            ]
+        )
+        return pa.table(cols, schema=arrow_schema)
 
     def _append(
         self, table: Table, arrow_table: pa.Table, watermark: datetime | None
@@ -404,9 +794,7 @@ class IcebergWriter:
         latest = {
             "stream2pretrain.latest_snapshot_id": str(snapshot_id),
             "stream2pretrain.latest_attestation_signature": attestation.signature,
-            "stream2pretrain.latest_attestation_set_version": (
-                attestation.benchmark_set_version
-            ),
+            "stream2pretrain.latest_attestation_set_version": (attestation.benchmark_set_version),
         }
         if attest_uri:
             latest["stream2pretrain.latest_decon_attestation_uri"] = attest_uri
@@ -451,6 +839,7 @@ def build_attestation_sink(cfg: common.ProcessorConfig) -> AttestationSink:
         bucket=cfg.decon_bucket,
         kafka_producer=producer,
         topic=cfg.decon_attest_topic,
+        strict=os.environ.get("S2P_REQUIRE_DURABLE_OUTPUTS") == "1",
     )
 
 
@@ -469,19 +858,18 @@ class AttestationSink:
         bucket: str,
         kafka_producer: object | None = None,
         topic: str = "decon.attest",
+        strict: bool = False,
     ) -> None:
         self._s3 = s3_client
         self._bucket = bucket
         self._producer = kafka_producer
         self._topic = topic
+        self._strict = strict
 
     def write(self, attestation: DeconAttestation) -> str:
         """Persist + publish; returns the canonical s3 URI."""
         payload = common.decon_dumps(attestation)
-        key = (
-            f"decon/{attestation.benchmark_set_version}/"
-            f"{attestation.snapshot_id:020d}.json"
-        )
+        key = f"decon/{attestation.benchmark_set_version}/{attestation.snapshot_id:020d}.json"
         try:
             self._s3.put_object(  # type: ignore[union-attr]
                 Bucket=self._bucket,
@@ -490,14 +878,21 @@ class AttestationSink:
                 ContentType="application/json",
             )
         except Exception:
+            if self._strict:
+                raise
             return ""
         uri = f"s3://{self._bucket}/{key}"
         if self._producer is not None:
             try:
-                self._producer.produce(self._topic, key=str(attestation.snapshot_id).encode(), value=payload)  # type: ignore[union-attr]
-                self._producer.flush()  # type: ignore[union-attr]
+                self._producer.produce(
+                    self._topic, key=str(attestation.snapshot_id).encode(), value=payload
+                )  # type: ignore[union-attr]
+                remaining = self._producer.flush()  # type: ignore[union-attr]
+                if remaining and self._strict:
+                    raise RuntimeError(f"{remaining} decon attestation messages were not delivered")
             except Exception:
-                pass
+                if self._strict:
+                    raise
         return uri
 
 
@@ -531,10 +926,25 @@ def _aggregate_tokens_flagged(rows: list[GoldRecord]) -> int:
     return sum(int(r.tokens or 0) for r in rows if r.contaminated_with)
 
 
+def _decision_key(record: GoldRecord) -> DecisionKey:
+    """Stable identity of one deterministic decision recipe for a document."""
+    return (
+        record.doc_id,
+        record.scoring_version,
+        record.classifier_revision,
+        record.policy_revision,
+    )
+
+
+def _rows_watermark(rows: list[GoldRecord]) -> datetime | None:
+    return max((row.valid_from for row in rows), default=None)
+
+
 def _is_trainable_gold(record: GoldRecord) -> bool:
     """Defensive writer-side guard for the clean-only Gold contract."""
     return (
         record.risk_tier == 1
+        and record.route in {"broad_pretraining", "reasoning_candidate"}
         and not record.reject_reasons
         and not record.pii_flags
         and not record.contaminated_with
@@ -542,7 +952,7 @@ def _is_trainable_gold(record: GoldRecord) -> bool:
 
 
 def build_dataflow(cfg: common.ProcessorConfig) -> object:
-    """Construct the Bytewax dataflow that pumps ``docs.curated`` to Iceberg."""
+    """Persist the authoritative decision stream and accepted Gold subset."""
     from bytewax import operators as op
     from bytewax.connectors.kafka import KafkaSource
     from bytewax.dataflow import Dataflow
@@ -556,7 +966,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     start_offset = common.kafka_starting_offset()
     source = KafkaSource(
         brokers=cfg.redpanda_brokers.split(","),
-        topics=[cfg.curated_topic],
+        topics=[cfg.decisions_topic],
         starting_offset=start_offset,
         add_config=common.kafka_consumer_config(cfg.consumer_group),
     )
@@ -589,9 +999,7 @@ def main() -> None:
     cfg = common.load_config()
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.iceberg")
-    log.info("starting iceberg writer", topic=cfg.curated_topic)
+    log.info("starting iceberg writer", topic=cfg.decisions_topic)
     start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
-    from bytewax.run import cli_main
-
-    cli_main(flow)
+    common.run_bytewax_flow(flow, cfg, "iceberg-writer")

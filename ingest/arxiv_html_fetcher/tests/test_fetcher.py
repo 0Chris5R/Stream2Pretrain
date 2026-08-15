@@ -15,13 +15,14 @@ dependency.
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
 
 from ingest.arxiv_html_fetcher.fetcher import (
+    FetchOutcome,
     build_metadata_stub,
     canonical_arxiv_url,
     fetch_one,
@@ -127,9 +128,7 @@ class _FakeProducer:
     async def stop(self) -> None:
         return None
 
-    async def send(
-        self, record: BronzeRecord, *, headers: dict[str, str] | None = None
-    ) -> None:
+    async def send(self, record: BronzeRecord, *, headers: dict[str, str] | None = None) -> None:
         self.records.append(record)
 
 
@@ -163,9 +162,7 @@ async def test_fetch_one_returns_extracted_when_arxiv_html_is_200() -> None:
     client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
     try:
         bucket = TokenBucket(rate=64.0, burst=64)
-        outcome = await fetch_one(
-            "2401.12345", client, bucket=bucket, min_sleep_s=0.0
-        )
+        outcome = await fetch_one("2401.12345", client, bucket=bucket, min_sleep_s=0.0)
     finally:
         await client.aclose()
     assert outcome.status == 200
@@ -196,9 +193,7 @@ async def test_fetch_one_falls_back_to_ar5iv_on_404() -> None:
     client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
     try:
         bucket = TokenBucket(rate=64.0, burst=64)
-        outcome = await fetch_one(
-            "2104.00001", client, bucket=bucket, min_sleep_s=0.0
-        )
+        outcome = await fetch_one("2104.00001", client, bucket=bucket, min_sleep_s=0.0)
     finally:
         await client.aclose()
     assert state["primary_calls"] == 1
@@ -217,15 +212,42 @@ async def test_fetch_one_returns_404_outcome_when_both_fail() -> None:
     client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
     try:
         bucket = TokenBucket(rate=64.0, burst=64)
-        outcome = await fetch_one(
-            "9912.99999", client, bucket=bucket, min_sleep_s=0.0
-        )
+        outcome = await fetch_one("9912.99999", client, bucket=bucket, min_sleep_s=0.0)
     finally:
         await client.aclose()
     assert outcome.status == 404
     assert outcome.fallback_used is True
     assert outcome.extracted is None
     assert outcome.html is None
+    assert outcome.source_format == "metadata"
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_uses_pdf_when_both_html_sources_are_missing() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/pdf/" in str(request.url):
+            return httpx.Response(
+                200,
+                content=b"%PDF-1.7\ncontrolled",
+                headers={"content-type": "application/pdf"},
+            )
+        return httpx.Response(404, text="missing")
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        outcome = await fetch_one(
+            "9912.99999",
+            client,
+            bucket=TokenBucket(rate=64.0, burst=64),
+            min_sleep_s=0.0,
+        )
+    finally:
+        await client.aclose()
+
+    assert outcome.status == 200
+    assert outcome.source_format == "pdf"
+    assert outcome.html == b"%PDF-1.7\ncontrolled"
+    assert outcome.extraction_pipeline == "docling-pdf-cpu-2.114.0"
 
 
 def test_make_bronze_record_html_branch() -> None:
@@ -295,6 +317,33 @@ def test_make_bronze_record_metadata_stub_branch() -> None:
     assert record.http_status == 404
     assert record.spdx_license_source == "manual_override"
     assert b"fulltext_unavailable" in stub
+
+
+def test_make_bronze_record_pdf_branch() -> None:
+    outcome = FetchOutcome(
+        status=200,
+        url="https://arxiv.org/pdf/9912.99999",
+        html=b"%PDF-1.7\ncontrolled",
+        extracted=None,
+        extraction_pipeline="docling-pdf-cpu-2.114.0",
+        fallback_used=True,
+        fetched_at=datetime(2026, 6, 15, 9, 0, tzinfo=UTC),
+        etag=None,
+        last_modified=None,
+        source_format="pdf",
+    )
+    record, key, content_type = make_bronze_record(
+        arxiv_id="9912.99999",
+        outcome=outcome,
+        feed_name="arxiv-html-fetcher",
+        bucket="bronze",
+        license_default="arxiv-non-exclusive-distribution",
+        bytes_size=len(outcome.html or b""),
+    )
+
+    assert content_type == "application/pdf"
+    assert key.endswith(".pdf.gz")
+    assert record.source_format == "pdf"
 
 
 def test_load_backfill_ids_filters_blank_and_invalid(tmp_path: Any) -> None:

@@ -26,8 +26,18 @@ from schemas.bronze import (
 )
 from schemas.code import CodeFileRecord
 from schemas.decon import BenchmarkHit, DeconAttestation
-from schemas.gold import GoldRecord
-from schemas.silver import SilverRecord, SilverTags
+from schemas.gold import CorpusRoute, GoldRecord, SegmentScore
+from schemas.scientific import (
+    ScientificCitation,
+    ScientificDocument,
+    ScientificEquation,
+    ScientificFigure,
+    ScientificParagraph,
+    ScientificSection,
+    ScientificTable,
+    SectionRole,
+)
+from schemas.silver import SilverRecord, SilverSegment, SilverTags
 from schemas.sourcefeed import (
     MixtureRecipeSpec,
     MixtureSourceWeight,
@@ -35,6 +45,7 @@ from schemas.sourcefeed import (
 )
 from schemas.topics import (
     CODE_SOURCE_FORMAT,
+    CURATION_DECISIONS,
     DECON_ATTEST,
     DOCS_CURATED,
     DOCS_NORMALIZED,
@@ -46,6 +57,7 @@ from schemas.topics import (
 
 __all__ = [
     "CODE_SOURCE_FORMAT",
+    "CURATION_DECISIONS",
     "DECON_ATTEST",
     "DOCS_CURATED",
     "DOCS_NORMALIZED",
@@ -53,11 +65,22 @@ __all__ = [
     "BenchmarkHit",
     "BronzeRecord",
     "CodeFileRecord",
+    "CorpusRoute",
     "DeconAttestation",
     "GoldRecord",
     "MixtureRecipeSpec",
     "MixtureSourceWeight",
+    "ScientificCitation",
+    "ScientificDocument",
+    "ScientificEquation",
+    "ScientificFigure",
+    "ScientificParagraph",
+    "ScientificSection",
+    "ScientificTable",
+    "SectionRole",
+    "SegmentScore",
     "SilverRecord",
+    "SilverSegment",
     "SilverTags",
     "SourceFeedSpec",
     "SourceFormat",

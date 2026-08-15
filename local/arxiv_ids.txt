@@ -1,0 +1,5 @@
+# Small, stable papers with arXiv HTML renderings. Edit this list freely.
+# The local test intentionally fetches only a few documents.
+2402.00159
+2402.08954
+2406.17557

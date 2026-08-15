@@ -156,6 +156,8 @@ Iceberg + observability).
   value: {{ .Values.redpanda.topics.docsNormalized | quote }}
 - name: S2P_CURATED_TOPIC
   value: {{ .Values.redpanda.topics.docsCurated | quote }}
+- name: S2P_DECISIONS_TOPIC
+  value: {{ .Values.redpanda.topics.curationDecisions | quote }}
 - name: S2P_DECON_TOPIC
   value: {{ .Values.redpanda.topics.deconAttest | quote }}
 - name: MINIO_ENDPOINT
@@ -176,6 +178,10 @@ Iceberg + observability).
   value: {{ .Values.iceberg.namespace | quote }}
 - name: S2P_ICEBERG_GOLD_TABLE
   value: {{ .Values.iceberg.goldTable | quote }}
+- name: S2P_ICEBERG_DECISIONS_TABLE
+  value: {{ .Values.iceberg.decisionsTable | quote }}
+- name: S2P_ICEBERG_BENCHMARK_TABLE
+  value: {{ .Values.iceberg.benchmarkCandidatesTable | quote }}
 - name: POLARIS_URI
   value: {{ .Values.iceberg.polarisUrl | quote }}
 - name: POLARIS_WAREHOUSE

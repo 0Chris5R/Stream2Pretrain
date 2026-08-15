@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { ShieldCheck, ShieldAlert, Loader2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Loader2, ShieldAlert, ShieldCheck } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,14 +15,13 @@ interface Props {
 }
 
 /**
- * Renders a single decon attestation and offers a "Verify" button that calls
- * the server-side `/api/decon/verify` route, which executes `cosign verify-blob`
- * with the bundled signer cert.
+ * Renders the current attestation. Verification is automatic: local mode uses
+ * Ed25519 directly and production can opt into Sigstore/cosign.
  */
 export function AttestationViewer({ attestation }: Props) {
   const [state, setState] = useState<'idle' | 'pending' | VerifyResult>('idle');
 
-  async function verify() {
+  const verify = useCallback(async () => {
     setState('pending');
     try {
       const result = await apiFetch<VerifyResult>('/api/decon/verify', VerifyResultSchema, {
@@ -38,7 +37,12 @@ export function AttestationViewer({ attestation }: Props) {
         verified_at: new Date().toISOString(),
       });
     }
-  }
+  }, [attestation.snapshot_id]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void verify(), 0);
+    return () => window.clearTimeout(timer);
+  }, [verify]);
 
   const verdict =
     state === 'idle' || state === 'pending'
@@ -53,21 +57,29 @@ export function AttestationViewer({ attestation }: Props) {
         <div>
           <CardTitle className="text-base">snapshot #{attestation.snapshot_id}</CardTitle>
           <p className="font-mono text-xs text-muted-foreground">
-            {formatTs(attestation.committed_at)} - benchmarks{' '}
-            {attestation.benchmark_set_version}
+            {formatTs(attestation.committed_at)} - benchmarks {attestation.benchmark_set_version}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {verdict ? <Badge variant={verdict.variant}>{verdict.label}</Badge> : null}
-          <Button size="sm" variant="outline" onClick={verify} disabled={state === 'pending'}>
-            {state === 'pending' ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          <Badge variant={verdict?.variant ?? 'secondary'}>
+            {state === 'pending' || state === 'idle' ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
             ) : verdict?.variant === 'success' ? (
-              <ShieldCheck className="mr-2 h-4 w-4" />
+              <ShieldCheck className="mr-1 h-3.5 w-3.5" />
             ) : (
-              <ShieldAlert className="mr-2 h-4 w-4" />
+              <ShieldAlert className="mr-1 h-3.5 w-3.5" />
             )}
-            Verify
+            {verdict?.label ?? 'verifying'}
+          </Badge>
+          <Button
+            size="icon"
+            variant="ghost"
+            title="Re-verify signature"
+            aria-label="Re-verify signature"
+            onClick={verify}
+            disabled={state === 'pending'}
+          >
+            <ShieldCheck className="h-4 w-4" />
           </Button>
         </div>
       </CardHeader>
@@ -78,21 +90,11 @@ export function AttestationViewer({ attestation }: Props) {
           <Stat label="rejected docs" value={formatInt(attestation.rejected_doc_hashes.length)} />
           <Stat label="benchmarks" value={attestation.benchmarks.join(', ')} />
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          {Object.entries(attestation.per_benchmark_hits).map(([bench, hits]) => (
-            <div
-              key={bench}
-              className="rounded border bg-muted/30 px-2 py-1 text-center font-mono text-xs"
-            >
-              <div className="text-muted-foreground">{bench}</div>
-              <div className="text-sm">{formatInt(hits)}</div>
-            </div>
-          ))}
-        </div>
         {state !== 'idle' && state !== 'pending' ? (
-          <p className="rounded border bg-muted/30 p-2 font-mono text-xs">
-            {state.message}
-            {state.signer_subject ? ` - signer: ${state.signer_subject}` : ''}
+          <p className="flex items-center gap-2 text-xs text-muted-foreground">
+            {state.ok ? <ShieldCheck className="h-4 w-4 text-emerald-600" /> : null}
+            {state.ok ? 'Signature verified automatically' : state.message}
+            {state.signer_subject ? ` · ${state.signer_subject}` : ''}
           </p>
         ) : null}
       </CardContent>

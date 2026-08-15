@@ -35,9 +35,17 @@ class Tokenizer:
         and is what FineWeb publishes.
     """
 
-    def __init__(self, *, encoding: str = "cl100k_base") -> None:
+    def __init__(
+        self,
+        *,
+        encoding: str = "cl100k_base",
+        allow_fallback: bool = True,
+    ) -> None:
         self._encoding_name = encoding
+        self._allow_fallback = allow_fallback
         self._impl, self._backend = self._load(encoding)
+        if not allow_fallback and self._backend != "tiktoken":
+            raise RuntimeError("tiktoken is required when fallbacks are disabled")
 
     @property
     def backend(self) -> TokenizerName:
@@ -67,6 +75,8 @@ class Tokenizer:
             try:
                 return TokenCount(tokens=len(self._impl.encode(text)), backend="tiktoken")  # type: ignore[union-attr]
             except Exception:
+                if not self._allow_fallback:
+                    raise
                 pass
         if self._backend == "sentencepiece" and self._impl is not None:
             try:
@@ -75,5 +85,9 @@ class Tokenizer:
                     backend="sentencepiece",
                 )
             except Exception:
+                if not self._allow_fallback:
+                    raise
                 pass
+        if not self._allow_fallback:
+            raise RuntimeError("the required tiktoken backend failed")
         return TokenCount(tokens=len(text.split()), backend="proxy-whitespace")

@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "name": "arxiv-cs-recent",
+      "protocol": "rss",
+      "endpoint": "https://rss.arxiv.org/rss/cs.AI+cs.CL+cs.LG",
+      "poll_interval_seconds": 7200,
+      "rate_limit": {
+        "requests_per_second": 1.0,
+        "burst": 2,
+        "respect_x_poll_interval": false
+      },
+      "auth": { "type": "none" },
+      "license_default": "arxiv-non-exclusive-distribution",
+      "enabled": true,
+      "egress_allow": ["rss.arxiv.org", "arxiv.org", "ar5iv.labs.arxiv.org"],
+      "accept_content_types": ["application/rss+xml", "text/html", "application/pdf"]
+    }
+  ]
+}

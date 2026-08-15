@@ -19,7 +19,58 @@ from dataclasses import dataclass
 # Common English stopwords - list deliberately short so the rule is cheap.
 # Source: DeepMind Gopher paper appendix table.
 _STOPWORDS: frozenset[str] = frozenset(
-    ["the", "be", "to", "of", "and", "a", "in", "that", "have", "I", "it", "for", "not", "on", "with", "he", "as", "you", "do", "at", "this", "but", "his", "by", "from", "they", "we", "say", "her", "she", "or", "an", "will", "my", "one", "all", "would", "there", "their", "what", "so", "up", "out", "if", "about", "who", "get", "which", "go", "me"]
+    [
+        "the",
+        "be",
+        "to",
+        "of",
+        "and",
+        "a",
+        "in",
+        "that",
+        "have",
+        "I",
+        "it",
+        "for",
+        "not",
+        "on",
+        "with",
+        "he",
+        "as",
+        "you",
+        "do",
+        "at",
+        "this",
+        "but",
+        "his",
+        "by",
+        "from",
+        "they",
+        "we",
+        "say",
+        "her",
+        "she",
+        "or",
+        "an",
+        "will",
+        "my",
+        "one",
+        "all",
+        "would",
+        "there",
+        "their",
+        "what",
+        "so",
+        "up",
+        "out",
+        "if",
+        "about",
+        "who",
+        "get",
+        "which",
+        "go",
+        "me",
+    ]
 )
 _BULLET_PREFIXES: tuple[str, ...] = ("\u2022", "*", "-", "\u25cf", "\u25aa", "\u2023", "\u2043")
 
@@ -84,9 +135,7 @@ class GopherFilter:
         lines = [ln for ln in text.splitlines() if ln.strip()]
         if lines:
             bullet_lines = sum(1 for ln in lines if ln.lstrip().startswith(_BULLET_PREFIXES))
-            ellipsis_lines = sum(
-                1 for ln in lines if ln.rstrip().endswith(("...", "…"))
-            )
+            ellipsis_lines = sum(1 for ln in lines if ln.rstrip().endswith(("...", "…")))
             bullet_line_ratio = bullet_lines / len(lines)
             ellipsis_line_ratio = ellipsis_lines / len(lines)
         else:

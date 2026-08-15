@@ -1,0 +1,41 @@
+version: scientific-validation-v1
+split_policy: paper_id
+label_authority: reviewed_human
+papers:
+  - {arxiv_id: "1706.03762", strata: [theory, equations], split: calibration, review_status: pending}
+  - {arxiv_id: "1810.04805", strata: [empirical, tables], split: calibration, review_status: pending}
+  - {arxiv_id: "2005.14165", strata: [empirical, scaling, tables], split: calibration, review_status: pending}
+  - {arxiv_id: "2005.11401", strata: [methods, empirical], split: calibration, review_status: pending}
+  - {arxiv_id: "2106.09685", strata: [methods, equations], split: calibration, review_status: pending}
+  - {arxiv_id: "2203.15556", strata: [scaling, empirical, figures], split: calibration, review_status: pending}
+  - {arxiv_id: "2205.14135", strata: [systems, methods, equations], split: calibration, review_status: pending}
+  - {arxiv_id: "2305.18290", strata: [methods, reasoning], split: calibration, review_status: pending}
+  - {arxiv_id: "2307.09288", strata: [empirical, safety, tables], split: calibration, review_status: pending}
+  - {arxiv_id: "2309.06180", strata: [systems, methods], split: calibration, review_status: pending}
+  - {arxiv_id: "2310.06825", strata: [systems, empirical], split: calibration, review_status: pending}
+  - {arxiv_id: "2312.00752", strata: [theory, systems, equations], split: calibration, review_status: pending}
+  - {arxiv_id: "2402.00159", strata: [native_html, figures], split: calibration, review_status: pending}
+  - {arxiv_id: "2402.08954", strata: [native_html, tables], split: calibration, review_status: pending}
+  - {arxiv_id: "2406.17557", strata: [native_html, data_curation, tables], split: calibration, review_status: pending}
+  - {arxiv_id: "2406.11794", strata: [data_curation, benchmark], split: calibration, review_status: pending}
+  - {arxiv_id: "2211.17192", strata: [methods, reasoning], split: calibration, review_status: pending}
+  - {arxiv_id: "2001.08361", strata: [theory, scaling, figures], split: calibration, review_status: pending}
+  - {arxiv_id: "2305.13048", strata: [systems, theory], split: holdout, review_status: pending}
+  - {arxiv_id: "2401.04088", strata: [systems, empirical, tables], split: holdout, review_status: pending}
+  - {arxiv_id: "2312.11805", strata: [short_paper, empirical], split: holdout, review_status: pending}
+  - {arxiv_id: "2309.16609", strata: [empirical, multilingual], split: holdout, review_status: pending}
+  - {arxiv_id: "2404.14219", strata: [technical_report, tables], split: holdout, review_status: pending}
+  - {arxiv_id: "2403.08295", strata: [technical_report, safety], split: holdout, review_status: pending}
+  - {arxiv_id: "2308.12950", strata: [code, technical_report], split: holdout, review_status: pending}
+  - {arxiv_id: "2309.07864", strata: [reasoning, benchmark], split: holdout, review_status: pending}
+  - {arxiv_id: "2306.11644", strata: [methods, reasoning], split: holdout, review_status: pending}
+  - {arxiv_id: "2010.11929", strata: [visual_evidence, figures], split: holdout, review_status: pending}
+  - {arxiv_id: "2103.00020", strata: [visual_evidence, multimodal], split: holdout, review_status: pending}
+  - {arxiv_id: "2204.02311", strata: [visual_evidence, multimodal], split: holdout, review_status: pending}
+  - {arxiv_id: "2304.08485", strata: [visual_evidence, benchmark], split: holdout, review_status: pending}
+  - {arxiv_id: "2303.12712", strata: [visual_evidence, dataset], split: holdout, review_status: pending}
+  - {arxiv_id: "1810.03993", strata: [documentation, short_paper], split: holdout, review_status: pending}
+  - {arxiv_id: "1907.11692", strata: [dataset, governance], split: holdout, review_status: pending}
+  - {arxiv_id: "2108.07258", strata: [dataset, governance], split: holdout, review_status: pending}
+  - {arxiv_id: "2110.01963", strata: [benchmark, survey], split: holdout, review_status: pending}
+  - {arxiv_id: "2111.09839", strata: [benchmark, reasoning], split: holdout, review_status: pending}

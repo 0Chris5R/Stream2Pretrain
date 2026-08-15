@@ -1,9 +1,10 @@
 # Stream2Pretrain - Data Model (the data passport)
 
-Three append-only Iceberg tables (bronze / silver / gold) plus a fourth
-auxiliary table for signed decontamination attestations. This document
-expands `RESEARCH.md` section 6 into a field-by-field reference. The wire
-shape is enforced by the Pydantic models in `schemas/`.
+The current data plane retains raw Bronze objects and structured scientific
+artifacts in MinIO, transports typed records over Redpanda, and appends every
+curation outcome to an Iceberg decision table. Only accepted outcomes are also
+appended to Gold. Signed decontamination attestations describe each writer
+batch. The wire shape is enforced by the Pydantic models in `schemas/`.
 
 ## Tier overview
 
@@ -11,6 +12,8 @@ shape is enforced by the Pydantic models in `schemas/`.
 |---|---|---|---|---|
 | Bronze | Raw fetched bytes + metadata pointer | gzipped HTML on MinIO + `BronzeRecord` JSON on `raw.fetched` | 30 days (prod) | `schemas/bronze.py` |
 | Silver | Normalised + tagged but pre-quality-filter | Parquet in Iceberg | 90 days | `schemas/silver.py` |
+| Scientific artifact | Structured sections, tables, equations, figures, citations, OCR and extractor provenance | JSON and figure assets in MinIO | aligned with source | `schemas/scientific.py` |
+| Decisions | Every accepted or rejected scored outcome plus its full signal vector | Parquet in Iceberg | indefinite | `schemas/gold.py` |
 | Gold | Curated, mixture-ready training shard | Parquet in Iceberg | indefinite | `schemas/gold.py` |
 | Decon attestations | Signed snapshot certificates | Parquet in Iceberg | indefinite | `schemas/decon.py` |
 
@@ -32,7 +35,8 @@ Field-by-field (matches `BronzeRecord`):
 | `etag` | string | no | for conditional GET |
 | `bytes_size` | int >=0 | no | uncompressed payload size |
 
-Bronze partitioning: `s3://bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.html.gz`.
+Bronze partitioning uses
+`s3://bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.<html|pdf>.gz`.
 This Hive-style layout makes per-source pruning cheap when bisecting.
 
 ## Silver tier
@@ -85,8 +89,14 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `text` | string | yes | post-PII-scrubbed |
 | `lang` | ISO code | yes | |
 | `tokens` | int >=0 | yes | GPT-2-tokenizer token count |
-| `quality_score` | float 0..5 | yes | FineWeb-Edu raw classifier |
-| `edu_score` | float 0..5 | yes | distilled-classifier educational score |
+| `edu_score` | float 0..5 | yes | Raw source-aware quality signal: FinePDFs v2, FineWeb-Edu, or code policy |
+| `quality_score` | float 0..5 | yes | Explainable composite of source quality, structure, language, heuristics, and KenLM bucket |
+| `lang_score` | float 0..1 | yes | language-confidence signal |
+| `gopher_pass` | bool | yes | Gopher heuristic outcome |
+| `c4_*` | bool/float | yes | individual C4 outcomes and punctuation fraction |
+| `perplexity`, `perplexity_bucket`, `perplexity_scorer` | float/enum/string | yes | KenLM signal and exact scorer provenance |
+| `near_duplicate`, `near_dup_cluster_id` | bool/string \| null | yes/no | stateful deduplication outcome |
+| `minhash_backend`, `minhash_num_perms`, `lsh_backend` | string/int/string | yes | deduplication implementation provenance |
 | `license` | SPDX or `unknown` | yes | |
 | `license_source` | enum | yes | `html_meta`, `robots_txt`, `sitemap`, `license_file`, `manual`, `unknown` |
 | `risk_tier` | 1 / 2 / 3 | yes | MixtureVitae convention |
@@ -99,8 +109,11 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `classifier_revision` | string | yes | e.g. `fineweb-edu-onnx-int8-2026-05-31` |
 | `policy_revision` | `git:<sha>` | yes | git commit of the policy bundle |
 | `snapshot_id` | int \| null | no | populated by Iceberg commit |
-| `_row_id` | int \| null | no | Iceberg V3 row lineage id |
+| `_row_id` | int \| null | no | reserved; null in the current Iceberg V2 writer |
 | `trace_id` | 32-char hex | yes | inherited |
+| `scientific_artifact_s3_uri` | S3 URI \| null | no | canonical structured-document artifact |
+| `figure_count`, `table_count`, `equation_count`, `citation_count` | int | yes | extraction completeness counters |
+| `extraction_warnings` | list[string] | no | explicit degraded-extraction evidence |
 
 Gold partitioning: `PARTITION BY lang, risk_tier, month(valid_from)`. The
 `month(valid_from)` partition makes `as_of(timestamp)` pruning cheap.
@@ -113,11 +126,13 @@ Gold partitioning: `PARTITION BY lang, risk_tier, month(valid_from)`. The
 | 2 | caution | heuristic uncertainty or a rejected code licence |
 | 3 | drop | hard fail: explicit dirty signal, dropped before mixture |
 
-Only tier 1 rows with empty `reject_reasons`, empty `pii_flags`, and no
-`contaminated_with` marks are published to `docs.curated` and committed to
-`gold`. Tier 2 and tier 3 records are dropped by the curation dataflow before
-the training table boundary; rejected-row observability is tracked separately
-from the Gold table contract.
+Every row is published to `curation.decisions` and committed to
+`gold.curation_decisions`, including the full signal vector, risk tier, PII
+flags, contamination matches, and rejection reasons. Only tier 1 rows with
+empty `reject_reasons`, empty `pii_flags`, and no `contaminated_with` marks are
+also published to `docs.curated` and committed to `gold.curated`. The two
+Iceberg appends are not a distributed transaction; current delivery is
+at-least-once and replay behavior remains a runtime measurement.
 
 The provisional demo policy admits non-code records with no machine-readable
 license. Their `license` remains `unknown`; the pipeline does not invent an
@@ -125,7 +140,8 @@ SPDX identifier. Code still requires a configured permissive SPDX license.
 
 ## Decon attestations
 
-One row per Iceberg snapshot of the gold table, signed and replayable.
+One signed row per writer batch. Its counts are calculated from the complete
+decision batch and it records the accepted Gold snapshot id when one exists.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|

@@ -29,7 +29,36 @@ spec:
       {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       terminationGracePeriodSeconds: 60
-      {{- if .Values.processor.curate.modelBundle.url }}
+      {{- if .Values.processor.curate.modelBundle.bootstrap }}
+      initContainers:
+        - name: model-bootstrap
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command: ["python", "-m", "processor.model_bootstrap"]
+          env:
+            - name: S2P_MODELS_DIR
+              value: /models
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: FINEPDFS_EDU_V2_REVISION
+              value: "90ddef285f67230389057c14b2f6bbfeb70d40ea"
+            - name: FINEWEB_EDU_REVISION
+              value: "284663cbb2dabf9bda30d8f8cc49601251ee1631"
+            - name: E5_SMALL_REVISION
+              value: "ffb93f3bd4047442299a41ebb6fa998a38507c52"
+            - name: KENLM_REVISION
+              value: "3fbe35c83b1a39f420a345b7c96a186c8030d834"
+            - name: FIGURE_CLASSIFIER_REVISION
+              value: "f859dfbff5c9916cd996942d4b0db7fa25808220"
+          resources:
+            {{- toYaml .Values.processor.curate.modelBundle.resources | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      {{- else if .Values.processor.curate.modelBundle.url }}
       initContainers:
         - name: fetch-onnx-model
           image: {{ .Values.processor.curate.modelBundle.image | quote }}
@@ -80,6 +109,16 @@ spec:
               value: {{ .Values.processor.curate.onnxModel | quote }}
             - name: S2P_MODELS_DIR
               value: /models
+            - name: S2P_REQUIRE_REAL_MODELS
+              value: "1"
+            - name: S2P_FINEPDFS_EDU_REVISION
+              value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
+            - name: S2P_FINEWEB_EDU_REVISION
+              value: "fineweb-edu@284663cbb2dabf9bda30d8f8cc49601251ee1631"
+            - name: S2P_DOCLING_ENABLED
+              value: "1"
+            - name: S2P_USE_PRESIDIO
+              value: "1"
             - name: S2P_MINHASH_BANDS
               value: {{ .Values.processor.curate.minHashBands | quote }}
             - name: S2P_MINHASH_ROWS_PER_BAND

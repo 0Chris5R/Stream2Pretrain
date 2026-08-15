@@ -53,9 +53,22 @@ class ProcessorMetrics:
             ["namespace", "reason"],
             registry=self.registry,
         )
+        self._processor_routed = Counter(
+            "s2p_processor_routed_total",
+            "Documents assigned to each final corpus route.",
+            ["namespace", "route"],
+            registry=self.registry,
+        )
         self._quality_score = Histogram(
             "s2p_quality_score",
-            "FineWeb-Edu quality score distribution.",
+            "Explainable composite corpus-quality score distribution.",
+            ["namespace"],
+            buckets=QUALITY_BUCKETS,
+            registry=self.registry,
+        )
+        self._edu_score = Histogram(
+            "s2p_fineweb_edu_score",
+            "Official FineWeb-Edu model score distribution.",
             ["namespace"],
             buckets=QUALITY_BUCKETS,
             registry=self.registry,
@@ -90,18 +103,30 @@ class ProcessorMetrics:
             self._processor_ingested.labels(self._namespace, source_feed).inc()
             self._documents_emitted.labels(self._namespace, "normalize").inc()
 
-    def record_curated(self, *, source_feed: str, quality_score: float) -> None:
+    def record_curated(
+        self, *, source_feed: str, quality_score: float, edu_score: float | None = None
+    ) -> None:
         with self._lock:
             self._processor_curated.labels(self._namespace, source_feed).inc()
             self._documents_emitted.labels(self._namespace, "curate").inc()
             self._quality_score.labels(self._namespace).observe(quality_score)
+            if edu_score is not None:
+                self._edu_score.labels(self._namespace).observe(edu_score)
 
-    def record_dropped(self, *, reasons: Iterable[str], quality_score: float) -> None:
+    def record_dropped(
+        self, *, reasons: Iterable[str], quality_score: float, edu_score: float | None = None
+    ) -> None:
         reasons_list = list(reasons) or ["unknown"]
         with self._lock:
             for reason in reasons_list:
                 self._processor_dropped.labels(self._namespace, reason).inc()
             self._quality_score.labels(self._namespace).observe(quality_score)
+            if edu_score is not None:
+                self._edu_score.labels(self._namespace).observe(edu_score)
+
+    def record_route(self, *, route: str) -> None:
+        with self._lock:
+            self._processor_routed.labels(self._namespace, route).inc()
 
     def record_decon_scan(self, *, benchmarks: Iterable[str]) -> None:
         hits = list(benchmarks)
@@ -110,9 +135,22 @@ class ProcessorMetrics:
             for benchmark in hits:
                 self._decon_flagged.labels(self._namespace, benchmark).inc()
 
-    def record_iceberg_flush(self, *, rows: int, seconds: float) -> None:
+    def record_iceberg_flush(
+        self,
+        *,
+        rows: int,
+        seconds: float,
+        decisions: int | None = None,
+        benchmark_candidates: int = 0,
+    ) -> None:
         with self._lock:
             self._documents_emitted.labels(self._namespace, "iceberg").inc(max(0, rows))
+            self._documents_emitted.labels(self._namespace, "decision").inc(
+                max(0, rows if decisions is None else decisions)
+            )
+            self._documents_emitted.labels(self._namespace, "benchmark_reserve").inc(
+                max(0, benchmark_candidates)
+            )
             self._iceberg_flush_seconds.labels(self._namespace).observe(max(0.0, seconds))
 
     def render_prometheus(self) -> bytes:

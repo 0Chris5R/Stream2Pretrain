@@ -76,11 +76,17 @@ def test_iter_documents_skip_via_cursor() -> None:
     rows = [
         {
             "text": "row a",
-            "meta": {"url": "https://arxiv.org/abs/2402.01000", "timestamp": "2024-02-15T00:00:00Z"},
+            "meta": {
+                "url": "https://arxiv.org/abs/2402.01000",
+                "timestamp": "2024-02-15T00:00:00Z",
+            },
         },
         {
             "text": "row b",
-            "meta": {"url": "https://arxiv.org/abs/2402.01100", "timestamp": "2024-02-16T00:00:00Z"},
+            "meta": {
+                "url": "https://arxiv.org/abs/2402.01100",
+                "timestamp": "2024-02-16T00:00:00Z",
+            },
         },
     ]
     cursor = SeedCursor(repo_id=rpa.REPO_ID)
@@ -93,7 +99,10 @@ def test_iter_documents_respects_max_docs() -> None:
     rows = [
         {
             "text": f"row {i}",
-            "meta": {"url": f"https://arxiv.org/abs/2402.0{i}", "timestamp": "2024-02-15T00:00:00Z"},
+            "meta": {
+                "url": f"https://arxiv.org/abs/2402.0{i}",
+                "timestamp": "2024-02-15T00:00:00Z",
+            },
         }
         for i in range(5)
     ]

@@ -24,6 +24,7 @@ def cfg(tmp_path: Path) -> ProcessorConfig:
         raw_topic="raw.fetched",
         normalized_topic="docs.normalized",
         curated_topic="docs.curated",
+        decisions_topic="curation.decisions",
         decon_attest_topic="decon.attest",
         minio_endpoint="http://localhost:9000",
         minio_access_key="minioadmin",

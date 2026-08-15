@@ -1,5 +1,56 @@
 {
   "$defs": {
+    "SilverSegment": {
+      "additionalProperties": false,
+      "description": "One included prose segment evaluated by CPU quality models.",
+      "properties": {
+        "role": {
+          "default": "other",
+          "enum": [
+            "abstract",
+            "introduction",
+            "background",
+            "methods",
+            "results",
+            "discussion",
+            "conclusion",
+            "limitations",
+            "appendix",
+            "acknowledgements",
+            "references",
+            "metadata",
+            "other"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "segment_id": {
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "word_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Word Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "segment_id",
+        "title",
+        "text"
+      ],
+      "title": "SilverSegment",
+      "type": "object"
+    },
     "SilverTags": {
       "additionalProperties": false,
       "description": "Heuristic tagger outputs and perplexity score.",
@@ -43,11 +94,36 @@
   "additionalProperties": false,
   "description": "Normalized, language-tagged, heuristically-scored document.",
   "properties": {
+    "citation_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Citation Count",
+      "type": "integer"
+    },
     "doc_id": {
       "description": "Content-addressed document id, sha256 of the canonical URL.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Doc Id",
       "type": "string"
+    },
+    "equation_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Equation Count",
+      "type": "integer"
+    },
+    "excluded_section_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Excluded Section Count",
+      "type": "integer"
+    },
+    "excluded_sections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Excluded Sections",
+      "type": "array"
     },
     "extracted_with": {
       "description": "Extractor identity + version, e.g. 'resiliparse-0.14'.",
@@ -62,11 +138,35 @@
       "title": "Extraction Pipeline",
       "type": "string"
     },
+    "extraction_warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Extraction Warnings",
+      "type": "array"
+    },
+    "figure_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Figure Count",
+      "type": "integer"
+    },
+    "included_section_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Included Section Count",
+      "type": "integer"
+    },
     "lang": {
       "description": "ISO 639-1/3 language code.",
       "maxLength": 8,
       "minLength": 2,
       "title": "Lang",
+      "type": "string"
+    },
+    "lang_detector_revision": {
+      "default": "unknown",
+      "title": "Lang Detector Revision",
       "type": "string"
     },
     "lang_score": {
@@ -90,8 +190,14 @@
     },
     "minhash_sig": {
       "description": "Binary MinHash signature, 112 permutations packed little-endian.",
-      "format": "binary",
+      "format": "base64url",
       "title": "Minhash Sig",
+      "type": "string"
+    },
+    "model_text": {
+      "default": "",
+      "description": "Body-only prose used by web-quality, KenLM, PII, and dedup stages. Scientific equations/tables/figures remain in text but are excluded here.",
+      "title": "Model Text",
       "type": "string"
     },
     "near_dup_cluster_id": {
@@ -107,6 +213,40 @@
       "description": "Set by the LSHBloom operator; None for first occurrence in band.",
       "title": "Near Dup Cluster Id"
     },
+    "projection_version": {
+      "default": "document-v1",
+      "title": "Projection Version",
+      "type": "string"
+    },
+    "scientific_artifact_s3_uri": {
+      "anyOf": [
+        {
+          "pattern": "^s3://[^/]+/.+",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Structured sections/tables/equations/figures JSON artifact.",
+      "title": "Scientific Artifact S3 Uri"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/SilverSegment"
+      },
+      "title": "Segments",
+      "type": "array"
+    },
+    "source_feed": {
+      "default": "unknown",
+      "description": "SourceFeed CRD name propagated from Bronze.",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Feed",
+      "type": "string"
+    },
     "source_format": {
       "default": "html",
       "description": "Wire shape carried forward from the Bronze record.",
@@ -121,6 +261,19 @@
       ],
       "title": "Source Format",
       "type": "string"
+    },
+    "source_metadata_text": {
+      "default": "",
+      "description": "Bounded title/author metadata scanned separately from trainable body text.",
+      "maxLength": 32768,
+      "title": "Source Metadata Text",
+      "type": "string"
+    },
+    "source_word_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Source Word Count",
+      "type": "integer"
     },
     "spdx_license": {
       "anyOf": [
@@ -149,6 +302,18 @@
       "title": "Spdx License Source",
       "type": "string"
     },
+    "structured_text": {
+      "default": "",
+      "description": "Bounded tables/equations/figure surrogates appended after selected prose.",
+      "title": "Structured Text",
+      "type": "string"
+    },
+    "table_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Table Count",
+      "type": "integer"
+    },
     "tags": {
       "$ref": "#/$defs/SilverTags"
     },
@@ -175,6 +340,12 @@
       "pattern": "^[0-9a-f]{32}$",
       "title": "Trace Id",
       "type": "string"
+    },
+    "training_word_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Training Word Count",
+      "type": "integer"
     },
     "url": {
       "format": "uri",

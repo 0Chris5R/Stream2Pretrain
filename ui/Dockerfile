@@ -47,10 +47,11 @@ FROM alpine:${ALPINE_VERSION} AS cosign
 ARG COSIGN_VERSION
 ARG TARGETARCH
 RUN apk add --no-cache curl ca-certificates \
- && case "${TARGETARCH:-amd64}" in \
-      amd64) ARCH=amd64 ;; \
-      arm64) ARCH=arm64 ;; \
-      *) echo "unsupported arch ${TARGETARCH}" && exit 1 ;; \
+ && BUILD_ARCH="${TARGETARCH:-$(apk --print-arch)}" \
+ && case "${BUILD_ARCH}" in \
+      amd64|x86_64) ARCH=amd64 ;; \
+      arm64|aarch64) ARCH=arm64 ;; \
+      *) echo "unsupported arch ${BUILD_ARCH}" && exit 1 ;; \
     esac \
  && curl -fsSL -o /usr/local/bin/cosign \
       "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-${ARCH}" \

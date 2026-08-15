@@ -22,9 +22,9 @@ Per-paper semantics:
 - 404 from ``arxiv.org/html/<id>`` -> retry against
   ``ar5iv.labs.arxiv.org/html/<id>``; on 200, ``extraction_pipeline``
   becomes ``"ar5iv-2026-06"``.
-- both 404 -> emit a Bronze record with ``source_format="metadata"`` and
-  the diagnostic body ``{"reason": "fulltext_unavailable", ...}`` so a
-  Phase-2 marker-pdf job can pick it up later.
+- both 404 -> fetch ``arxiv.org/pdf/<id>`` and emit ``source_format="pdf"``
+  for the bounded CPU Docling fallback. A metadata diagnostic is emitted only
+  when the PDF is unavailable too.
 """
 
 from __future__ import annotations
@@ -62,6 +62,7 @@ log = get_logger(__name__)
 
 ARXIV_HTML_BASE = "https://arxiv.org/html"
 AR5IV_HTML_BASE = "https://ar5iv.labs.arxiv.org/html"
+ARXIV_PDF_BASE = "https://arxiv.org/pdf"
 
 # arXiv asks for max 4 req/s plus a 1 s sleep between requests. We honour
 # both via the token bucket (rate=4/s, burst=4) and an explicit
@@ -98,6 +99,7 @@ class FetchOutcome:
         "fetched_at",
         "html",
         "last_modified",
+        "source_format",
         "status",
         "url",
     )
@@ -114,6 +116,7 @@ class FetchOutcome:
         fetched_at: datetime,
         etag: str | None,
         last_modified: datetime | None,
+        source_format: str = "html",
     ) -> None:
         self.status = status
         self.url = url
@@ -124,6 +127,7 @@ class FetchOutcome:
         self.fetched_at = fetched_at
         self.etag = etag
         self.last_modified = last_modified
+        self.source_format = source_format
 
 
 def _parse_last_modified(value: str | None) -> datetime | None:
@@ -190,6 +194,7 @@ async def fetch_one(
             fetched_at=fetched_at,
             etag=resp.headers.get("etag"),
             last_modified=_parse_last_modified(resp.headers.get("last-modified")),
+            source_format="metadata",
         )
 
     fallback_url = canonical_arxiv_url(arxiv_id, mirror="ar5iv")
@@ -213,16 +218,56 @@ async def fetch_one(
             last_modified=_parse_last_modified(fb_resp.headers.get("last-modified")),
         )
 
+    if fb_resp.status_code != 404:
+        return FetchOutcome(
+            status=fb_resp.status_code,
+            url=fallback_url,
+            html=None,
+            extracted=None,
+            extraction_pipeline=AR5IV_PIPELINE,
+            fallback_used=True,
+            fetched_at=fb_fetched_at,
+            etag=fb_resp.headers.get("etag"),
+            last_modified=_parse_last_modified(fb_resp.headers.get("last-modified")),
+            source_format="metadata",
+        )
+
+    pdf_url = f"{ARXIV_PDF_BASE}/{arxiv_id}"
+    await bucket.acquire()
+    if min_sleep_s > 0:
+        await asyncio.sleep(min_sleep_s)
+    pdf_fetched_at = datetime.now(tz=UTC)
+    pdf_resp = await client.get(pdf_url)
+    content_type = pdf_resp.headers.get("content-type", "").lower()
+    if (
+        pdf_resp.status_code == 200
+        and pdf_resp.content
+        and ("application/pdf" in content_type or pdf_resp.content.startswith(b"%PDF"))
+    ):
+        return FetchOutcome(
+            status=200,
+            url=pdf_url,
+            html=pdf_resp.content,
+            extracted=None,
+            extraction_pipeline="docling-pdf-cpu-2.114.0",
+            fallback_used=True,
+            fetched_at=pdf_fetched_at,
+            etag=pdf_resp.headers.get("etag"),
+            last_modified=_parse_last_modified(pdf_resp.headers.get("last-modified")),
+            source_format="pdf",
+        )
+
     return FetchOutcome(
-        status=fb_resp.status_code,
-        url=fallback_url,
+        status=pdf_resp.status_code,
+        url=pdf_url,
         html=None,
         extracted=None,
-        extraction_pipeline=AR5IV_PIPELINE,
+        extraction_pipeline="docling-pdf-cpu-2.114.0",
         fallback_used=True,
-        fetched_at=fb_fetched_at,
-        etag=fb_resp.headers.get("etag"),
-        last_modified=_parse_last_modified(fb_resp.headers.get("last-modified")),
+        fetched_at=pdf_fetched_at,
+        etag=pdf_resp.headers.get("etag"),
+        last_modified=_parse_last_modified(pdf_resp.headers.get("last-modified")),
+        source_format="metadata",
     )
 
 
@@ -234,8 +279,10 @@ def build_metadata_stub(arxiv_id: str, outcome: FetchOutcome) -> bytes:
         "primary_url": canonical_arxiv_url(arxiv_id, mirror="arxiv"),
         "ar5iv_url": canonical_arxiv_url(arxiv_id, mirror="ar5iv"),
         "ar5iv_status": outcome.status,
+        "pdf_url": f"{ARXIV_PDF_BASE}/{arxiv_id}",
+        "pdf_status": outcome.status,
         "schema_version": 1,
-        "next_action": "phase2_marker_pdf",
+        "next_action": "manual_source_review",
     }
     return json.dumps(payload, sort_keys=True).encode("utf-8")
 
@@ -263,6 +310,12 @@ def make_bronze_record(
         source_format = "html"
         ext = "html.gz"
         content_type = "text/html"
+    elif outcome.status == 200 and outcome.source_format == "pdf" and outcome.html:
+        spdx = license_default
+        spdx_source = "manual_override" if license_default else "unknown"
+        source_format = "pdf"
+        ext = "pdf.gz"
+        content_type = "application/pdf"
     else:
         spdx = license_default
         spdx_source = "manual_override" if license_default else "unknown"
@@ -419,9 +472,7 @@ async def run_for_ids(
     bucket = TokenBucket(rate_per_second, burst)
     emitted = 0
 
-    async with build_async_client(
-        cfg, headers=headers, transport=transport
-    ) as client:
+    async with build_async_client(cfg, headers=headers, transport=transport) as client:
         producer_cm: BronzeProducer
         minio_cm: MinioWriter
         owns_producer = producer_override is None

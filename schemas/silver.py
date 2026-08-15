@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
+from schemas.scientific import SectionRole
 
 ValidFromSource = Literal[
     "http_last_modified",
@@ -48,6 +49,18 @@ class SilverTags(BaseModel):
     perplexity_bucket: PerplexityBucket
 
 
+class SilverSegment(BaseModel):
+    """One included prose segment evaluated by CPU quality models."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    segment_id: str
+    title: str
+    role: SectionRole = "other"
+    text: str
+    word_count: int = Field(default=0, ge=0)
+
+
 class SilverRecord(BaseModel):
     """Normalized, language-tagged, heuristically-scored document."""
 
@@ -62,10 +75,32 @@ class SilverRecord(BaseModel):
     url: HttpUrl
     title: str | None = Field(default=None, max_length=2048)
     text: str = Field(..., description="Extracted plain text (Resiliparse output).")
-    lang: str = Field(
-        ..., min_length=2, max_length=8, description="ISO 639-1/3 language code."
+    model_text: str = Field(
+        default="",
+        description=(
+            "Body-only prose used by web-quality, KenLM, PII, and dedup stages. "
+            "Scientific equations/tables/figures remain in text but are excluded here."
+        ),
     )
+    source_metadata_text: str = Field(
+        default="",
+        max_length=32768,
+        description="Bounded title/author metadata scanned separately from trainable body text.",
+    )
+    structured_text: str = Field(
+        default="",
+        description="Bounded tables/equations/figure surrogates appended after selected prose.",
+    )
+    segments: list[SilverSegment] = Field(default_factory=list)
+    projection_version: str = "document-v1"
+    source_word_count: int = Field(default=0, ge=0)
+    training_word_count: int = Field(default=0, ge=0)
+    included_section_count: int = Field(default=0, ge=0)
+    excluded_section_count: int = Field(default=0, ge=0)
+    excluded_sections: list[str] = Field(default_factory=list)
+    lang: str = Field(..., min_length=2, max_length=8, description="ISO 639-1/3 language code.")
     lang_score: float = Field(..., ge=0.0, le=1.0)
+    lang_detector_revision: str = "unknown"
     extracted_with: str = Field(
         ..., description="Extractor identity + version, e.g. 'resiliparse-0.14'."
     )
@@ -135,3 +170,16 @@ class SilverRecord(BaseModel):
         default="unknown",
         description="Where the SPDX id was read from.",
     )
+
+    # Structured scientific artifact. The full nested object remains in
+    # MinIO; compact counts and its pointer travel with every downstream row.
+    scientific_artifact_s3_uri: str | None = Field(
+        default=None,
+        pattern=r"^s3://[^/]+/.+",
+        description="Structured sections/tables/equations/figures JSON artifact.",
+    )
+    figure_count: int = Field(default=0, ge=0)
+    table_count: int = Field(default=0, ge=0)
+    equation_count: int = Field(default=0, ge=0)
+    citation_count: int = Field(default=0, ge=0)
+    extraction_warnings: list[str] = Field(default_factory=list)

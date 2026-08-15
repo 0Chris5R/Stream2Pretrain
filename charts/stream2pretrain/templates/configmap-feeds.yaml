@@ -91,5 +91,6 @@ data:
       "raw_fetched": {{ .Values.redpanda.topics.rawFetched | quote }},
       "docs_normalized": {{ .Values.redpanda.topics.docsNormalized | quote }},
       "docs_curated": {{ .Values.redpanda.topics.docsCurated | quote }},
+      "curation_decisions": {{ .Values.redpanda.topics.curationDecisions | quote }},
       "decon_attest": {{ .Values.redpanda.topics.deconAttest | quote }}
     }

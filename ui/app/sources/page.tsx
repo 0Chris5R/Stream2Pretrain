@@ -2,43 +2,47 @@
 
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Edit3, Play, Plus, RefreshCcw, Trash2 } from 'lucide-react';
 import { z } from 'zod';
-import { Plus, RefreshCcw, Trash2 } from 'lucide-react';
 
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { SourceCard } from '@/components/source-card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import { queryKeys } from '@/lib/query-keys';
 import {
-  SourceFeedProtocols,
   SourceFeedSpecSchema,
   SourceFeedStatusSchema,
   type SourceFeedSpec,
   type SourceFeedStatus,
 } from '@/lib/schemas';
+import { formatInt, relativeTime } from '@/lib/utils';
 
 const SourceListSchema = z.array(SourceFeedStatusSchema);
+const runnableProtocols = ['rss', 'atom', 'oai-pmh', 'sitemap'] as const;
 
 async function fetchSources(): Promise<SourceFeedStatus[]> {
-  return apiFetch<SourceFeedStatus[]>('/api/sources', SourceListSchema);
+  return apiFetch('/api/sources', SourceListSchema);
 }
 
-async function createSource(spec: SourceFeedSpec): Promise<SourceFeedStatus> {
-  return apiFetch<SourceFeedStatus>('/api/sources', SourceFeedStatusSchema, {
-    method: 'POST',
-    body: spec,
-  });
+async function saveSource(spec: SourceFeedSpec): Promise<SourceFeedStatus> {
+  return apiFetch('/api/sources', SourceFeedStatusSchema, { method: 'POST', body: spec });
 }
 
 async function deleteSource(name: string): Promise<{ deleted: boolean }> {
@@ -47,34 +51,42 @@ async function deleteSource(name: string): Promise<{ deleted: boolean }> {
   });
 }
 
+async function setSourceEnabled(name: string, enabled: boolean): Promise<SourceFeedStatus> {
+  return apiFetch(`/api/sources/${encodeURIComponent(name)}`, SourceFeedStatusSchema, {
+    method: 'PATCH',
+    body: { enabled },
+  });
+}
+
+async function runSource(name: string): Promise<SourceFeedStatus> {
+  return apiFetch(`/api/sources/${encodeURIComponent(name)}/run`, SourceFeedStatusSchema, {
+    method: 'POST',
+  });
+}
+
 export default function SourcesPage() {
   const queryClient = useQueryClient();
   const sources = useQuery({
     queryKey: queryKeys.sources,
     queryFn: fetchSources,
-    refetchInterval: 10_000,
+    refetchInterval: 4_000,
   });
-
-  const create = useMutation({
-    mutationFn: createSource,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.sources }),
+  const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeys.sources });
+  const save = useMutation({ mutationFn: saveSource, onSuccess: refresh });
+  const remove = useMutation({ mutationFn: deleteSource, onSuccess: refresh });
+  const toggle = useMutation({
+    mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
+      setSourceEnabled(name, enabled),
+    onSuccess: refresh,
   });
-  const remove = useMutation({
-    mutationFn: deleteSource,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.sources }),
-  });
-
-  const [open, setOpen] = useState(false);
+  const run = useMutation({ mutationFn: runSource, onSuccess: refresh });
+  const [editing, setEditing] = useState<SourceFeedSpec | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Source feeds</h1>
-          <p className="text-sm text-muted-foreground">
-            Backed by SourceFeed CRDs. CRUD here proxies through `/api/sources` to the cluster API.
-          </p>
-        </div>
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold tracking-tight">Sources</h1>
         <div className="flex gap-2">
           <Button
             variant="outline"
@@ -84,195 +96,266 @@ export default function SourcesPage() {
           >
             <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
           </Button>
-          <Dialog open={open} onOpenChange={setOpen}>
+          <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
               <Button size="sm">
-                <Plus className="mr-2 h-4 w-4" /> New source
+                <Plus className="mr-2 h-4 w-4" /> Add source
               </Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Create SourceFeed</DialogTitle>
-                <DialogDescription>
-                  Validated against `schemas/source_feed_spec.schema.json` before submit.
-                </DialogDescription>
+                <DialogTitle>Add source</DialogTitle>
               </DialogHeader>
-              <NewSourceForm
+              <SourceForm
+                pending={save.isPending}
                 onSubmit={async (spec) => {
-                  await create.mutateAsync(spec);
-                  setOpen(false);
+                  await save.mutateAsync(spec);
+                  setCreateOpen(false);
                 }}
-                pending={create.isPending}
-                error={create.error as Error | null}
               />
             </DialogContent>
           </Dialog>
         </div>
       </div>
 
-      {sources.error ? (
-        <p className="rounded border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-          {(sources.error as Error).message}
-        </p>
-      ) : null}
+      {sources.error ? <ErrorBox error={sources.error as Error} /> : null}
+      {save.error ? <ErrorBox error={save.error as Error} /> : null}
+      {toggle.error ? <ErrorBox error={toggle.error as Error} /> : null}
+      {run.error ? <ErrorBox error={run.error as Error} /> : null}
 
-      {sources.data ? (
-        sources.data.length === 0 ? (
-          <Card>
-            <CardHeader>
-              <CardTitle>No SourceFeed CRDs found</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                Apply the seed manifests with `kubectl apply -f infra/k8s/sourcefeeds-seed.yaml`,
-                or create one with the button above.
-              </p>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {sources.data.map((status) => (
-              <div key={status.name} className="relative">
-                <SourceCard status={status} />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-2 top-2 h-7 w-7 text-muted-foreground hover:text-destructive"
-                  onClick={() => {
-                    if (window.confirm(`Delete SourceFeed/${status.name}?`)) {
-                      remove.mutate(status.name);
-                    }
-                  }}
-                  aria-label="delete"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )
-      ) : (
-        <p className="text-sm text-muted-foreground">Loading sources...</p>
-      )}
+      <Card>
+        <CardContent className="overflow-x-auto p-0">
+          <Table className="min-w-[52rem]">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Source</TableHead>
+                <TableHead>Protocol</TableHead>
+                <TableHead>Policy</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">New documents</TableHead>
+                <TableHead>Last poll</TableHead>
+                <TableHead className="w-[190px] text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sources.data?.map((source) => (
+                <TableRow key={source.name}>
+                  <TableCell>
+                    <div className="font-medium">{source.name}</div>
+                    <div className="max-w-64 truncate text-xs text-muted-foreground">
+                      {new URL(source.spec.endpoint).host}
+                    </div>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{source.spec.protocol}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{policyFor(source)}</Badge>
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge source={source} />
+                  </TableCell>
+                  <TableCell className="text-right font-mono">
+                    {formatInt(source.documents_24h)}
+                  </TableCell>
+                  <TableCell className="text-sm">{relativeTime(source.last_attempt_at)}</TableCell>
+                  <TableCell>
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        title={source.spec.enabled ? 'Disable' : 'Enable'}
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          toggle.mutate({ name: source.name, enabled: !source.spec.enabled })
+                        }
+                      >
+                        {source.spec.enabled ? 'Disable' : 'Enable'}
+                      </Button>
+                      <Button
+                        title="Run once"
+                        variant="ghost"
+                        size="icon"
+                        disabled={
+                          !source.spec.enabled ||
+                          source.poll_state === 'polling' ||
+                          !runnableProtocols.includes(
+                            source.spec.protocol as (typeof runnableProtocols)[number],
+                          )
+                        }
+                        onClick={() => run.mutate(source.name)}
+                      >
+                        <Play className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        title="Edit"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setEditing(source.spec)}
+                      >
+                        <Edit3 className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        title="Delete"
+                        variant="ghost"
+                        size="icon"
+                        className="hover:text-destructive"
+                        onClick={() => {
+                          if (window.confirm(`Delete ${source.name}?`)) remove.mutate(source.name);
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {sources.data?.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
+                    No sources
+                  </TableCell>
+                </TableRow>
+              ) : null}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <Dialog
+        open={editing !== null}
+        onOpenChange={(open) => {
+          if (!open) setEditing(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit source</DialogTitle>
+          </DialogHeader>
+          {editing ? (
+            <SourceForm
+              initial={editing}
+              pending={save.isPending}
+              onSubmit={async (spec) => {
+                await save.mutateAsync(spec);
+                setEditing(null);
+              }}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-interface NewSourceFormProps {
-  onSubmit: (spec: SourceFeedSpec) => void | Promise<void>;
+function SourceForm({
+  initial,
+  pending,
+  onSubmit,
+}: {
+  initial?: SourceFeedSpec;
   pending: boolean;
-  error: Error | null;
-}
-
-function NewSourceForm({ onSubmit, pending, error }: NewSourceFormProps) {
+  onSubmit: (spec: SourceFeedSpec) => Promise<void>;
+}) {
   const [form, setForm] = useState({
-    name: '',
-    protocol: 'rss',
-    endpoint: '',
-    poll_interval_seconds: '900',
-    requests_per_second: '0.5',
-    burst: '5',
+    name: initial?.name ?? '',
+    protocol: initial?.protocol ?? 'rss',
+    endpoint: initial?.endpoint ?? '',
+    poll_interval_seconds: String(initial?.poll_interval_seconds ?? 7200),
+    requests_per_second: String(initial?.rate_limit.requests_per_second ?? 1),
+    burst: String(initial?.rate_limit.burst ?? 2),
   });
-  const [validation, setValidation] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const update = (key: keyof typeof form, value: string) =>
+    setForm((current) => ({ ...current, [key]: value }));
 
-  function update<K extends keyof typeof form>(key: K, value: string) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    const candidate = {
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const endpoint = form.endpoint.trim();
+    const parsed = SourceFeedSpecSchema.safeParse({
       name: form.name.trim(),
       protocol: form.protocol,
-      endpoint: form.endpoint.trim(),
-      enabled: true,
+      endpoint,
+      enabled: initial?.enabled ?? true,
       poll_interval_seconds: Number(form.poll_interval_seconds),
       rate_limit: {
         requests_per_second: Number(form.requests_per_second),
         burst: Number(form.burst),
         respect_x_poll_interval: false,
       },
-      accept_content_types: [],
-      egress_allow: [],
-    };
-    const parsed = SourceFeedSpecSchema.safeParse(candidate);
+      auth: { type: 'none' },
+      accept_content_types: initial?.accept_content_types ?? [],
+      egress_allow: initial?.egress_allow ?? [safeHost(endpoint)].filter(Boolean),
+      license_default:
+        initial?.license_default ??
+        (safeHost(endpoint).endsWith('arxiv.org') ? 'arxiv-non-exclusive-distribution' : 'unknown'),
+    });
     if (!parsed.success) {
-      setValidation(parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
+      setError(parsed.error.issues[0]?.message ?? 'Invalid source');
       return;
     }
-    setValidation(null);
+    setError(null);
     await onSubmit(parsed.data);
   }
 
   return (
-    <form onSubmit={submit} className="space-y-3">
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="name">
-          <Input value={form.name} onChange={(e) => update('name', e.target.value)} required />
+    <form className="space-y-4" onSubmit={submit}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Name">
+          <Input
+            value={form.name}
+            disabled={Boolean(initial)}
+            onChange={(event) => update('name', event.target.value)}
+            required
+          />
         </Field>
-        <Field label="protocol">
+        <Field label="Protocol">
           <select
-            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
             value={form.protocol}
-            onChange={(e) => update('protocol', e.target.value)}
+            onChange={(event) => update('protocol', event.target.value)}
           >
-            {SourceFeedProtocols.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
+            {runnableProtocols.map((protocol) => (
+              <option key={protocol}>{protocol}</option>
             ))}
           </select>
         </Field>
       </div>
-      <Field label="endpoint">
+      <Field label="Endpoint">
         <Input
+          type="url"
           value={form.endpoint}
-          onChange={(e) => update('endpoint', e.target.value)}
-          placeholder="https://example.org/feed.xml"
+          onChange={(event) => update('endpoint', event.target.value)}
           required
         />
       </Field>
-      <div className="grid grid-cols-3 gap-3">
-        <Field label="poll interval (s)">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Field label="Poll interval">
           <Input
             type="number"
-            min={60}
+            min="60"
             value={form.poll_interval_seconds}
-            onChange={(e) => update('poll_interval_seconds', e.target.value)}
+            onChange={(event) => update('poll_interval_seconds', event.target.value)}
           />
         </Field>
-        <Field label="rps">
+        <Field label="Requests / sec">
           <Input
             type="number"
-            min={0.1}
-            step={0.1}
+            min="0.1"
+            step="0.1"
             value={form.requests_per_second}
-            onChange={(e) => update('requests_per_second', e.target.value)}
+            onChange={(event) => update('requests_per_second', event.target.value)}
           />
         </Field>
-        <Field label="burst">
+        <Field label="Burst">
           <Input
             type="number"
-            min={1}
+            min="1"
             value={form.burst}
-            onChange={(e) => update('burst', e.target.value)}
+            onChange={(event) => update('burst', event.target.value)}
           />
         </Field>
       </div>
-      {validation ? (
-        <p className="rounded border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-          {validation}
-        </p>
-      ) : null}
-      {error ? (
-        <p className="rounded border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive">
-          {error.message}
-        </p>
-      ) : null}
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
       <div className="flex justify-end">
-        <Button type="submit" disabled={pending}>
-          {pending ? 'Creating...' : 'Create'}
-        </Button>
+        <Button disabled={pending}>{pending ? 'Saving' : 'Save source'}</Button>
       </div>
     </form>
   );
@@ -280,9 +363,33 @@ function NewSourceForm({ onSubmit, pending, error }: NewSourceFormProps) {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-1.5">
-      <Label className="text-xs uppercase tracking-wide text-muted-foreground">{label}</Label>
+    <label className="space-y-1.5">
+      <span className="text-xs font-medium">{label}</span>
       {children}
+    </label>
+  );
+}
+function ErrorBox({ error }: { error: Error }) {
+  return (
+    <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+      {error.message}
     </div>
   );
+}
+function safeHost(value: string): string {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return '';
+  }
+}
+function policyFor(source: SourceFeedStatus): string {
+  const host = new URL(source.spec.endpoint).hostname;
+  return host.endsWith('arxiv.org') || source.spec.protocol === 'oai-pmh' ? 'scientific' : 'web';
+}
+function StatusBadge({ source }: { source: SourceFeedStatus }) {
+  if (!source.spec.enabled) return <Badge variant="secondary">Disabled</Badge>;
+  if (source.poll_state === 'polling') return <Badge>Running</Badge>;
+  if (source.poll_state === 'error') return <Badge variant="destructive">Failed</Badge>;
+  return <Badge variant="success">Ready</Badge>;
 }

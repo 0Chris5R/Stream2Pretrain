@@ -5,12 +5,13 @@ What this exercises:
 2. Inject a synthetic ``BronzeRecord`` directly onto ``raw.fetched``. The v0.2
    pipeline replaces the v0.1 manual submit endpoint with native fulltext
    pollers (``arxiv_html_fetcher``, ``openreview_poller``,
-   ``github_release_tarball_fetcher``); the test contract is unchanged - a
-   bronze record makes it through to ``docs.curated`` within 30 seconds.
-3. Consume from ``docs.curated`` and assert a matching ``doc_id`` lands in
-   time. When the curator is not running, the fallback assertion is "the
-   record made it onto ``raw.fetched``", since that is the contract the
-   injection step alone owns.
+   ``github_release_tarball_fetcher``).
+3. Consume the matching scored outcome from ``curation.decisions`` within 30
+   seconds. Every document must reach this durable audit stream, including
+   quarantine, retry, benchmark-reserve, and training-eligible outcomes.
+4. Require a second copy on ``docs.curated`` only when the recorded decision
+   is actually training-eligible. A quality gate is allowed to quarantine a
+   synthetic probe; that is successful processing, not a missing event.
 
 Skips cleanly when:
 - Docker is unavailable or the dev stack cannot be reached.
@@ -19,14 +20,17 @@ Skips cleanly when:
 
 from __future__ import annotations
 
+import gzip
 import json
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from schemas.topics import DOCS_CURATED, RAW_FETCHED
+from schemas.bronze import BronzeRecord
+from schemas.topics import CURATION_DECISIONS, DOCS_CURATED, RAW_FETCHED
 from tests.conftest import StackEndpoints
 
 pytestmark = pytest.mark.integration
@@ -50,9 +54,7 @@ def _consume_until(
     timeout_s: float,
 ) -> dict[str, Any] | None:
     """Tail ``topic`` from the earliest offset until ``predicate(record)`` is true."""
-    confluent_kafka = pytest.importorskip(
-        "confluent_kafka", reason="confluent-kafka not installed"
-    )
+    confluent_kafka = pytest.importorskip("confluent_kafka", reason="confluent-kafka not installed")
     consumer = confluent_kafka.Consumer(
         {
             "bootstrap.servers": brokers,
@@ -82,10 +84,10 @@ def _consume_until(
 
 
 def _topic_exists(brokers: str, topic: str) -> bool:
-    confluent_kafka = pytest.importorskip(
-        "confluent_kafka", reason="confluent-kafka not installed"
-    )
-    admin = confluent_kafka.admin.AdminClient({"bootstrap.servers": brokers})
+    pytest.importorskip("confluent_kafka", reason="confluent-kafka not installed")
+    from confluent_kafka.admin import AdminClient
+
+    admin = AdminClient({"bootstrap.servers": brokers})
     md = admin.list_topics(timeout=5.0)
     return topic in md.topics
 
@@ -94,9 +96,7 @@ def _produce_bronze(
     brokers: str, topic: str, record: dict[str, Any], timeout_s: float = 5.0
 ) -> None:
     """Produce a single JSON record to ``topic`` and flush before returning."""
-    confluent_kafka = pytest.importorskip(
-        "confluent_kafka", reason="confluent-kafka not installed"
-    )
+    confluent_kafka = pytest.importorskip("confluent_kafka", reason="confluent-kafka not installed")
     producer = confluent_kafka.Producer({"bootstrap.servers": brokers})
     producer.produce(
         topic,
@@ -108,52 +108,122 @@ def _produce_bronze(
         raise AssertionError(f"{remaining} bronze records still pending after flush")
 
 
-def test_bronze_to_curated_within_30s(dev_stack: StackEndpoints) -> None:
-    """A synthetic bronze record lands on the curated topic in <= 30s.
+def _persist_smoke_document(endpoints: StackEndpoints, *, url: str, body: str) -> dict[str, Any]:
+    """Persist valid Bronze bytes and return the current wire schema."""
+    import boto3
 
-    If the processor topology is not running we fall back to verifying the
-    bronze hop only, since that is the contract the injection step alone owns.
-    """
+    doc_id = _make_doc_id(url)
+    fetched_at = datetime.now(UTC)
+    key = (
+        f"year={fetched_at:%Y}/month={fetched_at:%m}/day={fetched_at:%d}/"
+        f"source=local-integration-smoke/{doc_id.removeprefix('sha256:')}.html.gz"
+    )
+    html = (
+        "<!doctype html><html><head><title>Integration smoke paper</title></head>"
+        "<body><article><h1>Integration smoke paper</h1>"
+        "<h6 class='ltx_title_abstract'>Abstract</h6>"
+        "<p>This controlled integration paper verifies a complete event path.</p>"
+        "<h2>Methods</h2><p>" + body + "</p>"
+        "<h2>Results</h2><p>The resulting record is checked on the clean output topic.</p>"
+        "</article></body></html>"
+    ).encode()
+    payload = gzip.compress(html)
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoints.minio_endpoint,
+        aws_access_key_id=endpoints.minio_access_key,
+        aws_secret_access_key=endpoints.minio_secret_key,
+        region_name="us-east-1",
+    )
+    client.put_object(
+        Bucket="bronze",
+        Key=key,
+        Body=payload,
+        ContentType="text/html",
+        ContentEncoding="gzip",
+    )
+    record = BronzeRecord(
+        doc_id=doc_id,
+        url=url,
+        fetched_at=fetched_at,
+        http_status=200,
+        content_type="text/html",
+        raw_html_s3_uri=f"s3://bronze/{key}",
+        source_feed="local-integration-smoke",
+        trace_id="0" * 32,
+        bytes_size=len(payload),
+        source_format="html",
+        extraction_pipeline="integration-smoke-1.0",
+        spdx_license="CC0-1.0",
+        spdx_license_source="manual_override",
+    )
+    return record.model_dump(mode="json")
+
+
+def test_bronze_to_durable_decision_within_30s(dev_stack: StackEndpoints) -> None:
+    """A synthetic bronze record receives a durable decision in <= 30s."""
     pytest.importorskip("confluent_kafka", reason="confluent-kafka not installed")
 
-    doc_id = _make_doc_id(KNOWN_URL)
-    bronze = {
-        "doc_id": doc_id,
-        "url": KNOWN_URL,
-        "source_feed": "arxiv-html-fetcher",
-        "source_format": "html",
-        "extraction_pipeline": "arxiv-html-fetcher@v0.2",
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "license_spdx": "arxiv-non-exclusive-distribution",
-        "minio_object": (
-            "s3://bronze/year=2026/month=06/day=15/source=arxiv-html-fetcher/"
-            f"{doc_id[len('sha256:'):]}.html.gz"
-        ),
-        "bytes_size": 0,
-        "trace_id": "0" * 32,
-    }
+    url = f"{KNOWN_URL}?probe=e2e-{time.time_ns()}"
+    body = " ".join(
+        [
+            "A reproducible streaming pipeline records raw bytes, structured extraction, "
+            "independent quality signals, and a durable routing decision for later audit."
+            for _ in range(14)
+        ]
+    )
+    bronze = _persist_smoke_document(dev_stack, url=url, body=body)
+    doc_id = str(bronze["doc_id"])
 
     start = time.monotonic()
     _produce_bronze(dev_stack.redpanda_brokers, RAW_FETCHED, bronze)
 
-    if not _topic_exists(dev_stack.redpanda_brokers, DOCS_CURATED):
-        pytest.skip("docs.curated topic does not exist; processor not running")
+    if not _topic_exists(dev_stack.redpanda_brokers, CURATION_DECISIONS):
+        pytest.skip("curation.decisions topic does not exist; processor not running")
 
-    target_topic = (
-        DOCS_CURATED
-        if _topic_exists(dev_stack.redpanda_brokers, DOCS_CURATED)
-        else RAW_FETCHED
-    )
-    record = _consume_until(
+    decision = _consume_until(
         brokers=dev_stack.redpanda_brokers,
-        topic=target_topic,
+        topic=CURATION_DECISIONS,
         predicate=lambda r: r.get("doc_id") == doc_id,
         timeout_s=30.0 - (time.monotonic() - start),
     )
-    assert record is not None, (
-        f"no record with doc_id={doc_id} arrived on {target_topic} within 30s"
+    assert decision is not None, (
+        f"no record with doc_id={doc_id} arrived on {CURATION_DECISIONS} within 30s"
     )
-    assert record["doc_id"] == doc_id
+    assert decision["doc_id"] == doc_id
+    assert decision["route"] in {
+        "broad_pretraining",
+        "reasoning_candidate",
+        "benchmark_candidate",
+        "quarantine",
+        "retry",
+    }
+    assert isinstance(decision["reject_reasons"], list)
+
+    trainable = (
+        decision["risk_tier"] == 1
+        and decision["route"] in {"broad_pretraining", "reasoning_candidate"}
+        and not decision["reject_reasons"]
+        and not decision["pii_flags"]
+        and not decision["contaminated_with"]
+    )
+    if trainable:
+        assert _topic_exists(dev_stack.redpanda_brokers, DOCS_CURATED)
+        curated = _consume_until(
+            brokers=dev_stack.redpanda_brokers,
+            topic=DOCS_CURATED,
+            predicate=lambda r: r.get("doc_id") == doc_id,
+            timeout_s=max(1.0, 30.0 - (time.monotonic() - start)),
+        )
+        assert curated is not None, (
+            f"training-eligible doc_id={doc_id} did not arrive on {DOCS_CURATED}"
+        )
+    else:
+        assert decision["reject_reasons"] or decision["route"] in {
+            "benchmark_candidate",
+            "retry",
+            "quarantine",
+        }
 
 
 def test_bronze_lands_on_raw_fetched(dev_stack: StackEndpoints) -> None:
@@ -163,22 +233,9 @@ def test_bronze_lands_on_raw_fetched(dev_stack: StackEndpoints) -> None:
     """
     pytest.importorskip("confluent_kafka", reason="confluent-kafka not installed")
 
-    doc_id = _make_doc_id(KNOWN_URL + "?probe=raw")
-    bronze = {
-        "doc_id": doc_id,
-        "url": KNOWN_URL + "?probe=raw",
-        "source_feed": "arxiv-html-fetcher",
-        "source_format": "html",
-        "extraction_pipeline": "arxiv-html-fetcher@v0.2",
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "license_spdx": "arxiv-non-exclusive-distribution",
-        "minio_object": (
-            "s3://bronze/year=2026/month=06/day=15/source=arxiv-html-fetcher/"
-            f"{doc_id[len('sha256:'):]}.html.gz"
-        ),
-        "bytes_size": 0,
-        "trace_id": "0" * 32,
-    }
+    url = f"{KNOWN_URL}?probe=raw-{time.time_ns()}"
+    bronze = _persist_smoke_document(dev_stack, url=url, body="Raw bus probe text. " * 60)
+    doc_id = str(bronze["doc_id"])
 
     _produce_bronze(dev_stack.redpanda_brokers, RAW_FETCHED, bronze)
 
@@ -189,4 +246,4 @@ def test_bronze_lands_on_raw_fetched(dev_stack: StackEndpoints) -> None:
         timeout_s=10.0,
     )
     assert record is not None, f"injected doc_id={doc_id} not visible on raw.fetched"
-    assert record["url"].endswith("?probe=raw")
+    assert record["url"] == url

@@ -30,6 +30,23 @@ def test_lorem_ipsum_detection() -> None:
     assert not looks_like_lorem_ipsum("a normal blog post about cats")
 
 
+def test_lorem_ipsum_mention_in_long_scientific_prose_is_not_placeholder() -> None:
+    text = (
+        "This study compares several corpus filters and explains their implementation. " * 35
+        + "The published C4 recipe removes documents containing lorem ipsum or curly brackets."
+    )
+    assert not looks_like_lorem_ipsum(text)
+
+
+def test_repeated_lorem_ipsum_in_long_block_is_placeholder() -> None:
+    text = (
+        "This otherwise long block has ordinary prose for context. " * 12
+        + "Lorem ipsum dolor sit amet, consectetur adipiscing elit. "
+        + "Lorem ipsum dolor sit amet."
+    )
+    assert looks_like_lorem_ipsum(text)
+
+
 def test_c4_filter_passes_clean_prose(long_english_text: str) -> None:
     assert C4Filter().passes(long_english_text)
 

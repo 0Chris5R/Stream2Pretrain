@@ -41,9 +41,18 @@ def has_curly_braces(text: str) -> bool:
 
 
 def looks_like_lorem_ipsum(text: str) -> bool:
-    """Heuristic ``Lorem ipsum`` detector - case-insensitive substring match."""
+    """Detect actual placeholder copy without rejecting prose that discusses it.
+
+    A short block containing a canonical phrase is almost certainly filler. In
+    longer prose, require several occurrences so a scientific paper describing
+    C4's own filters does not lose an otherwise useful section merely for
+    mentioning ``lorem ipsum`` once.
+    """
     haystack = text.lower()
-    return any(tok in haystack for tok in _LOREM_TOKENS)
+    hits = sum(haystack.count(token) for token in _LOREM_TOKENS)
+    if hits == 0:
+        return False
+    return len(text.split()) <= 40 or hits >= 3
 
 
 @dataclass(frozen=True, slots=True)

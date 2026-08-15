@@ -1,176 +1,251 @@
 'use client';
 
+import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
+import { ArrowUpRight } from 'lucide-react';
 
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { QualityHistogramChart } from '@/components/quality-histogram';
-import { ThroughputSpark } from '@/components/throughput-spark';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { ActivityPanel } from '@/components/activity-panel';
 import { Badge } from '@/components/ui/badge';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { QualityHistogramChart } from '@/components/quality-histogram';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import { queryKeys } from '@/lib/query-keys';
 import { DashboardSummarySchema, type DashboardSummary } from '@/lib/schemas';
 import { formatInt } from '@/lib/utils';
 
 async function fetchDashboard(): Promise<DashboardSummary> {
-  return apiFetch<DashboardSummary>('/api/dashboard', DashboardSummarySchema);
+  return apiFetch('/api/dashboard', DashboardSummarySchema);
 }
 
 export default function DashboardPage() {
-  const { data, isLoading, error } = useQuery({
+  const dashboard = useQuery({
     queryKey: queryKeys.dashboard,
     queryFn: fetchDashboard,
     refetchInterval: 5_000,
   });
+  const data = dashboard.data;
+  const scored =
+    data?.quality_histogram.edu_buckets.reduce((sum, bucket) => sum + bucket.count, 0) ?? 0;
 
   return (
-    <div className="space-y-6">
-      <header className="space-y-1">
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">
-          Last hour rollup. Auto-refreshes every 5 s; spark line is live SSE.
-        </p>
-      </header>
+        <span className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" /> Live
+        </span>
+      </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <KpiCard
-          label="Ingested last hour"
-          value={data ? formatInt(data.ingested_last_hour) : '-'}
-          loading={isLoading}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="Decisions" value={data ? formatInt(data.durable_decisions) : '-'} />
+        <Metric
+          label="Training documents"
+          value={data ? formatInt(data.training_export_documents) : '-'}
         />
-        <KpiCard
-          label="Curated last hour"
-          value={data ? formatInt(data.curated_last_hour) : '-'}
-          loading={isLoading}
-        />
-        <KpiCard
-          label="Acceptance rate"
+        <Metric
+          label="Acceptance"
           value={data ? `${(acceptanceRate(data) * 100).toFixed(1)}%` : '-'}
-          loading={isLoading}
+        />
+        <Metric
+          label="Benchmark reserve"
+          value={
+            data
+              ? formatInt(
+                  data.route_distribution.find((row) => row.route === 'benchmark_candidate')
+                    ?.documents ?? 0,
+                )
+              : '-'
+          }
         />
       </div>
 
+      <ActivityPanel />
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium">Source quality</CardTitle>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              n={formatInt(scored)}
+            </span>
+          </CardHeader>
+          <CardContent>
+            {data ? (
+              <QualityHistogramChart data={data.quality_histogram} series="edu_buckets" />
+            ) : (
+              <Skeleton />
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium">Composite quality</CardTitle>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              n={formatInt(scored)}
+            </span>
+          </CardHeader>
+          <CardContent>
+            {data ? <QualityHistogramChart data={data.quality_histogram} /> : <Skeleton />}
+          </CardContent>
+        </Card>
+      </div>
+
       <Card>
-        <CardHeader>
-          <CardTitle>Live curated docs/min</CardTitle>
-          <CardDescription>Server-Sent Events from the in-cluster Prometheus.</CardDescription>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium">Corpus routes</CardTitle>
         </CardHeader>
-        <CardContent>
-          <ThroughputSpark height={120} />
+        <CardContent className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Route</TableHead>
+                <TableHead className="text-right">Documents</TableHead>
+                <TableHead className="text-right">Source words</TableHead>
+                <TableHead className="text-right">Projection words</TableHead>
+                <TableHead className="text-right">Mean source quality</TableHead>
+                <TableHead className="text-right">Mean composite</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data?.route_distribution.map((row) => (
+                <TableRow key={row.route}>
+                  <TableCell>
+                    <Link
+                      href={`/documents?route=${encodeURIComponent(row.route)}&include_fixtures=true`}
+                      className="inline-flex items-center gap-1 hover:underline"
+                    >
+                      <RouteBadge route={row.route} />
+                      <ArrowUpRight className="h-3.5 w-3.5" />
+                    </Link>
+                  </TableCell>
+                  <TableCell className="text-right font-mono">{formatInt(row.documents)}</TableCell>
+                  <TableCell className="text-right font-mono">
+                    {formatInt(row.source_words)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono">
+                    {formatInt(row.training_words)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono">{row.mean_edu.toFixed(2)}</TableCell>
+                  <TableCell className="text-right font-mono">
+                    {row.mean_quality.toFixed(2)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
         <Card>
-          <CardHeader>
-            <CardTitle>Quality histogram</CardTitle>
-            <CardDescription>FineWeb-Edu score over the last hour.</CardDescription>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Sources</CardTitle>
           </CardHeader>
           <CardContent>
-            {data ? (
-              <QualityHistogramChart data={data.quality_histogram} />
-            ) : (
-              <Skeleton className="h-[220px]" />
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Rejected by reason</CardTitle>
-            <CardDescription>Aggregated from processor.dropped_total.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {data ? (
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(data.rejected_by_reason).map(([reason, count]) => (
-                  <Badge key={reason} variant="secondary" className="font-mono">
-                    {reason} {formatInt(count)}
-                  </Badge>
-                ))}
-              </div>
-            ) : (
-              <Skeleton className="h-10" />
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Per-source acceptance</CardTitle>
-          <CardDescription>Curated vs ingested by source over the last hour.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {data ? (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Source</TableHead>
-                  <TableHead className="text-right">Total</TableHead>
-                  <TableHead className="text-right">Accepted</TableHead>
+                  <TableHead className="text-right">Observed</TableHead>
+                  <TableHead className="text-right">Training</TableHead>
                   <TableHead className="text-right">Rate</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.per_source_acceptance.map((row) => {
-                  const rate = row.total === 0 ? 0 : row.accepted / row.total;
-                  return (
-                    <TableRow key={row.source}>
-                      <TableCell className="font-mono">{row.source}</TableCell>
-                      <TableCell className="text-right font-mono">{formatInt(row.total)}</TableCell>
-                      <TableCell className="text-right font-mono">
-                        {formatInt(row.accepted)}
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {(rate * 100).toFixed(1)}%
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
+                {data?.per_source_acceptance.map((row) => (
+                  <TableRow key={row.source}>
+                    <TableCell>
+                      <Link
+                        href={`/documents?source=${encodeURIComponent(row.source)}&include_fixtures=true`}
+                        className="hover:underline"
+                      >
+                        {row.source}
+                      </Link>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">{formatInt(row.total)}</TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatInt(row.accepted)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {row.total ? `${((row.accepted / row.total) * 100).toFixed(1)}%` : '-'}
+                    </TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
-          ) : (
-            <Skeleton className="h-32" />
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Rejected</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {data ? (
+              Object.entries(data.rejected_by_reason).map(([reason, count]) => (
+                <Link
+                  key={reason}
+                  href={`/documents?rejection_reason=${encodeURIComponent(reason)}&include_fixtures=true`}
+                  className="flex items-center justify-between rounded-md border px-3 py-2 text-sm hover:bg-accent"
+                >
+                  <span>{humanize(reason)}</span>
+                  <span className="font-mono">{formatInt(count)}</span>
+                </Link>
+              ))
+            ) : (
+              <Skeleton />
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
-      {error ? (
-        <p className="rounded border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-          {(error as Error).message}
-        </p>
+      {dashboard.error ? (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+          {(dashboard.error as Error).message}
+        </div>
       ) : null}
     </div>
   );
 }
 
-function acceptanceRate(d: DashboardSummary): number {
-  if (d.ingested_last_hour === 0) return 0;
-  return d.curated_last_hour / d.ingested_last_hour;
-}
-
-function KpiCard({
-  label,
-  value,
-  loading,
-}: {
-  label: string;
-  value: string;
-  loading: boolean;
-}) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
     <Card>
-      <CardHeader className="pb-2">
-        <CardDescription>{label}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {loading ? <Skeleton className="h-8 w-24" /> : <p className="text-3xl font-semibold tabular-nums">{value}</p>}
+      <CardContent className="p-4">
+        <div className="text-xs text-muted-foreground">{label}</div>
+        <div className="mt-1 text-3xl font-semibold tabular-nums">{value}</div>
       </CardContent>
     </Card>
   );
 }
-
-function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded-md bg-muted ${className}`} />;
+function RouteBadge({ route }: { route: string }) {
+  return (
+    <Badge
+      variant={
+        route === 'quarantine'
+          ? 'destructive'
+          : route === 'retry' || route === 'benchmark_candidate'
+            ? 'warning'
+            : 'success'
+      }
+    >
+      {humanize(route)}
+    </Badge>
+  );
+}
+function acceptanceRate(data: DashboardSummary): number {
+  return data.durable_decisions ? data.training_export_documents / data.durable_decisions : 0;
+}
+function humanize(value: string): string {
+  return value.replaceAll('_', ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+function Skeleton() {
+  return <div className="h-40 animate-pulse rounded bg-muted" />;
 }

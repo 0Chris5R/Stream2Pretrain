@@ -1,4 +1,171 @@
 {
+  "$defs": {
+    "SegmentScore": {
+      "additionalProperties": false,
+      "description": "Per-section model signals retained for explainability.",
+      "properties": {
+        "c4_pass": {
+          "default": true,
+          "title": "C4 Pass",
+          "type": "boolean"
+        },
+        "comparison_classifier_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comparison Classifier Revision"
+        },
+        "decision": {
+          "default": "included",
+          "enum": [
+            "included",
+            "excluded"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "edu_score": {
+          "anyOf": [
+            {
+              "maximum": 5.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Primary source-aware educational-quality model output.",
+          "title": "Edu Score"
+        },
+        "exclusion_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclusion Reasons",
+          "type": "array"
+        },
+        "finepdfs_edu_score": {
+          "anyOf": [
+            {
+              "maximum": 5.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finepdfs Edu Score"
+        },
+        "fineweb_edu_score": {
+          "anyOf": [
+            {
+              "maximum": 5.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fineweb Edu Score"
+        },
+        "perplexity": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Perplexity"
+        },
+        "perplexity_bucket": {
+          "anyOf": [
+            {
+              "enum": [
+                "head",
+                "middle",
+                "tail"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Perplexity Bucket"
+        },
+        "pii_flags": {
+          "items": {
+            "enum": [
+              "email",
+              "phone",
+              "ssn",
+              "credit_card",
+              "ipv4",
+              "ipv6",
+              "passport"
+            ],
+            "type": "string"
+          },
+          "title": "Pii Flags",
+          "type": "array"
+        },
+        "quality_classifier_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quality Classifier Revision"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "segment_id": {
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "word_count": {
+          "minimum": 0,
+          "title": "Word Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "segment_id",
+        "title",
+        "role",
+        "word_count"
+      ],
+      "title": "SegmentScore",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "description": "Curated document plus full provenance + scoring metadata.",
   "properties": {
@@ -13,8 +180,53 @@
         }
       ],
       "default": null,
-      "description": "Iceberg V3 row lineage id.",
+      "description": "Reserved row-lineage id; null in the current Iceberg V2 writer.",
       "title": "Row Id"
+    },
+    "benchmark_score": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Benchmark Score",
+      "type": "number"
+    },
+    "benchmark_set_version": {
+      "default": "unknown",
+      "title": "Benchmark Set Version",
+      "type": "string"
+    },
+    "c4_curly_brace_pass": {
+      "default": true,
+      "title": "C4 Curly Brace Pass",
+      "type": "boolean"
+    },
+    "c4_fraction_lines_with_punct": {
+      "default": 1.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "C4 Fraction Lines With Punct",
+      "type": "number"
+    },
+    "c4_lorem_ipsum_pass": {
+      "default": true,
+      "title": "C4 Lorem Ipsum Pass",
+      "type": "boolean"
+    },
+    "c4_nopunc_pass": {
+      "default": true,
+      "title": "C4 Nopunc Pass",
+      "type": "boolean"
+    },
+    "citation_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Citation Count",
+      "type": "integer"
+    },
+    "classifier_backend": {
+      "default": "unknown",
+      "title": "Classifier Backend",
+      "type": "string"
     },
     "classifier_revision": {
       "title": "Classifier Revision",
@@ -28,6 +240,45 @@
       "title": "Contaminated With",
       "type": "array"
     },
+    "content_tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Content Tags",
+      "type": "array"
+    },
+    "decon_embedding_revision": {
+      "default": "unknown",
+      "title": "Decon Embedding Revision",
+      "type": "string"
+    },
+    "decon_exact_matches": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Decon Exact Matches",
+      "type": "array"
+    },
+    "decon_max_similarity": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": -1.0,
+      "title": "Decon Max Similarity",
+      "type": "number"
+    },
+    "decon_ngram_size": {
+      "default": 13,
+      "minimum": 1,
+      "title": "Decon Ngram Size",
+      "type": "integer"
+    },
+    "decon_semantic_matches": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Decon Semantic Matches",
+      "type": "array"
+    },
     "doc_id": {
       "description": "Content-addressed document id, sha256 of the canonical URL.",
       "pattern": "^sha256:[0-9a-f]{64}$",
@@ -35,10 +286,50 @@
       "type": "string"
     },
     "edu_score": {
-      "description": "Distilled-classifier educational score.",
+      "description": "Primary source-aware educational-quality output. Scientific PDF/HTML uses FinePDFs Edu v2; general web content uses FineWeb-Edu.",
       "maximum": 5.0,
       "minimum": 0.0,
       "title": "Edu Score",
+      "type": "number"
+    },
+    "eligible_routes": {
+      "items": {
+        "enum": [
+          "broad_pretraining",
+          "reasoning_candidate",
+          "benchmark_candidate",
+          "quarantine",
+          "retry"
+        ],
+        "type": "string"
+      },
+      "title": "Eligible Routes",
+      "type": "array"
+    },
+    "equation_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Equation Count",
+      "type": "integer"
+    },
+    "excluded_section_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Excluded Section Count",
+      "type": "integer"
+    },
+    "excluded_sections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Excluded Sections",
+      "type": "array"
+    },
+    "extraction_completeness": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Extraction Completeness",
       "type": "number"
     },
     "extraction_pipeline": {
@@ -49,11 +340,94 @@
       "title": "Extraction Pipeline",
       "type": "string"
     },
+    "extraction_warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Extraction Warnings",
+      "type": "array"
+    },
+    "figure_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Figure Count",
+      "type": "integer"
+    },
+    "gopher_alpha_word_ratio": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Gopher Alpha Word Ratio",
+      "type": "number"
+    },
+    "gopher_bullet_line_ratio": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Gopher Bullet Line Ratio",
+      "type": "number"
+    },
+    "gopher_ellipsis_line_ratio": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Gopher Ellipsis Line Ratio",
+      "type": "number"
+    },
+    "gopher_mean_word_len": {
+      "default": 0.0,
+      "minimum": 0.0,
+      "title": "Gopher Mean Word Len",
+      "type": "number"
+    },
+    "gopher_pass": {
+      "default": true,
+      "title": "Gopher Pass",
+      "type": "boolean"
+    },
+    "gopher_stopword_ratio": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Gopher Stopword Ratio",
+      "type": "number"
+    },
+    "gopher_symbol_word_ratio": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Gopher Symbol Word Ratio",
+      "type": "number"
+    },
+    "gopher_word_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Gopher Word Count",
+      "type": "integer"
+    },
+    "included_section_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Included Section Count",
+      "type": "integer"
+    },
     "lang": {
       "maxLength": 8,
       "minLength": 2,
       "title": "Lang",
       "type": "string"
+    },
+    "lang_detector_revision": {
+      "default": "unknown",
+      "title": "Lang Detector Revision",
+      "type": "string"
+    },
+    "lang_score": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Lang Score",
+      "type": "number"
     },
     "license": {
       "description": "SPDX id or 'unknown'.",
@@ -72,6 +446,87 @@
       "title": "License Source",
       "type": "string"
     },
+    "lsh_backend": {
+      "default": "unknown",
+      "title": "Lsh Backend",
+      "type": "string"
+    },
+    "metadata_pii_flags": {
+      "items": {
+        "enum": [
+          "email",
+          "phone",
+          "ssn",
+          "credit_card",
+          "ipv4",
+          "ipv6",
+          "passport"
+        ],
+        "type": "string"
+      },
+      "title": "Metadata Pii Flags",
+      "type": "array"
+    },
+    "minhash_backend": {
+      "default": "unknown",
+      "title": "Minhash Backend",
+      "type": "string"
+    },
+    "minhash_num_perms": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Minhash Num Perms",
+      "type": "integer"
+    },
+    "near_dup_cluster_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Near Dup Cluster Id"
+    },
+    "near_duplicate": {
+      "default": false,
+      "title": "Near Duplicate",
+      "type": "boolean"
+    },
+    "perplexity": {
+      "default": 0.0,
+      "minimum": 0.0,
+      "title": "Perplexity",
+      "type": "number"
+    },
+    "perplexity_bucket": {
+      "default": "head",
+      "enum": [
+        "head",
+        "middle",
+        "tail"
+      ],
+      "title": "Perplexity Bucket",
+      "type": "string"
+    },
+    "perplexity_scorer": {
+      "default": "unknown",
+      "title": "Perplexity Scorer",
+      "type": "string"
+    },
+    "pii_action": {
+      "default": "none",
+      "enum": [
+        "none",
+        "metadata_removed",
+        "segments_removed",
+        "body_quarantine"
+      ],
+      "title": "Pii Action",
+      "type": "string"
+    },
     "pii_flags": {
       "items": {
         "enum": [
@@ -88,16 +543,33 @@
       "title": "Pii Flags",
       "type": "array"
     },
+    "pii_scanner_revision": {
+      "default": "regex-only",
+      "title": "Pii Scanner Revision",
+      "type": "string"
+    },
     "policy_revision": {
       "description": "Git SHA of the policy bundle, prefixed 'git:'.",
       "title": "Policy Revision",
       "type": "string"
     },
+    "projection_version": {
+      "default": "document-v1",
+      "title": "Projection Version",
+      "type": "string"
+    },
     "quality_score": {
-      "description": "FineWeb-Edu raw classifier score.",
+      "description": "Explainable composite corpus-quality score; not a model output.",
       "maximum": 5.0,
       "minimum": 0.0,
       "title": "Quality Score",
+      "type": "number"
+    },
+    "reasoning_score": {
+      "default": 0.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Reasoning Score",
       "type": "number"
     },
     "reject_reasons": {
@@ -113,11 +585,28 @@
           "license_excluded",
           "decontamination_hit",
           "validity_interval_invalid",
-          "minhash_backend_mismatch"
+          "minhash_backend_mismatch",
+          "insufficient_scientific_body"
         ],
         "type": "string"
       },
       "title": "Reject Reasons",
+      "type": "array"
+    },
+    "removed_body_pii_flags": {
+      "items": {
+        "enum": [
+          "email",
+          "phone",
+          "ssn",
+          "credit_card",
+          "ipv4",
+          "ipv6",
+          "passport"
+        ],
+        "type": "string"
+      },
+      "title": "Removed Body Pii Flags",
       "type": "array"
     },
     "risk_tier": {
@@ -129,9 +618,49 @@
       "title": "Risk Tier",
       "type": "integer"
     },
+    "route": {
+      "default": "quarantine",
+      "enum": [
+        "broad_pretraining",
+        "reasoning_candidate",
+        "benchmark_candidate",
+        "quarantine",
+        "retry"
+      ],
+      "title": "Route",
+      "type": "string"
+    },
+    "route_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Route Reasons",
+      "type": "array"
+    },
+    "scientific_artifact_s3_uri": {
+      "anyOf": [
+        {
+          "pattern": "^s3://[^/]+/.+",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Structured scientific-document artifact retained in MinIO.",
+      "title": "Scientific Artifact S3 Uri"
+    },
     "scoring_version": {
       "title": "Scoring Version",
       "type": "string"
+    },
+    "segment_scores": {
+      "items": {
+        "$ref": "#/$defs/SegmentScore"
+      },
+      "title": "Segment Scores",
+      "type": "array"
     },
     "snapshot_id": {
       "anyOf": [
@@ -145,6 +674,14 @@
       ],
       "default": null,
       "title": "Snapshot Id"
+    },
+    "source_feed": {
+      "default": "unknown",
+      "description": "SourceFeed CRD name propagated from Bronze/Silver.",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Feed",
+      "type": "string"
     },
     "source_format": {
       "default": "html",
@@ -160,6 +697,12 @@
       ],
       "title": "Source Format",
       "type": "string"
+    },
+    "source_word_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Source Word Count",
+      "type": "integer"
     },
     "spdx_license": {
       "anyOf": [
@@ -188,8 +731,26 @@
       "title": "Spdx License Source",
       "type": "string"
     },
+    "structural_quality_score": {
+      "default": 0.0,
+      "maximum": 5.0,
+      "minimum": 0.0,
+      "title": "Structural Quality Score",
+      "type": "number"
+    },
+    "table_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Table Count",
+      "type": "integer"
+    },
     "text": {
       "title": "Text",
+      "type": "string"
+    },
+    "tokenizer_revision": {
+      "default": "unknown",
+      "title": "Tokenizer Revision",
       "type": "string"
     },
     "tokens": {
@@ -203,6 +764,12 @@
       "pattern": "^[0-9a-f]{32}$",
       "title": "Trace Id",
       "type": "string"
+    },
+    "training_word_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Training Word Count",
+      "type": "integer"
     },
     "valid_from": {
       "format": "date-time",

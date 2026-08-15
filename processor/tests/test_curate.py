@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from processor import common
 from processor.common import ProcessorConfig, gold_loads, silver_dumps
-from processor.curate import build_state, curate_one, is_trainable_gold, process_silver_payload
-from schemas.silver import SilverRecord, SilverTags
+from processor.curate import (
+    build_state,
+    curate_one,
+    is_trainable_gold,
+    process_silver_decision_payload,
+    process_silver_payload,
+)
+from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
 
 def _silver(text: str, doc_id: str = "sha256:" + "a" * 64) -> SilverRecord:
@@ -53,7 +60,10 @@ def test_curate_flags_pii(cfg: ProcessorConfig, long_english_text: str) -> None:
     try:
         text = long_english_text + " contact me at john.doe@example.com please."
         gold = curate_one(state, _silver(text, doc_id="sha256:" + "b" * 64))
-        assert "email" in gold.pii_flags
+        assert "email" in gold.removed_body_pii_flags
+        assert "email" not in gold.pii_flags
+        assert "john.doe@example.com" not in gold.text
+        assert gold.pii_action == "body_quarantine"
         assert "pii_detected" in gold.reject_reasons
         assert gold.risk_tier == 3
         assert not is_trainable_gold(gold)
@@ -73,6 +83,142 @@ def test_curate_flags_curly_brace(cfg: ProcessorConfig) -> None:
         state.close()
 
 
+def test_curate_removes_only_the_sensitive_section(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(long_english_text, doc_id="sha256:" + "d" * 64).model_copy(
+            update={
+                "title": "Segment-aware paper",
+                "model_text": long_english_text,
+                "segments": [
+                    SilverSegment(
+                        segment_id="methods",
+                        title="Methods",
+                        role="methods",
+                        text=long_english_text,
+                        word_count=len(long_english_text.split()),
+                    ),
+                    SilverSegment(
+                        segment_id="contact",
+                        title="Contact details",
+                        role="other",
+                        text="Correspondence should be sent to author@example.invalid.",
+                        word_count=7,
+                    ),
+                ],
+                "source_word_count": len(long_english_text.split()) + 7,
+                "training_word_count": len(long_english_text.split()) + 7,
+                "included_section_count": 2,
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "author@example.invalid" not in gold.text
+        assert "email" in gold.removed_body_pii_flags
+        assert gold.pii_action == "segments_removed"
+        assert "pii_detected" not in gold.reject_reasons
+        assert any(
+            score.segment_id == "contact" and score.decision == "excluded"
+            for score in gold.segment_scores
+        )
+        assert any(
+            score.segment_id == "methods" and score.decision == "included"
+            for score in gold.segment_scores
+        )
+        assert is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_author_email_is_metadata_not_a_body_reject(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(long_english_text, doc_id="sha256:" + "e" * 64).model_copy(
+            update={"source_metadata_text": "Ada Researcher ada@example.invalid"}
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "email" in gold.metadata_pii_flags
+        assert gold.pii_action == "metadata_removed"
+        assert "pii_detected" not in gold.reject_reasons
+        assert is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_scientific_curly_braces_are_a_visible_nonblocking_signal(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        text = long_english_text + " The shard set is S = {n-k, n} for every experiment."
+        silver = _silver(text, doc_id="sha256:" + "f" * 64).model_copy(
+            update={
+                "scientific_artifact_s3_uri": "s3://silver/scientific/f/document.json",
+                "model_text": text,
+                "segments": [
+                    SilverSegment(
+                        segment_id="methods",
+                        title="Methods",
+                        role="methods",
+                        text=text,
+                        word_count=len(text.split()),
+                    )
+                ],
+                "included_section_count": 1,
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert not gold.c4_curly_brace_pass
+        assert "c4_nopunc_filter" not in gold.reject_reasons
+        assert gold.segment_scores[0].decision == "included"
+        assert is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_structured_evidence_with_email_is_removed_before_final_projection(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(long_english_text, doc_id="sha256:" + "7" * 64).model_copy(
+            update={
+                "model_text": long_english_text,
+                "segments": [
+                    SilverSegment(
+                        segment_id="results",
+                        title="Results",
+                        role="results",
+                        text=long_english_text,
+                        word_count=len(long_english_text.split()),
+                    )
+                ],
+                "structured_text": "[FIGURE] Visible text: contact author@example.invalid [/FIGURE]",
+                "scientific_artifact_s3_uri": "s3://silver/scientific/7/document.json",
+                "included_section_count": 1,
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "author@example.invalid" not in gold.text
+        assert "email" in gold.removed_body_pii_flags
+        assert "pii_detected" not in gold.reject_reasons
+        assert gold.pii_action == "segments_removed"
+        assert is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
 def test_curate_marks_duplicates(cfg: ProcessorConfig, long_english_text: str) -> None:
     state = build_state(cfg)
     try:
@@ -84,6 +230,42 @@ def test_curate_marks_duplicates(cfg: ProcessorConfig, long_english_text: str) -
         assert not is_trainable_gold(second)
     finally:
         state.close()
+
+
+def test_decision_replay_returns_identical_cached_result(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        payload = silver_dumps(_silver(long_english_text))
+
+        first = process_silver_decision_payload(state, payload)
+        replay = process_silver_decision_payload(state, payload)
+
+        assert replay == first
+        assert "near_duplicate" not in common.gold_loads(replay[0]).reject_reasons
+    finally:
+        state.close()
+
+
+def test_decision_replay_after_worker_restart_uses_durable_cache(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    payload = silver_dumps(_silver(long_english_text))
+    first_state = build_state(cfg)
+    try:
+        first = process_silver_decision_payload(first_state, payload)
+    finally:
+        first_state.close()
+
+    replay_state = build_state(cfg)
+    try:
+        replay = process_silver_decision_payload(replay_state, payload)
+    finally:
+        replay_state.close()
+
+    assert replay == first
+    assert "near_duplicate" not in common.gold_loads(replay[0]).reject_reasons
 
 
 def test_curate_recomputes_placeholder_seed_minhash(
@@ -147,7 +329,7 @@ def test_process_silver_payload_drops_rejected_rows(
         state.close()
 
 
-def test_missing_license_is_trainable_for_non_code(
+def test_missing_paper_license_is_recorded_but_not_a_pilot_gate(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
     state = build_state(cfg)

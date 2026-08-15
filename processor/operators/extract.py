@@ -53,10 +53,18 @@ class ResiliparseExtractor:
         paragraphs, which Gopher/C4 filters expect.
     """
 
-    def __init__(self, *, main_content: bool = True, preserve_formatting: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        main_content: bool = True,
+        preserve_formatting: bool = True,
+        allow_fallback: bool = True,
+    ) -> None:
         self._main_content = main_content
         self._preserve_formatting = preserve_formatting
         self._available = self._probe_resiliparse()
+        if not allow_fallback and not self._available:
+            raise RuntimeError("Resiliparse is required when fallbacks are disabled")
 
     @staticmethod
     def _probe_resiliparse() -> bool:

@@ -9,9 +9,7 @@ from processor.seed.cursor import SeedCursor
 
 
 def test_url_matches_allowlist_exact_host() -> None:
-    assert ff.url_matches_allowlist(
-        "https://arxiv.org/abs/2402.01234", ["arxiv.org"]
-    )
+    assert ff.url_matches_allowlist("https://arxiv.org/abs/2402.01234", ["arxiv.org"])
 
 
 def test_url_matches_allowlist_subdomain_suffix() -> None:

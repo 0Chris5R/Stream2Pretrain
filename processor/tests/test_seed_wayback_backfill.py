@@ -8,11 +8,11 @@ from processor.seed import wayback_backfill as wb
 from processor.seed.cursor import SeedCursor
 
 _TIMEMAP = (
-    '<https://web.archive.org/web/timemap/link/https://example.com/feed.xml>;'
+    "<https://web.archive.org/web/timemap/link/https://example.com/feed.xml>;"
     ' rel="self"; type="application/link-format",\n'
-    '<https://web.archive.org/web/20240101000000/https://example.com/feed.xml>;'
+    "<https://web.archive.org/web/20240101000000/https://example.com/feed.xml>;"
     ' rel="memento"; datetime="Mon, 01 Jan 2024 00:00:00 GMT",\n'
-    '<https://web.archive.org/web/20250515000000/https://example.com/feed.xml>;'
+    "<https://web.archive.org/web/20250515000000/https://example.com/feed.xml>;"
     ' rel="memento"; datetime="Thu, 15 May 2025 00:00:00 GMT",\n'
 )
 

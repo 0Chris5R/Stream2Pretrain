@@ -106,6 +106,7 @@ class LSHBloomIndex:
         self._cluster_counter = 0
         self._memory_bands: list[_BitArray] = [_BitArray(bits_per_band) for _ in range(num_bands)]
         self._cluster_map: dict[str, str] = {}
+        self._cluster_anchors: dict[str, str] = {}
         self._db, self._backend = self._open_state(backend)
 
     @property
@@ -125,9 +126,7 @@ class LSHBloomIndex:
             try:
                 import plyvel  # type: ignore[import-untyped]
 
-                db = plyvel.DB(
-                    str(self._state_path / "leveldb"), create_if_missing=True
-                )
+                db = plyvel.DB(str(self._state_path / "leveldb"), create_if_missing=True)
                 self._restore_from(db)
                 return db, "plyvel"
             except Exception:
@@ -157,11 +156,16 @@ class LSHBloomIndex:
             if blob is not None:
                 self._memory_bands[i] = _BitArray.from_bytes(blob, self._bits_per_band)
         cluster_blob = self._db_get(db, b"__clusters__")
+        anchors_blob = self._db_get(db, b"__cluster_anchors__")
         counter_blob = self._db_get(db, b"__counter__")
         if cluster_blob:
             import orjson
 
             self._cluster_map = orjson.loads(cluster_blob)
+        if anchors_blob:
+            import orjson
+
+            self._cluster_anchors = orjson.loads(anchors_blob)
         if counter_blob:
             self._cluster_counter = int(counter_blob.decode("ascii"))
 
@@ -202,6 +206,11 @@ class LSHBloomIndex:
         import orjson
 
         self._db_put(self._db, b"__clusters__", orjson.dumps(self._cluster_map))
+        self._db_put(
+            self._db,
+            b"__cluster_anchors__",
+            orjson.dumps(self._cluster_anchors),
+        )
         self._db_put(self._db, b"__counter__", str(self._cluster_counter).encode("ascii"))
 
     def observe(self, doc_id: str, sig: MinHashSignature) -> NearDupResult:
@@ -223,10 +232,17 @@ class LSHBloomIndex:
                 break
             existing_cluster = existing_cluster or cid
         if all_seen and existing_cluster is not None:
+            # At-least-once Kafka delivery can replay the same document after
+            # its expensive curation completed but before the source offset
+            # checkpoint committed. A document is never a near-duplicate of
+            # itself; only a different doc_id colliding with the anchor is.
+            if self._cluster_anchors.get(existing_cluster) == doc_id:
+                return NearDupResult(is_near_duplicate=False, cluster_id=existing_cluster)
             return NearDupResult(is_near_duplicate=True, cluster_id=existing_cluster)
         # Otherwise: register doc as the anchor of a new cluster (if no
         # band claimed one) and update the band Blooms.
         cluster_id = existing_cluster or self._mint_cluster_id(doc_id)
+        self._cluster_anchors.setdefault(cluster_id, doc_id)
         for i, ck in enumerate(cluster_keys):
             for h in self._hashes(ck.encode("utf-8")):
                 self._memory_bands[i].set(h)

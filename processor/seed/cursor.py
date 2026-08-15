@@ -74,9 +74,7 @@ class SeedCursor:
     repo_id: str
     last_native_id: str = ""
     rows_emitted: int = 0
-    updated_at: datetime = field(
-        default_factory=lambda: datetime(1970, 1, 1, tzinfo=UTC)
-    )
+    updated_at: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=UTC))
     namespaces: dict[str, str] = field(default_factory=dict)
     """Per-namespace last-seen suffix.
 
@@ -103,7 +101,9 @@ class SeedCursor:
         if not last and self.last_native_id:
             legacy_ns = _namespace_of(self.last_native_id)
             if legacy_ns == ns:
-                last = self.last_native_id[len(legacy_ns) + 1 :] if legacy_ns else self.last_native_id
+                last = (
+                    self.last_native_id[len(legacy_ns) + 1 :] if legacy_ns else self.last_native_id
+                )
         if not last:
             return False
         return suffix <= last
