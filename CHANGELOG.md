@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reimplemented the DHBW deployment as measured `platform`, `catalog`,
+  `topics`, and `application` stages with Helm 3 validation and pinned charts.
+- Replaced the missing local Polaris chart with official Apache Polaris 1.7.0
+  and documented its in-memory demo limitation.
+- Removed unmeasured production, MinIO-operator, Loki, Tempo, and Alloy
+  overlays. MinIO is now an explicit external stateful prerequisite.
+- Made chart values strict, disabled optional exporters and autoscaling by
+  default, and added a selectable Kafka starting offset for safe smoke tests.
+- Removed committed demo credential defaults and protected Terraform VMs from
+  accidental destruction.
+
 ## [0.2.0] - 2026-06-15
 
 Fulltext, code, and seed-mixture release. Turns the v0.1 metadata-and-blog

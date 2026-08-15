@@ -1,42 +1,48 @@
-# Dev override - single broker, single replica everywhere, smaller resources.
+---
+# Generic single-replica development profile. DHBW-specific endpoints and
+# scheduling live in infra/helmfile-values/stream2pretrain.dev.yaml.
 profile: dev
 
 ingest:
-  rss: {replicas: 1}
-  oaipmh: {replicas: 1}
-  sitemap: {replicas: 1}
-  githubEvents: {replicas: 1}
-  githubReleases: {replicas: 1}
-  hf: {replicas: 1}
+  rss:
+    replicas: 1
+  oaipmh:
+    replicas: 1
+  sitemap:
+    replicas: 1
+  githubEvents:
+    replicas: 1
+  githubReleases:
+    replicas: 1
+  hf:
+    replicas: 1
 
 processor:
   fetcher:
     replicas: 1
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
   curate:
     replicas: 1
-    checkpoint:
-      size: 5Gi
-    resources:
-      requests: {cpu: 200m, memory: 512Mi}
-      limits: {cpu: 1, memory: 1Gi}
   iceberg:
     replicas: 1
+  duckdbApi:
+    replicas: 1
+  deconGate:
+    replicas: 1
+
+mixtureController:
+  replicas: 1
 
 ui:
   replicas: 1
   ingress:
-    enabled: true
-    host: s2p.dev.local
-    clusterIssuer: selfsigned-issuer
+    enabled: false
 
 keda:
-  fetcher: {minReplicas: 1, maxReplicas: 2, lagThreshold: 500}
-  curate: {minReplicas: 1, maxReplicas: 2, lagThreshold: 500}
-  iceberg: {minReplicas: 1, maxReplicas: 1, lagThreshold: 1000}
+  enabled: false
 
 observability:
   tracing:
-    sampleRatio: 1.0
+    otlpEndpoint: ""
+    sampleRatio: 0.0
+  logs:
+    lokiEndpoint: ""

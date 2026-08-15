@@ -8,50 +8,44 @@ privileges in the `stream2pretrain` namespace.
 ## 1. First deploy
 
 ```bash
-# 1.1 Provision the cluster (one-time).
-bash infra/k3s-install.sh
+# 1.1 Validate locally and review the OpenStack plan.
+./scripts/setup_dhbw_demo.sh validate
+OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh plan
 
-# 1.2 Apply the helmfile (chart + dependencies).
-helmfile -f helmfile.yaml apply
+# 1.2 Provision the reviewed VM plan and install k3s.
+OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh cluster
 
-# 1.3 Seed the Phase-1 SourceFeed CRDs.
+# 1.3 Provision MinIO, required buckets, Secrets, and benchmark ConfigMap.
+# See infra/README.md. No demo credentials are created by the script.
+
+# 1.4 Apply the measured ownership tiers.
+./scripts/setup_dhbw_demo.sh platform
+./scripts/setup_dhbw_demo.sh catalog
+./scripts/setup_dhbw_demo.sh topics
+./scripts/setup_dhbw_demo.sh application
+
+# 1.5 Seed sources and verify.
 NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
-
-# 1.4 Bootstrap Redpanda topics from the dev profile.
-kubectl -n stream2pretrain exec deploy/redpanda -- bash /scripts/seed_topics.sh
-
-# 1.5 Smoke check.
-kubectl -n stream2pretrain get pods
+./scripts/setup_dhbw_demo.sh verify
 kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
 ```
 
-Expected pods (18-22 depending on optional extras): redpanda + console,
-minio + bootstrap, polaris, duckdb, ui, curator (1 replica that KEDA
-scales), 5-7 ingest pollers, decon-gate API, plus the
-kube-prometheus-stack + Loki + Alloy + Tempo + Traefik + cert-manager +
-Gatekeeper system pods.
+This sequence is for a clean install. Do not apply the application tier to the
+current legacy release until the immutable-selector and curator StatefulSet
+migration in `docs/infrastructure-reimplementation.md` is approved. Loki,
+Tempo, and Alloy are not in the measured baseline.
 
 ## 2. Scale the curator
 
-The curator is keyed off the `docs.normalized` topic lag. It scales
-horizontally up to the cap in
-`charts/stream2pretrain/templates/scaledobjects.yaml`.
+The measured DHBW baseline keeps KEDA disabled. Do not select replica counts or
+lag thresholds from examples. Run the target-cluster procedure in
+`docs/capacity-benchmark.md`, record the results, then update
+`keda.curate`, `keda.fetcher`, and `keda.iceberg` in the DHBW values file.
 
 ```bash
-# Inspect the current scale + lag.
-kubectl -n stream2pretrain get scaledobject curator -o yaml | yq .status
-
-# Force a temporary scale (overrides KEDA for one minute).
-kubectl -n stream2pretrain scale deploy curator --replicas=4
-
-# Raise the cap permanently:
-helm upgrade stream2pretrain charts/stream2pretrain \
-    --reuse-values \
-    --set curator.maxReplicas=12
+uv run python scripts/capacity_probe.py
+./scripts/setup_dhbw_demo.sh validate
 ```
-
-The other consumers (Iceberg writer, Decon-Gate) follow the same pattern;
-their `ScaledObject` names are `iceberg-writer` and `decon-gate`.
 
 ## 3. Debug a stuck stage
 
@@ -59,16 +53,16 @@ Symptom: KEDA replica count climbs to the cap; lag keeps growing.
 
 ```bash
 # 3.1 Identify the bottleneck.
-kubectl -n stream2pretrain logs deploy/curator --tail=200 | rg -i 'error|warn'
-kubectl -n stream2pretrain top pod | grep curator
+kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate --tail=200 | rg -i 'error|warn'
+kubectl -n stream2pretrain top pod | rg processor-curate
 
 # 3.2 Pull a sample from each topic.
-kubectl -n stream2pretrain exec -it deploy/redpanda -- \
+kubectl -n redpanda exec -it redpanda-0 -c redpanda -- \
     rpk topic consume docs.normalized --num 5 --offset latest
 
 # 3.3 Trace a single doc end to end.
 DOC_ID="sha256:..."
-kubectl -n stream2pretrain logs deploy/curator | grep "$DOC_ID"
+kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate | rg "$DOC_ID"
 # Then jump to Tempo using the trace_id field on the log line.
 ```
 
@@ -86,19 +80,19 @@ case is **deliberate replay** (e.g. for a contamination bisect).
 
 ```bash
 # 4.1 Stop the curator.
-kubectl -n stream2pretrain scale deploy curator --replicas=0
+kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=0
 
 # 4.2 Reset the consumer-group offsets to a known epoch.
-kubectl -n stream2pretrain exec -it deploy/redpanda -- \
+kubectl -n redpanda exec -it redpanda-0 -c redpanda -- \
     rpk group seek s2p-curator --to-timestamp 2026-06-15T00:00:00Z \
         --topics raw.fetched,docs.normalized
 
-# 4.3 Wipe the operator-state PVC if you want a cold start.
+# 4.3 Destructive cold start, only after a snapshot and explicit approval.
 kubectl -n stream2pretrain delete pvc bytewax-state-curator
 # (the StatefulSet will recreate the PVC.)
 
 # 4.4 Bring the curator back.
-kubectl -n stream2pretrain scale deploy curator --replicas=1
+kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=1
 ```
 
 ## 5. Rotate the Decon-Gate signing key

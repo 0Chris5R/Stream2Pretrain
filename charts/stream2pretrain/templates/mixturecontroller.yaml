@@ -80,7 +80,6 @@ metadata:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
   type: ClusterIP
-  clusterIP: None
   ports:
     - name: http
       port: 8080

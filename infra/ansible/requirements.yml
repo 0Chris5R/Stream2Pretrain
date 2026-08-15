@@ -2,3 +2,4 @@
 - name: k3s-dhbw-cloud-role
   src: https://github.com/pfisterer/k3s-dhbw-cloud-role.git
   scm: git
+  version: 280b1afdd02b3bf7be79e580190fe9e65585d459

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Stream2Pretrain values",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": ["image", "redpanda", "minio", "iceberg", "sources", "ingest", "processor", "ui", "keda", "observability"],
   "properties": {
     "image": {
@@ -41,6 +41,7 @@
       "properties": {
         "bootstrapServers": {"type": "string", "minLength": 1},
         "schemaRegistry": {"type": "string"},
+        "startingOffset": {"type": "string", "enum": ["beginning", "end"]},
         "saslMechanism": {"type": "string"},
         "authSecret": {"type": "string"},
         "topics": {

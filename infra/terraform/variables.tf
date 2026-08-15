@@ -1,8 +1,7 @@
 # Variables for the DHBWCloud VM bootstrap.
 #
-# Defaults mirror the already-working demo project in ~/DHBW/cloud: VMs are
-# attached directly to the existing DHBWV6 network and k3s is installed later
-# through Ansible.
+# The remaining defaults describe the measured DHBW cluster: VMs attach to the
+# existing DHBWV6 network and k3s is installed later through Ansible.
 
 variable "cluster_name" {
   description = "Logical cluster name; used as prefix for all VM names."
@@ -13,7 +12,11 @@ variable "cluster_name" {
 variable "image_id" {
   description = "OpenStack Glance image id for all VMs."
   type        = string
-  default     = "7842eb53-0ac7-4677-9160-2466371b4302"
+
+  validation {
+    condition     = length(trimspace(var.image_id)) > 0
+    error_message = "image_id must be supplied from the target DHBWCloud project."
+  }
 }
 
 variable "control_flavor" {
@@ -32,12 +35,21 @@ variable "worker_count" {
   description = "Number of k3s worker nodes."
   type        = number
   default     = 2
+
+  validation {
+    condition     = var.worker_count >= 1 && floor(var.worker_count) == var.worker_count
+    error_message = "worker_count must be a positive whole number."
+  }
 }
 
 variable "key_pair" {
   description = "Existing OpenStack keypair name used for SSH access."
   type        = string
-  default     = "Julian"
+
+  validation {
+    condition     = length(trimspace(var.key_pair)) > 0
+    error_message = "key_pair must name an existing keypair in the target project."
+  }
 }
 
 variable "network_name" {

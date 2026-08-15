@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-0.2.0-blue)](CHANGELOG.md) [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml) [![Node](https://img.shields.io/badge/node-20%2B-blue)](ui/package.json) [![Kubernetes](https://img.shields.io/badge/kubernetes-1.30%2B-blue)](charts/stream2pretrain)
 
-A Kubernetes-native, streaming-first curation pipeline for **frontier-LLM-research pretraining data**. Live arXiv full-text HTML, OpenReview reviews, GitHub release source archives, HuggingFace metadata, and AI-lab blogs flow through a Bytewax dataflow that runs the FineWeb / DCLM / Dolma curation recipe (HTML extraction, language ID, Gopher/C4 heuristics, KenLM perplexity, MinHash + LSHBloom near-dup, FineWeb-Edu ONNX INT8 quality, PII redaction, benchmark decontamination), then lands typed Bronze/Silver/Gold tables in an Apache Iceberg V3 lakehouse on MinIO. KEDA autoscales each consumer on Redpanda lag; Prometheus + Loki + Tempo trace every document end-to-end; a Next.js 14 cockpit visualises throughput, the signed contamination attestations, the temporal `as_of(timestamp)` query, and the shadow A/B mixture comparison.
+A Kubernetes-native, streaming-first curation pipeline for **frontier-LLM-research pretraining data**. Live arXiv full-text HTML, OpenReview reviews, GitHub release source archives, HuggingFace metadata, and AI-lab blogs flow through a Bytewax dataflow that runs the FineWeb / DCLM / Dolma curation recipe (HTML extraction, language ID, Gopher/C4 heuristics, KenLM perplexity, MinHash + LSHBloom near-dup, FineWeb-Edu ONNX INT8 quality, PII redaction, benchmark decontamination), then lands typed Bronze/Silver/Gold tables in an Apache Iceberg V3 lakehouse on MinIO. The chart supports KEDA lag scaling and OpenTelemetry export after their thresholds and backends are measured; the DHBW baseline keeps both disabled. Prometheus and a Next.js 14 cockpit expose throughput, signed contamination attestations, temporal `as_of(timestamp)` queries, and the shadow A/B mixture comparison.
 
 This repository is the Cloud Computing & Big Data **Prüfungsleistung 2026** at DHBW. It hits all five Vs of Big Data on the Kubernetes substrate the lecture defines, with one **begründete Abweichung** (Redpanda + Bytewax, justified below) eligible for bonus points.
 
@@ -68,11 +68,15 @@ These survived adversarial verification across 14 candidate claims; they are the
                                        DuckDB API (UI lakehouse queries)
                                        Polaris REST catalog
 
-Cross-cutting: kube-prometheus-stack + Loki + Alloy + Tempo (trace_id end-to-end),
+Cross-cutting target: kube-prometheus-stack + optional Loki + Alloy + Tempo,
 Traefik IngressRoute + cert-manager TLS, OPA Gatekeeper for SourceFeed admission,
 NetworkPolicies (default-deny + per-source egress jail), KEDA Kafka-lag scalers,
 mixture-controller (kopf) reconciling MixtureRecipe CRDs (N3).
 ```
+
+The measured DHBW baseline currently enables kube-prometheus-stack and keeps
+Loki, Alloy, Tempo, application NetworkPolicies, Gatekeeper constraints, and
+KEDA disabled pending the prerequisites documented below.
 
 Detailed walkthrough in [`docs/architecture.md`](docs/architecture.md). Mermaid source in [`docs/architecture.mmd`](docs/architecture.mmd).
 
@@ -86,8 +90,8 @@ Detailed walkthrough in [`docs/architecture.md`](docs/architecture.md). Mermaid 
 |  |                           NetworkPolicies, Gatekeeper, ServiceMonitors
 |  |- dashboards/              Grafana JSON
 |  +- values{,-dev,-prod}.yaml + values.schema.json
-|- helmfile.yaml             cert-manager, Traefik, kube-prometheus-stack,
-|                              Loki, Tempo, Alloy, KEDA, Gatekeeper, MinIO,
+|- helmfile.yaml             measured DHBW releases: cert-manager, Traefik,
+|                              kube-prometheus-stack, KEDA, Gatekeeper,
 |                              Redpanda, Polaris, Stream2Pretrain
 |- infra/                    Terraform OpenStack (1 control + 2 workers),
 |                              k3s install scripts, cloud-init, helmfile
@@ -151,56 +155,58 @@ Tear down with `make dev-down` (preserves volumes) or `make dev-reset` (destroys
 
 ## Quickstart - k3s on DHBWCloud
 
-The full deployment is one Helmfile apply. The chart bundles every Stream2Pretrain component plus the lecture stack.
+The supported path is staged so infrastructure, credentials, and stateful data
+cannot be changed by one opaque command. It requires Helm 3.
 
 ```bash
-# 1. provision 3 OpenStack VMs (1 control + 2 workers)
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars  # fill in DHBWCloud creds, SSH key, etc.
-terraform init && terraform apply
+cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
+$EDITOR infra/terraform/terraform.tfvars
 
-# 2. install k3s on the VMs
-bash infra/k3s-install/k3s-server.sh   # on the control node
-bash infra/k3s-install/k3s-agent.sh    # on each worker
+# Validate locally and review the OpenStack plan.
+HELM_BINARY=/opt/homebrew/opt/helm@3/bin/helm \
+  ./scripts/setup_dhbw_demo.sh validate
+OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh plan
 
-# 3. provision required secrets (see "What you must provide" below)
-kubectl apply -f path/to/your/sealed-secrets.yaml
+# Provision VMs and install k3s only after reviewing the plan.
+OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh cluster
 
-# 4. apply the full stack
-helmfile -f helmfile.yaml apply
-
-# 5. seed the live SourceFeed CRDs
-NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
-
-# 6. (optional but recommended for the demo) run the seed corpus loader
-bash scripts/seed_corpus.sh --components=pes2o,redpajama-arxiv,fineweb-edu,stack-edu,wayback
-
-# 7. open the cockpit
-kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
-open http://localhost:3000/dashboard
+# Provision the external MinIO service, buckets, Secrets, and benchmark
+# ConfigMap listed below, then apply one ownership tier at a time.
+./scripts/setup_dhbw_demo.sh platform
+./scripts/setup_dhbw_demo.sh catalog
+./scripts/setup_dhbw_demo.sh topics
+./scripts/setup_dhbw_demo.sh application
+./scripts/setup_dhbw_demo.sh verify
 ```
 
-Full operational runbook (scaling, KEDA tuning, RocksDB checkpoint recovery, signing-key rotation, contamination-bisect replay) in [`docs/operations.md`](docs/operations.md).
+Do not run the `application` stage against the current legacy release until its
+immutable-selector and curator StatefulSet migration is approved. The exact
+safe path and measured live state are documented in
+[`docs/infrastructure-reimplementation.md`](docs/infrastructure-reimplementation.md).
+The detailed operator reference is [`infra/README.md`](infra/README.md).
 
 ## What you must provide
 
 The repo is fully implemented in code; what is **not** committed for security and environment reasons:
 
-- **DHBWCloud OpenStack credentials**, flavor names, external network name (`terraform.tfvars`).
-- **SSH public key** for VM access (`var.ssh_public_key`).
-- **DNS zone** for the wildcard cert. Replace `stream2pretrain.example.org` placeholders in `infra/dns/cert-manager-issuer.yaml`, `infra/helmfile-values/stream2pretrain.prod.yaml`, and the helmfile prod block.
+- **DHBWCloud OpenStack credentials**, image id, existing keypair, flavor names,
+  network name, and reviewed security groups (`terraform.tfvars`).
+- **DNS zone** for the wildcard cert. Replace the markers in
+  `infra/dns/cert-manager-issuer.yaml` only after the team provides the zone.
 - **RFC 2136 TSIG key** + authoritative nameserver for cert-manager DNS-01.
-- **Five Kubernetes Secrets** in the `stream2pretrain` namespace before `helm install`:
-  - `stream2pretrain-minio` (`accessKey`, `secretKey`)
-  - `stream2pretrain-github` (`token`)
-  - `stream2pretrain-hf` (`token`)
-  - `stream2pretrain-decon-signing` (`ed25519.key`)
-  - `stream2pretrain-keda-redpanda` (`sasl`, `tls`, `username`, `password`)
-- **Grafana admin Secret** `grafana-admin` (`admin-user`, `admin-password`) and **MinIO tenant secret** in prod.
+- **Externally managed Kubernetes objects** before applying their Helmfile tier:
+  - `monitoring/grafana-admin` Secret (`admin-user`, `admin-password`)
+  - `polaris/polaris-bootstrap` Secret (`credentials`)
+  - `stream2pretrain/stream2pretrain-minio` Secret (`accessKey`, `secretKey`)
+  - `stream2pretrain/stream2pretrain-github` Secret (`token`)
+  - `stream2pretrain/stream2pretrain-hf` Secret (`token`)
+  - `stream2pretrain/stream2pretrain-decon-signing` Secret (`ed25519.key`, `ed25519.crt`)
+  - `stream2pretrain/stream2pretrain-polaris` Secret (`credential`, `scope`)
+  - `stream2pretrain/stream2pretrain-decon-benchmarks` ConfigMap (`corpus.json`)
+- **MinIO service and buckets**. The cluster must provide `minio/minio` and the
+  `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-decon` buckets. The existing
+  MinIO deployment is preserved and is not owned by Helmfile.
 - **Container image builds** for the 13 component images (`registry/stream2pretrain/<component>:0.2.0`). The Helm chart references images; building them is a CI job. Per-component Dockerfile build commands are in `charts/stream2pretrain/README.md`.
-- **Allowed admin/ingress CIDRs** - Terraform defaults to no public SSH/API or
-  Traefik access. Set `allowed_admin_cidrs` to the lab VPN or bastion CIDR and
-  set `ingress_cidrs` to the intended UI audience before applying.
 - **Target-cluster capacity measurements** - run `uv run python
   scripts/capacity_probe.py` on the DHBWCloud k3s context and follow
   [`docs/capacity-benchmark.md`](docs/capacity-benchmark.md) before locking
@@ -218,17 +224,17 @@ Endpoints, rate limits, license posture, and the full Big-Data Vs mapping in [`S
 
 ## Demo story
 
-The grader sees, in five minutes from screenshots alone:
+After the measured blockers are resolved, the target grader walkthrough is:
 
 1. **Architecture overview** - the diagram above, every component labelled.
-2. `kubectl get pods -A` - all ~22 pods running across 3 nodes.
-3. **Grafana** - throughput per stage (fetch, normalise, curate, write), KEDA replica counts, Redpanda lag per topic, quality-score histogram, decon flag rate.
+2. `kubectl get pods -A` - all required pods Ready across the three nodes.
+3. **Grafana** - throughput per stage, Redpanda lag per topic, quality-score histogram, and decon flag rate.
 4. **Cockpit** - live counters (last hour: ingested, curated, rejected by reason), per-source acceptance rates, quality histogram.
 5. **Decon-Gate viewer** - click a snapshot, see the signed certificate (per-benchmark hit counts, rejected hashes, signature verification status).
 6. **`as_of(timestamp)` view** - date picker; the table shows the deterministic token mixture as it would have been at that timestamp (powered by the seed loader on day 1).
 7. **DuckDB query** - `SELECT lang, COUNT(*), SUM(tokens) FROM gold WHERE risk_tier=1 GROUP BY lang;`.
-8. **Tempo trace** - a fresh SourceFeed item flows through poller -> Redpanda -> fetcher -> curator -> Iceberg, every span labelled with the `trace_id` materialised into the manifest.
-9. **KEDA scale-up** - load generator pumps 10k URLs; the curator pod count climbs from 1 to 6 in real time.
+8. **Trace correlation** - after a measured Tempo backend is installed, a fresh SourceFeed item can be followed by the `trace_id` materialised into the manifest.
+9. **Measured KEDA scale-up** - after capacity benchmarking, use the recorded load profile and replica limits to demonstrate lag-based scaling.
 10. **Failure recovery** - `kubectl delete pod` on a curator; Bytewax restores from RocksDB checkpoint and resumes without duplicates (Redpanda transactional consumer).
 
 ## Why Redpanda + Bytewax (begründete Abweichung)
@@ -245,6 +251,7 @@ The lecture stack does not include a streaming bus or stream engine. This projec
 - [`docs/architecture.md`](docs/architecture.md) - component breakdown
 - [`docs/data-model.md`](docs/data-model.md) - Bronze/Silver/Gold field-by-field
 - [`docs/operations.md`](docs/operations.md) - deploy, scale, debug, recover
+- [`docs/infrastructure-reimplementation.md`](docs/infrastructure-reimplementation.md) - measured DHBW rewrite, live state, and migration boundary
 - [`docs/capacity-benchmark.md`](docs/capacity-benchmark.md) - target-cluster capacity measurement procedure
 - [`docs/novelty.md`](docs/novelty.md) - the three differentiators with evidence
 - [`docs/threat-model.md`](docs/threat-model.md) - STRIDE for the curator

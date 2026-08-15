@@ -1,6 +1,6 @@
 ---
-# Redpanda 1-broker dev mode (CLAUDE.md: 2 worker layout cannot host 3 brokers).
-# Documented limitation: no replication; topic.replication.factor is forced to 1.
+# Values currently proven by the running DHBW cluster. The single broker and
+# existing 50 GiB claim provide no replication and are not a capacity claim.
 statefulset:
   replicas: 1
   podAntiAffinity:

@@ -1,9 +1,8 @@
 # Stream2Pretrain DHBWCloud bootstrap.
 #
-# This intentionally mirrors the working demo project in ~/DHBW/cloud:
 # Terraform only provisions the OpenStack VMs on the existing DHBWV6 network
 # and writes an Ansible inventory. k3s installation and cluster add-ons are
-# handled by the Ansible k3s-dhbw-cloud-role afterwards.
+# handled by the pinned Ansible role afterwards.
 
 locals {
   base_metadata = merge(
@@ -28,6 +27,10 @@ resource "openstack_compute_instance_v2" "master" {
   }
 
   metadata = merge(local.base_metadata, { role = "server" })
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "openstack_compute_instance_v2" "worker" {
@@ -47,6 +50,10 @@ resource "openstack_compute_instance_v2" "worker" {
     role  = "agent"
     index = tostring(count.index + 1)
   })
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "local_file" "ansible_inventory" {

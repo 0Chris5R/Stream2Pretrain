@@ -1,227 +1,153 @@
-# Stream2Pretrain Infrastructure
+# Stream2Pretrain infrastructure
 
-This directory bootstraps the cluster the project chart runs on. The control
-plane is one VM running `k3s server`; data-plane workloads run on two `k3s agent`
-VMs. Terraform creates the VMs on DHBWCloud OpenStack using the same DHBWV6
-pattern as the working demo project in `~/DHBW/cloud`; Ansible installs k3s
-afterwards.
+This directory contains the measured DHBWCloud deployment path. Terraform owns
+the OpenStack VMs, Ansible owns k3s, and Helmfile owns the platform, catalog,
+and application releases. MinIO is an explicit external prerequisite because
+the existing cluster already has a stateful MinIO deployment and its replacement
+topology has not been measured.
 
-```
-+--------------------+
-|  Terraform (here)  |   creates 3 OpenStack VMs on DHBWV6 + inventory
-+----------+---------+
-           | ansible -i generated-inventory.yml infra/ansible/deploy.yaml
-           v
-+--------------------+
-|  k3s cluster       |   1 control + 2 workers, installed by k3s-dhbw-cloud-role
-+----------+---------+
-           |
-           | helmfile -e dev apply
-           v
-+--------------------+   cert-manager, Traefik, kube-prometheus-stack, Loki,
-|  Platform releases |   Tempo, Alloy, KEDA, Gatekeeper, MinIO, Redpanda,
-|  (helmfile.yaml)   |   Polaris-lite, finally ./charts/stream2pretrain.
-+--------------------+
-```
+Only the `dev` environment is deployable. The former production overlays were
+removed because their replica counts, retention periods, and volume sizes were
+not based on target-cluster measurements.
+
+## Safety boundary
+
+- Terraform protects every VM with `prevent_destroy`.
+- The deployment script never creates credentials, deletes PVCs, or runs a
+  forced Helm upgrade.
+- OpenStack state, plans, credentials, generated inventory, and kubeconfig are
+  ignored by Git.
+- The live application release cannot be adopted in one Helm upgrade because
+  it contains mixed immutable selector schemes. See
+  [`../docs/infrastructure-reimplementation.md`](../docs/infrastructure-reimplementation.md).
 
 ## Layout
 
-```
+```text
 infra/
-  terraform/
-    versions.tf              provider pins (terraform-provider-openstack ~> 3.0)
-    variables.tf             all knobs, defaults matching the DHBWV6 demo
-    main.tf                  1 master + 2 workers on the existing DHBWV6 network
-    outputs.tf               VM IPs + Ansible inventory path
-    terraform.tfvars.example copy to terraform.tfvars (gitignored)
-  ansible/
-    deploy.yaml              installs k3s with the DHBW role, without
-                             Gridflex-specific post-tasks
-    requirements.yml         role dependency for ansible-galaxy
-  k3s-install/
-    cloud-init-server.yaml   legacy direct-k3s bootstrap assets, not used by
-    cloud-init-agent.yaml    the DHBWV6 Terraform path
-    k3s-server.sh            legacy direct-k3s bootstrap script
-    k3s-agent.sh             legacy direct-k3s bootstrap script
-  dns/
-    cert-manager-issuer.yaml letsencrypt + rfc2136 webhook, wildcard cert
-  helmfile-values/
-    <release>.<env>.yaml     per-release values, dev + prod
+  terraform/          OpenStack VMs and generated Ansible inventory
+  ansible/            pinned k3s role and playbook
+  dns/                opt-in RFC2136 certificate configuration
+  helmfile-values/    measured DHBW `dev` overrides
+  k3s-install/        legacy manual bootstrap, not used by the supported path
 ```
 
-`/helmfile.yaml` lives at the repo root because `helmfile` resolves chart paths
-relative to the file (and we ship two local charts at `./charts/stream2pretrain`
-and `./charts/polaris-lite`).
+The release graph and exact chart versions are in `../helmfile.yaml` and
+`../helmfile.lock`.
 
 ## Prerequisites
 
-1. DHBWCloud OpenStack project with quota for:
-   - 3 VMs (default: 3 x `k8s.node`, conservative demo sizing)
-   - Access to the existing `DHBWV6` network
-   The exact quota still needs to be measured on the target project before
-   increasing worker count or resource requests.
-2. A wildcard DNS zone (the team needs to confirm; CLAUDE.md open question).
-3. Local tools:
-   - Terraform >= 1.7
-   - Ansible with `kubernetes.core` and the `k3s-dhbw-cloud-role`
-   - `helmfile` >= 0.165 + `helm` >= 3.14 (`helm plugin install
-     https://github.com/databus23/helm-diff` is recommended)
-   - `kubectl` >= 1.30
-   - `jq`
-   - `openstack` CLI configured via `clouds.yaml` or `source openrc.sh`
+- Terraform, Ansible, `kubectl`, Helmfile, and Helm 3. Helm 4 is not supported
+  by the pinned charts. Set `HELM_BINARY` when Helm 3 is not the default.
+- DHBWCloud credentials through `OS_CLOUD`, exported `OS_*` variables, or an
+  explicit `OPENRC_PATH`.
+- Project-specific `image_id` and `key_pair` values in
+  `infra/terraform/terraform.tfvars`.
+- A reachable MinIO service named `minio` in namespace `minio`, the four
+  application buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-decon`,
+  and externally managed credentials.
+- Application images with identical digests available on every eligible node.
+  The current cluster has them only on the control-plane node, so the DHBW
+  override temporarily schedules application pods there with `pullPolicy:
+  Never`.
 
-## Bootstrap
+Required externally managed objects:
 
-### Fast path: DHBW demo setup
+| Namespace | Object | Required keys |
+| --- | --- | --- |
+| `monitoring` | Secret `grafana-admin` | `admin-user`, `admin-password` |
+| `polaris` | Secret `polaris-bootstrap` | `credentials` |
+| `stream2pretrain` | Secret `stream2pretrain-minio` | `accessKey`, `secretKey` |
+| `stream2pretrain` | Secret `stream2pretrain-polaris` | `credential`, `scope` |
+| `stream2pretrain` | Secret `stream2pretrain-github` | `token` |
+| `stream2pretrain` | Secret `stream2pretrain-hf` | `token` |
+| `stream2pretrain` | Secret `stream2pretrain-decon-signing` | `ed25519.key`, `ed25519.crt` |
+| `stream2pretrain` | ConfigMap `stream2pretrain-decon-benchmarks` | `corpus.json` |
 
-For the DHBWCloud demo, use the repo script instead of replaying the Terraform,
-Ansible and Helm steps by hand:
+Use Sealed Secrets, External Secrets, or another team-approved mechanism. The
+repository intentionally contains no example credential values.
 
-```bash
-./scripts/setup_dhbw_demo.sh
-```
+## Commands
 
-The script is idempotent and does the current demo-safe path end to end:
-
-- sources the OpenStack app credential from `/Users/I749974/DHBW/cloud/app-cred-Julian-openrc.sh` when present
-- applies the Terraform VM plan
-- installs k3s with `infra/ansible/deploy.yaml`
-- installs kube-prometheus-stack, cert-manager, Traefik, KEDA, Gatekeeper and Redpanda
-- patches Redpanda listener bind addresses for the IPv6-only pod network
-- creates the Stream2Pretrain Redpanda topics with replication factor 1
-- installs standalone MinIO demo storage and creates the required buckets
-- creates local demo Secrets in the `stream2pretrain` namespace
-
-To resume only part of the setup while debugging:
+Run every command from the repository root. Each stage is explicit so a failed
+prerequisite does not turn into a partial full-stack install.
 
 ```bash
-RUN_TERRAFORM=0 RUN_ANSIBLE=0 ./scripts/setup_dhbw_demo.sh
-RUN_TERRAFORM=0 RUN_ANSIBLE=0 RUN_PLATFORM=0 RUN_STORAGE=1 ./scripts/setup_dhbw_demo.sh
+# Local validation only
+HELM_BINARY=/opt/homebrew/opt/helm@3/bin/helm \
+  ./scripts/setup_dhbw_demo.sh validate
+
+# Read-only OpenStack plan
+OPENRC_PATH=/absolute/path/to/openrc.sh \
+  ./scripts/setup_dhbw_demo.sh plan
+
+# Apply the reviewed VM plan and install k3s
+OPENRC_PATH=/absolute/path/to/openrc.sh \
+  ./scripts/setup_dhbw_demo.sh cluster
+
+# Apply each in-cluster ownership tier after its prerequisites exist
+./scripts/setup_dhbw_demo.sh platform
+./scripts/setup_dhbw_demo.sh catalog
+./scripts/setup_dhbw_demo.sh topics
+./scripts/setup_dhbw_demo.sh application
+
+# Read-only cluster health summary
+./scripts/setup_dhbw_demo.sh verify
 ```
 
-The script does not destroy OpenStack resources and does not deploy the project
-application images yet. The app chart still needs AMD64 images accessible from
-the cluster and the missing Polaris deployment path resolved.
+`platform` installs cert-manager, Traefik, kube-prometheus-stack, KEDA,
+Gatekeeper, and Redpanda. `catalog` installs the official Apache Polaris 1.7.0
+chart. `topics` idempotently creates the four one-partition, one-replica topics
+matching the measured live cluster. `application` installs the local
+Stream2Pretrain chart. Loki, Tempo, and
+Alloy are excluded until their MinIO credentials, retention, storage, and
+resource requirements are measured.
 
-### 1. Provision VMs
+The dev Polaris configuration uses in-memory persistence. Pod replacement can
+lose catalog state. A production catalog requires a relational JDBC service,
+credential secret, recovery test, and measured persistent storage before it can
+be added to this deployment path.
 
-```bash
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars                    # adjust image_id/key_pair/flavors if needed
-source ~/dhbwcloud-openrc.sh                # OS_AUTH_URL etc.
-terraform init
-terraform plan
-terraform apply
-```
+## Existing cluster migration
 
-Terraform writes `infra/terraform/generated-inventory.yml`, shaped like the
-working demo inventory.
+Do not run the `application` stage against the current release yet. Four
+stateless workloads use an older selector scheme, and the curator StatefulSet
+also differs in immutable fields. Kubernetes correctly rejects a full upgrade.
+Do not bypass that rejection with `helm upgrade --force` because recreating the
+StatefulSet can disturb its checkpoint PVC relationship.
 
-### 2. Install k3s with Ansible
+The safe migration is:
 
-```bash
-cd ../..
-ansible-galaxy install -r infra/ansible/requirements.yml --force
-ansible-playbook \
-  -i infra/terraform/generated-inventory.yml \
-  infra/ansible/deploy.yaml
-```
+1. Distribute the same application image digests to all nodes or publish them
+   to a reachable registry.
+2. Recreate the four stateless workloads during an approved maintenance window.
+3. Plan the curator StatefulSet and PVC migration separately.
+4. Run a server-side dry-run of the rendered release.
+5. Apply the clean chart and verify one controlled record before enabling KEDA.
 
-The Ansible role writes `infra/kubeconfig-stream2pretrain.yaml`. Treat it as a
-secret. The repo-specific playbook deliberately does not reuse the demo
-`tasks/k3s-configure.yaml`, because that file contains Gridflex node names and
-an overly broad default-ServiceAccount ClusterRoleBinding.
+Until that migration, only targeted, reversible patches should be applied to
+the live application workloads.
 
-### 3. Install platform releases
+## DNS and TLS
 
-```bash
-cd ../..               # repo root
-helmfile -e dev deps   # download upstream charts
-helmfile -e dev apply
-```
+The verified demo path uses port forwarding. Public ingress remains opt-in
+because no RFC2136 zone or TSIG credentials are committed. Replace every marker
+in `infra/dns/cert-manager-issuer.yaml`, review the intended CIDRs, and apply it
+only after the team supplies the real DNS data.
 
-Order is enforced via `needs:` in `helmfile.yaml`:
-1. cert-manager (CRDs + webhook)
-2. Traefik (DaemonSet, replaces the disabled k3s built-in)
-3. kube-prometheus-stack (Prometheus, Grafana, AlertManager, ServiceMonitor CRDs)
-4. Loki (logs, S3 backend on MinIO)
-5. Tempo (traces, S3 backend on MinIO)
-6. Alloy (DaemonSet: log shipping + OTel OTLP receiver -> Tempo)
-7. KEDA (autoscaling)
-8. Gatekeeper (admission)
-9. MinIO operator + tenant (object store, with the buckets the chart consumes)
-10. Redpanda (1-broker dev mode; documented limitation)
-11. Polaris-lite (Iceberg REST catalog, in-cluster S3 to MinIO)
-12. Stream2Pretrain (project chart at `./charts/stream2pretrain`)
+## Destructive operations
 
-### 4. TLS
+No teardown command is provided. Removing the cluster or stateful releases can
+destroy MinIO, Redpanda, Prometheus, and curator data. Snapshot the relevant
+volumes and obtain explicit approval before removing `prevent_destroy` or
+deleting any PVC.
 
-Apply the issuer + wildcard cert after editing it with the team's DNS zone +
-TSIG credentials:
+## Still needs measurement
 
-```bash
-$EDITOR infra/dns/cert-manager-issuer.yaml      # replace REPLACE_WITH_* markers
-kubectl apply -f infra/dns/cert-manager-issuer.yaml
-kubectl -n traefik wait --for=condition=Ready certificate/stream2pretrain-wildcard --timeout=10m
-```
-
-In `dev`, `tlsEnabled` is false and the wildcard cert step is optional.
-
-### 5. Verify
-
-```bash
-kubectl get pods -A
-kubectl -n monitoring port-forward svc/kps-grafana 3000:80
-kubectl -n redpanda port-forward svc/redpanda-console 8080:8080
-kubectl -n stream2pretrain get scaledobject,servicemonitor,ingressroute
-```
-
-All pods Ready, KEDA `ScaledObject`s present for `fetcher`, `curate`,
-`iceberg-writer`, Grafana shows the platform dashboards (kube-prometheus-stack
-ships them automatically; chart-layer adds Stream2Pretrain dashboards).
-
-## Tear down
-
-```bash
-helmfile -e dev destroy
-cd infra/terraform && terraform destroy
-```
-
-This deletes everything including MinIO data. Snapshot the volumes via
-OpenStack first if you want to keep state.
-
-## Decisions you must still make (from CLAUDE.md open questions)
-
-- DHBWCloud project quota (vCPU/RAM/disk per VM): if `k8s.node` is unavailable,
-  set `control_flavor` / `worker_flavor` to whatever the team has and revisit the resource
-  presets in `helmfile-values/*.dev.yaml` and `*.prod.yaml`.
-- DNS zone for the wildcard cert: replace every `stream2pretrain.example.org`
-  marker in `infra/dns/cert-manager-issuer.yaml`,
-  `infra/helmfile-values/stream2pretrain.prod.yaml`, and the prod
-  `environments` block in `helmfile.yaml`.
-- TSIG zone + key for rfc2136 DNS-01 challenge.
-- Whether to run prod from this same cluster or a second one (the dev/prod
-  split here is environment-only, not multi-cluster).
-- Polaris upstream chart: availability and version pin are `needs-measurement`.
-  The Helmfile currently references `./charts/polaris-lite` (scaffolded by the
-  chart-layer agent). Swap to `apache/polaris` once the upstream chart hits
-  GA and the version is pinned.
-
-## Why these picks
-
-All locked in CLAUDE.md, 2026-06-15. Short summary:
-
-- k3s on OpenStack, single-server: lecture stack, fits the 1+2 worker constraint.
-- Redpanda 1-broker: 3-4x lower RAM than JVM Kafka; replication factor 1 in
-  topic creation is documented in the project chart.
-- Bytewax: Python-native streaming, no JVM heap tuning.
-- MinIO + Iceberg V3 + Polaris: lecture object store; vendor-neutral catalog;
-  row lineage via `_row_id` for the validity-interval column.
-- KEDA Kafka-lag trigger: lecture default; native consumer-group lag scaling.
-- Loki + Tempo + Alloy: lecture stack; Tempo enables the trace-id-in-Iceberg
-  novelty (RESEARCH.md N5).
-- Traefik + cert-manager: lecture stack; DNS-01 supports wildcards which
-  HTTP-01 does not.
-- OPA Gatekeeper: more expressive ConstraintTemplates than Kyverno for the
-  SourceFeed CRD admission rules.
+- Sustainable document throughput and processor resource requests
+- Redpanda partition count and retention capacity
+- MinIO production topology and storage throughput
+- Polaris relational database sizing and recovery behavior
+- Loki and Tempo retention, storage, and CPU/memory requirements
+- Seed-loader volume size on the target datasets
+- KEDA thresholds and maximum replicas

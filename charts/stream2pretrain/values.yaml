@@ -41,6 +41,7 @@ rbac:
 redpanda:
   bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
   schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
+  startingOffset: beginning
   saslMechanism: ""
   authSecret: ""
   topics:
@@ -604,7 +605,8 @@ ui:
 # KEDA scaling
 # -----------------------------------------------------------------------------
 keda:
-  enabled: true
+  # Enable only after lag and replica limits are measured on the target cluster.
+  enabled: false
   pollingInterval: 15
   cooldownPeriod: 60
   prometheus:
@@ -624,9 +626,7 @@ keda:
   triggerAuthSecret: stream2pretrain-keda-redpanda
   # Set ``auth.enabled: true`` only when the Redpanda profile actually has
   # SASL/TLS turned on and the secret named by ``triggerAuthSecret`` exists
-  # with keys (sasl, tls, username, password). For the dev/prod profiles
-  # shipped in infra/helmfile-values, plaintext PLAIN is used and auth
-  # MUST stay disabled.
+  # with keys (sasl, tls, username, password).
   auth:
     enabled: false
 
@@ -650,16 +650,18 @@ observability:
         grafana_dashboard: "1"
       namespace: monitoring
   tracing:
-    otlpEndpoint: http://tempo.tempo.svc.cluster.local:4317
-    sampleRatio: 0.1
+    # Empty endpoints disable exporters. Do not retry against optional services
+    # that are not part of the baseline deployment.
+    otlpEndpoint: ""
+    sampleRatio: 0.0
   logs:
-    lokiEndpoint: http://loki.loki.svc.cluster.local:3100
+    lokiEndpoint: ""
 
 # -----------------------------------------------------------------------------
 # OPA Gatekeeper constraints
 # -----------------------------------------------------------------------------
 gatekeeper:
-  enabled: true
+  enabled: false
   enforcementAction: deny
   minPollIntervalSeconds: 30
   maxPollIntervalSeconds: 86400

@@ -148,6 +148,8 @@ Iceberg + observability).
   value: {{ .Values.redpanda.bootstrapServers | quote }}
 - name: REDPANDA_SCHEMA_REGISTRY
   value: {{ .Values.redpanda.schemaRegistry | quote }}
+- name: S2P_KAFKA_START_OFFSET
+  value: {{ .Values.redpanda.startingOffset | quote }}
 - name: S2P_RAW_TOPIC
   value: {{ .Values.redpanda.topics.rawFetched | quote }}
 - name: S2P_NORMALIZED_TOPIC

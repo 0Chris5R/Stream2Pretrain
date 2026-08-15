@@ -1,118 +1,100 @@
 ---
-# Stream2Pretrain project chart (./charts/stream2pretrain) - dev preset.
-# Final keys depend on the chart values.yaml authored by the chart-layer agent.
-# Keep this file aligned with that schema; placeholders are documented inline.
+# DHBW demo override. Every key in this file is validated by the application
+# chart's values.schema.json. Keep this file small and measured-cluster-specific.
 
-global:
-  domain: stream2pretrain.local
-  environment: dev
-  imageRegistry: ghcr.io/stream2pretrain
-  imagePullPolicy: IfNotPresent
-  storageClass: local-path
-  tlsSecretName: ""              # dev = HTTP only
+profile: dev
 
-ingress:
-  enabled: true
-  className: traefik
-  host: stream2pretrain.local
-  tls:
-    enabled: false
+image:
+  registry: docker.io
+  tag: "0.2.0"
+  # Images currently exist only in the control-plane containerd store. Never
+  # hide an incomplete image distribution step behind a remote pull attempt.
+  pullPolicy: Never
+
+# Temporary scheduling constraint matching measured image availability. Remove
+# this only after the image-sync or registry step has verified the same digests
+# on every worker.
+nodeSelector:
+  kubernetes.io/hostname: stream2pretrain-master
 
 redpanda:
-  brokers: redpanda.redpanda.svc:9093
-  schemaRegistry: http://redpanda.redpanda.svc:8081
-  topics:
-    rawFetched: raw.fetched
-    docsNormalized: docs.normalized
-    docsCurated: docs.curated
-    deconAttest: decon.attest
-    mixtureControl: mixture.control
+  bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
+  schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
+  # Smoke mode skips the uncommitted historical backlog. Switch to beginning
+  # only after one controlled document completes the full pipeline.
+  startingOffset: end
 
 minio:
-  endpoint: http://minio.minio.svc:80
-  region: us-east-1
-  accessKeySecret: stream2pretrain-minio-secret
+  endpoint: http://minio.minio.svc.cluster.local:9000
+  credentialsSecret: stream2pretrain-minio
   buckets:
-    bronze: bronze
-    silver: silver
-    gold: gold
-    decon: decon-attestations
+    bronze: s2p-bronze
+    silver: s2p-silver
+    gold: s2p-gold
+    decon: s2p-decon
 
 iceberg:
-  catalogUri: http://polaris.polaris.svc:8181
-  warehouse: s3://polaris-warehouse/
-  branchPrefix: dev
+  catalog: stream2pretrain
+  namespace: gold
+  goldTable: curated
+  polarisUrl: http://polaris.polaris.svc.cluster.local:8181/api/catalog
+  warehouse: stream2pretrain
+  credentialSecret: stream2pretrain-polaris
 
+# The existing cluster has no Tempo, Loki, or Alloy release. Empty endpoints
+# disable exporters instead of creating unbounded retry logs.
 observability:
-  otelEndpoint: http://alloy.monitoring.svc:4317
-  serviceNamePrefix: stream2pretrain
-  serviceMonitorEnabled: true
+  tracing:
+    otlpEndpoint: ""
+    sampleRatio: 0.0
+  logs:
+    lokiEndpoint: ""
+
+# Establish a single working replica before measuring or enabling autoscaling.
+keda:
+  enabled: false
 
 processor:
   fetcher:
     replicas: 1
-    keda:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 3
-      lagThreshold: 1000
   curate:
     replicas: 1
-    keda:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 6
-      lagThreshold: 500
-  icebergWriter:
+  iceberg:
     replicas: 1
-    keda:
-      enabled: true
-      minReplicas: 1
-      maxReplicas: 2
-      lagThreshold: 200
-
-deconGate:
-  enabled: true
-  replicas: 1
-  benchmarkSetVersion: v2026-06-01
-  signing:
-    secretName: decon-signer-key
+  duckdbApi:
+    replicas: 1
+  deconGate:
+    replicas: 1
 
 mixtureController:
-  enabled: false   # build-out in Week 6; off by default in dev
+  replicas: 1
 
 ui:
   replicas: 1
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
+  ingress:
+    enabled: false
 
-duckdbServer:
-  enabled: true
-  resources:
-    requests:
-      cpu: 200m
-      memory: 512Mi
-    limits:
-      cpu: 1000m
-      memory: 2Gi
+# DNS-based egress policies are not implementable by standard Kubernetes
+# NetworkPolicy. Keep policies disabled until concrete cluster CIDRs are
+# measured and a CNI-aware policy is designed.
+networkPolicy:
+  enabled: false
+
+gatekeeper:
+  # ConstraintTemplate CRDs are established asynchronously. Install the
+  # application constraint in a separate phase after the baseline works.
+  enabled: false
+
+# These images are not present in the current node image set. Enable each only
+# after its image is distributed and its smoke test passes.
+sources:
+  arxiv:
+    htmlFetcher:
+      enabled: false
 
 ingest:
-  rssPoller:
-    schedule: "*/5 * * * *"
-  sitemapPoller:
-    schedule: "*/15 * * * *"
-  arxivOaiPoller:
-    schedule: "13 */2 * * *"
-  githubEventsPoller:
-    schedule: "*/2 * * * *"
+  githubTarballFetcher:
+    enabled: false
 
-networkPolicies:
-  enabled: false  # turn on once base path stabilises
-
-gatekeeperConstraints:
-  enabled: true
+openreviewPoller:
+  enabled: false

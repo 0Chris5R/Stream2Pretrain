@@ -1,19 +1,21 @@
 # Copy to terraform.tfvars and adjust if DHBWCloud changes image/flavor names.
 # terraform.tfvars is gitignored.
 
-# Defaults mirror the working demo project in ~/DHBW/cloud.
+# Values below describe the existing DHBW IPv6 network. Verify them against the
+# target project before applying.
 cluster_name = "stream2pretrain"
 network_name = "DHBWV6"
 ip_family    = "ipv6"
 
-# Ubuntu Server image id observed in the demo Terraform.
-image_id = "7842eb53-0ac7-4677-9160-2466371b4302"
+# Required project-specific inputs. Resolve these with the OpenStack CLI rather
+# than copying another project member's identifiers.
+image_id = "REPLACE_WITH_GLANCE_IMAGE_ID"
 
-# Existing OpenStack keypair.
-key_pair = "Julian"
+key_pair = "REPLACE_WITH_OPENSTACK_KEYPAIR"
 
-# Sizing. `k8s.node` is the conservative demo default; benchmark on the actual
-# cluster before increasing this.
+# The current cluster was successfully provisioned with k8s.node. Changing the
+# flavor or worker count requires a fresh capacity measurement and an explicit
+# review because the resources are protected from replacement.
 control_flavor = "k8s.node"
 worker_flavor  = "k8s.node"
 worker_count   = 2

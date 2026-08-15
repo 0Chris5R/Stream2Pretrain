@@ -1,5 +1,6 @@
 ---
-# kube-prometheus-stack dev preset. Tight resources, short retention, no persistent volumes.
+# Values currently proven by the running DHBW cluster. They are a deployment
+# baseline, not a capacity recommendation.
 fullnameOverride: kps
 crds:
   enabled: true
@@ -19,7 +20,10 @@ alertmanager:
         memory: 256Mi
 grafana:
   enabled: true
-  adminPassword: stream2pretrain # >>> REPLACE in prod via secret <<<
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
   defaultDashboardsTimezone: utc
   serviceMonitor:
     enabled: true

@@ -1,34 +1,17 @@
-# Prod override - 3 replica targets, prod KEDA caps, real cluster issuer.
+---
+# Production enables security-sensitive behavior but intentionally does not
+# invent capacity settings. Replica counts, resource requests, KEDA thresholds,
+# storage sizes, retention, and partition counts remain needs-measurement on the
+# target cluster and must be supplied in an operator-owned override.
 profile: prod
 
-processor:
-  fetcher:
-    replicas: 3
-    resources:
-      requests: {cpu: 500m, memory: 1Gi}
-      limits: {cpu: 2, memory: 2Gi}
-  curate:
-    replicas: 1
-    checkpoint:
-      size: 100Gi
-      storageClass: ceph-block
-    resources:
-      requests: {cpu: 1, memory: 2Gi}
-      limits: {cpu: 4, memory: 4Gi}
-  iceberg:
-    replicas: 2
+image:
+  pullPolicy: Always
 
-ui:
-  replicas: 3
-  ingress:
-    host: stream2pretrain.example.com
-    clusterIssuer: letsencrypt-prod
+networkPolicy:
+  enabled: true
+  defaultDeny: true
 
-keda:
-  fetcher: {minReplicas: 2, maxReplicas: 20, lagThreshold: 1000}
-  curate: {minReplicas: 1, maxReplicas: 8, lagThreshold: 500}
-  iceberg: {minReplicas: 1, maxReplicas: 4, lagThreshold: 2000}
-
-observability:
-  tracing:
-    sampleRatio: 0.1
+gatekeeper:
+  enabled: true
+  enforcementAction: deny
