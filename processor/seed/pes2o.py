@@ -69,9 +69,7 @@ def is_cs_row(row: dict[str, Any]) -> bool:
         tokens = cats.replace(",", " ").split()
         return any(t.startswith(ARXIV_CS_PREFIXES) for t in tokens)
     if isinstance(cats, list):
-        return any(
-            isinstance(t, str) and t.startswith(ARXIV_CS_PREFIXES) for t in cats
-        )
+        return any(isinstance(t, str) and t.startswith(ARXIV_CS_PREFIXES) for t in cats)
     # No metadata: keep the row.
     return True
 

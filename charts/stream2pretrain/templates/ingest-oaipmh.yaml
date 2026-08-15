@@ -1,4 +1,4 @@
-{{- if .Values.sources.arxiv.enabled }}
+{{- if or .Values.sources.arxiv.enabled .Values.mixtureController.enabled }}
 {{- $component := "ingest-oaipmh" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 apiVersion: batch/v1
@@ -9,6 +9,7 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
+  suspend: {{ not .Values.sources.arxiv.enabled }}
   schedule: {{ .Values.sources.arxiv.oaiPmh.schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3

@@ -33,9 +33,7 @@ import httpx
 
 from schemas.silver import ValidFromSource
 
-_SCHEMA_DATE_PATTERN = re.compile(
-    r'"datePublished"\s*:\s*"([^"]+)"', re.IGNORECASE | re.DOTALL
-)
+_SCHEMA_DATE_PATTERN = re.compile(r'"datePublished"\s*:\s*"([^"]+)"', re.IGNORECASE | re.DOTALL)
 _LASTMOD_PATTERN = re.compile(r"<lastmod>([^<]+)</lastmod>", re.IGNORECASE)
 
 

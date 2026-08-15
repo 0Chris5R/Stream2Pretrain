@@ -1,0 +1,390 @@
+{
+  "models": {
+    "v1": {
+      "repo_id": "HuggingFaceFW/finepdfs_edu_classifier_eng_Latn",
+      "revision": "d1d20d432b6588831bfec203e11aeb9195ef32fd"
+    },
+    "v2": {
+      "repo_id": "HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn",
+      "revision": "90ddef285f67230389057c14b2f6bbfeb70d40ea"
+    }
+  },
+  "sample_size": 30,
+  "sample_unit": "section",
+  "summary": {
+    "v1": {
+      "mean": 0.8164884199698766,
+      "median": 0.7409396469593048
+    },
+    "v2": {
+      "mean": 3.6457637111345926,
+      "median": 3.964524030685425
+    }
+  },
+  "samples": [
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-1",
+      "expected_score": null,
+      "v1": 0.9963892698287964,
+      "v2": 2.7753357887268066,
+      "v2_minus_v1": 1.7789465188980103,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.1 Introduction",
+        "role": "introduction"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-4",
+      "expected_score": null,
+      "v1": 1.1284602880477905,
+      "v2": 2.9348087310791016,
+      "v2_minus_v1": 1.806348443031311,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.3.1 A better solution",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-5",
+      "expected_score": null,
+      "v1": 1.2053743600845337,
+      "v2": 3.172612190246582,
+      "v2_minus_v1": 1.9672378301620483,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.3.2 A Strong HTML Ecosystem",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-7",
+      "expected_score": null,
+      "v1": 1.085362195968628,
+      "v2": 4.157645225524902,
+      "v2_minus_v1": 3.0722830295562744,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.4.1 L a T e X and reinterpretation",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-9",
+      "expected_score": null,
+      "v1": 0.4716052711009979,
+      "v2": 3.4724230766296387,
+      "v2_minus_v1": 3.0008178055286407,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.5.1 But my journal offers HTML now",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-10",
+      "expected_score": null,
+      "v1": 0.700907826423645,
+      "v2": 2.6194674968719482,
+      "v2_minus_v1": 1.9185596704483032,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.5.2 arXiv’s pragmatic approach",
+        "role": "methods"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-13",
+      "expected_score": null,
+      "v1": 0.8800027370452881,
+      "v2": 3.3956830501556396,
+      "v2_minus_v1": 2.5156803131103516,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.5.5 Unfinished work",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-14",
+      "expected_score": null,
+      "v1": 0.7633823752403259,
+      "v2": 2.483917236328125,
+      "v2_minus_v1": 1.720534861087799,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "Sample HTML Paper",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-15",
+      "expected_score": null,
+      "v1": 0.7497245669364929,
+      "v2": 1.7900217771530151,
+      "v2_minus_v1": 1.0402972102165222,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.6 Early Impact",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:f17e48c4411a53b8594845f937ba60af8f37c710772d1554328157892b5474d5:section-16",
+      "expected_score": null,
+      "v1": 0.5546327233314514,
+      "v2": 1.9347295761108398,
+      "v2_minus_v1": 1.3800968527793884,
+      "metadata": {
+        "paper_title": "HTML papers on arXiv: why it’s important, and how we made it happen",
+        "section_title": "0.7 Future Work",
+        "role": "conclusion"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-1",
+      "expected_score": null,
+      "v1": 0.6325617432594299,
+      "v2": 4.402139663696289,
+      "v2_minus_v1": 3.769577920436859,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "Abstract",
+        "role": "abstract"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-2",
+      "expected_score": null,
+      "v1": 0.7321547269821167,
+      "v2": 4.563631534576416,
+      "v2_minus_v1": 3.8314768075942993,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "1 Introduction",
+        "role": "introduction"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-3",
+      "expected_score": null,
+      "v1": 0.8601292371749878,
+      "v2": 4.703972816467285,
+      "v2_minus_v1": 3.8438435792922974,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "2 Background",
+        "role": "background"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-5",
+      "expected_score": null,
+      "v1": 0.6182501912117004,
+      "v2": 4.080392837524414,
+      "v2_minus_v1": 3.4621426463127136,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "3.1 Experimental setup",
+        "role": "methods"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-8",
+      "expected_score": null,
+      "v1": 0.7241106033325195,
+      "v2": 4.553140640258789,
+      "v2_minus_v1": 3.8290300369262695,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "3.4 Deduplication",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-10",
+      "expected_score": null,
+      "v1": 0.6443203687667847,
+      "v2": 4.3239641189575195,
+      "v2_minus_v1": 3.679643750190735,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "3.6 Developing additional heuristic filters",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-12",
+      "expected_score": null,
+      "v1": 0.8257653713226318,
+      "v2": 4.670973300933838,
+      "v2_minus_v1": 3.845207929611206,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "4 FineWeb-Edu",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-16",
+      "expected_score": null,
+      "v1": 0.5377088785171509,
+      "v2": 3.6465766429901123,
+      "v2_minus_v1": 3.1088677644729614,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "6 Conclusion",
+        "role": "conclusion"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-22",
+      "expected_score": null,
+      "v1": 2.7946629524230957,
+      "v2": 4.040085315704346,
+      "v2_minus_v1": 1.24542236328125,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "F.1 Annotation Prompt",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:84c08ef7655869d79fc4f755a96a8db2a58602a105df579667498e3186097403:section-25",
+      "expected_score": null,
+      "v1": 0.7714910507202148,
+      "v2": 4.265267372131348,
+      "v2_minus_v1": 3.493776321411133,
+      "metadata": {
+        "paper_title": "The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale",
+        "section_title": "G.2 Association Analysis",
+        "role": "results"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-1",
+      "expected_score": null,
+      "v1": 0.7850069403648376,
+      "v2": 4.161482810974121,
+      "v2_minus_v1": 3.3764758706092834,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "Abstract",
+        "role": "abstract"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-2",
+      "expected_score": null,
+      "v1": 0.7749953866004944,
+      "v2": 4.323960304260254,
+      "v2_minus_v1": 3.5489649176597595,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "1 Introduction",
+        "role": "introduction"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-4",
+      "expected_score": null,
+      "v1": 0.5199190378189087,
+      "v2": 3.888962745666504,
+      "v2_minus_v1": 3.369043707847595,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "Open corpora for language model pretraining.",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-42",
+      "expected_score": null,
+      "v1": 0.7530971169471741,
+      "v2": 4.664653778076172,
+      "v2_minus_v1": 3.911556661128998,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "9.2 Measuring Domain Fit",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-43",
+      "expected_score": null,
+      "v1": 0.49899470806121826,
+      "v2": 2.6858363151550293,
+      "v2_minus_v1": 2.186841607093811,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "Conclusion",
+        "role": "conclusion"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-59",
+      "expected_score": null,
+      "v1": 0.6410585045814514,
+      "v2": 3.3001294136047363,
+      "v2_minus_v1": 2.659070909023285,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "C.5 LLaMA ( Touvron et al. 2023a )",
+        "role": "other"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-62",
+      "expected_score": null,
+      "v1": 0.6560260653495789,
+      "v2": 3.0128695964813232,
+      "v2_minus_v1": 2.3568435311317444,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "D.2 Perplexity Evaluation Suite",
+        "role": "results"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-66",
+      "expected_score": null,
+      "v1": 0.8579370975494385,
+      "v2": 4.8551530838012695,
+      "v2_minus_v1": 3.997215986251831,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "Appendix F Tokenization Analysis",
+        "role": "appendix"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-94",
+      "expected_score": null,
+      "v1": 0.66886967420578,
+      "v2": 2.337812900543213,
+      "v2_minus_v1": 1.6689432263374329,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "How was the data collected? (e.g., hardware apparatus/sensor, manual human curation, software program, software interface/API; how were these constructs/measures/methods validated?)",
+        "role": "methods"
+      }
+    },
+    {
+      "doc_id": "sha256:e2fb1f50c56b295c7619af899ad9f0d41f79868e6104bb7a6059e754960372c7:section-101",
+      "expected_score": null,
+      "v1": 0.6617513298988342,
+      "v2": 4.155261993408203,
+      "v2_minus_v1": 3.493510663509369,
+      "metadata": {
+        "paper_title": "Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research",
+        "section_title": "What preprocessing/cleaning was done? (e.g., discretization or bucketing, tokenization, part-of-speech tagging, SIFT feature extraction, removal of instances, processing of missing values, etc.)",
+        "role": "other"
+      }
+    }
+  ],
+  "comparison": {
+    "mean_v2_minus_v1": 2.829275291164716,
+    "v2_higher_count": 30
+  }
+}

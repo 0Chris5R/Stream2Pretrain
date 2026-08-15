@@ -29,6 +29,13 @@ from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
 #   3 = drop (explicit dirty signal; should not enter training mixture)
 RiskTier = Literal[1, 2, 3]
 PiiFlag = Literal["email", "phone", "ssn", "credit_card", "ipv4", "ipv6", "passport"]
+CorpusRoute = Literal[
+    "broad_pretraining",
+    "reasoning_candidate",
+    "benchmark_candidate",
+    "quarantine",
+    "retry",
+]
 RejectReason = Literal[
     "language_filter",
     "gopher_filter",
@@ -41,7 +48,35 @@ RejectReason = Literal[
     "decontamination_hit",
     "validity_interval_invalid",
     "minhash_backend_mismatch",
+    "insufficient_scientific_body",
 ]
+
+
+class SegmentScore(BaseModel):
+    """Per-section model signals retained for explainability."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    segment_id: str
+    title: str
+    role: str
+    word_count: int = Field(..., ge=0)
+    edu_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=5.0,
+        description="Primary source-aware educational-quality model output.",
+    )
+    finepdfs_edu_score: float | None = Field(default=None, ge=0.0, le=5.0)
+    fineweb_edu_score: float | None = Field(default=None, ge=0.0, le=5.0)
+    quality_classifier_revision: str | None = None
+    comparison_classifier_revision: str | None = None
+    perplexity: float | None = Field(default=None, ge=0.0)
+    perplexity_bucket: Literal["head", "middle", "tail"] | None = None
+    c4_pass: bool = True
+    pii_flags: list[PiiFlag] = Field(default_factory=list)
+    decision: Literal["included", "excluded"] = "included"
+    exclusion_reasons: list[str] = Field(default_factory=list)
 
 
 class GoldRecord(BaseModel):
@@ -56,11 +91,58 @@ class GoldRecord(BaseModel):
 
     # Quality signals.
     quality_score: float = Field(
-        ..., ge=0.0, le=5.0, description="FineWeb-Edu raw classifier score."
+        ...,
+        ge=0.0,
+        le=5.0,
+        description="Explainable composite corpus-quality score; not a model output.",
     )
     edu_score: float = Field(
-        ..., ge=0.0, le=5.0, description="Distilled-classifier educational score."
+        ...,
+        ge=0.0,
+        le=5.0,
+        description=(
+            "Primary source-aware educational-quality output. Scientific PDF/HTML uses "
+            "FinePDFs Edu v2; general web content uses FineWeb-Edu."
+        ),
     )
+    structural_quality_score: float = Field(default=0.0, ge=0.0, le=5.0)
+    extraction_completeness: float = Field(default=0.0, ge=0.0, le=1.0)
+    reasoning_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    benchmark_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    route: CorpusRoute = "quarantine"
+    eligible_routes: list[CorpusRoute] = Field(default_factory=list)
+    route_reasons: list[str] = Field(default_factory=list)
+    content_tags: list[str] = Field(default_factory=list)
+    segment_scores: list[SegmentScore] = Field(default_factory=list)
+    projection_version: str = "document-v1"
+    source_word_count: int = Field(default=0, ge=0)
+    training_word_count: int = Field(default=0, ge=0)
+    included_section_count: int = Field(default=0, ge=0)
+    excluded_section_count: int = Field(default=0, ge=0)
+    excluded_sections: list[str] = Field(default_factory=list)
+    lang_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    lang_detector_revision: str = "unknown"
+    tokenizer_revision: str = "unknown"
+    gopher_pass: bool = True
+    gopher_word_count: int = Field(default=0, ge=0)
+    gopher_mean_word_len: float = Field(default=0.0, ge=0.0)
+    gopher_stopword_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    gopher_bullet_line_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    gopher_ellipsis_line_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    gopher_symbol_word_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    gopher_alpha_word_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    c4_nopunc_pass: bool = True
+    c4_curly_brace_pass: bool = True
+    c4_lorem_ipsum_pass: bool = True
+    c4_fraction_lines_with_punct: float = Field(default=1.0, ge=0.0, le=1.0)
+    perplexity: float = Field(default=0.0, ge=0.0)
+    perplexity_bucket: Literal["head", "middle", "tail"] = "head"
+    perplexity_scorer: str = "unknown"
+    near_duplicate: bool = False
+    near_dup_cluster_id: str | None = None
+    minhash_backend: str = "unknown"
+    minhash_num_perms: int = Field(default=0, ge=0)
+    lsh_backend: str = "unknown"
 
     # Licence + risk.
     license: str = Field(..., description="SPDX id or 'unknown'.")
@@ -69,12 +151,22 @@ class GoldRecord(BaseModel):
     ]
     risk_tier: RiskTier
     pii_flags: list[PiiFlag] = Field(default_factory=list)
+    metadata_pii_flags: list[PiiFlag] = Field(default_factory=list)
+    removed_body_pii_flags: list[PiiFlag] = Field(default_factory=list)
+    pii_action: Literal["none", "metadata_removed", "segments_removed", "body_quarantine"] = "none"
+    pii_scanner_revision: str = "regex-only"
 
     # Decontamination.
     contaminated_with: list[str] = Field(
         default_factory=list,
         description="Benchmark identifiers this doc overlapped with, e.g. ['MMLU'].",
     )
+    decon_exact_matches: list[str] = Field(default_factory=list)
+    decon_semantic_matches: list[str] = Field(default_factory=list)
+    decon_max_similarity: float = Field(default=0.0, ge=-1.0, le=1.0)
+    decon_ngram_size: int = Field(default=13, ge=1)
+    decon_embedding_revision: str = "unknown"
+    benchmark_set_version: str = "unknown"
 
     # Temporal validity.
     valid_from: datetime
@@ -86,14 +178,16 @@ class GoldRecord(BaseModel):
     # Versioning - identifies the deterministic recipe this record came from.
     scoring_version: str
     classifier_revision: str
-    policy_revision: str = Field(
-        ..., description="Git SHA of the policy bundle, prefixed 'git:'."
-    )
+    classifier_backend: str = "unknown"
+    policy_revision: str = Field(..., description="Git SHA of the policy bundle, prefixed 'git:'.")
 
     # Iceberg-side identity. Populated on commit; pre-commit records carry None.
     snapshot_id: int | None = Field(default=None, ge=0)
     row_id: int | None = Field(
-        default=None, ge=0, alias="_row_id", description="Iceberg V3 row lineage id."
+        default=None,
+        ge=0,
+        alias="_row_id",
+        description="Reserved row-lineage id; null in the current Iceberg V2 writer.",
     )
 
     # Tracing.
@@ -130,3 +224,14 @@ class GoldRecord(BaseModel):
         default="unknown",
         description="Where the SPDX id was read from.",
     )
+
+    scientific_artifact_s3_uri: str | None = Field(
+        default=None,
+        pattern=r"^s3://[^/]+/.+",
+        description="Structured scientific-document artifact retained in MinIO.",
+    )
+    figure_count: int = Field(default=0, ge=0)
+    table_count: int = Field(default=0, ge=0)
+    equation_count: int = Field(default=0, ge=0)
+    citation_count: int = Field(default=0, ge=0)
+    extraction_warnings: list[str] = Field(default_factory=list)

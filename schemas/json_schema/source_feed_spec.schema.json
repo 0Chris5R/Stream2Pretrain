@@ -4,7 +4,7 @@
       "additionalProperties": false,
       "description": "Reference to a Secret holding the auth token.",
       "properties": {
-        "header_name": {
+        "headerName": {
           "anyOf": [
             {
               "type": "string"
@@ -14,9 +14,9 @@
             }
           ],
           "default": null,
-          "title": "Header Name"
+          "title": "Headername"
         },
-        "secret_key": {
+        "secretKey": {
           "anyOf": [
             {
               "type": "string"
@@ -26,9 +26,9 @@
             }
           ],
           "default": null,
-          "title": "Secret Key"
+          "title": "Secretkey"
         },
-        "secret_name": {
+        "secretName": {
           "anyOf": [
             {
               "type": "string"
@@ -38,7 +38,7 @@
             }
           ],
           "default": null,
-          "title": "Secret Name"
+          "title": "Secretname"
         },
         "type": {
           "default": "none",
@@ -64,20 +64,20 @@
           "title": "Burst",
           "type": "integer"
         },
-        "requests_per_second": {
+        "requestsPerSecond": {
           "exclusiveMinimum": 0.0,
-          "title": "Requests Per Second",
+          "title": "Requestspersecond",
           "type": "number"
         },
-        "respect_x_poll_interval": {
+        "respectXPollInterval": {
           "default": false,
           "description": "If true, the poller defers to the response's X-Poll-Interval header.",
-          "title": "Respect X Poll Interval",
+          "title": "Respectxpollinterval",
           "type": "boolean"
         }
       },
       "required": [
-        "requests_per_second",
+        "requestsPerSecond",
         "burst"
       ],
       "title": "RateLimitSpec",
@@ -87,22 +87,22 @@
   "additionalProperties": false,
   "description": "Spec of a single SourceFeed CRD instance.",
   "properties": {
-    "accept_content_types": {
+    "acceptContentTypes": {
       "items": {
         "type": "string"
       },
-      "title": "Accept Content Types",
+      "title": "Acceptcontenttypes",
       "type": "array"
     },
     "auth": {
       "$ref": "#/$defs/AuthSpec"
     },
-    "egress_allow": {
+    "egressAllow": {
       "description": "Hostnames the SourceFeed pod may dial (NetworkPolicy egress).",
       "items": {
         "type": "string"
       },
-      "title": "Egress Allow",
+      "title": "Egressallow",
       "type": "array"
     },
     "enabled": {
@@ -117,7 +117,7 @@
       "title": "Endpoint",
       "type": "string"
     },
-    "license_default": {
+    "licenseDefault": {
       "default": "unknown",
       "enum": [
         "unknown",
@@ -129,7 +129,7 @@
         "BSD-3-Clause",
         "arxiv-non-exclusive-distribution"
       ],
-      "title": "License Default",
+      "title": "Licensedefault",
       "type": "string"
     },
     "name": {
@@ -138,10 +138,10 @@
       "title": "Name",
       "type": "string"
     },
-    "poll_interval_seconds": {
+    "pollIntervalSeconds": {
       "exclusiveMinimum": 0,
       "maximum": 86400,
-      "title": "Poll Interval Seconds",
+      "title": "Pollintervalseconds",
       "type": "integer"
     },
     "protocol": {
@@ -156,7 +156,7 @@
       "title": "Protocol",
       "type": "string"
     },
-    "rate_limit": {
+    "rateLimit": {
       "$ref": "#/$defs/RateLimitSpec"
     }
   },
@@ -164,8 +164,8 @@
     "name",
     "protocol",
     "endpoint",
-    "poll_interval_seconds",
-    "rate_limit"
+    "pollIntervalSeconds",
+    "rateLimit"
   ],
   "title": "SourceFeedSpec",
   "type": "object"

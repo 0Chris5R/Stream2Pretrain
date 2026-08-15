@@ -1,8 +1,8 @@
 """Stream2Pretrain processor - Bytewax dataflows + curation operators.
 
 This package contains the streaming processors that turn raw fetched
-documents into curated, mixture-ready ``GoldRecord`` rows on the
-``docs.curated`` Redpanda topic and into Iceberg ``gold`` table snapshots.
+documents into durable accepted/rejected decisions on ``curation.decisions``
+and a clean, mixture-ready subset on ``docs.curated`` and Iceberg Gold.
 
 Modules
 -------

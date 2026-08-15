@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from processor.common import ProcessorConfig
-from processor.mixture_controller.controller import MixtureController, _sourcefeed_status
+from processor.mixture_controller.controller import (
+    MixtureController,
+    _cron_schedule,
+    _sourcefeed_status,
+)
 from schemas.sourcefeed import MixtureRecipeSpec
 
 
@@ -31,6 +35,13 @@ def test_sourcefeed_status_maps_kubernetes_crd_shape() -> None:
     assert status["spec"]["rate_limit"]["requests_per_second"] == 1.0
     assert status["documents_24h"] == 12
     assert status["poll_state"] == "idle"
+
+
+def test_sourcefeed_intervals_map_to_valid_cron_schedules() -> None:
+    assert _cron_schedule(60) == "* * * * *"
+    assert _cron_schedule(900) == "*/15 * * * *"
+    assert _cron_schedule(7200) == "0 */2 * * *"
+    assert _cron_schedule(86400) == "0 0 * * *"
 
 
 def test_mixture_compare_returns_ui_payload(cfg: ProcessorConfig) -> None:

@@ -4,10 +4,10 @@
       "additionalProperties": false,
       "description": "A single source's weight within a mixture.",
       "properties": {
-        "source_feed": {
+        "sourceFeed": {
           "maxLength": 63,
           "minLength": 1,
-          "title": "Source Feed",
+          "title": "Sourcefeed",
           "type": "string"
         },
         "weight": {
@@ -18,7 +18,7 @@
         }
       },
       "required": [
-        "source_feed",
+        "sourceFeed",
         "weight"
       ],
       "title": "MixtureSourceWeight",
@@ -43,28 +43,28 @@
       "title": "Languages",
       "type": "array"
     },
-    "max_risk_tier": {
+    "maxRiskTier": {
       "default": 2,
       "enum": [
         1,
         2,
         3
       ],
-      "title": "Max Risk Tier",
+      "title": "Maxrisktier",
       "type": "integer"
     },
-    "min_edu_score": {
+    "minEduScore": {
       "default": 2.0,
       "maximum": 5.0,
       "minimum": 0.0,
-      "title": "Min Edu Score",
+      "title": "Mineduscore",
       "type": "number"
     },
-    "min_quality_score": {
+    "minQualityScore": {
       "default": 2.0,
       "maximum": 5.0,
       "minimum": 0.0,
-      "title": "Min Quality Score",
+      "title": "Minqualityscore",
       "type": "number"
     },
     "name": {
@@ -81,7 +81,7 @@
       "title": "Sources",
       "type": "array"
     },
-    "target_tokens_per_hour": {
+    "targetTokensPerHour": {
       "anyOf": [
         {
           "minimum": 0,
@@ -93,7 +93,7 @@
       ],
       "default": null,
       "description": "Optional throttle target; None means uncapped.",
-      "title": "Target Tokens Per Hour"
+      "title": "Targettokensperhour"
     }
   },
   "required": [

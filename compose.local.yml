@@ -1,0 +1,405 @@
+# Podman-first laptop profile for a small end-to-end Stream2Pretrain run.
+#
+# This file is intentionally separate from docker-compose.dev.yml.  The dev
+# file remains the fast Redpanda + MinIO dependency stack; this profile adds
+# the actual processors, local Iceberg catalog, observability, APIs, and UI.
+# No service talks to Kubernetes.
+
+name: stream2pretrain-local
+
+x-processor-environment: &processor-environment
+  S2P_ENV: dev
+  S2P_NAMESPACE: stream2pretrain-local
+  LOG_LEVEL: INFO
+  REDPANDA_BROKERS: redpanda:29092
+  S2P_RAW_TOPIC: raw.fetched
+  S2P_NORMALIZED_TOPIC: docs.normalized
+  S2P_CURATED_TOPIC: docs.curated
+  S2P_DECISIONS_TOPIC: curation.decisions
+  S2P_DECON_TOPIC: decon.attest
+  S2P_KAFKA_START_OFFSET: beginning
+  # The largest measured normalized record in the 2026-08-15 latest-50
+  # pilot is 1,103,458 bytes. Use the next binary ceiling for the pilot.
+  S2P_KAFKA_MESSAGE_MAX_BYTES: "2097152"
+  S2P_BYTEWAX_SNAPSHOT_SECONDS: "1"
+  MINIO_ENDPOINT: http://minio:9000
+  MINIO_ACCESS_KEY: minioadmin
+  MINIO_SECRET_KEY: minioadmin
+  MINIO_BRONZE_BUCKET: bronze
+  MINIO_SILVER_BUCKET: silver
+  MINIO_GOLD_BUCKET: gold
+  MINIO_DECON_BUCKET: decon-attestations
+  S2P_BENCH_SET_VERSION: local-canaries-v1
+  S2P_BENCH_CORPUS_PATH: /config/benchmark_canaries.json
+  S2P_BENCHMARK_CORPUS_KIND: demo_canaries
+  S2P_ICEBERG_CATALOG_TYPE: sql
+  S2P_ICEBERG_CATALOG_NAME: local
+  S2P_ICEBERG_CATALOG_URI: sqlite:////var/lib/s2p-lakehouse/catalog.db
+  S2P_ICEBERG_WAREHOUSE: file:///var/lib/s2p-lakehouse/warehouse
+  S2P_ICEBERG_NAMESPACE: gold
+  S2P_ICEBERG_GOLD_TABLE: curated
+  S2P_ICEBERG_DECISIONS_TABLE: curation_decisions
+  S2P_ICEBERG_BENCHMARK_TABLE: benchmark_candidates
+  S2P_USE_PRESIDIO: "1"
+  S2P_REQUIRE_REAL_MODELS: "1"
+  S2P_FINEPDFS_EDU_REVISION: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
+  S2P_REQUIRE_DURABLE_OUTPUTS: "1"
+  S2P_FINEWEB_EDU_REVISION: fineweb-edu@284663cbb2dabf9bda30d8f8cc49601251ee1631
+  S2P_FIGURE_CLASSIFIER_REVISION: docling-figure-v2.5@f859dfbff5c9916cd996942d4b0db7fa25808220
+  S2P_DOCLING_ENABLED: "1"
+  S2P_DOCLING_CPU_THREADS: "2"
+  S2P_DOCLING_MAX_PAGES: "40"
+  S2P_DOCLING_MAX_BYTES: "52428800"
+  S2P_DOCLING_DOCUMENT_TIMEOUT: "180"
+  S2P_USE_COSIGN: "0"
+
+x-processor-service: &processor-service
+  image: stream2pretrain-processor:local
+  build:
+    context: .
+    dockerfile: processor/Dockerfile.local
+  environment: *processor-environment
+  volumes:
+    - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
+    - models-data:/opt/models:ro
+  mem_limit: 1g
+  cpus: 1.0
+  restart: unless-stopped
+
+services:
+  model-bootstrap:
+    profiles: ["bootstrap"]
+    image: stream2pretrain-processor:local
+    entrypoint: ["python", "-m", "processor.model_bootstrap"]
+    user: "0:0"
+    environment:
+      S2P_MODELS_DIR: /opt/models
+      TIKTOKEN_CACHE_DIR: /opt/models/tiktoken
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      FINEWEB_EDU_REVISION: 284663cbb2dabf9bda30d8f8cc49601251ee1631
+      E5_SMALL_REVISION: ffb93f3bd4047442299a41ebb6fa998a38507c52
+      KENLM_REVISION: 3fbe35c83b1a39f420a345b7c96a186c8030d834
+      FIGURE_CLASSIFIER_REVISION: f859dfbff5c9916cd996942d4b0db7fa25808220
+    volumes:
+      - models-data:/opt/models
+    mem_limit: 2g
+    cpus: 2.0
+    restart: "no"
+
+  redpanda:
+    image: stream2pretrain-redpanda:local
+    build:
+      context: ./local/redpanda
+      dockerfile: Dockerfile
+    command:
+      - rpk
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:29092,external://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda:29092,external://localhost:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=localhost:8082
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --set
+      - redpanda.kafka_batch_max_bytes=2097152
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+      - "8082:8082"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    mem_limit: 1536m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "rpk -X brokers=localhost:29092 cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
+
+  redpanda-bootstrap:
+    image: stream2pretrain-redpanda:local
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for topic in raw.fetched docs.normalized docs.curated curation.decisions decon.attest; do
+          rpk -X brokers=redpanda:29092 topic create "$${topic}" \
+            --partitions 1 --replicas 1 \
+            --config retention.ms=604800000 \
+            --config cleanup.policy=delete \
+            --config max.message.bytes=2097152 \
+          || rpk -X brokers=redpanda:29092 topic alter-config "$${topic}" \
+            --set max.message.bytes=2097152
+        done
+    restart: "no"
+
+  redpanda-console:
+    image: stream2pretrain-redpanda-console:local
+    build:
+      context: ./local/redpanda
+      dockerfile: Dockerfile.console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+      CONFIG_FILEPATH: ""
+    ports:
+      - "8080:8080"
+    mem_limit: 512m
+    cpus: 0.5
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-08T15-41-24Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
+
+  minio-bootstrap:
+    image: quay.io/minio/mc:RELEASE.2025-04-08T15-39-49Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc mb --ignore-existing local/bronze
+        mc mb --ignore-existing local/silver
+        mc mb --ignore-existing local/gold
+        mc mb --ignore-existing local/decon-attestations
+        mc mb --ignore-existing local/checkpoints
+    restart: "no"
+
+  lakehouse-bootstrap:
+    image: busybox:1.36
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /var/lib/s2p-lakehouse/warehouse && chown -R 65532:65532 /var/lib/s2p-lakehouse"]
+    volumes:
+      - lakehouse-data:/var/lib/s2p-lakehouse
+    restart: "no"
+
+  processor-fetcher:
+    <<: *processor-service
+    entrypoint: ["s2p-fetcher"]
+    environment:
+      <<: *processor-environment
+      S2P_CONSUMER_GROUP: s2p-local-fetcher
+      S2P_PROBE_PORT: "9090"
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      minio-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
+      - models-data:/opt/models:ro
+      - curator-state:/var/lib/s2p
+    mem_limit: 4g
+    cpus: 2.0
+
+  processor-curate:
+    <<: *processor-service
+    entrypoint: ["s2p-curate"]
+    environment:
+      <<: *processor-environment
+      S2P_CONSUMER_GROUP: s2p-local-curate
+      S2P_PROBE_PORT: "9090"
+      S2P_POLICY_REVISION: git:local-uncommitted
+      S2P_SCORING_VERSION: local-mechanics-v1
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
+      - models-data:/opt/models:ro
+      - curator-state:/var/lib/s2p
+    mem_limit: 8g
+    cpus: 4.0
+
+  processor-iceberg-writer:
+    <<: *processor-service
+    entrypoint: ["s2p-iceberg-writer"]
+    environment:
+      <<: *processor-environment
+      S2P_CONSUMER_GROUP: s2p-local-iceberg-writer
+      S2P_PROBE_PORT: "9090"
+      S2P_FLUSH_RECORDS: "1"
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      minio-bootstrap:
+        condition: service_completed_successfully
+      lakehouse-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
+      - lakehouse-data:/var/lib/s2p-lakehouse
+      - curator-state:/var/lib/s2p
+    mem_limit: 1536m
+    cpus: 1.0
+
+  decon-api:
+    <<: *processor-service
+    entrypoint: ["s2p-decon-api"]
+    environment:
+      <<: *processor-environment
+      S2P_DECON_API_PORT: "8081"
+    depends_on:
+      minio-bootstrap:
+        condition: service_completed_successfully
+    ports:
+      - "8081:8081"
+    mem_limit: 512m
+    cpus: 0.5
+
+  duckdb-api:
+    <<: *processor-service
+    entrypoint: ["s2p-duckdb-api"]
+    environment:
+      <<: *processor-environment
+      S2P_DUCKDB_API_PORT: "8090"
+      S2P_BIND_HOST: 0.0.0.0
+      S2P_DUCKDB_UNSAFE_VERSION_GUESSING: "1"
+    depends_on:
+      lakehouse-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
+      - lakehouse-data:/var/lib/s2p-lakehouse
+    ports:
+      - "8090:8090"
+    mem_limit: 1536m
+    cpus: 1.0
+
+  sources-api:
+    <<: *processor-service
+    entrypoint: ["s2p-local-sources-api"]
+    environment:
+      <<: *processor-environment
+      S2P_ENV: local
+      S2P_BIND_HOST: 0.0.0.0
+      S2P_LOCAL_SOURCES_API_PORT: "8083"
+      S2P_LOCAL_SOURCE_MAX_RECORDS: "8"
+      S2P_LOCAL_SOURCES_STATE: /var/lib/s2p/sources.json
+      S2P_LOCAL_SOURCES_SEED: /config/source_feeds.json
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      minio-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./local/source_feeds.json:/config/source_feeds.json:ro
+      - source-control-data:/var/lib/s2p
+    mem_limit: 512m
+    cpus: 0.5
+
+  prometheus:
+    image: prom/prometheus:v3.4.2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./local/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9091:9090"
+    mem_limit: 512m
+    cpus: 0.5
+    restart: unless-stopped
+
+  ui:
+    image: stream2pretrain-ui:local
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    depends_on:
+      - decon-api
+      - duckdb-api
+      - prometheus
+      - sources-api
+    environment:
+      DECON_GATE_URL: http://decon-api:8081
+      DUCKDB_URL: http://duckdb-api:8090
+      PROMETHEUS_URL: http://prometheus:9090
+      SOURCES_API_URL: http://sources-api:8083
+      THROUGHPUT_TICK_MS: "2000"
+      DASHBOARD_COUNTER_MODE: current
+      S2P_LOCAL_MODE: "1"
+    ports:
+      - "3100:3000"
+    mem_limit: 1g
+    cpus: 1.0
+    restart: unless-stopped
+
+  arxiv-ingest:
+    profiles: ["manual"]
+    image: stream2pretrain-arxiv-fetcher:local
+    build:
+      context: .
+      dockerfile: ingest/arxiv_html_fetcher/Dockerfile
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      minio-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      S2P_ENV: dev
+      LOG_LEVEL: INFO
+      REDPANDA_BROKERS: redpanda:29092
+      S2P_RAW_TOPIC: raw.fetched
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BRONZE_BUCKET: bronze
+    command:
+      - --ids-file
+      - /config/arxiv_ids.txt
+      - --feed-name
+      - arxiv-html-local
+      - --license-default
+      - arxiv-non-exclusive-distribution
+    volumes:
+      - ./local/arxiv_ids.txt:/config/arxiv_ids.txt:ro
+    restart: "no"
+
+  controlled-fixtures:
+    <<: *processor-service
+    profiles: ["manual"]
+    entrypoint: ["python", "-m", "processor.local_fixture_ingest"]
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      minio-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+volumes:
+  models-data:
+  redpanda-data:
+  minio-data:
+  lakehouse-data:
+  curator-state:
+  prometheus-data:
+  source-control-data:

@@ -18,6 +18,8 @@ dependencies = [
     "structlog>=24.1",
     "orjson>=3.10",
     "cramjam>=2.11.0",
+    # aiokafka checks this module directly before enabling zstd compression.
+    "zstandard>=0.23",
     "PyYAML>=6.0",
     "kubernetes>=30.1",
 ]

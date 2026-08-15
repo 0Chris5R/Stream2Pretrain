@@ -5,6 +5,24 @@ target DHBWCloud k3s cluster after the platform dependencies and the
 Stream2Pretrain chart are installed. Do not replace missing measurements with
 estimates. Keep `needs-measurement` until the command output exists.
 
+## Capacity evidence already available from the lecture repository
+
+The course material provides two concrete deployment references, but only one
+has numeric capacity:
+
+- `lecture_slides/04a - Architecture and Core Concepts.md` starts the local
+  Minikube environment with 6 CPUs and 7,000 MB RAM.
+- The same handout selects the DHBW Cloud flavor `m1.xlarge`, but does not
+  publish that flavor's CPU, RAM, ephemeral-disk, or quota values.
+
+The first number is a development recommendation, not evidence for the remote
+cluster. The second is only a flavor name. Consequently the chart uses one
+strict curator replica and conservative KEDA maxima by default. The larger
+`values-prod.yaml` maxima are generic production examples and must not be used
+for the course cluster until the probe below records allocatable resources.
+FinePDFs v2 plus FineWeb-Edu comparison inference also makes the curator
+materially larger than the older FineWeb-only configuration.
+
 ## Preconditions
 
 - `kubectl` points at the target k3s cluster.
@@ -42,6 +60,16 @@ The report covers:
   Pod.
 - MinIO pod discovery. Throughput remains `needs-measurement` until a MinIO
   benchmark such as `warp` is run against the target tenant.
+
+Immediately after gaining access, also capture the flavor and quota surface:
+
+```sh
+kubectl get nodes -o wide
+kubectl describe nodes
+kubectl get resourcequota,limitrange -A
+kubectl get storageclass
+kubectl top nodes
+```
 
 ## Seed Loader Smoke
 

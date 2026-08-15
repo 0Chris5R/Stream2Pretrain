@@ -20,7 +20,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { apiFetch } from '@/lib/api';
 import { queryKeys } from '@/lib/query-keys';
-import { MixtureCompareSchema, type MixtureCompare } from '@/lib/schemas';
+import { MixtureCompareSchema, RuntimeProfileSchema, type MixtureCompare } from '@/lib/schemas';
 import { formatInt } from '@/lib/utils';
 
 async function fetchCompare(a: string, b: string): Promise<MixtureCompare> {
@@ -34,6 +34,10 @@ export default function MixturePage() {
   const [a, setA] = useState('main');
   const [b, setB] = useState('shadow');
   const [committed, setCommitted] = useState<{ a: string; b: string } | null>(null);
+  const profile = useQuery({
+    queryKey: ['runtime-profile'],
+    queryFn: () => apiFetch('/api/health', RuntimeProfileSchema),
+  });
 
   const compare = useQuery({
     queryKey: committed ? queryKeys.mixture(committed.a, committed.b) : ['mixture', 'idle'],
@@ -51,6 +55,10 @@ export default function MixturePage() {
       ? compare.data.perplexity_delta.reduce((acc, p) => acc + p.delta, 0) /
         compare.data.perplexity_delta.length
       : null;
+
+  if (profile.data?.local_mode) {
+    return <N3FutureWork />;
+  }
 
   return (
     <div className="space-y-6">
@@ -153,6 +161,28 @@ export default function MixturePage() {
       ) : null}
     </div>
   );
+}
+
+function N3FutureWork() {
+  return (
+    <div className="space-y-5">
+      <header className="space-y-1">
+        <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-semibold tracking-tight">Mixture A/B</h1>
+          <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-xs font-medium text-white">future work</span>
+        </div>
+      </header>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <FutureCard title="Branch A + B" text="Two recipes consume the same stream into isolated Iceberg branches." />
+        <FutureCard title="Rolling evaluation" text="An identical proxy LM trains on equal token windows for each branch." />
+        <FutureCard title="Promotion gate" text="Per-domain perplexity deltas produce an auditable promotion decision." />
+      </div>
+    </div>
+  );
+}
+
+function FutureCard({ title, text }: { title: string; text: string }) {
+  return <Card><CardHeader><CardTitle className="text-base">{title}</CardTitle></CardHeader><CardContent className="text-sm text-muted-foreground">{text}</CardContent></Card>;
 }
 
 function Stat({ label, value }: { label: string; value: string }) {

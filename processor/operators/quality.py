@@ -1,45 +1,44 @@
-"""FineWeb-Edu quality classifier (ONNX INT8) wrapper.
+"""CPU wrappers for the official FinePDFs and FineWeb-Edu regressors.
 
-The reference checkpoint is
-``HuggingFaceFW/fineweb-edu-classifier`` distilled to ONNX INT8 so a single
-CPU core hits ~1k docs/s. The wrapper:
+The wrapper:
 
-- Loads the ONNX model lazily (so unit tests do not pay model load cost).
+- Prefers a bundled ONNX export when present.
+- Otherwise runs the official Safetensors checkpoint with Transformers on CPU.
 - Tokenises with the bundled HuggingFace fast tokenizer if available.
-- Returns the raw 5-class regression score and an "edu_score" alias used by
-  downstream gates.
+- Returns the raw 0..5 educational-value regression score. The pipeline's
+  separate composite quality score is calculated later from a visible vector.
 
-If ``onnxruntime`` is absent or the model file is missing, the wrapper falls
-back to a deterministic heuristic that scores text by its average word
-length and stopword ratio. The heuristic is documented as
-``proxy-heuristic-0.1`` in the gold record's ``classifier_revision`` field.
+The deterministic fallback exists only for unit tests and non-faithful
+developer profiles. Strict local and Kubernetes profiles fail startup when a
+required artifact is absent.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass(frozen=True, slots=True)
 class QualityScore:
     """Output of :meth:`QualityClassifier.score`."""
 
-    quality_score: float
     edu_score: float
     revision: str
 
 
 class QualityClassifier:
-    """Wrapper around the FineWeb-Edu ONNX classifier.
+    """Wrapper around an official educational-quality classifier.
 
     Parameters
     ----------
     model_path
-        Path to a directory containing ``model.onnx`` plus the tokenizer
-        files. ``None`` triggers the proxy heuristic.
+        Path to a checkpoint directory. A verified ``model.onnx`` is preferred
+        when present; otherwise the official Safetensors weights run through
+        Transformers on CPU. ``None`` triggers the test-only proxy heuristic.
     revision
         Identifier persisted into the gold record; defaults to the
         path's basename.
@@ -53,11 +52,17 @@ class QualityClassifier:
         model_path: str | Path | None,
         *,
         revision: str | None = None,
-        max_length: int = 512,
+        model_family: str = "fineweb-edu",
+        max_length: int | None = None,
+        allow_fallback: bool = True,
     ) -> None:
         self._path = Path(model_path) if model_path else None
-        self._max_length = max_length
-        self._session, self._tokenizer = self._load(self._path)
+        self._model_family = model_family
+        self._max_length = max_length or (2048 if model_family == "finepdfs-edu-v2" else 512)
+        self._allow_fallback = allow_fallback
+        self._session, self._torch_model, self._tokenizer = self._load(self._path)
+        if not allow_fallback and not self.is_model_loaded:
+            raise RuntimeError(f"the pinned {model_family} model is required")
         self._revision = revision or self._derive_revision()
 
     @property
@@ -65,41 +70,112 @@ class QualityClassifier:
         """Identifier persisted into ``GoldRecord.classifier_revision``."""
         return self._revision
 
+    @property
+    def is_model_loaded(self) -> bool:
+        """Whether inference uses a real FineWeb-Edu model artifact."""
+        return self._tokenizer is not None and (
+            self._session is not None or self._torch_model is not None
+        )
+
+    @property
+    def backend(self) -> str:
+        """Return the active inference backend for diagnostics."""
+        if self._session is not None:
+            return "onnxruntime"
+        if self._torch_model is not None:
+            return "transformers-cpu"
+        return "proxy"
+
     @staticmethod
-    def _load(path: Path | None) -> tuple[object | None, object | None]:
+    def _load(
+        path: Path | None,
+    ) -> tuple[object | None, object | None, object | None]:
         if path is None or not path.is_dir():
-            return None, None
-        try:
-            import onnxruntime as ort  # type: ignore[import-untyped]
-        except Exception:
-            return None, None
+            return None, None, None
         model_file = path / "model.onnx"
-        if not model_file.is_file():
-            return None, None
-        sess = ort.InferenceSession(str(model_file), providers=["CPUExecutionProvider"])
         try:
             from transformers import AutoTokenizer  # type: ignore[import-untyped]
 
-            tok = AutoTokenizer.from_pretrained(str(path))
+            tok = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
         except Exception:
-            tok = None
-        return sess, tok
-
-    def _derive_revision(self) -> str:
-        if self._session is None or self._path is None:
-            return "proxy-heuristic-0.1"
-        return f"fineweb-edu-onnx-int8-{self._path.name}"
-
-    def score(self, text: str) -> QualityScore:
-        """Return a (quality, edu, revision) tuple for ``text``."""
-        if not text or not text.strip():
-            return QualityScore(quality_score=0.0, edu_score=0.0, revision=self._revision)
-        if self._session is not None and self._tokenizer is not None:
+            return None, None, None
+        if model_file.is_file():
             try:
-                return self._score_onnx(text)
+                import onnxruntime as ort  # type: ignore[import-untyped]
+
+                sess = ort.InferenceSession(str(model_file), providers=["CPUExecutionProvider"])
+                return sess, None, tok
             except Exception:
                 pass
+        if (path / "model.safetensors").is_file():
+            try:
+                from transformers import (  # type: ignore[import-untyped]
+                    AutoModelForSequenceClassification,
+                )
+
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    str(path), local_files_only=True, use_safetensors=True
+                )
+                model.eval()
+                return None, model, tok
+            except Exception:
+                pass
+        return None, None, None
+
+    def _derive_revision(self) -> str:
+        if self._path is None or not self.is_model_loaded:
+            return "proxy-heuristic-0.1"
+        if self._session is not None:
+            return f"{self._model_family}-onnx-{self._path.name}"
+        return f"{self._model_family}-transformers-cpu-{self._path.name}"
+
+    def score(self, text: str) -> QualityScore:
+        """Return the independent educational-quality model score for ``text``."""
+        if not text or not text.strip():
+            return QualityScore(edu_score=0.0, revision=self._revision)
+        chunks = self._text_chunks(text)
+        if self._session is not None and self._tokenizer is not None:
+            try:
+                return max(
+                    (self._score_onnx(chunk) for chunk in chunks),
+                    key=lambda score: score.edu_score,
+                )
+            except Exception:
+                if not self._allow_fallback:
+                    raise
+        if self._torch_model is not None and self._tokenizer is not None:
+            try:
+                return max(
+                    (self._score_transformers(chunk) for chunk in chunks),
+                    key=lambda score: score.edu_score,
+                )
+            except Exception:
+                if not self._allow_fallback:
+                    raise
         return self._score_proxy(text)
+
+    def _text_chunks(self, text: str) -> list[str]:
+        """Apply the official FinePDFs top/bottom long-extract sampling rule."""
+        if not self._model_family.startswith("finepdfs-edu") or self._tokenizer is None:
+            return [text]
+        max_chars = 10_000
+        candidates = (
+            [text[:max_chars]] if len(text) <= max_chars else [text[:max_chars], text[-max_chars:]]
+        )
+        chunks: list[str] = []
+        for candidate in candidates:
+            token_ids = self._tokenizer.encode(  # type: ignore[union-attr]
+                candidate,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=self._max_length - 2,
+            )
+            decoded = self._tokenizer.decode(  # type: ignore[union-attr]
+                token_ids, skip_special_tokens=True
+            )
+            if decoded.strip():
+                chunks.append(decoded.strip())
+        return chunks or [text]
 
     def _score_onnx(self, text: str) -> QualityScore:
         """Inference path using the loaded ONNX session."""
@@ -121,7 +197,27 @@ class QualityClassifier:
         score = float(outputs[0].reshape(-1)[0])
         clamped = max(0.0, min(5.0, score))
         return QualityScore(
-            quality_score=clamped,
+            edu_score=clamped,
+            revision=self._revision,
+        )
+
+    def _score_transformers(self, text: str) -> QualityScore:
+        """CPU inference against the official Safetensors checkpoint."""
+        import torch  # type: ignore[import-not-found]
+
+        encoded = self._tokenizer(  # type: ignore[misc]
+            text,
+            max_length=self._max_length,
+            truncation=True,
+            padding=True,
+            return_tensors="pt",
+        )
+        model = cast(Callable[..., Any], self._torch_model)
+        with torch.inference_mode():
+            outputs = model(**encoded)
+        score = float(outputs.logits.reshape(-1)[0].item())
+        clamped = max(0.0, min(5.0, score))
+        return QualityScore(
             edu_score=clamped,
             revision=self._revision,
         )
@@ -136,7 +232,7 @@ class QualityClassifier:
         """
         words = [w for w in text.split() if w]
         if not words:
-            return QualityScore(quality_score=0.0, edu_score=0.0, revision=self._revision)
+            return QualityScore(edu_score=0.0, revision=self._revision)
         mean_len = sum(len(w) for w in words) / len(words)
         # Sigmoid centred at 4 char mean length so 5-6 char words score ~3.5.
         base = 5.0 / (1.0 + math.exp(-(mean_len - 4.0)))
@@ -145,7 +241,6 @@ class QualityClassifier:
             base *= 0.5
         clamped = max(0.0, min(5.0, base))
         return QualityScore(
-            quality_score=clamped,
             edu_score=clamped,
             revision=self._revision,
         )

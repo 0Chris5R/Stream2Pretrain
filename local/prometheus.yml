@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: processor-fetcher
+    static_configs:
+      - targets: ["processor-fetcher:9090"]
+  - job_name: processor-curate
+    static_configs:
+      - targets: ["processor-curate:9090"]
+  - job_name: processor-iceberg-writer
+    static_configs:
+      - targets: ["processor-iceberg-writer:9090"]
+  - job_name: decon-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["decon-api:8081"]
+  - job_name: redpanda
+    metrics_path: /public_metrics
+    static_configs:
+      - targets: ["redpanda:9644"]

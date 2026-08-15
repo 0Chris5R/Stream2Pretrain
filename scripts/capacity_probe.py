@@ -15,7 +15,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-TOPICS = ("raw.fetched", "docs.normalized", "docs.curated", "decon.attest")
+TOPICS = (
+    "raw.fetched",
+    "docs.normalized",
+    "docs.curated",
+    "curation.decisions",
+    "decon.attest",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +87,9 @@ def _scaled_int(value: str, multiplier: float) -> int | None:
         return None
 
 
-def kubectl_json(args: list[str], *, namespace: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+def kubectl_json(
+    args: list[str], *, namespace: str | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
     command = ["kubectl"]
     if namespace:
         command.extend(["-n", namespace])
@@ -195,12 +203,16 @@ def pvc_capacity(namespace: str) -> dict[str, Any]:
                 "capacity_bytes": parse_byte_quantity(str(capacity or "")),
             }
         )
-    seed_claims = [c for c in claims if "seed" in str(c["name"]).lower() or "hf" in str(c["name"]).lower()]
+    seed_claims = [
+        c for c in claims if "seed" in str(c["name"]).lower() or "hf" in str(c["name"]).lower()
+    ]
     return {"status": "measured", "claims": claims, "seed_loader_claims": seed_claims}
 
 
 def redpanda_topics(namespace: str) -> dict[str, Any]:
-    pods, err = kubectl_json(["get", "pods", "-l", "app.kubernetes.io/name=redpanda"], namespace=namespace)
+    pods, err = kubectl_json(
+        ["get", "pods", "-l", "app.kubernetes.io/name=redpanda"], namespace=namespace
+    )
     if err or pods is None or not pods.get("items"):
         return {"status": "needs-measurement", "reason": err or "no Redpanda pods found"}
     pod_name = pods["items"][0].get("metadata", {}).get("name")
@@ -299,7 +311,9 @@ def _summary(section: dict[str, Any], key: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Collect k3s capacity evidence for Stream2Pretrain.")
+    parser = argparse.ArgumentParser(
+        description="Collect k3s capacity evidence for Stream2Pretrain."
+    )
     parser.add_argument("--namespace", default="stream2pretrain")
     parser.add_argument("--redpanda-namespace", default="redpanda")
     parser.add_argument("--minio-namespace", default="minio")

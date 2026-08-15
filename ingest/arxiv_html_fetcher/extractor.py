@@ -31,12 +31,8 @@ AR5IV_PIPELINE = "ar5iv-2026-06"
 # ids; unmapped URLs are passed through verbatim so the curate stage can
 # decide whether to risk-tier them.
 _LICENSE_URL_TO_SPDX: dict[str, str] = {
-    "http://arxiv.org/licenses/nonexclusive-distrib/1.0/": (
-        "arxiv-non-exclusive-distribution"
-    ),
-    "https://arxiv.org/licenses/nonexclusive-distrib/1.0/": (
-        "arxiv-non-exclusive-distribution"
-    ),
+    "http://arxiv.org/licenses/nonexclusive-distrib/1.0/": ("arxiv-non-exclusive-distribution"),
+    "https://arxiv.org/licenses/nonexclusive-distrib/1.0/": ("arxiv-non-exclusive-distribution"),
     "http://creativecommons.org/licenses/by/4.0/": "CC-BY-4.0",
     "https://creativecommons.org/licenses/by/4.0/": "CC-BY-4.0",
     "http://creativecommons.org/licenses/by-sa/4.0/": "CC-BY-SA-4.0",
@@ -199,9 +195,7 @@ def _resiliparse_extract(html: str) -> tuple[str, list[str]]:
 def _stdlib_headings(html: str) -> list[str]:
     """Collect H1-H4 inner text. Used by both extractor branches."""
     out: list[str] = []
-    for m in re.finditer(
-        r"<h([1-4])\b[^>]*?>(.*?)</h\1>", html, flags=re.IGNORECASE | re.DOTALL
-    ):
+    for m in re.finditer(r"<h([1-4])\b[^>]*?>(.*?)</h\1>", html, flags=re.IGNORECASE | re.DOTALL):
         level = int(m.group(1))
         body = _TAG.sub("", m.group(2)).strip()
         body = re.sub(r"\s+", " ", body)
@@ -212,16 +206,18 @@ def _stdlib_headings(html: str) -> list[str]:
 
 def _stdlib_extract(html: str) -> str:
     """Tag-stripping fallback used when Resiliparse is unavailable."""
-    body_match = re.search(
-        r"<article\b[^>]*?>(.*?)</article>",
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    ) or re.search(
-        r"<div\b[^>]*?class=\"[^\"]*?ltx_page_main[^\"]*?\"[^>]*?>(.*?)</div>\s*</body>",
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    ) or re.search(
-        r"<body\b[^>]*?>(.*?)</body>", html, flags=re.IGNORECASE | re.DOTALL
+    body_match = (
+        re.search(
+            r"<article\b[^>]*?>(.*?)</article>",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        or re.search(
+            r"<div\b[^>]*?class=\"[^\"]*?ltx_page_main[^\"]*?\"[^>]*?>(.*?)</div>\s*</body>",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        or re.search(r"<body\b[^>]*?>(.*?)</body>", html, flags=re.IGNORECASE | re.DOTALL)
     )
     body = body_match.group(1) if body_match else html
     body = re.sub(r"<script\b.*?</script>", "", body, flags=re.IGNORECASE | re.DOTALL)
@@ -256,10 +252,7 @@ def extract_arxiv_html(
     title, meta = extract_metadata(text_html)
 
     license_url = (
-        meta.get("citation_license")
-        or meta.get("dc.rights")
-        or meta.get("license")
-        or None
+        meta.get("citation_license") or meta.get("dc.rights") or meta.get("license") or None
     )
     submission_date = parse_submission_date(
         meta.get("citation_publication_date") or meta.get("citation_date")

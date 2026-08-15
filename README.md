@@ -2,7 +2,7 @@
 
 [![Version](https://img.shields.io/badge/version-0.2.0-blue)](CHANGELOG.md) [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml) [![Node](https://img.shields.io/badge/node-20%2B-blue)](ui/package.json) [![Kubernetes](https://img.shields.io/badge/kubernetes-1.30%2B-blue)](charts/stream2pretrain)
 
-A Kubernetes-native, streaming-first curation pipeline for **frontier-LLM-research pretraining data**. Live arXiv full-text HTML, OpenReview reviews, GitHub release source archives, HuggingFace metadata, and AI-lab blogs flow through a Bytewax dataflow that runs the FineWeb / DCLM / Dolma curation recipe (HTML extraction, language ID, Gopher/C4 heuristics, KenLM perplexity, MinHash + LSHBloom near-dup, FineWeb-Edu ONNX INT8 quality, PII redaction, benchmark decontamination), then lands typed Bronze/Silver/Gold tables in an Apache Iceberg V3 lakehouse on MinIO. The chart supports KEDA lag scaling and OpenTelemetry export after their thresholds and backends are measured; the DHBW baseline keeps both disabled. Prometheus and a Next.js 14 cockpit expose throughput, signed contamination attestations, temporal `as_of(timestamp)` queries, and the shadow A/B mixture comparison.
+A Kubernetes-native, streaming-first curation pipeline for **frontier-LLM-research pretraining data**. Live arXiv HTML/PDF, OpenReview reviews, GitHub release source archives, HuggingFace metadata, and AI-lab blogs flow through a Bytewax dataflow that runs a source-aware FinePDFs/FineWeb/DCLM/Dolma-inspired recipe: structured scientific extraction, language ID, Gopher/C4 heuristics, KenLM perplexity, MinHash plus LSHBloom near-deduplication, pinned FinePDFs Edu v2 for scientific text, FineWeb-Edu for general web text, code-specific rules, PII detection, and benchmark decontamination. Every outcome lands in an auditable Iceberg V2 decision table, while only accepted records enter Gold. The chart supports KEDA lag scaling and OpenTelemetry export after their thresholds and backends are measured; the DHBW baseline keeps both disabled. Prometheus and the Next.js cockpit expose the live pipeline, scientific artifacts, quality signals, dataset exports, and signed contamination attestations. Shadow A/B mixture training remains the explicitly deferred final feature.
 
 This repository is the Cloud Computing & Big Data **Prüfungsleistung 2026** at DHBW. It hits all five Vs of Big Data on the Kubernetes substrate the lecture defines, with one **begründete Abweichung** (Redpanda + Bytewax, justified below) eligible for bonus points.
 
@@ -10,26 +10,38 @@ This repository is the Cloud Computing & Big Data **Prüfungsleistung 2026** at 
 
 - Ingests live AI-research documents from 9 sources: arXiv OAI-PMH + 4 RSS feeds, arXiv native HTML at `/html/<id>` (with `ar5iv` fallback), GitHub Public Events filtered to ~30 curated AI repos, GitHub Releases Atom plus per-release source tarballs, HuggingFace Hub models + Daily Papers, OpenReview API v2 + REVIEWARENA backfill for ICLR/NeurIPS/ICML/COLM, sitemap walks, and an AI-lab blog RSS bundle.
 - Pre-loads ~55-65 B tokens of historical material via a one-shot **seed loader** that streams a 5-component HuggingFace mixture (peS2o cs.\* + RedPajama-arxiv + FineWeb-Edu URL-filtered + Stack-Edu Python/ML + Wayback backfill) into the same pipeline, so the temporal-query demo has data on day 1.
-- Runs the full FineWeb-class curation recipe as a single Bytewax dataflow with event-time semantics and stateful operators across job boundaries.
-- Lands per-document validity intervals, SPDX license tags, and signed contamination attestations alongside the curated Gold table.
-- Ships a cockpit UI with live throughput, quality histograms, signed-attestation viewer, an `as_of(timestamp)` temporal browser, and a shadow A/B mixture comparison view.
+- Applies source-aware quality policy: pinned FinePDFs Edu v2 for scientific
+  text, FineWeb-Edu for web text, and code-specific structural rules, while
+  keeping model scores separate from the explainable composite score.
+- Builds a clean scientific training projection while preserving sections,
+  tables, equations, citations, figure assets, CPU OCR, figure-type routing,
+  and a bounded Docling CPU fallback when arXiv HTML is unavailable.
+- Routes every scored outcome to broad pretraining, reasoning candidate,
+  benchmark candidate, quarantine, or extraction retry. Complete decision
+  records and validity intervals remain auditable; only accepted training rows
+  enter Gold.
+- Makes restart and replay behavior durable through a fingerprinted decision
+  cache, persistent near-duplicate state, and idempotent Iceberg appends.
+- Ships a compact cockpit with per-stage activity windows, filterable document
+  and artifact inspection, SourceFeed controls, benchmark coverage and signed
+  scans, and bounded JSONL/Parquet dataset exports.
 
 ## Three locked novelty differentiators
 
 These survived adversarial verification across 14 candidate claims; they are the demo headliners and the rubric-relevant bonus material.
 
-**N1 - Streaming Decon-Gate with per-snapshot signed contamination attestation.** A 13-gram Bloom filter plus an E5-small ONNX embedding sketch run inline during ingestion against MMLU / GSM8K / HumanEval / MATH / GPQA. On every Iceberg snapshot commit the gate emits a canonical-JSON attestation signed with cosign (or Ed25519 from a Secret-mounted key in dev) carrying per-benchmark hit counts, rejected document hashes, the benchmark-set version pin, and the snapshot id. Implemented in `processor/decon_gate.py`, `processor/sign.py`, `processor/iceberg_writer.py`, surfaced in `ui/app/decon`. No other OSS curator ships streaming + snapshot-bound + signed.
+**N1 - Streaming Decon-Gate with per-snapshot signed contamination attestation.** A 13-gram Bloom filter plus an E5-small ONNX embedding sketch run inline during ingestion against MMLU / GSM8K / HumanEval / MATH / GPQA. Every curation outcome is retained in `curation.decisions`; on an Iceberg write batch the gate emits a canonical-JSON attestation signed with Ed25519, carrying per-benchmark hit counts, rejected document hashes, the benchmark-set version pin, and the authoritative decision snapshot id. Implemented in `processor/decon_gate.py`, `processor/sign.py`, `processor/iceberg_writer.py`, surfaced in `ui/app/decon`.
 
-**N2 - Per-document validity interval with `as_of(timestamp)` temporal query.** Every record carries a typed `[valid_from, valid_to)` interval populated from the strongest available source (HTTP Last-Modified > schema.org datePublished > sitemap lastmod > Wayback first-seen > dataset native publication date > fetched_at). The interval propagates all the way into the token-shard manifest as a column over token-id ranges, and `as_of(timestamp)` returns the deterministic mixture as it would have been at any past instant - the foundation for contamination replay and time-conditioned training. Implemented in `processor/operators/validity.py`, `processor/iceberg_writer.py`, `ui/app/as-of`. The seed loader populates this column from each dataset's native publication metadata, so the `as_of('2024-06-01')` demo works on day 1, not after multi-day live polling.
+**N2 - Per-document validity interval with range exports.** Every record carries a typed `[valid_from, valid_to)` interval populated from the strongest available source evidence. DuckDB evaluates those intervals against the current Gold relation, while Datasets selects a date range and exports a pinned manifest plus JSONL/Parquet. This is record-validity time, not Iceberg snapshot time travel. Implemented in `processor/operators/validity.py`, `processor/iceberg_writer.py`, `processor/duckdb_api.py`, and `ui/app/datasets`.
 
-**N3 - Shadow-mode A/B mixture comparison via two `MixtureRecipe` CRDs.** Two `MixtureRecipe` CRDs subscribe to the same live `SourceFeed`, materialise separate Iceberg branches, a small proxy LM continuously trains on each branch on a rolling window, and per-domain perplexity deltas gate auto-promotion. Argo-Rollouts-style progressive delivery transplanted onto a streaming data-curation substrate. Implemented in `processor/mixture_controller/`, `ui/app/mixture`. The proxy LM is a documented stub with a clean swap-in interface.
+**N3 - Shadow-mode A/B mixture comparison via two `MixtureRecipe` CRDs.** This is deliberately future work. The repository contains the CRD, controller/UI skeleton, and proxy-runner interface, but it does not yet materialise two real Iceberg branches or train/evaluate equal-budget models. The final optional milestone is to place a short-lived remote GPU runner behind that interface and keep promotion in shadow-recommendation mode until its guards are proven.
 
 ## Architecture
 
 ```
                         +------------------+
-                        |  Next.js UI      |  dashboard, cockpit, decon viewer,
-                        +--------+---------+  as_of, mixtures
+                        |  Next.js UI      |  dashboard, documents, sources,
+                        +--------+---------+  benchmark safety, datasets
                                  |
                           REST/WebSocket/SSE
                                  |
@@ -37,12 +49,13 @@ These survived adversarial verification across 14 candidate claims; they are the
 | RSS / Atom /   |               |
 | Sitemap /      |               |
 | OAI-PMH /      |               |               +--------------------+
-| arXiv-HTML /   +-------------->|               |  Redpanda          |
+| arXiv HTML/PDF +-------------->|               |  Redpanda          |
 | GitHub Events /|               +-------------->+  topics:           |
 | GH Releases /  |   (live ingest pollers and    |  raw.fetched       |
 | GH Tarballs /  |    fetchers, KEDA-scaled)     |  docs.normalized   |
 | HF Hub /       |                               |  docs.curated      |
 | OpenReview     |                               |  decon.attest      |
+|                |                               |  curation.decisions|
 +----------------+                               +---------+----------+
 +--------------------------------+                         |
 | Seed loader (one-shot Bytewax) +------------------------>|  Kafka API
@@ -50,18 +63,18 @@ These survived adversarial verification across 14 candidate claims; they are the
 |  Edu + Stack-Edu + Wayback     |   +------------------------------------------------+
 +--------------------------------+   |  Bytewax curation dataflow (KEDA on lag)       |
                                      |                                                |
-                                     |  fetcher -> Resiliparse -> langID              |
+                                     |  fetcher -> Resiliparse/Docling -> langID      |
                                      |     -> Gopher/C4 taggers -> KenLM perplexity   |
                                      |     -> Rensa MinHash -> LSHBloom near-dup      |
-                                     |     -> FineWeb-Edu ONNX INT8 -> PII regex      |
+                                     |     -> source quality CPU -> PII/Presidio      |
                                      |     -> Decon-Gate (N1) + sign                  |
                                      |     -> validity-interval enricher (N2)         |
                                      |     -> Iceberg writer                          |
                                      +------------------------+-----------------------+
                                                               v
                                   +---------------------------+--------------+
-                                  |  MinIO (S3) + Apache Iceberg V3         |
-                                  |  bronze, silver, gold, decon_attestations|
+                                  |  MinIO (S3) + Apache Iceberg V2         |
+                                  |  science, decisions, gold, attestations |
                                   +-------------------+---------------------+
                                                       |
                                                       v
@@ -104,15 +117,16 @@ Detailed walkthrough in [`docs/architecture.md`](docs/architecture.md). Mermaid 
 |- processor/                Bytewax dataflows + curation operators
 |  |- operators/               extract (Resiliparse), langid, gopher, c4,
 |  |                           kenlm_score, minhash (Rensa), lshbloom,
-|  |                           quality (FineWeb-Edu ONNX), pii, validity
+|  |                           quality (FinePDFs/FineWeb/code), pii, validity
 |  |- seed/                    per-component HF dataset loaders
 |  |- mixture_controller/      kopf-based reconciler (N3)
-|  +- fetcher.py, curate.py, iceberg_writer.py, decon_gate.py, sign.py,
+|  +- fetcher.py, curate.py, scientific.py, scientific_policy.py,
+|     decision_cache.py, iceberg_writer.py, decon_gate.py, sign.py,
 |     seed_loader.py, tokenize.py
-|- ui/                       Next.js 14 App Router + shadcn/ui + TanStack Query
-|  |- app/{dashboard,sources,decon,as-of,mixture}
+|- ui/                       Next.js App Router + shadcn/ui + TanStack Query
+|  |- app/{dashboard,documents,sources,decon,datasets,mixture}
 |  |- app/api/               throughput SSE, decon verify, sources CRUD,
-|  |                           dashboard, duckdb query, mixture compare
+|  |                           dashboard, documents, exports, mixture compare
 |  +- components/, lib/duckdb-client.ts
 |- schemas/                  shared Pydantic v2 + JSON Schemas
 |  +- bronze.py, silver.py, gold.py, decon.py, code.py, sourcefeed.py,
@@ -136,7 +150,7 @@ The dev stack runs Redpanda single-node + MinIO via Docker Compose. No Kubernete
 # 1. boot Redpanda + MinIO
 make dev-up
 
-# 2. seed the four core topics
+# 2. seed the five core topics
 make seed-topics
 
 # 3. run the dev smoke test (compose up + topics + arxiv-html one-shot)
@@ -152,6 +166,13 @@ UIs while developing:
 - MinIO Console: http://localhost:9001 (`minioadmin` / `minioadmin`)
 
 Tear down with `make dev-down` (preserves volumes) or `make dev-reset` (destroys volumes).
+
+For the Podman-first full local path (processors, local Iceberg catalog,
+DuckDB APIs, Prometheus, and cockpit), use [`local/README.md`](local/README.md).
+The audited student-project scope and implementation plan are in
+[`docs/STUDENT_PROJECT_PLAN.md`](docs/STUDENT_PROJECT_PLAN.md); measured output
+from the validated nine-document CPU replay is in
+[`docs/LOCAL_PILOT_REPORT.md`](docs/LOCAL_PILOT_REPORT.md).
 
 ## Quickstart - k3s on DHBWCloud
 
@@ -231,11 +252,15 @@ After the measured blockers are resolved, the target grader walkthrough is:
 3. **Grafana** - throughput per stage, Redpanda lag per topic, quality-score histogram, and decon flag rate.
 4. **Cockpit** - live counters (last hour: ingested, curated, rejected by reason), per-source acceptance rates, quality histogram.
 5. **Decon-Gate viewer** - click a snapshot, see the signed certificate (per-benchmark hit counts, rejected hashes, signature verification status).
-6. **`as_of(timestamp)` view** - date picker; the table shows the deterministic token mixture as it would have been at that timestamp (powered by the seed loader on day 1).
+6. **`as_of(timestamp)` view** - date picker; the table shows records in the
+   current Gold relation whose `[valid_from, valid_to)` interval contains the
+   timestamp.
 7. **DuckDB query** - `SELECT lang, COUNT(*), SUM(tokens) FROM gold WHERE risk_tier=1 GROUP BY lang;`.
 8. **Trace correlation** - after a measured Tempo backend is installed, a fresh SourceFeed item can be followed by the `trace_id` materialised into the manifest.
 9. **Measured KEDA scale-up** - after capacity benchmarking, use the recorded load profile and replica limits to demonstrate lag-based scaling.
-10. **Failure recovery** - `kubectl delete pod` on a curator; Bytewax restores from RocksDB checkpoint and resumes without duplicates (Redpanda transactional consumer).
+10. **Failure recovery** - `kubectl delete pod` on a curator, then measure and
+    verify Bytewax recovery plus durable decision-cache, LSH, and Iceberg
+    idempotence; report Kafka replay events separately from unique durable rows.
 
 ## Why Redpanda + Bytewax (begründete Abweichung)
 
@@ -257,6 +282,8 @@ The lecture stack does not include a streaming bus or stream engine. This projec
 - [`docs/threat-model.md`](docs/threat-model.md) - STRIDE for the curator
 - [`docs/research-fulltext-and-code.md`](docs/research-fulltext-and-code.md) - mid-2026 fulltext + code acquisition research
 - [`docs/research-seed-corpus.md`](docs/research-seed-corpus.md) - mid-2026 seed mixture research
+- [`docs/STUDENT_PROJECT_PLAN.md`](docs/STUDENT_PROJECT_PLAN.md) - audited state, focused scope, CPU visual path, and local test plan
+- [`docs/LOCAL_PILOT_REPORT.md`](docs/LOCAL_PILOT_REPORT.md) - measured Podman replay, model backends, routes, resources, and UI verification
 
 ## License
 

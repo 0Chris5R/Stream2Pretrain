@@ -29,7 +29,7 @@ from pyiceberg.types import (  # noqa: E402
     LongType,
     NestedField,
     StringType,
-    TimestampType,
+    TimestamptzType,
 )
 
 
@@ -40,8 +40,8 @@ def _iceberg_schema() -> Schema:
         NestedField(2, "text", StringType(), required=True),
         NestedField(3, "lang", StringType(), required=True),
         NestedField(4, "tokens", LongType(), required=True),
-        NestedField(5, "valid_from", TimestampType(), required=True),
-        NestedField(6, "valid_to", TimestampType(), required=False),
+        NestedField(5, "valid_from", TimestamptzType(), required=True),
+        NestedField(6, "valid_to", TimestamptzType(), required=False),
     )
 
 
@@ -63,9 +63,7 @@ def gold_table() -> tuple[SqlCatalog, str]:
         },
     )
     catalog.create_namespace("gold")
-    table = catalog.create_table(
-        "gold.curated", schema=_iceberg_schema()
-    )
+    table = catalog.create_table("gold.curated", schema=_iceberg_schema())
 
     base = datetime(2026, 1, 1, tzinfo=UTC)
     rows = [
@@ -126,15 +124,11 @@ def test_validity_interval_filter_returns_in_window_rows(
     table = catalog.load_table(name)
     target = datetime(2026, 2, 15, tzinfo=UTC)
     target_iso = target.isoformat()
-    arrow = (
-        table.scan(
-            row_filter=(
-                f"valid_from <= '{target_iso}' "
-                f"AND (valid_to IS NULL OR valid_to > '{target_iso}')"
-            ),
-        )
-        .to_arrow()
-    )
+    arrow = table.scan(
+        row_filter=(
+            f"valid_from <= '{target_iso}' AND (valid_to IS NULL OR valid_to > '{target_iso}')"
+        ),
+    ).to_arrow()
     doc_ids = sorted(arrow.column("doc_id").to_pylist())
     expected = sorted(["sha256:" + "a" * 64, "sha256:" + "b" * 64])
     assert doc_ids == expected, f"as_of({target}) returned {doc_ids}"
@@ -159,8 +153,6 @@ def test_time_travel_returns_subset_at_earlier_snapshot(
     catalog, name = gold_table
     table = catalog.load_table(name)
     first_snapshot = next(iter(table.snapshots()))
-    arrow = (
-        table.scan(snapshot_id=first_snapshot.snapshot_id).to_arrow()
-    )
+    arrow = table.scan(snapshot_id=first_snapshot.snapshot_id).to_arrow()
     doc_ids = arrow.column("doc_id").to_pylist()
     assert doc_ids == ["sha256:" + "a" * 64]

@@ -11,6 +11,21 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 
 ## Decision log
 
+### 2026-08-15 - Curation product execution contract locked
+
+- `docs/CURATION_PRODUCT_EXECUTION_PLAN.md` is the binding source of truth for
+  the post-pilot scoring, OCR, benchmark-safety, source-aware classifier, UI,
+  export, validation, and Kubernetes-capacity work.
+- Do not silently reduce, omit, proxy, or relabel its requirements because an
+  implementation is expensive. Scope changes require an explicit team decision
+  recorded in that file.
+- FinePDFs Edu v2 is the expected scientific-quality default, subject to the
+  recorded same-sample comparison with FineWeb-Edu.
+- The normal UI must be concise and self-explanatory. Detailed limitations and
+  implementation exposition live in documentation or collapsed audit views,
+  not as repeated page prose.
+- N3 shadow-mode mixture training is the only explicitly deferred feature.
+
 ### 2026-06-15 - Project framing locked
 - Use case: streaming-first LLM pretraining data curator on Kubernetes.
 - Architecture: Kappa (streaming-only), per the lecture default.

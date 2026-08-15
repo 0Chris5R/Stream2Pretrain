@@ -14,16 +14,17 @@ import type { QualityHistogram } from '@/lib/schemas';
 interface Props {
   data: QualityHistogram;
   height?: number;
+  series?: 'buckets' | 'edu_buckets';
 }
 
 /**
- * Bar chart of FineWeb-Edu quality scores in [0..5].
+ * Bar chart for one explicitly named 0..5 quality signal.
  * Buckets are produced by the processor and arrive sorted ascending.
  */
-export function QualityHistogramChart({ data, height = 220 }: Props) {
+export function QualityHistogramChart({ data, height = 220, series = 'buckets' }: Props) {
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data.buckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+      <BarChart data={data[series]} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
         <XAxis
           dataKey="score"

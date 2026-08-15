@@ -17,9 +17,14 @@ RUN pip install --no-cache-dir uv==0.4.27
 
 WORKDIR /src
 COPY pyproject.toml /src/pyproject.toml
+COPY README.md /src/README.md
 COPY schemas /src/schemas
-COPY ingest/common /src/ingest/common
-COPY ingest/arxiv_html_fetcher /src/ingest/arxiv_html_fetcher
+# uv validates every declared workspace member before resolving even when the
+# command installs only this fetcher. The full Python source tree is under 4 MB
+# and keeps the container build consistent with the root workspace metadata.
+COPY ingest /src/ingest
+COPY processor /src/processor
+COPY tests /src/tests
 
 RUN uv pip install --system --no-cache \
         -e . \
@@ -35,6 +40,7 @@ RUN groupadd --system --gid 65532 nonroot \
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/s2p-arxiv-html-fetcher /usr/local/bin/s2p-arxiv-html-fetcher
 COPY --from=builder /src /app
+ENV PYTHONPATH=/app
 WORKDIR /app
 USER nonroot
 ENTRYPOINT ["s2p-arxiv-html-fetcher"]

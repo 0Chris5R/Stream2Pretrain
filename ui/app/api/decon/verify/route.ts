@@ -31,7 +31,7 @@ import { UPSTREAM } from '@/lib/upstream';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const RequestSchema = z.object({ snapshot_id: z.number().int().nonnegative() });
+const RequestSchema = z.object({ snapshot_id: z.string().regex(/^\d+$/) });
 
 const COSIGN_BIN = process.env.COSIGN_BIN ?? 'cosign';
 const USE_COSIGN = process.env.S2P_USE_COSIGN === '1';
@@ -101,7 +101,8 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
 
   const { signature, signer_cert, ...payload } = attestation.data;
-  const canonical = Buffer.from(canonicalJSONStringify(payload), 'utf8');
+  const canonicalPayload = { ...payload, snapshot_id: BigInt(payload.snapshot_id) };
+  const canonical = Buffer.from(canonicalJSONStringify(canonicalPayload), 'utf8');
   const verified_at = new Date().toISOString();
   const signerSubject = extractSubject(signer_cert);
 

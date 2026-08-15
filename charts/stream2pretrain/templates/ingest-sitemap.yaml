@@ -1,4 +1,4 @@
-{{- if .Values.sources.sitemap.enabled }}
+{{- if or .Values.sources.sitemap.enabled .Values.mixtureController.enabled }}
 {{- $component := "ingest-sitemap" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 apiVersion: batch/v1
@@ -9,6 +9,7 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
+  suspend: {{ not .Values.sources.sitemap.enabled }}
   schedule: {{ .Values.sources.sitemap.schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3

@@ -12,7 +12,7 @@ import re
 import time
 from collections.abc import Sequence
 from typing import Any, Protocol
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 _RELATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 
@@ -32,13 +32,19 @@ class DuckDBQueryService:
         connection: DuckDBConnection,
         *,
         gold_relation: str = "gold",
+        decisions_relation: str = "decisions",
         refresh_iceberg: bool = False,
+        artifact_store: ScientificArtifactStore | None = None,
     ) -> None:
         if not _RELATION_RE.fullmatch(gold_relation):
             raise ValueError("gold_relation must be a simple DuckDB relation name")
+        if not _RELATION_RE.fullmatch(decisions_relation):
+            raise ValueError("decisions_relation must be a simple relation name")
         self._conn = connection
         self._gold = gold_relation
+        self._decisions = decisions_relation
         self._refresh_iceberg = refresh_iceberg
+        self._artifact_store = artifact_store
 
     @classmethod
     def from_env(cls) -> DuckDBQueryService:
@@ -46,10 +52,21 @@ class DuckDBQueryService:
 
         db_path = os.environ.get("S2P_DUCKDB_DATABASE", ":memory:")
         gold_relation = os.environ.get("S2P_DUCKDB_GOLD_RELATION", "gold")
+        decisions_relation = os.environ.get("S2P_DUCKDB_DECISIONS_RELATION", "decisions")
         conn = duckdb.connect(db_path, read_only=False)
         _load_extensions(conn)
+        if os.environ.get("S2P_DUCKDB_UNSAFE_VERSION_GUESSING") == "1":
+            # The laptop profile uses a single PyIceberg SQLite-catalog writer,
+            # which does not maintain DuckDB's optional version-hint.text.
+            conn.execute("SET unsafe_enable_version_guessing = true")
         _configure_s3(conn)
-        return cls(conn, gold_relation=gold_relation, refresh_iceberg=True)
+        return cls(
+            conn,
+            gold_relation=gold_relation,
+            decisions_relation=decisions_relation,
+            refresh_iceberg=True,
+            artifact_store=ScientificArtifactStore.from_env(),
+        )
 
     def as_of(self, ts: str) -> list[dict[str, Any]]:
         sql = f"""
@@ -63,10 +80,10 @@ class DuckDBQueryService:
         GROUP BY source_feed
         ORDER BY tokens DESC, source_feed ASC
         """
-        return self._rows(sql, [ts, ts])
+        return self._rows(sql, [ts, ts], relation=self._gold)
 
     def quality_histogram(self) -> dict[str, list[dict[str, Any]]]:
-        sql = f"""
+        composite_sql = f"""
         SELECT
           CAST(FLOOR(quality_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
@@ -74,7 +91,519 @@ class DuckDBQueryService:
         GROUP BY score
         ORDER BY score ASC
         """
-        return {"buckets": self._rows(sql, [])}
+        edu_sql = f"""
+        SELECT
+          CAST(FLOOR(edu_score * 2) / 2 AS DOUBLE) AS score,
+          CAST(COUNT(*) AS BIGINT) AS count
+        FROM {self._gold}
+        GROUP BY score
+        ORDER BY score ASC
+        """
+        return {
+            "buckets": self._rows(composite_sql, [], relation=self._gold),
+            "edu_buckets": self._rows(edu_sql, [], relation=self._gold),
+        }
+
+    def curation_summary(self) -> list[dict[str, Any]]:
+        """Aggregate the durable decision stream by final corpus route."""
+        sql = f"""
+        SELECT
+          route,
+          CAST(COUNT(*) AS BIGINT) AS documents,
+          CAST(COALESCE(SUM(source_word_count), 0) AS BIGINT) AS source_words,
+          CAST(COALESCE(SUM(training_word_count), 0) AS BIGINT) AS training_words,
+          CAST(COALESCE(AVG(quality_score), 0) AS DOUBLE) AS mean_quality,
+          CAST(COALESCE(AVG(edu_score), 0) AS DOUBLE) AS mean_edu
+        FROM {self._decisions}
+        GROUP BY route
+        ORDER BY documents DESC, route ASC
+        """
+        return self._rows(sql, [], relation=self._decisions)
+
+    def corpus_overview(self) -> dict[str, Any]:
+        """Return restart-safe headline counts from durable Iceberg tables.
+
+        Prometheus process counters correctly describe activity since a worker
+        started, but they cannot describe the current corpus after recovery.
+        Dashboard totals therefore come from the decision and Gold tables.
+        """
+        decision_totals = self._rows(
+            f"""
+            SELECT CAST(COUNT(*) AS BIGINT) AS durable_decisions
+            FROM {self._decisions}
+            """,
+            [],
+            relation=self._decisions,
+        )
+        training_totals = self._rows(
+            f"""
+            SELECT CAST(COUNT(*) AS BIGINT) AS training_export_documents
+            FROM {self._gold}
+            """,
+            [],
+            relation=self._gold,
+        )
+        reasons = self._rows(
+            f"""
+            SELECT reason, CAST(COUNT(*) AS BIGINT) AS count
+            FROM {self._decisions}, UNNEST(reject_reasons) AS rejected(reason)
+            GROUP BY reason
+            ORDER BY count DESC, reason ASC
+            """,
+            [],
+            relation=self._decisions,
+        )
+        decision_sources = self._rows(
+            f"""
+            SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
+            FROM {self._decisions}
+            GROUP BY source_feed
+            ORDER BY source_feed ASC
+            """,
+            [],
+            relation=self._decisions,
+        )
+        accepted_sources = self._rows(
+            f"""
+            SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS accepted
+            FROM {self._gold}
+            GROUP BY source_feed
+            ORDER BY source_feed ASC
+            """,
+            [],
+            relation=self._gold,
+        )
+        accepted_by_source = {str(row["source"]): int(row["accepted"]) for row in accepted_sources}
+        per_source = [
+            {
+                "source": str(row["source"]),
+                "accepted": accepted_by_source.get(str(row["source"]), 0),
+                "total": int(row["total"]),
+            }
+            for row in decision_sources
+        ]
+        return {
+            "durable_decisions": int(decision_totals[0]["durable_decisions"]),
+            "training_export_documents": int(training_totals[0]["training_export_documents"]),
+            "rejected_by_reason": {str(row["reason"]): int(row["count"]) for row in reasons},
+            "per_source_acceptance": per_source,
+        }
+
+    def documents(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 25,
+        search: str | None = None,
+        routes: Sequence[str] = (),
+        sources: Sequence[str] = (),
+        source_formats: Sequence[str] = (),
+        date_from: str | None = None,
+        date_to: str | None = None,
+        tags: Sequence[str] = (),
+        rejection_reasons: Sequence[str] = (),
+        has_figures: bool | None = None,
+        has_tables: bool | None = None,
+        has_equations: bool | None = None,
+        include_fixtures: bool = False,
+        min_edu: float | None = None,
+        max_edu: float | None = None,
+        min_quality: float | None = None,
+        max_quality: float | None = None,
+        sort: str = "newest",
+    ) -> dict[str, Any]:
+        """Return a paginated, server-filtered collection of durable decisions."""
+        bounded_page = max(1, page)
+        bounded_size = max(1, min(page_size, 100))
+        where, params = self._document_where(
+            search=search,
+            routes=routes,
+            sources=sources,
+            source_formats=source_formats,
+            date_from=date_from,
+            date_to=date_to,
+            tags=tags,
+            rejection_reasons=rejection_reasons,
+            has_figures=has_figures,
+            has_tables=has_tables,
+            has_equations=has_equations,
+            include_fixtures=include_fixtures,
+            min_edu=min_edu,
+            max_edu=max_edu,
+            min_quality=min_quality,
+            max_quality=max_quality,
+        )
+        order_by = {
+            "newest": "valid_from DESC, doc_id ASC",
+            "oldest": "valid_from ASC, doc_id ASC",
+            "quality_desc": "quality_score DESC, valid_from DESC",
+            "edu_desc": "edu_score DESC, valid_from DESC",
+            "perplexity_asc": "perplexity ASC, valid_from DESC",
+        }.get(sort, "valid_from DESC, doc_id ASC")
+        sql = f"""
+        SELECT
+          doc_id,
+          TRIM(LEADING '# ' FROM SPLIT_PART(text, '\n', 1)) AS title,
+          source_feed,
+          source_format,
+          lang,
+          CAST(valid_from AS VARCHAR) AS valid_from,
+          quality_score,
+          edu_score,
+          structural_quality_score,
+          reasoning_score,
+          benchmark_score,
+          perplexity,
+          risk_tier,
+          route,
+          content_tags,
+          reject_reasons,
+          source_word_count,
+          training_word_count,
+          included_section_count,
+          excluded_section_count,
+          figure_count,
+          table_count,
+          equation_count,
+          citation_count,
+          scientific_artifact_s3_uri,
+          SUBSTR(text, 1, 320) AS text_preview,
+          CAST(COUNT(*) OVER () AS BIGINT) AS _total
+        FROM {self._decisions}
+        {where}
+        ORDER BY {order_by}
+        LIMIT ? OFFSET ?
+        """
+        rows = self._rows(
+            sql,
+            [*params, bounded_size, (bounded_page - 1) * bounded_size],
+            relation=self._decisions,
+        )
+        total = int(rows[0].pop("_total")) if rows else 0
+        return {
+            "items": rows,
+            "total": total,
+            "page": bounded_page,
+            "page_size": bounded_size,
+            "pages": (total + bounded_size - 1) // bounded_size,
+        }
+
+    def document_facets(self, *, include_fixtures: bool = False) -> dict[str, list[str]]:
+        """Return collection values used by compact filter controls."""
+        fixture_clause = "" if include_fixtures else "WHERE source_feed NOT LIKE 'local-%'"
+        sources = self._rows(
+            f"SELECT DISTINCT source_feed AS value FROM {self._decisions} "
+            f"{fixture_clause} ORDER BY value",
+            [],
+            relation=self._decisions,
+        )
+        formats = self._rows(
+            f"SELECT DISTINCT source_format AS value FROM {self._decisions} "
+            f"{fixture_clause} ORDER BY value",
+            [],
+            relation=self._decisions,
+        )
+        conjunction = "WHERE" if not fixture_clause else "AND"
+        tags = self._rows(
+            f"SELECT DISTINCT tag AS value FROM {self._decisions}, "
+            f"UNNEST(content_tags) AS values(tag) {fixture_clause} "
+            f"{conjunction} tag IS NOT NULL ORDER BY value",
+            [],
+            relation=self._decisions,
+        )
+        reasons = self._rows(
+            f"SELECT DISTINCT reason AS value FROM {self._decisions}, "
+            f"UNNEST(reject_reasons) AS values(reason) {fixture_clause} "
+            f"{conjunction} reason IS NOT NULL ORDER BY value",
+            [],
+            relation=self._decisions,
+        )
+        return {
+            "sources": [str(row["value"]) for row in sources],
+            "source_formats": [str(row["value"]) for row in formats],
+            "content_tags": [str(row["value"]) for row in tags],
+            "rejection_reasons": [str(row["value"]) for row in reasons],
+        }
+
+    def dataset_rows(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        routes: Sequence[str],
+        sources: Sequence[str] = (),
+        source_formats: Sequence[str] = (),
+        tags: Sequence[str] = (),
+        min_edu: float | None = None,
+        min_quality: float | None = None,
+        include_structured: bool = True,
+        limit: int = 5_000,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded, reproducible JSONL-ready training export."""
+        where, params = self._document_where(
+            routes=routes,
+            sources=sources,
+            source_formats=source_formats,
+            date_from=date_from,
+            date_to=date_to,
+            tags=tags,
+            min_edu=min_edu,
+            min_quality=min_quality,
+            include_fixtures=False,
+        )
+        sql = f"""
+        SELECT
+          doc_id, text, source_feed, source_format, CAST(valid_from AS VARCHAR) AS valid_from,
+          route, content_tags, quality_score, edu_score, structural_quality_score,
+          reasoning_score, benchmark_score, tokens, policy_revision, scoring_version,
+          classifier_revision, projection_version, scientific_artifact_s3_uri
+        FROM {self._decisions}
+        {where}
+          AND risk_tier = 1
+          AND ARRAY_LENGTH(reject_reasons) = 0
+        ORDER BY valid_from ASC, doc_id ASC
+        LIMIT ?
+        """
+        rows = self._rows(sql, [*params, max(1, min(limit, 5_000))], relation=self._decisions)
+        if not include_structured:
+            for row in rows:
+                row["text"] = _without_structured_surrogates(str(row["text"]))
+        return rows
+
+    def dataset_summary(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        routes: Sequence[str],
+        sources: Sequence[str] = (),
+        source_formats: Sequence[str] = (),
+        tags: Sequence[str] = (),
+        min_edu: float | None = None,
+        min_quality: float | None = None,
+        include_structured: bool = True,
+    ) -> dict[str, Any]:
+        """Return reproducible selection metadata before an export is created."""
+        where, params = self._document_where(
+            routes=routes,
+            sources=sources,
+            source_formats=source_formats,
+            date_from=date_from,
+            date_to=date_to,
+            tags=tags,
+            min_edu=min_edu,
+            min_quality=min_quality,
+            include_fixtures=False,
+        )
+        rows = self._rows(
+            f"""
+            SELECT
+              CAST(COUNT(*) AS BIGINT) AS documents,
+              CAST(COALESCE(SUM(tokens), 0) AS BIGINT) AS tokens,
+              CAST(COALESCE(SUM(source_word_count), 0) AS BIGINT) AS source_words,
+              CAST(COALESCE(SUM(training_word_count), 0) AS BIGINT) AS projection_words,
+              CAST(COUNT(DISTINCT source_feed) AS BIGINT) AS source_count
+            FROM {self._decisions}
+            {where}
+              AND risk_tier = 1
+              AND ARRAY_LENGTH(reject_reasons) = 0
+            """,
+            params,
+            relation=self._decisions,
+        )[0]
+        revisions = self._rows(
+            f"""
+            SELECT DISTINCT
+              policy_revision, scoring_version, classifier_revision, classifier_backend,
+              projection_version, extraction_pipeline, benchmark_set_version,
+              decon_embedding_revision, pii_scanner_revision, lang_detector_revision,
+              tokenizer_revision, perplexity_scorer, minhash_backend, lsh_backend
+            FROM {self._decisions}
+            {where}
+              AND risk_tier = 1
+              AND ARRAY_LENGTH(reject_reasons) = 0
+            ORDER BY policy_revision, classifier_revision
+            """,
+            params,
+            relation=self._decisions,
+        )
+        revision_keys = (
+            "policy_revision",
+            "scoring_version",
+            "classifier_revision",
+            "classifier_backend",
+            "projection_version",
+            "extraction_pipeline",
+            "benchmark_set_version",
+            "decon_embedding_revision",
+            "pii_scanner_revision",
+            "lang_detector_revision",
+            "tokenizer_revision",
+            "perplexity_scorer",
+            "minhash_backend",
+            "lsh_backend",
+        )
+        decisions_table = os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
+        return {
+            **rows,
+            "selection": {
+                "date_from": date_from,
+                "date_to": date_to,
+                "routes": list(routes),
+                "sources": list(sources),
+                "source_formats": list(source_formats),
+                "content_tags": list(tags),
+                "min_edu": min_edu,
+                "min_quality": min_quality,
+                "include_structured": include_structured,
+                "fixtures_included": False,
+            },
+            "manifest": {
+                "revisions": {
+                    key: sorted(
+                        {str(row[key]) for row in revisions if row.get(key) not in {None, ""}}
+                    )
+                    for key in revision_keys
+                },
+                "decision_table": _table_snapshot_manifest(decisions_table),
+                "export_limit": 5_000,
+            },
+        }
+
+    def _document_where(
+        self,
+        *,
+        search: str | None = None,
+        routes: Sequence[str] = (),
+        sources: Sequence[str] = (),
+        source_formats: Sequence[str] = (),
+        date_from: str | None = None,
+        date_to: str | None = None,
+        tags: Sequence[str] = (),
+        rejection_reasons: Sequence[str] = (),
+        has_figures: bool | None = None,
+        has_tables: bool | None = None,
+        has_equations: bool | None = None,
+        include_fixtures: bool = False,
+        min_edu: float | None = None,
+        max_edu: float | None = None,
+        min_quality: float | None = None,
+        max_quality: float | None = None,
+    ) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if not include_fixtures:
+            clauses.append("source_feed NOT LIKE 'local-%'")
+        if search and search.strip():
+            clauses.append(
+                "(LOWER(text) LIKE ? OR LOWER(doc_id) LIKE ? OR LOWER(source_feed) LIKE ?)"
+            )
+            needle = f"%{search.strip().lower()}%"
+            params.extend([needle, needle, needle])
+        for column, values in (
+            ("route", routes),
+            ("source_feed", sources),
+            ("source_format", source_formats),
+        ):
+            if values:
+                clauses.append("(" + " OR ".join(f"{column} = ?" for _ in values) + ")")
+                params.extend(values)
+        for column, values in (("content_tags", tags), ("reject_reasons", rejection_reasons)):
+            for value in values:
+                clauses.append(f"LIST_CONTAINS({column}, ?)")
+                params.append(value)
+        if date_from:
+            clauses.append("valid_from >= CAST(? AS TIMESTAMP)")
+            params.append(date_from)
+        if date_to:
+            clauses.append("valid_from <= CAST(? AS TIMESTAMP)")
+            params.append(date_to)
+        for presence_column, present in (
+            ("figure_count", has_figures),
+            ("table_count", has_tables),
+            ("equation_count", has_equations),
+        ):
+            if present is not None:
+                clauses.append(f"{presence_column} {'>' if present else '='} 0")
+        for score_column, threshold_operator, threshold in (
+            ("edu_score", ">=", min_edu),
+            ("edu_score", "<=", max_edu),
+            ("quality_score", ">=", min_quality),
+            ("quality_score", "<=", max_quality),
+        ):
+            if threshold is not None:
+                clauses.append(f"{score_column} {threshold_operator} ?")
+                params.append(threshold)
+        return ("WHERE " + " AND ".join(clauses) if clauses else "", params)
+
+    def document(self, doc_id: str) -> dict[str, Any] | None:
+        """Return one full decision with its structured scientific artifact."""
+        sql = f"""
+        SELECT
+          doc_id, TRIM(LEADING '# ' FROM SPLIT_PART(text, '\n', 1)) AS title,
+          text, source_feed, source_format, lang, CAST(valid_from AS VARCHAR) AS valid_from,
+          quality_score, edu_score, risk_tier, reject_reasons, pii_flags,
+          contaminated_with, extraction_pipeline, classifier_revision, classifier_backend,
+          scoring_version, policy_revision, license, license_source,
+          spdx_license, spdx_license_source,
+          scientific_artifact_s3_uri, figure_count, table_count, equation_count,
+          citation_count, extraction_warnings, lang_score, gopher_pass,
+          c4_nopunc_pass, c4_curly_brace_pass, c4_lorem_ipsum_pass,
+          c4_fraction_lines_with_punct, perplexity, perplexity_bucket,
+          perplexity_scorer, near_duplicate, near_dup_cluster_id,
+          minhash_backend, minhash_num_perms, lsh_backend,
+          structural_quality_score, extraction_completeness, reasoning_score,
+          benchmark_score, route, eligible_routes, route_reasons, content_tags,
+          segment_scores_json, projection_version, source_word_count,
+          training_word_count, included_section_count, excluded_section_count,
+          excluded_sections, metadata_pii_flags, removed_body_pii_flags,
+          pii_action, pii_scanner_revision, lang_detector_revision,
+          tokenizer_revision, gopher_word_count, gopher_mean_word_len,
+          gopher_stopword_ratio, gopher_bullet_line_ratio,
+          gopher_ellipsis_line_ratio, gopher_symbol_word_ratio,
+          gopher_alpha_word_ratio, decon_exact_matches,
+          decon_semantic_matches, decon_max_similarity, decon_ngram_size,
+          decon_embedding_revision, benchmark_set_version
+        FROM {self._decisions}
+        WHERE doc_id = ?
+        ORDER BY valid_from DESC
+        LIMIT 1
+        """
+        rows = self._rows(sql, [doc_id], relation=self._decisions)
+        if not rows:
+            return None
+        row = rows[0]
+        try:
+            import orjson
+
+            parsed_scores = orjson.loads(str(row.pop("segment_scores_json", "[]")))
+            row["segment_scores"] = parsed_scores if isinstance(parsed_scores, list) else []
+        except Exception:
+            row["segment_scores"] = []
+        uri = row.get("scientific_artifact_s3_uri")
+        row["scientific_artifact"] = (
+            self._artifact_store.read_json(str(uri))
+            if uri and self._artifact_store is not None
+            else None
+        )
+        return row
+
+    def figure(self, doc_id: str, figure_id: str) -> tuple[bytes, str] | None:
+        """Load one figure through its structured artifact."""
+        document = self.document(doc_id)
+        if not document or self._artifact_store is None:
+            return None
+        artifact = document.get("scientific_artifact")
+        if not isinstance(artifact, dict):
+            return None
+        for figure in artifact.get("figures", []):
+            if not isinstance(figure, dict) or figure.get("figure_id") != figure_id:
+                continue
+            uri = figure.get("asset_s3_uri")
+            if not uri:
+                return None
+            return self._artifact_store.read_bytes(str(uri))
+        return None
 
     def safe_query(self, sql: str, params: Sequence[Any]) -> dict[str, Any]:
         stripped = sql.strip().rstrip(";")
@@ -83,12 +612,34 @@ class DuckDBQueryService:
         if ";" in stripped:
             raise ValueError("multiple SQL statements are not allowed")
         started = time.perf_counter()
-        rows = self._rows(stripped, params)
+        if self._refresh_iceberg:
+            _register_iceberg_relation(
+                self._conn,
+                self._gold,
+                os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated"),
+            )
+            _register_iceberg_relation(
+                self._conn,
+                self._decisions,
+                os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions"),
+            )
+        rows = self._rows(stripped, params, relation=None)
         return {"rows": rows, "durationMs": (time.perf_counter() - started) * 1000.0}
 
-    def _rows(self, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
-        if self._refresh_iceberg:
-            _register_gold_relation(self._conn, self._gold)
+    def _rows(
+        self,
+        sql: str,
+        params: Sequence[Any],
+        *,
+        relation: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if self._refresh_iceberg and relation is not None:
+            table_name = (
+                os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated")
+                if relation == self._gold
+                else os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
+            )
+            _register_iceberg_relation(self._conn, relation, table_name)
         result = self._conn.execute(sql, params)
         names = [str(col[0]) for col in (result.description or [])]
         return [dict(zip(names, row, strict=True)) for row in result.fetchall()]
@@ -129,56 +680,87 @@ def _configure_s3(conn: DuckDBConnection) -> None:
 
 def _register_gold_relation(conn: DuckDBConnection, relation: str) -> None:
     """Expose the Polaris Iceberg Gold table as the local DuckDB relation."""
+    _register_iceberg_relation(conn, relation, os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated"))
+
+
+def _register_iceberg_relation(conn: DuckDBConnection, relation: str, table_name: str) -> None:
+    """Expose one configured Iceberg table as a DuckDB view."""
     if not _RELATION_RE.fullmatch(relation):
         raise ValueError("gold_relation must be a simple DuckDB relation name")
-    location = _load_gold_table_location()
+    location = _load_table_location(table_name)
     if location is None:
         _create_empty_gold_relation(conn, relation)
         return
+    scan = f"iceberg_scan({_sql_string(location)}, allow_moved_paths = true)"
     conn.execute(
         f"CREATE OR REPLACE VIEW {relation} AS "
-        f"SELECT * FROM iceberg_scan({_sql_string(location)}, allow_moved_paths = true)"
+        f"SELECT * FROM {scan} "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY doc_id, scoring_version, classifier_revision, policy_revision "
+        "ORDER BY trace_id ASC"
+        ") = 1"
     )
 
 
 def _load_gold_table_location() -> str | None:
-    """Resolve the Gold table location through Polaris, returning None if absent."""
-    uri = os.environ.get("POLARIS_URI")
-    warehouse = os.environ.get("POLARIS_WAREHOUSE")
-    if not uri or not warehouse:
-        return None
-    from pyiceberg.catalog import load_catalog
+    """Resolve the Gold location through the configured runtime catalog."""
+    return _load_table_location(os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated"))
 
-    props: dict[str, str] = {
-        "uri": uri,
-        "warehouse": warehouse,
-        "s3.endpoint": os.environ.get("MINIO_ENDPOINT", ""),
-        "s3.access-key-id": os.environ.get("MINIO_ACCESS_KEY")
-        or os.environ.get("AWS_ACCESS_KEY_ID", ""),
-        "s3.secret-access-key": os.environ.get("MINIO_SECRET_KEY")
-        or os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
-        "s3.region": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-        "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
-    }
-    token = os.environ.get("POLARIS_TOKEN")
-    if token:
-        props["token"] = token
-    credential = os.environ.get("POLARIS_CREDENTIAL")
-    if credential:
-        props["credential"] = credential
-        props["scope"] = os.environ.get("POLARIS_SCOPE", "PRINCIPAL_ROLE:ALL")
+
+def _load_table_location(table_name: str) -> str | None:
+    """Resolve one table location through the configured runtime catalog."""
+    from processor.iceberg_catalog import load_runtime_catalog
+
+    catalog_type = os.environ.get("S2P_ICEBERG_CATALOG_TYPE", "rest").strip().lower()
+    if catalog_type != "sql" and not (
+        os.environ.get("POLARIS_URI") and os.environ.get("POLARIS_WAREHOUSE")
+    ):
+        return None
     namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
         "ICEBERG_NAMESPACE", "gold"
     )
-    table_name = os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated")
     try:
-        table = load_catalog("polaris", **props).load_table((namespace, table_name))
+        table = load_runtime_catalog().load_table((namespace, table_name))
     except Exception as exc:
         if _is_missing_iceberg_table(exc):
             return None
         raise
     location = getattr(table, "location", None)
     return str(location()) if callable(location) else str(location)
+
+
+def _table_snapshot_manifest(table_name: str) -> dict[str, Any]:
+    """Return the current Iceberg identity without pretending it is immutable."""
+    from processor.iceberg_catalog import load_runtime_catalog
+
+    namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
+        "ICEBERG_NAMESPACE", "gold"
+    )
+    result: dict[str, Any] = {
+        "namespace": namespace,
+        "table": table_name,
+        "snapshot_id": None,
+        "metadata_location": None,
+    }
+    catalog_type = os.environ.get("S2P_ICEBERG_CATALOG_TYPE", "rest").strip().lower()
+    if catalog_type != "sql" and not (
+        os.environ.get("POLARIS_URI") and os.environ.get("POLARIS_WAREHOUSE")
+    ):
+        return result
+    try:
+        table = load_runtime_catalog().load_table((namespace, table_name))
+    except Exception as exc:
+        if _is_missing_iceberg_table(exc):
+            return result
+        raise
+    snapshot = table.current_snapshot()
+    # Iceberg snapshot IDs are 64-bit integers and commonly exceed JavaScript's
+    # exact integer range. Preserve the identifier byte-for-byte over JSON.
+    result["snapshot_id"] = str(snapshot.snapshot_id) if snapshot is not None else None
+    result["metadata_location"] = getattr(table, "metadata_location", None) or getattr(
+        table.metadata, "metadata_location", None
+    )
+    return result
 
 
 def _is_missing_iceberg_table(exc: Exception) -> bool:
@@ -216,10 +798,112 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           CAST(NULL AS VARCHAR) AS source_format,
           CAST(NULL AS VARCHAR) AS extraction_pipeline,
           CAST(NULL AS VARCHAR) AS spdx_license,
-          CAST(NULL AS VARCHAR) AS spdx_license_source
+          CAST(NULL AS VARCHAR) AS spdx_license_source,
+          CAST(NULL AS VARCHAR) AS scientific_artifact_s3_uri,
+          CAST(0 AS INTEGER) AS figure_count,
+          CAST(0 AS INTEGER) AS table_count,
+          CAST(0 AS INTEGER) AS equation_count,
+          CAST(0 AS INTEGER) AS citation_count,
+          CAST([] AS VARCHAR[]) AS extraction_warnings
+          , CAST(0 AS DOUBLE) AS lang_score
+          , CAST(TRUE AS BOOLEAN) AS gopher_pass
+          , CAST(TRUE AS BOOLEAN) AS c4_nopunc_pass
+          , CAST(TRUE AS BOOLEAN) AS c4_curly_brace_pass
+          , CAST(TRUE AS BOOLEAN) AS c4_lorem_ipsum_pass
+          , CAST(1 AS DOUBLE) AS c4_fraction_lines_with_punct
+          , CAST(0 AS DOUBLE) AS perplexity
+          , CAST('head' AS VARCHAR) AS perplexity_bucket
+          , CAST('unknown' AS VARCHAR) AS perplexity_scorer
+          , CAST(FALSE AS BOOLEAN) AS near_duplicate
+          , CAST(NULL AS VARCHAR) AS near_dup_cluster_id
+          , CAST('unknown' AS VARCHAR) AS minhash_backend
+          , CAST('unknown' AS VARCHAR) AS lsh_backend
+          , CAST(0 AS INTEGER) AS minhash_num_perms
+          , CAST(0 AS DOUBLE) AS structural_quality_score
+          , CAST(0 AS DOUBLE) AS extraction_completeness
+          , CAST(0 AS DOUBLE) AS reasoning_score
+          , CAST(0 AS DOUBLE) AS benchmark_score
+          , CAST('quarantine' AS VARCHAR) AS route
+          , CAST([] AS VARCHAR[]) AS eligible_routes
+          , CAST([] AS VARCHAR[]) AS route_reasons
+          , CAST([] AS VARCHAR[]) AS content_tags
+          , CAST('[]' AS VARCHAR) AS segment_scores_json
+          , CAST('document-v1' AS VARCHAR) AS projection_version
+          , CAST(0 AS INTEGER) AS source_word_count
+          , CAST(0 AS INTEGER) AS training_word_count
+          , CAST(0 AS INTEGER) AS included_section_count
+          , CAST(0 AS INTEGER) AS excluded_section_count
+          , CAST([] AS VARCHAR[]) AS excluded_sections
+          , CAST([] AS VARCHAR[]) AS metadata_pii_flags
+          , CAST([] AS VARCHAR[]) AS removed_body_pii_flags
+          , CAST('none' AS VARCHAR) AS pii_action
+          , CAST('unknown' AS VARCHAR) AS pii_scanner_revision
+          , CAST('unknown' AS VARCHAR) AS lang_detector_revision
+          , CAST('unknown' AS VARCHAR) AS tokenizer_revision
+          , CAST(0 AS INTEGER) AS gopher_word_count
+          , CAST(0 AS DOUBLE) AS gopher_mean_word_len
+          , CAST(0 AS DOUBLE) AS gopher_stopword_ratio
+          , CAST(0 AS DOUBLE) AS gopher_bullet_line_ratio
+          , CAST(0 AS DOUBLE) AS gopher_ellipsis_line_ratio
+          , CAST(0 AS DOUBLE) AS gopher_symbol_word_ratio
+          , CAST(0 AS DOUBLE) AS gopher_alpha_word_ratio
+          , CAST([] AS VARCHAR[]) AS decon_exact_matches
+          , CAST([] AS VARCHAR[]) AS decon_semantic_matches
+          , CAST(0 AS DOUBLE) AS decon_max_similarity
+          , CAST(13 AS INTEGER) AS decon_ngram_size
+          , CAST('unknown' AS VARCHAR) AS decon_embedding_revision
+          , CAST('unknown' AS VARCHAR) AS benchmark_set_version
+          , CAST('unknown' AS VARCHAR) AS classifier_backend
         WHERE FALSE
         """
     )
+
+
+class ScientificArtifactStore:
+    """Restricted MinIO reader for scientific JSON and image artifacts."""
+
+    def __init__(self, *, s3_client: Any, allowed_bucket: str) -> None:
+        self._s3 = s3_client
+        self._allowed_bucket = allowed_bucket
+
+    @classmethod
+    def from_env(cls) -> ScientificArtifactStore:
+        import boto3
+
+        return cls(
+            s3_client=boto3.client(
+                "s3",
+                endpoint_url=os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
+                aws_access_key_id=os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
+                aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY", "minioadmin"),
+                region_name="us-east-1",
+            ),
+            allowed_bucket=os.environ.get("MINIO_SILVER_BUCKET", "silver"),
+        )
+
+    def read_json(self, uri: str) -> dict[str, Any] | None:
+        try:
+            payload, _ = self.read_bytes(uri)
+            import orjson
+
+            value = orjson.loads(payload)
+            return value if isinstance(value, dict) else None
+        except Exception:
+            return None
+
+    def read_bytes(self, uri: str) -> tuple[bytes, str]:
+        parsed = urlparse(uri)
+        if parsed.scheme != "s3" or parsed.netloc != self._allowed_bucket:
+            raise ValueError("artifact URI is outside the configured Silver bucket")
+        key = parsed.path.lstrip("/")
+        if not key.startswith("scientific/"):
+            raise ValueError("artifact URI is outside the scientific prefix")
+        response = self._s3.get_object(  # type: ignore[union-attr]
+            Bucket=self._allowed_bucket, Key=key
+        )
+        return response["Body"].read(), str(
+            response.get("ContentType") or "application/octet-stream"
+        )
 
 
 def _sql_string(value: str) -> str:
@@ -247,10 +931,163 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
+    async def curation_summary(_: web.Request) -> web.Response:
+        try:
+            return web.json_response(service.curation_summary())
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
+    async def corpus_overview(_: web.Request) -> web.Response:
+        try:
+            return web.json_response(service.corpus_overview())
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
+    async def documents(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(
+                service.documents(
+                    page=int(request.query.get("page", "1")),
+                    page_size=int(request.query.get("page_size", "25")),
+                    search=request.query.get("search"),
+                    routes=request.query.getall("route", []),
+                    sources=request.query.getall("source", []),
+                    source_formats=request.query.getall("source_format", []),
+                    date_from=request.query.get("date_from"),
+                    date_to=request.query.get("date_to"),
+                    tags=request.query.getall("tag", []),
+                    rejection_reasons=request.query.getall("rejection_reason", []),
+                    has_figures=_optional_bool(request.query.get("has_figures")),
+                    has_tables=_optional_bool(request.query.get("has_tables")),
+                    has_equations=_optional_bool(request.query.get("has_equations")),
+                    include_fixtures=_optional_bool(request.query.get("include_fixtures")) is True,
+                    min_edu=_optional_float(request.query.get("min_edu")),
+                    max_edu=_optional_float(request.query.get("max_edu")),
+                    min_quality=_optional_float(request.query.get("min_quality")),
+                    max_quality=_optional_float(request.query.get("max_quality")),
+                    sort=request.query.get("sort", "newest"),
+                )
+            )
+        except (TypeError, ValueError):
+            return web.json_response({"detail": "invalid document filters"}, status=400)
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
+    async def document_facets(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(
+                service.document_facets(
+                    include_fixtures=_optional_bool(request.query.get("include_fixtures")) is True
+                )
+            )
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
+    async def dataset_export(request: web.Request) -> web.Response:
+        date_from = request.query.get("date_from")
+        date_to = request.query.get("date_to")
+        routes = request.query.getall("route", ["broad_pretraining", "reasoning_candidate"])
+        if not date_from or not date_to:
+            return web.json_response({"detail": "date_from and date_to are required"}, status=400)
+        try:
+            rows = service.dataset_rows(
+                date_from=date_from,
+                date_to=date_to,
+                routes=routes,
+                sources=request.query.getall("source", []),
+                source_formats=request.query.getall("source_format", []),
+                tags=request.query.getall("tag", []),
+                min_edu=_optional_float(request.query.get("min_edu")),
+                min_quality=_optional_float(request.query.get("min_quality")),
+                include_structured=_optional_bool(request.query.get("include_structured"))
+                is not False,
+                limit=int(request.query.get("limit", "5000")),
+            )
+            output_format = request.query.get("format", "jsonl")
+            if output_format == "parquet":
+                import io
+
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+
+                target = io.BytesIO()
+                pq.write_table(  # type: ignore[no-untyped-call]
+                    pa.Table.from_pylist(rows), target, compression="zstd"
+                )
+                return web.Response(
+                    body=target.getvalue(),
+                    content_type="application/vnd.apache.parquet",
+                    headers={
+                        "Content-Disposition": 'attachment; filename="stream2pretrain.parquet"'
+                    },
+                )
+            if output_format != "jsonl":
+                return web.json_response({"detail": "format must be jsonl or parquet"}, status=400)
+            import orjson
+
+            payload = b"".join(orjson.dumps(row) + b"\n" for row in rows)
+            return web.Response(
+                body=payload,
+                content_type="application/x-ndjson",
+                headers={"Content-Disposition": 'attachment; filename="stream2pretrain.jsonl"'},
+            )
+        except (TypeError, ValueError):
+            return web.json_response({"detail": "invalid export filters"}, status=400)
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
+    async def dataset_summary(request: web.Request) -> web.Response:
+        date_from = request.query.get("date_from")
+        date_to = request.query.get("date_to")
+        routes = request.query.getall("route", ["broad_pretraining", "reasoning_candidate"])
+        if not date_from or not date_to:
+            return web.json_response({"detail": "date_from and date_to are required"}, status=400)
+        try:
+            return web.json_response(
+                service.dataset_summary(
+                    date_from=date_from,
+                    date_to=date_to,
+                    routes=routes,
+                    sources=request.query.getall("source", []),
+                    source_formats=request.query.getall("source_format", []),
+                    tags=request.query.getall("tag", []),
+                    min_edu=_optional_float(request.query.get("min_edu")),
+                    min_quality=_optional_float(request.query.get("min_quality")),
+                    include_structured=_optional_bool(request.query.get("include_structured"))
+                    is not False,
+                )
+            )
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
+    async def document(request: web.Request) -> web.Response:
+        try:
+            value = service.document(unquote(request.match_info["doc_id"]))
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+        if value is None:
+            return web.json_response({"detail": "document not found"}, status=404)
+        return web.json_response(value)
+
+    async def figure(request: web.Request) -> web.Response:
+        try:
+            value = service.figure(
+                unquote(request.match_info["doc_id"]),
+                unquote(request.match_info["figure_id"]),
+            )
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+        if value is None:
+            return web.json_response({"detail": "figure not found"}, status=404)
+        payload, content_type = value
+        return web.Response(body=payload, content_type=content_type)
+
     async def query(request: web.Request) -> web.Response:
         body = await request.json()
         try:
-            return web.json_response(service.safe_query(str(body.get("sql", "")), body.get("params", [])))
+            return web.json_response(
+                service.safe_query(str(body.get("sql", "")), body.get("params", []))
+            )
         except ValueError as exc:
             return web.json_response({"detail": str(exc)}, status=400)
         except Exception as exc:
@@ -261,6 +1098,14 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
     app.router.add_get("/readyz", probe)
     app.router.add_get("/as-of", as_of)
     app.router.add_get("/quality-histogram", quality)
+    app.router.add_get("/curation-summary", curation_summary)
+    app.router.add_get("/corpus-overview", corpus_overview)
+    app.router.add_get("/documents", documents)
+    app.router.add_get("/document-facets", document_facets)
+    app.router.add_get("/documents/{doc_id}", document)
+    app.router.add_get("/documents/{doc_id}/figures/{figure_id}", figure)
+    app.router.add_get("/datasets/export", dataset_export)
+    app.router.add_get("/datasets/summary", dataset_summary)
     app.router.add_post("/query", query)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -277,6 +1122,35 @@ def main() -> None:
 
     service = DuckDBQueryService.from_env()
     asyncio.run(serve(service, port=int(os.environ.get("S2P_DUCKDB_API_PORT", "8090"))))
+
+
+def _optional_bool(value: str | None) -> bool | None:
+    if value is None or value == "":
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    raise ValueError("expected a boolean")
+
+
+def _optional_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _without_structured_surrogates(text: str) -> str:
+    """Remove bounded generated blocks while retaining the scientific body."""
+    cleaned = re.sub(
+        r"\n*\[(?:TABLE|FIGURE)\].*?\[/(?:TABLE|FIGURE)\]\n*",
+        "\n\n",
+        text,
+        flags=re.DOTALL,
+    )
+    cleaned = re.sub(r"\n*\[EQUATION\].*?\[/EQUATION\]\n*", "\n\n", cleaned, flags=re.DOTALL)
+    return cleaned.strip()
 
 
 if __name__ == "__main__":

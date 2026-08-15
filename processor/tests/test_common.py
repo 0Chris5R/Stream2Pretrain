@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
+from types import ModuleType
 
 from processor.common import (
     bronze_loads,
@@ -11,9 +13,11 @@ from processor.common import (
     gold_dumps,
     gold_loads,
     kafka_consumer_config,
+    kafka_producer_config,
     kafka_starting_offset,
     load_config,
     new_trace_id,
+    run_bytewax_flow,
     silver_dumps,
     silver_loads,
 )
@@ -84,7 +88,62 @@ def test_kafka_consumer_config_sets_group_id() -> None:
     assert kafka_consumer_config("s2p-fetcher") == {
         "group.id": "s2p-fetcher",
         "auto.offset.reset": "earliest",
+        "fetch.message.max.bytes": "1048576",
     }
+
+
+def test_kafka_message_configs_follow_environment(monkeypatch) -> None:
+    monkeypatch.setenv("S2P_KAFKA_MESSAGE_MAX_BYTES", "2097152")
+
+    assert kafka_consumer_config("curator") == {
+        "group.id": "curator",
+        "auto.offset.reset": "earliest",
+        "fetch.message.max.bytes": "2097152",
+    }
+    assert kafka_producer_config() == {"message.max.bytes": "2097152"}
+
+
+def test_run_bytewax_flow_initializes_and_reuses_recovery(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("S2P_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("S2P_BYTEWAX_SNAPSHOT_SECONDS", "2.5")
+    cfg = load_config()
+    calls: dict[str, object] = {"init_count": 0}
+
+    class FakeRecoveryConfig:
+        def __init__(self, path) -> None:
+            self.path = path
+
+    def fake_init_db_dir(path, part_count) -> None:
+        calls["init_count"] = int(calls["init_count"]) + 1
+        calls["part_count"] = part_count
+        (path / "part-0.sqlite3").touch()
+
+    def fake_cli_main(flow, *, epoch_interval, recovery_config) -> None:
+        calls["flow"] = flow
+        calls["epoch_interval"] = epoch_interval
+        calls["recovery_path"] = recovery_config.path
+
+    bytewax_package = ModuleType("bytewax")
+    bytewax_package.__path__ = []  # type: ignore[attr-defined]
+    recovery_module = ModuleType("bytewax.recovery")
+    recovery_module.RecoveryConfig = FakeRecoveryConfig  # type: ignore[attr-defined]
+    recovery_module.init_db_dir = fake_init_db_dir  # type: ignore[attr-defined]
+    run_module = ModuleType("bytewax.run")
+    run_module.cli_main = fake_cli_main  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "bytewax", bytewax_package)
+    monkeypatch.setitem(sys.modules, "bytewax.recovery", recovery_module)
+    monkeypatch.setitem(sys.modules, "bytewax.run", run_module)
+
+    flow = object()
+    run_bytewax_flow(flow, cfg, "fetcher")
+    run_bytewax_flow(flow, cfg, "fetcher")
+
+    expected = tmp_path / "bytewax" / "fetcher"
+    assert calls["init_count"] == 1
+    assert calls["part_count"] == 1
+    assert calls["flow"] is flow
+    assert calls["epoch_interval"].total_seconds() == 2.5  # type: ignore[union-attr]
+    assert calls["recovery_path"] == expected
 
 
 def test_bronze_roundtrip() -> None:
@@ -106,9 +165,7 @@ def test_bronze_roundtrip() -> None:
 
 
 def test_silver_roundtrip(silver_record: SilverRecord) -> None:
-    silver_record = silver_record.model_copy(
-        update={"minhash_sig": b"\x00\xff\x80\x01" * 112}
-    )
+    silver_record = silver_record.model_copy(update={"minhash_sig": b"\x00\xff\x80\x01" * 112})
     payload = silver_dumps(silver_record)
     parsed = silver_loads(payload)
     assert parsed.doc_id == silver_record.doc_id

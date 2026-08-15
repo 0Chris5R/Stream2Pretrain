@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from processor import common
-from processor.decon_api import AttestationStore
+from processor.decon_api import AttestationStore, _wire_attestation
 from schemas.decon import DeconAttestation
 
 
@@ -18,8 +18,14 @@ class _Body:
 
 
 class _FakeS3:
-    def __init__(self, objects: dict[str, bytes]) -> None:
+    def __init__(
+        self,
+        objects: dict[str, bytes],
+        *,
+        last_modified: dict[str, datetime] | None = None,
+    ) -> None:
         self.objects = objects
+        self.last_modified = last_modified or {}
 
     def get_object(self, **kwargs: str) -> dict[str, _Body]:
         assert kwargs["Bucket"] == "s2p-decon"
@@ -28,10 +34,16 @@ class _FakeS3:
             raise KeyError(key)
         return {"Body": _Body(self.objects[key])}
 
-    def list_objects_v2(self, **kwargs: str) -> dict[str, list[dict[str, str]]]:
+    def list_objects_v2(self, **kwargs: str) -> dict[str, list[dict[str, object]]]:
         assert kwargs["Bucket"] == "s2p-decon"
         prefix = kwargs["Prefix"]
-        return {"Contents": [{"Key": k} for k in self.objects if k.startswith(prefix)]}
+        return {
+            "Contents": [
+                {"Key": key, "LastModified": self.last_modified.get(key)}
+                for key in self.objects
+                if key.startswith(prefix)
+            ]
+        }
 
 
 def _attestation(snapshot_id: int) -> DeconAttestation:
@@ -63,15 +75,27 @@ def test_store_get_uses_canonical_attestation_key() -> None:
     assert store.get(43) is None
 
 
-def test_store_list_returns_newest_first_limited() -> None:
+def test_store_list_returns_newest_object_first_limited() -> None:
     objects = {
-        f"decon/v-test/{i:020d}.json": common.decon_dumps(_attestation(i))
-        for i in range(1, 4)
+        f"decon/v-test/{i:020d}.json": common.decon_dumps(_attestation(i)) for i in range(1, 4)
+    }
+    timestamps = {
+        "decon/v-test/00000000000000000001.json": datetime(2026, 6, 15, 12, 3, tzinfo=UTC),
+        "decon/v-test/00000000000000000002.json": datetime(2026, 6, 15, 12, 1, tzinfo=UTC),
+        "decon/v-test/00000000000000000003.json": datetime(2026, 6, 15, 12, 2, tzinfo=UTC),
     }
     store = AttestationStore(
-        s3_client=_FakeS3(objects),
+        s3_client=_FakeS3(objects, last_modified=timestamps),
         bucket="s2p-decon",
         benchmark_set_version="v-test",
     )
 
-    assert [r.snapshot_id for r in store.list(2)] == [3, 2]
+    assert [r.snapshot_id for r in store.list(2)] == [1, 3]
+
+
+def test_wire_snapshot_id_is_lossless_for_javascript() -> None:
+    record = _attestation(9_223_372_036_854_775_000)
+
+    payload = _wire_attestation(record)
+
+    assert payload["snapshot_id"] == "9223372036854775000"

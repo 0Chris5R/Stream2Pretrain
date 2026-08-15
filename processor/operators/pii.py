@@ -24,7 +24,16 @@ from schemas.gold import PiiFlag
 # negatives at the cost of moderate false positives, which is the right
 # trade-off for a pretraining filter.
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
-_PHONE = re.compile(r"(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,4}\d{2,4}")
+# Require a recognisable telephone layout rather than accepting arbitrary
+# groups of digits separated by spaces. The previous expression classified
+# scientific values such as ``2023-06 32 32 32`` as phone numbers.
+_PHONE = re.compile(
+    r"(?<![\w.])(?:"
+    r"\+\d{1,3}[\s.-]?(?:\(?\d{2,4}\)?[\s.-]?){1,3}\d{3,4}"
+    r"|\(\d{2,4}\)[\s.-]?\d{3,4}[\s.-]\d{3,4}"
+    r"|\d{3}[.-]\d{3}[.-]\d{4}"
+    r")(?![\w.])"
+)
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
 _CC = re.compile(r"\b(?:\d[ -]?){13,19}\b")
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
@@ -74,21 +83,44 @@ class PiiScanner:
         *,
         use_presidio: bool | None = None,
         max_text_chars: int = 1_000_000,
+        allow_fallback: bool = True,
     ) -> None:
         self._max_text_chars = max_text_chars
+        self._allow_fallback = allow_fallback
         self._use_presidio = (
-            os.environ.get("S2P_USE_PRESIDIO") == "1"
-            if use_presidio is None
-            else use_presidio
+            os.environ.get("S2P_USE_PRESIDIO") == "1" if use_presidio is None else use_presidio
         )
         self._presidio = self._load_presidio() if self._use_presidio else None
+        if self._use_presidio and not allow_fallback and self._presidio is None:
+            raise RuntimeError("Presidio with the bundled spaCy model is required")
+
+    @property
+    def is_presidio_loaded(self) -> bool:
+        """Whether the optional Presidio analyzer loaded successfully."""
+        return self._presidio is not None
+
+    @property
+    def revision(self) -> str:
+        """Human-readable scanner bundle persisted with each decision."""
+        return "regex-luhn-v1+presidio-en_core_web_sm" if self._presidio else "regex-luhn-v1"
 
     @staticmethod
     def _load_presidio() -> object | None:
         try:
             from presidio_analyzer import AnalyzerEngine  # type: ignore[import-untyped]
+            from presidio_analyzer.nlp_engine import (  # type: ignore[import-untyped]
+                NlpEngineProvider,
+            )
 
-            return AnalyzerEngine()
+            configuration = {
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+            }
+            nlp_engine = NlpEngineProvider(nlp_configuration=configuration).create_engine()
+            return AnalyzerEngine(
+                nlp_engine=nlp_engine,
+                supported_languages=["en"],
+            )
         except Exception:
             return None
 
@@ -133,12 +165,43 @@ class PiiScanner:
                     if flag:
                         hits.append(PiiHit(flag, snippet[r.start : r.end]))
             except Exception:
-                pass
+                if not self._allow_fallback:
+                    raise
         return _deduplicate(hits)
 
     def flags(self, text: str) -> list[PiiFlag]:
         """Return the sorted unique :class:`PiiFlag` list for ``text``."""
         return sorted({h.flag for h in self.scan(text)})
+
+    def blocking_flags(self, text: str) -> list[PiiFlag]:
+        """Return high-confidence findings that may block a training export.
+
+        Email addresses, Luhn-valid payment-card numbers, and SSN-shaped
+        values are sufficiently precise to remove their containing part.
+        Phone numbers use the strict syntax above. IP-looking values and
+        Presidio-only phone/passport guesses remain audit signals because
+        dotted experiment identifiers, section numbers, and tensor shapes
+        are common in scientific text.
+        """
+        if not text:
+            return []
+        snippet = text[: self._max_text_chars]
+        blocking: set[PiiFlag] = set()
+        if _EMAIL.search(snippet):
+            blocking.add("email")
+        if _SSN.search(snippet):
+            blocking.add("ssn")
+        if _PHONE.search(snippet):
+            blocking.add("phone")
+        for match in _CC.finditer(snippet):
+            digits = "".join(character for character in match.group(0) if character.isdigit())
+            if 13 <= len(digits) <= 19 and luhn_ok(digits):
+                blocking.add("credit_card")
+        for match in _PASSPORT.finditer(snippet):
+            context = snippet[max(0, match.start() - 48) : match.end() + 48].lower()
+            if "passport" in context:
+                blocking.add("passport")
+        return sorted(blocking)
 
     @staticmethod
     def _presidio_flag(entity_type: str) -> PiiFlag | None:

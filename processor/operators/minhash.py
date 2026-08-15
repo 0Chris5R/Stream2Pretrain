@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 DEFAULT_NUM_PERMS: int = 112
@@ -43,9 +44,7 @@ class MinHashSignature:
     def band_keys(self, num_bands: int = 28) -> list[bytes]:
         """Slice the digest into ``num_bands`` band keys for LSH banding."""
         if self.num_perms % num_bands != 0:
-            raise ValueError(
-                f"num_perms ({self.num_perms}) must divide num_bands ({num_bands})"
-            )
+            raise ValueError(f"num_perms ({self.num_perms}) must divide num_bands ({num_bands})")
         rows = self.num_perms // num_bands
         # Each permutation is 4 bytes (uint32). Reslice into bands.
         chunk = rows * 4
@@ -150,7 +149,9 @@ def _uint32_digest_to_bytes(raw: object, *, expected_perms: int) -> bytes:
         if len(digest) == expected_perms * 4:
             return digest
 
-    values = list(raw)  # type: ignore[arg-type]
+    if not isinstance(raw, Iterable):
+        raise TypeError("MinHash digest must be bytes or an iterable of integers")
+    values = list(raw)
     if len(values) == expected_perms * 4 and all(0 <= int(v) <= 0xFF for v in values):
         return bytes(int(v) for v in values)
     if len(values) != expected_perms:

@@ -23,3 +23,22 @@ def test_langid_english_long_text() -> None:
     )
     res = LangIdentifier(min_chars=1).identify(text)
     assert res.lang in {"en", "und"} or len(res.lang) >= 2
+
+
+def test_fastlangid_requests_probability_output() -> None:
+    class _FastLangId:
+        def predict(self, text: str, *, prob: bool = False) -> tuple[str, float] | str:
+            assert text
+            assert prob is True
+            return ("en", 0.98) if prob else "en"
+
+    identifier = object.__new__(LangIdentifier)
+    identifier._min_chars = 1
+    identifier._allow_fallback = False
+    identifier._backend = _FastLangId()
+    identifier._detector = "fastlangid-1"
+
+    result = identifier.identify("A sufficiently long scientific sentence for language ID.")
+
+    assert result.lang == "en"
+    assert result.score == 0.98

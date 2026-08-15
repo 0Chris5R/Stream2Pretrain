@@ -33,8 +33,9 @@ from processor.operators.langid import LangIdentifier
 from processor.operators.minhash import MinHasher
 from processor.operators.validity import ValidityEnricher, WaybackLookup
 from processor.probes import start_probe_server
+from processor.scientific import ScientificProcessingResult, ScientificProcessor
 from schemas.bronze import BronzeRecord
-from schemas.silver import SilverRecord, SilverTags
+from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
 
 @dataclass(slots=True)
@@ -51,10 +52,12 @@ class FetcherState:
     validity: ValidityEnricher
     s3: Any
     bucket: str
+    scientific: ScientificProcessor | None = None
 
 
 def build_state(cfg: common.ProcessorConfig, *, with_wayback: bool = True) -> FetcherState:
     """Construct a :class:`FetcherState` from the runtime config."""
+    require_real_models = os.environ.get("S2P_REQUIRE_REAL_MODELS") == "1"
     s3 = boto3.client(
         "s3",
         endpoint_url=cfg.minio_endpoint,
@@ -63,13 +66,26 @@ def build_state(cfg: common.ProcessorConfig, *, with_wayback: bool = True) -> Fe
         region_name="us-east-1",
     )
     wayback = WaybackLookup() if with_wayback else None
+    extractor = ResiliparseExtractor(allow_fallback=not require_real_models)
+    lang_id = LangIdentifier(allow_fallback=not require_real_models)
+    minhasher = MinHasher()
+    if require_real_models and minhasher.backend == "fallback-pyhash":
+        raise RuntimeError("datasketch or rensa MinHash is required")
+    scientific = ScientificProcessor(
+        s3_client=s3,
+        bucket=cfg.silver_bucket,
+        models_dir=cfg.models_dir,
+        user_agent=cfg.user_agent,
+        require_real_models=require_real_models,
+    )
     return FetcherState(
-        extractor=ResiliparseExtractor(),
-        lang_id=LangIdentifier(),
-        minhasher=MinHasher(),
+        extractor=extractor,
+        lang_id=lang_id,
+        minhasher=minhasher,
         validity=ValidityEnricher(wayback_lookup=wayback),
         s3=s3,
         bucket=cfg.bronze_bucket,
+        scientific=scientific,
     )
 
 
@@ -102,22 +118,122 @@ def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
 
 def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> SilverRecord | None:
     """Turn one (BronzeRecord + raw bytes) into a SilverRecord."""
+    scientific_result: ScientificProcessingResult | None = None
+    model_text = ""
+    source_metadata_text = ""
+    structured_text = ""
+    segments: list[SilverSegment] = []
+    projection_version = "document-v1"
+    source_word_count = 0
+    training_word_count = 0
+    included_section_count = 0
+    excluded_section_count = 0
+    excluded_sections: list[str] = []
     if bronze.source_format == "code":
         text = raw_html.decode("utf-8", errors="replace").strip()
         title = str(bronze.url).rsplit("/", 1)[-1] or None
+        model_text = text
+        source_metadata_text = title or ""
+        extracted_with = bronze.extraction_pipeline
+        extraction_pipeline = bronze.extraction_pipeline
+    elif bronze.source_format == "pdf":
+        if state.scientific is None:
+            return None
+        scientific_result = state.scientific.process_pdf(
+            doc_id=bronze.doc_id,
+            source_url=str(bronze.url),
+            pdf=raw_html,
+            extraction_pipeline=bronze.extraction_pipeline,
+        )
+        text = scientific_result.text
+        model_text = scientific_result.model_text
+        source_metadata_text = scientific_result.source_metadata_text
+        structured_text = scientific_result.structured_text
+        title = scientific_result.document.title
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
     else:
         extracted = state.extractor.extract(raw_html)
         text = extracted.text.strip()
+        model_text = text
+        source_metadata_text = extracted.title or ""
         title = extracted.title
         extracted_with = extracted.extracted_with
         extraction_pipeline = bronze.extraction_pipeline
     if not text:
         return None
-    lang_result = state.lang_id.identify(text)
+    artifact_uri: str | None = None
+    figure_count = 0
+    table_count = 0
+    equation_count = 0
+    citation_count = 0
+    extraction_warnings: list[str] = []
+    if bronze.source_format == "pdf" and scientific_result is not None:
+        artifact_uri = scientific_result.artifact_s3_uri
+        figure_count = len(scientific_result.document.figures)
+        table_count = len(scientific_result.document.tables)
+        equation_count = len(scientific_result.document.equations)
+        citation_count = len(scientific_result.document.citations)
+        extraction_warnings = list(scientific_result.document.warnings)
+    elif bronze.source_format == "html" and state.scientific is not None:
+        scientific_result = state.scientific.process(
+            doc_id=bronze.doc_id,
+            source_url=str(bronze.url),
+            html=raw_html,
+            plain_text=text,
+            title=title,
+            extraction_pipeline=extraction_pipeline,
+        )
+        text = scientific_result.text
+        model_text = scientific_result.model_text
+        source_metadata_text = scientific_result.source_metadata_text
+        structured_text = scientific_result.structured_text
+        title = scientific_result.document.title
+        artifact_uri = scientific_result.artifact_s3_uri
+        figure_count = len(scientific_result.document.figures)
+        table_count = len(scientific_result.document.tables)
+        equation_count = len(scientific_result.document.equations)
+        citation_count = len(scientific_result.document.citations)
+        extraction_warnings = list(scientific_result.document.warnings)
+    if scientific_result is not None:
+        document = scientific_result.document
+        segments = [
+            SilverSegment(
+                segment_id=section.section_id,
+                title=section.title,
+                role=section.role,
+                text=section.text,
+                word_count=section.word_count,
+            )
+            for section in document.sections
+            if section.include_in_training and section.text.strip()
+        ]
+        projection_version = document.projection_version
+        source_word_count = document.source_word_count
+        training_word_count = document.training_word_count
+        included_section_count = document.included_section_count
+        excluded_section_count = document.excluded_section_count
+        excluded_sections = list(document.excluded_sections)
+    else:
+        source_word_count = len(text.split())
+        training_word_count = source_word_count
+        included_section_count = 1 if text else 0
+        if text:
+            segments = [
+                SilverSegment(
+                    segment_id="document",
+                    title=title or "Document",
+                    text=model_text or text,
+                    word_count=len((model_text or text).split()),
+                )
+            ]
+    lang_result = state.lang_id.identify(model_text or text)
     sig = state.minhasher.signature(text)
-    html_text = raw_html.decode("utf-8", errors="replace") if raw_html else ""
+    html_text = (
+        raw_html.decode("utf-8", errors="replace")
+        if raw_html and bronze.source_format == "html"
+        else ""
+    )
     interval = state.validity.enrich(
         url=str(bronze.url),
         fetched_at=bronze.fetched_at,
@@ -129,8 +245,19 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         url=bronze.url,
         title=title,
         text=text,
+        model_text=model_text or text,
+        source_metadata_text=source_metadata_text,
+        structured_text=structured_text,
+        segments=segments,
+        projection_version=projection_version,
+        source_word_count=source_word_count,
+        training_word_count=training_word_count,
+        included_section_count=included_section_count,
+        excluded_section_count=excluded_section_count,
+        excluded_sections=excluded_sections,
         lang=lang_result.lang,
         lang_score=lang_result.score,
+        lang_detector_revision=lang_result.detector,
         extracted_with=extracted_with,
         tags=SilverTags(
             gopher_pass=True,  # populated by curate.py
@@ -151,6 +278,12 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         extraction_pipeline=extraction_pipeline,
         spdx_license=bronze.spdx_license,
         spdx_license_source=bronze.spdx_license_source,
+        scientific_artifact_s3_uri=artifact_uri,
+        figure_count=figure_count,
+        table_count=table_count,
+        equation_count=equation_count,
+        citation_count=citation_count,
+        extraction_warnings=extraction_warnings,
     )
 
 
@@ -220,6 +353,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     sink = KafkaSink(
         brokers=cfg.redpanda_brokers.split(","),
         topic=cfg.normalized_topic,
+        add_config=common.kafka_producer_config(),
     )
     op.output("fetcher_sink", filtered, sink)
     return flow
@@ -233,10 +367,7 @@ def main() -> None:
     log.info("starting fetcher dataflow", brokers=cfg.redpanda_brokers, topic=cfg.raw_topic)
     start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
-    # ``bytewax.run`` is deferred to avoid importing the runtime in tests.
-    from bytewax.run import cli_main
-
-    cli_main(flow)
+    common.run_bytewax_flow(flow, cfg, "fetcher")
 
 
 def serialize_for_kafka(record: SilverRecord) -> tuple[bytes, bytes]:

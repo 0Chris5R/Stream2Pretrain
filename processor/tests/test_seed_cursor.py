@@ -24,7 +24,12 @@ class _FakeS3:
         return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
 
     def put_object(
-        self, *, Bucket: str, Key: str, Body: bytes, ContentType: str = "application/json"  # noqa: N803
+        self,
+        *,
+        Bucket: str,  # noqa: N803 - mirrors boto3's keyword contract
+        Key: str,  # noqa: N803 - mirrors boto3's keyword contract
+        Body: bytes,  # noqa: N803 - mirrors boto3's keyword contract
+        ContentType: str = "application/json",  # noqa: N803
     ) -> dict[str, Any]:
         self.put_calls += 1
         self.objects[(Bucket, Key)] = Body

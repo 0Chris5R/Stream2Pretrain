@@ -42,7 +42,9 @@ def test_shingle_ngrams_size() -> None:
 
 def test_decon_gate_no_hits_on_clean_text() -> None:
     gate = DeconGate(benchmark_set_version="v-test", signer=AttestationSigner())
-    record, hits = gate.scan(_gold("totally innocuous prose about cats and dogs in spring time and summer time"))
+    record, hits = gate.scan(
+        _gold("totally innocuous prose about cats and dogs in spring time and summer time")
+    )
     assert hits == []
     assert record.contaminated_with == []
 

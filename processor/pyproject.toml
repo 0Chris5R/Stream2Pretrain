@@ -25,13 +25,28 @@ dependencies = [
 
 [project.optional-dependencies]
 runtime = [
+    # Local SourceFeed execution imports the shared MinIO/Kafka writers.
+    # Keep this explicit so processor-only installs are complete as well.
+    "stream2pretrain-ingest-common",
     "bytewax>=0.21",
     "confluent-kafka>=2.5",
+    "cramjam>=2.11",
+    "zstandard>=0.23",
     "resiliparse>=0.14",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "pillow>=10.4",
+    "pytesseract>=0.3.13",
+    # fastlangid's bundled FastText wrapper still relies on NumPy 1.x
+    # ``copy=False`` semantics. NumPy 2 raises before real LID inference.
+    "numpy>=1.26,<2",
     "fastlangid>=1.0",
     "onnxruntime>=1.18",
     "transformers>=4.40",
     "tokenizers>=0.19",
+    "torch>=2.3,<3",
+    "safetensors>=0.4",
+    "sentencepiece>=0.2",
     "tiktoken>=0.7",
     "datasketch>=1.6",
     "rensa>=0.2",
@@ -39,14 +54,57 @@ runtime = [
     "plyvel>=1.5",
     "sqlitedict>=2.1",
     "presidio-analyzer>=2.2",
+    "spacy>=3.8,<3.9",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "kopf>=1.37",
     "kubernetes>=29.0",
-    "pyiceberg>=0.7",
+    "pyiceberg[sql-sqlite,pyiceberg-core]>=0.7",
     "pyarrow>=16.0",
     "duckdb>=1.0",
     "aiohttp>=3.9",
+    "docling==2.114.0",
+    "pandas>=2.1,<4",
     # v0.2.0 seed loader: streaming HuggingFace dataset reader.
     "datasets>=2.20",
+]
+# Containerized laptop pilot profile. It includes every classifier used in the
+# curate path while omitting only Kubernetes controller dependencies and the
+# production-only alternative state backends.
+local = [
+    "stream2pretrain-ingest-common",
+    "bytewax>=0.21",
+    "confluent-kafka>=2.5",
+    "cramjam>=2.11",
+    "zstandard>=0.23",
+    "resiliparse>=0.14",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "pillow>=10.4",
+    "pytesseract>=0.3.13",
+    "numpy>=1.26,<2",
+    "fastlangid>=1.0",
+    "onnxruntime>=1.18,<2",
+    "transformers>=4.40,<5",
+    "tokenizers>=0.19",
+    "torch>=2.3,<3",
+    "safetensors>=0.4",
+    "sentencepiece>=0.2",
+    "kenlm>=0.2",
+    "tiktoken>=0.7",
+    "datasketch>=1.6",
+    "rensa>=0.2",
+    "plyvel>=1.5",
+    "sqlitedict>=2.1",
+    "presidio-analyzer>=2.2",
+    "spacy>=3.8,<3.9",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "pyiceberg[sql-sqlite,pyiceberg-core]>=0.7",
+    "pyarrow>=16.0",
+    "duckdb>=1.0",
+    "aiohttp>=3.9",
+    "docling==2.114.0",
+    "pandas>=2.1,<4",
+    "feedparser>=6.0.11",
 ]
 dev = [
     "pytest>=8.2",
@@ -61,6 +119,7 @@ s2p-curate = "processor.curate:main"
 s2p-iceberg-writer = "processor.iceberg_writer:main"
 s2p-decon-api = "processor.decon_api:main"
 s2p-duckdb-api = "processor.duckdb_api:main"
+s2p-local-sources-api = "processor.local_sources_api:main"
 s2p-mixture-controller = "processor.mixture_controller.controller:main"
 s2p-seed-loader = "processor.seed_loader:main"
 
@@ -70,3 +129,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
+
+[tool.hatch.metadata]
+allow-direct-references = true

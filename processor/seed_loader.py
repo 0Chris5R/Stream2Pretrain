@@ -232,17 +232,11 @@ def _pes2o_factory(cursor: SeedCursor, cfg: SeedLoaderConfig) -> Iterator[SeedDo
     return pes2o.iter_documents(cursor, max_docs=cfg.max_docs_per_component)
 
 
-def _redpajama_factory(
-    cursor: SeedCursor, cfg: SeedLoaderConfig
-) -> Iterator[SeedDocument]:
-    return redpajama_arxiv.iter_documents(
-        cursor, max_docs=cfg.max_docs_per_component
-    )
+def _redpajama_factory(cursor: SeedCursor, cfg: SeedLoaderConfig) -> Iterator[SeedDocument]:
+    return redpajama_arxiv.iter_documents(cursor, max_docs=cfg.max_docs_per_component)
 
 
-def _fineweb_factory(
-    cursor: SeedCursor, cfg: SeedLoaderConfig
-) -> Iterator[SeedDocument]:
+def _fineweb_factory(cursor: SeedCursor, cfg: SeedLoaderConfig) -> Iterator[SeedDocument]:
     return fineweb_edu_filter.iter_documents(
         cursor,
         allowlist=cfg.fineweb_url_allowlist,
@@ -250,17 +244,11 @@ def _fineweb_factory(
     )
 
 
-def _stack_factory(
-    cursor: SeedCursor, cfg: SeedLoaderConfig
-) -> Iterator[SeedDocument]:
-    return stack_edu_filter.iter_documents(
-        cursor, max_docs=cfg.max_docs_per_component
-    )
+def _stack_factory(cursor: SeedCursor, cfg: SeedLoaderConfig) -> Iterator[SeedDocument]:
+    return stack_edu_filter.iter_documents(cursor, max_docs=cfg.max_docs_per_component)
 
 
-def _wayback_factory(
-    cursor: SeedCursor, cfg: SeedLoaderConfig
-) -> Iterator[SeedDocument]:
+def _wayback_factory(cursor: SeedCursor, cfg: SeedLoaderConfig) -> Iterator[SeedDocument]:
     return wayback_backfill.iter_documents(
         cursor,
         months=cfg.wayback_months,
@@ -407,6 +395,7 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
         sink = KafkaSink(
             brokers=cfg.redpanda_brokers.split(","),
             topic=cfg.normalized_topic,
+            add_config=common.kafka_producer_config(),
         )
         op.output("seed.sink", mapped, sink)
     else:
@@ -414,9 +403,7 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
     return flow
 
 
-def run_inprocess(
-    cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig
-) -> dict[str, Any]:
+def run_inprocess(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> dict[str, Any]:
     """Synchronous fallback runner (no Bytewax) for the smoke job.
 
     Returns per-component stats. Used by :func:`main` when the
@@ -433,9 +420,7 @@ def run_inprocess(
     sink = _build_sink(cfg, seed_cfg)
     stats: dict[str, int] = {}
     for name in seed_cfg.components:
-        cursor = stream_component(
-            name, cursor_store=cursor_store, cfg=seed_cfg, on_record=sink
-        )
+        cursor = stream_component(name, cursor_store=cursor_store, cfg=seed_cfg, on_record=sink)
         stats[name] = cursor.rows_emitted
     return {
         "started_at": datetime.now(tz=UTC).isoformat(),
@@ -451,9 +436,7 @@ def _build_sink(
         log = common.get_logger("s2p.seed_loader")
 
         def _print(repo_id: str, rec: SilverRecord) -> None:
-            log.info(
-                "seed.dry_run", repo_id=repo_id, doc_id=rec.doc_id, lang=rec.lang
-            )
+            log.info("seed.dry_run", repo_id=repo_id, doc_id=rec.doc_id, lang=rec.lang)
 
         return _print
 

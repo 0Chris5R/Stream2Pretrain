@@ -1,0 +1,57 @@
+# Disk-efficient, CPU-only processor image for the Podman laptop profile.
+# Model weights are downloaded once into the profile's dedicated named volume.
+ARG PYTHON_VERSION=3.11
+FROM python:${PYTHON_VERSION}-slim
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    UV_LINK_MODE=copy \
+    UV_HTTP_TIMEOUT=120 \
+    S2P_MODELS_DIR=/opt/models \
+    TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
+    S2P_STATE_DIR=/var/lib/s2p
+
+WORKDIR /app
+COPY pyproject.toml /app/pyproject.toml
+COPY README.md /app/README.md
+COPY schemas /app/schemas
+COPY ingest /app/ingest
+COPY processor /app/processor
+COPY scripts /app/scripts
+COPY tests /app/tests
+
+# Install build and runtime packages in one layer, then remove compilers. On
+# Linux, the workspace uv source selects PyTorch's CPU-only wheel index while
+# unrelated packages continue to come from PyPI.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        libleveldb-dev \
+        libleveldb1d \
+        libssl-dev \
+        pkg-config \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+ && pip install --no-cache-dir uv==0.4.27 \
+ && uv pip install --system --no-cache . "./processor[local]" \
+ && python -c "import docling, kenlm, onnxruntime, plyvel, rensa, torch, torchvision" \
+ && pip uninstall -y uv \
+ && apt-get purge -y --auto-remove \
+        build-essential cmake curl git libleveldb-dev libssl-dev pkg-config \
+ && rm -rf /root/.cache /var/lib/apt/lists/* \
+ && groupadd --system --gid 65532 nonroot \
+ && useradd --system --uid 65532 --gid 65532 --home /home/nonroot --create-home nonroot \
+ && mkdir -p /opt/models /var/lib/s2p \
+ && chown -R nonroot:nonroot /var/lib/s2p
+
+USER nonroot
+ENTRYPOINT ["s2p-curate"]

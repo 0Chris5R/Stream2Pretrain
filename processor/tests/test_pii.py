@@ -38,6 +38,19 @@ def test_ssn_detection() -> None:
 def test_ipv4_detection() -> None:
     flags = PiiScanner().flags("connect to 192.168.1.10 over ssh")
     assert "ipv4" in flags
+    assert "ipv4" not in PiiScanner().blocking_flags("connect to 192.168.1.10 over ssh")
+
+
+def test_scientific_tensor_shape_is_not_a_phone_number() -> None:
+    scanner = PiiScanner(use_presidio=False)
+
+    assert "phone" not in scanner.flags("The 2023-06 checkpoint uses tensors of size 32 32 32.")
+
+
+def test_explicit_international_phone_number_is_blocking() -> None:
+    scanner = PiiScanner(use_presidio=False)
+
+    assert "phone" in scanner.blocking_flags("Telephone: +49 30 1234 5678")
 
 
 def test_clean_text_has_no_flags(long_english_text: str) -> None:

@@ -48,6 +48,7 @@ redpanda:
     rawFetched: raw.fetched
     docsNormalized: docs.normalized
     docsCurated: docs.curated
+    curationDecisions: curation.decisions
     deconAttest: decon.attest
 
 # -----------------------------------------------------------------------------
@@ -70,6 +71,8 @@ iceberg:
   catalog: stream2pretrain
   namespace: gold
   goldTable: curated
+  decisionsTable: curation_decisions
+  benchmarkCandidatesTable: benchmark_candidates
   polarisUrl: http://polaris.polaris.svc.cluster.local:8181/api/catalog
   # Polaris expects the Iceberg REST "warehouse" value to be the catalog name.
   # The physical object-store base location is configured on the Polaris catalog.
@@ -301,7 +304,7 @@ ingest:
     maxRecordsPerLoop: 0
     scaling:
       minReplicas: 0
-      maxReplicas: 3
+      maxReplicas: 1
       # docs.normalized lag threshold; arXiv ids form a small fraction of
       # the topic, so keep this low. needs-measurement on the real cluster.
       lagThreshold: 200
@@ -370,7 +373,7 @@ ingest:
     requestBurst: 4
     keda:
       minReplicas: 0
-      maxReplicas: 2
+      maxReplicas: 1
       # Prometheus-backed trigger avoids raw.fetched Kafka-lag self-amplification.
       # Threshold is a count of observed release records currently being processed
       # by tarball fetcher pods.
@@ -451,22 +454,26 @@ processor:
     image: stream2pretrain/processor-curate
     replicas: 1
     resources:
-      requests: {cpu: 500m, memory: 1Gi}
-      limits: {cpu: 2, memory: 2Gi}
+      requests: {cpu: 1, memory: 4Gi}
+      limits: {cpu: 2, memory: 8Gi}
     checkpoint:
       storageClass: ""
       size: 20Gi
-    onnxModel: /models/fineweb-edu-int8.onnx
+    onnxModel: /models/fineweb-edu/model.onnx
     minHashBands: 14
     minHashRowsPerBand: 9
     # FineWeb-Edu ONNX model bundle. Downloaded by an init container into an
     # emptyDir mounted at /models. Set ``url`` empty to disable the init
     # container (e.g. when the model is baked into the curate image).
     modelBundle:
+      bootstrap: true
       url: ""
       sha256: ""
-      sizeMi: 256
+      sizeMi: 10240
       image: ghcr.io/stream2pretrain/curl-jq:1.0.0
+      resources:
+        requests: {cpu: 500m, memory: 512Mi}
+        limits: {cpu: 2, memory: 2Gi}
   iceberg:
     image: stream2pretrain/processor-iceberg-writer
     replicas: 1
@@ -494,7 +501,8 @@ processor:
       - mmlu
       - gsm8k
       - humaneval
-      - bbh
+      - math
+      - gpqa
     bloomBits: 33
     bloomHashes: 7
     signingKeySecret: stream2pretrain-decon-signing
@@ -504,6 +512,7 @@ processor:
     benchmarkCorpus:
       configMap: stream2pretrain-decon-benchmarks
       secret: ""
+      kind: restricted_reserve
       fileName: corpus.json
       mountPath: /etc/stream2pretrain/decon
 
@@ -613,15 +622,17 @@ keda:
     serverAddress: http://kps-prometheus.monitoring.svc:9090
   fetcher:
     minReplicas: 1
-    maxReplicas: 10
+    # Conservative course-cluster default. Raise only after capacity_probe.py.
+    maxReplicas: 2
     lagThreshold: 1000
   curate:
     minReplicas: 1
-    maxReplicas: 4
+    # One strict CPU curator already owns both quality models and mmap'd KenLM.
+    maxReplicas: 1
     lagThreshold: 500
   iceberg:
     minReplicas: 1
-    maxReplicas: 3
+    maxReplicas: 1
     lagThreshold: 2000
   triggerAuthSecret: stream2pretrain-keda-redpanda
   # Set ``auth.enabled: true`` only when the Redpanda profile actually has

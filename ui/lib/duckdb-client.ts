@@ -75,9 +75,9 @@ export async function runQuery<T = Record<string, unknown>>(
 /**
  * Common SQL fragments.
  *
- * Iceberg `as_of(timestamp)` is exposed by the DuckDB Iceberg extension as
- * `iceberg_scan(..., snapshot_from_timestamp => ?)`. We default to the gold
- * table; callers override the path for benchmarking.
+ * The current `/as-of` route applies the record-level `[valid_from, valid_to)`
+ * predicate to the current Gold relation. Iceberg snapshot time travel is a
+ * separate future capability and is not implied by this path constant.
  */
 export const ICEBERG_GOLD_TABLE = 's3://stream2pretrain/gold/curated/';
 

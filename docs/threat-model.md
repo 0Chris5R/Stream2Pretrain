@@ -45,7 +45,7 @@ Six trust boundaries:
 | Asset | Threat | Mitigation | Residual |
 |---|---|---|---|
 | Bronze HTML in MinIO | Attacker rewrites stored bytes to bypass Decon-Gate | sha256 `doc_id` is content-addressed; MinIO bucket policy forbids overwrites except by curator; periodic integrity scan | Integrity scan cadence is `needs-measurement`. |
-| Iceberg metadata | Attacker tampers with snapshot manifests | Iceberg V3 row lineage + Polaris commit auth | Polaris commit log is not signed; Decon attestations bind a snapshot id to a hash but only for gold-table commits. |
+| Iceberg metadata | Attacker tampers with snapshot manifests | Iceberg V2 metadata + Polaris commit auth | Polaris commit log is not signed; Decon attestations bind the decision batch to the accepted Gold snapshot id. |
 | Decon attestation in transit | Attacker swaps the attestation between writer and topic | Signature is over canonical JSON of the body, computed pre-publish | None (signature-bound). |
 | Mixture recipe | Attacker patches a `MixtureRecipe` to elevate a contaminated source | Gatekeeper constraint on `weight` sums + RBAC on the CRD | The constraint cannot detect semantic intent; mixture controller logs every patch. |
 

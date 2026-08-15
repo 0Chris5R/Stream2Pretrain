@@ -60,7 +60,7 @@ def _parse_args(argv: list[str]) -> BisectArgs:
     p.add_argument("--snapshot-id", type=int, required=True)
     p.add_argument("--brokers", default="localhost:9092")
     p.add_argument("--attest-topic", default="decon.attest")
-    p.add_argument("--input-topic", default="docs.curated")
+    p.add_argument("--input-topic", default="curation.decisions")
     p.add_argument(
         "--benchmark-set",
         default=None,
@@ -177,8 +177,8 @@ def _replay_decon(
     counts.
     """
     try:
-        from processor.decon_gate import DeconGate  # type: ignore[import-not-found]
         from processor import common  # type: ignore[import-not-found]
+        from processor.decon_gate import DeconGate  # type: ignore[import-not-found]
     except ImportError:
         print(
             "processor.decon_gate not importable: cannot replay locally. "

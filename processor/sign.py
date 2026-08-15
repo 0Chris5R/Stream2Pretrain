@@ -15,13 +15,16 @@ produced the signature - the algorithm is encoded in the
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -224,3 +227,32 @@ def verify_signature(payload: bytes, signature_b64: str, cert_pem: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def _canonical_attestation(payload: Mapping[str, Any]) -> bytes:
+    """Serialize only the signed attestation body using the production contract."""
+
+    unsigned = {
+        key: value for key, value in payload.items() if key not in {"signature", "signer_cert"}
+    }
+    return json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sign_attestation(
+    payload: Mapping[str, Any], *, signer: AttestationSigner | None = None
+) -> dict[str, Any]:
+    """Return a copy of ``payload`` with a verifiable signature and certificate."""
+
+    body = {key: value for key, value in payload.items() if key not in {"signature", "signer_cert"}}
+    result = (signer or AttestationSigner()).sign(_canonical_attestation(body))
+    return {**body, "signature": result.signature_b64, "signer_cert": result.cert_pem}
+
+
+def verify_attestation(payload: Mapping[str, Any]) -> bool:
+    """Verify a signed attestation mapping against its embedded certificate."""
+
+    signature = payload.get("signature")
+    certificate = payload.get("signer_cert")
+    if not isinstance(signature, str) or not isinstance(certificate, str):
+        return False
+    return verify_signature(_canonical_attestation(payload), signature, certificate)

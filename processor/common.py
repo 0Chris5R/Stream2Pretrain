@@ -28,6 +28,8 @@ import os
 import secrets
 import sys
 from dataclasses import dataclass
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import orjson
@@ -94,6 +96,7 @@ class ProcessorConfig:
     raw_topic: str
     normalized_topic: str
     curated_topic: str
+    decisions_topic: str
     decon_attest_topic: str
 
     minio_endpoint: str
@@ -142,6 +145,7 @@ def load_config() -> ProcessorConfig:
         raw_topic=_env("S2P_RAW_TOPIC", "raw.fetched"),
         normalized_topic=_env("S2P_NORMALIZED_TOPIC", "docs.normalized"),
         curated_topic=_env("S2P_CURATED_TOPIC", "docs.curated"),
+        decisions_topic=_env("S2P_DECISIONS_TOPIC", "curation.decisions"),
         decon_attest_topic=_env("S2P_DECON_TOPIC", "decon.attest"),
         minio_endpoint=_env("MINIO_ENDPOINT", "http://localhost:9000"),
         minio_access_key=_env("MINIO_ACCESS_KEY", "minioadmin"),
@@ -193,7 +197,45 @@ def kafka_starting_offset() -> int:
 
 def kafka_consumer_config(group_id: str) -> dict[str, str]:
     """Config passed to Bytewax KafkaSource for Redpanda consumer groups."""
-    return {"group.id": group_id, "auto.offset.reset": "earliest"}
+    return {
+        "group.id": group_id,
+        "auto.offset.reset": "earliest",
+        "fetch.message.max.bytes": str(
+            _env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576)
+        ),
+    }
+
+
+def kafka_producer_config() -> dict[str, str]:
+    """Config passed to Bytewax KafkaSink for full-document payloads."""
+    return {
+        "message.max.bytes": str(
+            _env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576)
+        )
+    }
+
+
+def run_bytewax_flow(flow: object, cfg: ProcessorConfig, flow_name: str) -> None:
+    """Run one flow with durable source-offset recovery enabled.
+
+    Bytewax's Kafka connector deliberately disables broker-side offset commits
+    and stores source offsets in its recovery database. Without this explicit
+    recovery configuration, every process restart begins at
+    ``S2P_KAFKA_START_OFFSET`` and re-emits the retained topic.
+    """
+    from bytewax.recovery import RecoveryConfig, init_db_dir
+    from bytewax.run import cli_main
+
+    recovery_dir = Path(cfg.state_dir) / "bytewax" / flow_name
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    if not any(recovery_dir.glob("part-*.sqlite3")):
+        init_db_dir(recovery_dir, 1)
+    interval = timedelta(seconds=_env_float("S2P_BYTEWAX_SNAPSHOT_SECONDS", 1.0))
+    cli_main(
+        flow,
+        epoch_interval=interval,
+        recovery_config=RecoveryConfig(recovery_dir),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +307,7 @@ def init_tracer(service_name: str, cfg: ProcessorConfig) -> trace.Tracer:
     global _TRACER_INITIALIZED
     if _TRACER_INITIALIZED:
         return trace.get_tracer(service_name)
-    resource = Resource.create(
-        {SERVICE_NAME: service_name, "service.namespace": "stream2pretrain"}
-    )
+    resource = Resource.create({SERVICE_NAME: service_name, "service.namespace": "stream2pretrain"})
     provider = TracerProvider(resource=resource)
     if cfg.otel_endpoint:
         if cfg.otel_protocol.lower() == "http/protobuf":

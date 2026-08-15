@@ -50,6 +50,7 @@ create_topic() {
 create_topic "raw.fetched"      1 1
 create_topic "docs.normalized"  1 1
 create_topic "docs.curated"     1 1
+create_topic "curation.decisions" 1 1
 create_topic "decon.attest"     1 1
 
 echo

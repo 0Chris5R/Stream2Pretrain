@@ -1,5 +1,6 @@
 {{- $component := "decon-gate" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,6 +42,10 @@ spec:
               value: {{ .Values.processor.deconGate.apiPort | quote }}
             - name: S2P_BENCH_SET_VERSION
               value: {{ .Values.processor.deconGate.benchmarkSetVersion | quote }}
+            - name: S2P_BENCH_CORPUS_PATH
+              value: {{ printf "%s/%s" $bench.mountPath $bench.fileName | quote }}
+            - name: S2P_BENCHMARK_CORPUS_KIND
+              value: {{ .Values.processor.deconGate.benchmarkCorpus.kind | quote }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
@@ -54,9 +59,20 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: decon-benchmarks
+              mountPath: {{ $bench.mountPath | quote }}
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: decon-benchmarks
+          {{- if $bench.secret }}
+          secret:
+            secretName: {{ $bench.secret | quote }}
+          {{- else }}
+          configMap:
+            name: {{ $bench.configMap | quote }}
+          {{- end }}
 ---
 apiVersion: v1
 kind: Service
