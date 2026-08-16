@@ -90,6 +90,13 @@ apply_tier() {
     --selector "tier=$tier" apply
 }
 
+bootstrap_polaris() {
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  kubectl -n stream2pretrain rollout status deployment/stream2pretrain-duckdb --timeout=120s
+  kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+    python - < "$ROOT_DIR/scripts/bootstrap_polaris.py"
+}
+
 required_secrets() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local missing=0
@@ -122,10 +129,15 @@ required_platform_secret() {
 
 required_catalog_secret() {
   export KUBECONFIG="$KUBECONFIG_PATH"
-  if ! kubectl get secret -n polaris polaris-bootstrap >/dev/null 2>&1; then
-    printf 'Missing required Secret: polaris/polaris-bootstrap\n' >&2
-    return 1
-  fi
+  local missing=0
+  local secret
+  for secret in polaris-bootstrap polaris-minio; do
+    if ! kubectl get secret -n polaris "$secret" >/dev/null 2>&1; then
+      printf 'Missing required Secret: polaris/%s\n' "$secret" >&2
+      missing=1
+    fi
+  done
+  return "$missing"
 }
 
 required_application_services() {
@@ -160,9 +172,9 @@ ensure_topics() {
         rpk topic create "$topic" \
           --partitions 1 \
           --replicas 1 \
-          --config retention.ms=604800000 \
-          --config cleanup.policy=delete \
-          --config max.message.bytes=2097152
+          --topic-config retention.ms=604800000 \
+          --topic-config cleanup.policy=delete \
+          --topic-config max.message.bytes=2097152
     fi
   done
 }
@@ -220,6 +232,7 @@ case "$COMMAND" in
     required_application_services
     required_topics
     apply_tier application
+    bootstrap_polaris
     ;;
   verify)
     validate

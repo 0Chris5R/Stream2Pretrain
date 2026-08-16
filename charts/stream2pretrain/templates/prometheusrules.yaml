@@ -1,0 +1,59 @@
+{{- if .Values.observability.prometheusRule.enabled }}
+{{- $fullName := include "stream2pretrain.fullname" . -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Values.observability.prometheusRule.namespace }}
+  labels:
+    {{- include "stream2pretrain.labels" . | nindent 4 }}
+    {{- with .Values.observability.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: stream2pretrain.workloads
+      rules:
+        - alert: Stream2PretrainDeploymentUnavailable
+          expr: |
+            sum by (namespace, deployment) (
+              kube_deployment_spec_replicas{
+                namespace="{{ .Release.Namespace }}",
+                deployment=~"{{ $fullName }}-(processor-fetcher|processor-iceberg-writer|duckdb|ui)"
+              }
+            )
+            >
+            sum by (namespace, deployment) (
+              kube_deployment_status_replicas_available{
+                namespace="{{ .Release.Namespace }}",
+                deployment=~"{{ $fullName }}-(processor-fetcher|processor-iceberg-writer|duckdb|ui)"
+              }
+            )
+          labels:
+            severity: warning
+            service: stream2pretrain
+          annotations:
+            summary: Stream2Pretrain Deployment has unavailable replicas
+            description: Deployment {{ "{{ $labels.deployment }}" }} has fewer available replicas than requested.
+        - alert: Stream2PretrainCuratorUnavailable
+          expr: |
+            sum by (namespace, statefulset) (
+              kube_statefulset_replicas{
+                namespace="{{ .Release.Namespace }}",
+                statefulset="{{ $fullName }}-processor-curate"
+              }
+            )
+            >
+            sum by (namespace, statefulset) (
+              kube_statefulset_status_replicas_ready{
+                namespace="{{ .Release.Namespace }}",
+                statefulset="{{ $fullName }}-processor-curate"
+              }
+            )
+          labels:
+            severity: warning
+            service: stream2pretrain
+          annotations:
+            summary: Stream2Pretrain curator has unavailable replicas
+            description: StatefulSet {{ "{{ $labels.statefulset }}" }} has fewer ready replicas than requested.
+{{- end }}

@@ -45,7 +45,7 @@ spec:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
-            - name: S2P_GITHUB_TOKEN
+            - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.sources.github.events.tokenSecret | quote }}

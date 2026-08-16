@@ -230,3 +230,26 @@ cadence on MinIO bronze, and DHBWCloud quotas.
 - Keep code strict: missing licenses and SPDX identifiers outside MIT,
   BSD-2-Clause, BSD-3-Clause, Apache-2.0, and MPL-2.0 remain excluded.
 - This is a curation policy for the demo, not a legal-compliance determination.
+
+### 2026-08-16 - Authoritative 2026 assignment requirements
+
+- Source: `Cloud Computing und Big Data - Prüfungsleistung 2026 - Datengetriebener Prototyp auf Kubernetes-Basis`, provided by the project team on 2026-08-16.
+- The submission is one ZIP file. No external files or running deployment are inspected during grading.
+- `README.md` is the only report document and must contain all twelve required sections:
+  1. Use case and motivation.
+  2. Data characteristics and relevant Big Data V's.
+  3. Kappa or Lambda architecture decision with justification and diagram.
+  4. Components, technology choices, and end-to-end data flow.
+  5. Processing logic, including transformation, windowing or state, and late data.
+  6. Storage format, partitioning, schema, and lakehouse justification.
+  7. User-facing UI role, real pipeline connection, and operating flow.
+  8. Kubernetes workloads, configuration, persistence, and horizontal scaling.
+  9. Reproducible deployment instructions and prerequisites.
+  10. Links to central ingestion, processing, UI, and manifest code locations with explanations.
+  11. Embedded screenshots of the running UI, pods, serving output, and example pipeline output.
+  12. Honest prototype limits and outlook.
+- The prototype must implement ingestion, non-trivial stream processing, lakehouse storage, serving, and a real containerized UI on Kubernetes.
+- Every component must be designed for horizontal scaling and the scaling behavior must be shown.
+- The README must explain the team contribution split. Git history must remain plausible.
+- Bonus claims require a clear benefit. Extra work without recognizable value earns no bonus.
+- The final README must be concise, use direct prose, and avoid excessive parentheses, semicolons, and long dashes.

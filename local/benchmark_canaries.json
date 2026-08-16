@@ -2,8 +2,16 @@
   "MMLU": [
     "the violet observatory stores thirteen silver lanterns beside a quiet river while careful astronomers record every changing shadow"
   ],
-  "GSM8K": [],
-  "HumanEval": [],
-  "MATH": [],
-  "GPQA": []
+  "GSM8K": [
+    "a patient gardener arranges seventeen copper markers across five terraces and records every transfer before calculating the final remainder"
+  ],
+  "HumanEval": [
+    "write a function that rotates a list of amber tokens by three positions while preserving duplicates and returning an empty list unchanged"
+  ],
+  "MATH": [
+    "a synthetic polygon has eleven equal sides and a measured perimeter of one hundred forty three units determine the exact side length"
+  ],
+  "GPQA": [
+    "in a fictional laboratory blue particles cross a layered membrane only after two independent sensors agree on the same reversible transition"
+  ]
 }

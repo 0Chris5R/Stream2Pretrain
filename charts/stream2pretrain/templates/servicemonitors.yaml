@@ -24,11 +24,5 @@ spec:
       interval: {{ $.Values.observability.serviceMonitor.interval }}
       scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout }}
       path: /metrics
-{{- /*
-The `processor-curate` Service no longer exposes a `gate-metrics` port -
-the Decon-Gate runs in-process inside the curate container and shares the
-main `metrics` endpoint. Keeping the conditional removed so Prometheus
-Operator does not log spurious "no port named gate-metrics" warnings.
-*/}}
 {{- end }}
 {{- end }}

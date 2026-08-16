@@ -235,6 +235,11 @@ def _canonical_attestation(payload: Mapping[str, Any]) -> bytes:
     unsigned = {
         key: value for key, value in payload.items() if key not in {"signature", "signer_cert"}
     }
+    snapshot_id = unsigned.get("snapshot_id")
+    if isinstance(snapshot_id, str) and snapshot_id.isascii() and snapshot_id.isdigit():
+        numeric_snapshot_id = int(snapshot_id)
+        if str(numeric_snapshot_id) == snapshot_id:
+            unsigned["snapshot_id"] = numeric_snapshot_id
     return json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 

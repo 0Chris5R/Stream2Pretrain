@@ -9,8 +9,13 @@ Components:
   decon-gate API (attestation lookup), seed-loader (one-shot Bytewax Job for
   the 5-component HF seed mixture).
 - Control plane: mixture-controller (kopf) + SourceFeed/MixtureRecipe CRDs.
+{{- if .Values.ui.ingress.enabled }}
 - UI: Next.js 14 reachable at https://{{ .Values.ui.ingress.host }}/ once the
   Certificate {{ .Values.ui.ingress.tlsSecret }} is Ready.
+{{- else }}
+- UI: Next.js 14 available through:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "stream2pretrain.fullname" . }}-ui 3000:80
+{{- end }}
 
 Required external secrets (create before installing or use sealed-secrets):
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.minio.credentialsSecret }} \
@@ -23,9 +28,11 @@ Required external secrets (create before installing or use sealed-secrets):
       --from-file=ed25519.key=./signing.key
   kubectl -n {{ .Release.Namespace }} create configmap {{ .Values.processor.deconGate.benchmarkCorpus.configMap }} \
       --from-file={{ .Values.processor.deconGate.benchmarkCorpus.fileName }}=./benchmark-corpus.json
+{{- if .Values.keda.auth.enabled }}
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.keda.triggerAuthSecret }} \
       --from-literal=sasl=plain --from-literal=tls=disable \
       --from-literal=username=... --from-literal=password=...
+{{- end }}
 
 Verify:
   kubectl -n {{ .Release.Namespace }} get sourcefeeds,mixturerecipes

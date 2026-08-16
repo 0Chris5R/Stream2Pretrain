@@ -32,6 +32,7 @@ spec:
         - name: controller
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.mixtureController.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["s2p-mixture-controller"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: http
@@ -50,6 +51,10 @@ spec:
               value: "8080"
             - name: S2P_RECONCILE_INTERVAL_SECONDS
               value: {{ .Values.mixtureController.reconcileIntervalSeconds | quote }}
+            - name: USER
+              value: stream2pretrain
+            - name: HOME
+              value: /tmp
             - name: S2P_RSS_CRONJOB
               value: {{ printf "%s-ingest-rss" (include "stream2pretrain.fullname" .) | quote }}
             - name: S2P_OAI_CRONJOB

@@ -57,6 +57,7 @@ Required externally managed objects:
 | --- | --- | --- |
 | `monitoring` | Secret `grafana-admin` | `admin-user`, `admin-password` |
 | `polaris` | Secret `polaris-bootstrap` | `credentials` |
+| `polaris` | Secret `polaris-minio` | `accessKey`, `secretKey` |
 | `stream2pretrain` | Secret `stream2pretrain-minio` | `accessKey`, `secretKey` |
 | `stream2pretrain` | Secret `stream2pretrain-polaris` | `credential`, `scope` |
 | `stream2pretrain` | Secret `stream2pretrain-github` | `token` |

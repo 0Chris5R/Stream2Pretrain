@@ -110,15 +110,15 @@ spec:
             - name: S2P_MODELS_DIR
               value: /models
             - name: S2P_REQUIRE_REAL_MODELS
-              value: "1"
+              value: {{ ternary "1" "0" .Values.processor.curate.requireRealModels | quote }}
             - name: S2P_FINEPDFS_EDU_REVISION
               value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
             - name: S2P_FINEWEB_EDU_REVISION
               value: "fineweb-edu@284663cbb2dabf9bda30d8f8cc49601251ee1631"
             - name: S2P_DOCLING_ENABLED
-              value: "1"
+              value: {{ ternary "1" "0" .Values.processor.curate.doclingEnabled | quote }}
             - name: S2P_USE_PRESIDIO
-              value: "1"
+              value: {{ ternary "1" "0" .Values.processor.curate.usePresidio | quote }}
             - name: S2P_MINHASH_BANDS
               value: {{ .Values.processor.curate.minHashBands | quote }}
             - name: S2P_MINHASH_ROWS_PER_BAND

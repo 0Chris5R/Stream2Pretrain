@@ -76,4 +76,6 @@ def test_mapping_sign_and_verify_public_surface() -> None:
     signed = sign_attestation({"snapshot_id": 45, "tokens_scanned": 20})
 
     assert verify_attestation(signed)
+    assert verify_attestation({**signed, "snapshot_id": "45"})
     assert not verify_attestation({**signed, "tokens_scanned": 21})
+    assert not verify_attestation({**signed, "snapshot_id": "46"})

@@ -40,6 +40,8 @@ spec:
               value: {{ .Values.processor.duckdbApi.apiPort | quote }}
             - name: S2P_DUCKDB_GOLD_RELATION
               value: {{ .Values.processor.duckdbApi.goldRelation | quote }}
+            - name: HOME
+              value: /tmp
           livenessProbe:
             httpGet: {path: /healthz, port: http}
             initialDelaySeconds: 30

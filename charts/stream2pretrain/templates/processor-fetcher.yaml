@@ -43,6 +43,8 @@ spec:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
+            - name: S2P_STATE_DIR
+              value: /tmp/s2p-state
             - name: S2P_FETCHER_CONCURRENCY
               value: {{ .Values.processor.fetcher.concurrency | quote }}
             - name: S2P_CONSUMER_GROUP

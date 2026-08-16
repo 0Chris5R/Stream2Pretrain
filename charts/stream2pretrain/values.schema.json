@@ -84,6 +84,7 @@
         "goldTable": {"type": "string"},
         "polarisUrl": {"type": "string", "format": "uri"},
         "warehouse": {"type": "string"},
+        "accessDelegation": {"type": "string", "enum": ["vended-credentials", "remote-signing", "none"]},
         "credentialSecret": {"type": "string"},
         "credentialKey": {"type": "string"},
         "scopeKey": {"type": "string"},
@@ -458,6 +459,16 @@
           }
         },
         "serviceMonitor": {"type": "object"},
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "namespace", "labels"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "namespace": {"type": "string", "minLength": 1},
+            "labels": {"type": "object"}
+          }
+        },
         "grafana": {"type": "object"},
         "tracing": {"type": "object"},
         "logs": {"type": "object"}
