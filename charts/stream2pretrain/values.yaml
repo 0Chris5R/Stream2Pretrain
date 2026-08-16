@@ -77,6 +77,7 @@ iceberg:
   # Polaris expects the Iceberg REST "warehouse" value to be the catalog name.
   # The physical object-store base location is configured on the Polaris catalog.
   warehouse: stream2pretrain
+  accessDelegation: vended-credentials
   credentialSecret: stream2pretrain-polaris
   credentialKey: credential
   scopeKey: scope
@@ -453,6 +454,9 @@ processor:
   curate:
     image: stream2pretrain/processor-curate
     replicas: 1
+    requireRealModels: true
+    doclingEnabled: true
+    usePresidio: true
     resources:
       requests: {cpu: 1, memory: 4Gi}
       limits: {cpu: 2, memory: 8Gi}
@@ -652,6 +656,11 @@ observability:
     namespace: monitoring
     interval: 30s
     scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack
+  prometheusRule:
+    enabled: true
+    namespace: monitoring
     labels:
       release: kube-prometheus-stack
   grafana:

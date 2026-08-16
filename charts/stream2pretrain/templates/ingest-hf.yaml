@@ -46,7 +46,7 @@ spec:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
-            - name: S2P_HF_TOKEN
+            - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.sources.huggingface.models.tokenSecret | quote }}
@@ -136,7 +136,7 @@ spec:
                 {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
                 - name: S2P_COMPONENT
                   value: {{ $papers | quote }}
-                - name: S2P_HF_TOKEN
+                - name: HF_TOKEN
                   valueFrom:
                     secretKeyRef:
                       name: {{ .Values.sources.huggingface.dailyPapers.tokenSecret | quote }}

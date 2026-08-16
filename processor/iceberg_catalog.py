@@ -60,11 +60,14 @@ def _polaris_properties(cfg: ProcessorConfig | None) -> dict[str, str]:
         "type": "rest",
         "uri": uri,
         "warehouse": warehouse,
+        "header.X-Iceberg-Access-Delegation": os.environ.get(
+            "S2P_ICEBERG_ACCESS_DELEGATION", "vended-credentials"
+        ),
         "s3.endpoint": _cfg_or_env(cfg, "minio_endpoint", "MINIO_ENDPOINT"),
         "s3.access-key-id": _cfg_or_env(cfg, "minio_access_key", "MINIO_ACCESS_KEY"),
         "s3.secret-access-key": _cfg_or_env(cfg, "minio_secret_key", "MINIO_SECRET_KEY"),
         "s3.region": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-        "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
+        "py-io-impl": "pyiceberg.io.pyarrow.PyArrowFileIO",
     }
     token = cfg.polaris_token if cfg is not None else os.environ.get("POLARIS_TOKEN")
     if token:

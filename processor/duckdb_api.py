@@ -11,6 +11,8 @@ import os
 import re
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
@@ -687,11 +689,13 @@ def _register_iceberg_relation(conn: DuckDBConnection, relation: str, table_name
     """Expose one configured Iceberg table as a DuckDB view."""
     if not _RELATION_RE.fullmatch(relation):
         raise ValueError("gold_relation must be a simple DuckDB relation name")
-    location = _load_table_location(table_name)
-    if location is None:
+    reference = _load_table_reference(table_name)
+    if reference is None:
         _create_empty_gold_relation(conn, relation)
         return
-    scan = f"iceberg_scan({_sql_string(location)}, allow_moved_paths = true)"
+    location, version = reference
+    version_arg = f", version = {_sql_string(version)}" if version else ""
+    scan = f"iceberg_scan({_sql_string(location)}{version_arg}, allow_moved_paths = true)"
     conn.execute(
         f"CREATE OR REPLACE VIEW {relation} AS "
         f"SELECT * FROM {scan} "
@@ -709,6 +713,12 @@ def _load_gold_table_location() -> str | None:
 
 def _load_table_location(table_name: str) -> str | None:
     """Resolve one table location through the configured runtime catalog."""
+    reference = _load_table_reference(table_name)
+    return reference[0] if reference is not None else None
+
+
+def _load_table_reference(table_name: str) -> tuple[str, str | None] | None:
+    """Resolve the table root and exact metadata version from the catalog."""
     from processor.iceberg_catalog import load_runtime_catalog
 
     catalog_type = os.environ.get("S2P_ICEBERG_CATALOG_TYPE", "rest").strip().lower()
@@ -726,7 +736,12 @@ def _load_table_location(table_name: str) -> str | None:
             return None
         raise
     location = getattr(table, "location", None)
-    return str(location()) if callable(location) else str(location)
+    root = str(location()) if callable(location) else str(location)
+    metadata_location = str(getattr(table, "metadata_location", "") or "")
+    metadata_name = metadata_location.rsplit("/", 1)[-1]
+    suffix = ".metadata.json"
+    version = metadata_name[: -len(suffix)] if metadata_name.endswith(suffix) else None
+    return root, version
 
 
 def _table_snapshot_manifest(table_name: str) -> dict[str, Any]:
@@ -911,7 +926,18 @@ def _sql_string(value: str) -> str:
 
 
 async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
+    import asyncio
+
     from aiohttp import web  # type: ignore[import-untyped]
+
+    query_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="duckdb-query")
+
+    async def run_query(function: Any, /, *args: Any, **kwargs: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(query_executor, partial(function, *args, **kwargs))
+
+    async def stop_query_executor(_: web.Application) -> None:
+        query_executor.shutdown(wait=False, cancel_futures=True)
 
     async def probe(_: web.Request) -> web.Response:
         return web.Response(text="ok\n", content_type="text/plain")
@@ -921,32 +947,33 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         if not ts:
             return web.json_response({"detail": "missing ts"}, status=400)
         try:
-            return web.json_response(service.as_of(ts))
+            return web.json_response(await run_query(service.as_of, ts))
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
     async def quality(_: web.Request) -> web.Response:
         try:
-            return web.json_response(service.quality_histogram())
+            return web.json_response(await run_query(service.quality_histogram))
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
     async def curation_summary(_: web.Request) -> web.Response:
         try:
-            return web.json_response(service.curation_summary())
+            return web.json_response(await run_query(service.curation_summary))
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
     async def corpus_overview(_: web.Request) -> web.Response:
         try:
-            return web.json_response(service.corpus_overview())
+            return web.json_response(await run_query(service.corpus_overview))
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
     async def documents(request: web.Request) -> web.Response:
         try:
             return web.json_response(
-                service.documents(
+                await run_query(
+                    service.documents,
                     page=int(request.query.get("page", "1")),
                     page_size=int(request.query.get("page_size", "25")),
                     search=request.query.get("search"),
@@ -976,8 +1003,9 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
     async def document_facets(request: web.Request) -> web.Response:
         try:
             return web.json_response(
-                service.document_facets(
-                    include_fixtures=_optional_bool(request.query.get("include_fixtures")) is True
+                await run_query(
+                    service.document_facets,
+                    include_fixtures=_optional_bool(request.query.get("include_fixtures")) is True,
                 )
             )
         except Exception as exc:
@@ -990,7 +1018,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         if not date_from or not date_to:
             return web.json_response({"detail": "date_from and date_to are required"}, status=400)
         try:
-            rows = service.dataset_rows(
+            rows = await run_query(
+                service.dataset_rows,
                 date_from=date_from,
                 date_to=date_to,
                 routes=routes,
@@ -1044,7 +1073,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
             return web.json_response({"detail": "date_from and date_to are required"}, status=400)
         try:
             return web.json_response(
-                service.dataset_summary(
+                await run_query(
+                    service.dataset_summary,
                     date_from=date_from,
                     date_to=date_to,
                     routes=routes,
@@ -1062,7 +1092,7 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
 
     async def document(request: web.Request) -> web.Response:
         try:
-            value = service.document(unquote(request.match_info["doc_id"]))
+            value = await run_query(service.document, unquote(request.match_info["doc_id"]))
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
         if value is None:
@@ -1071,7 +1101,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
 
     async def figure(request: web.Request) -> web.Response:
         try:
-            value = service.figure(
+            value = await run_query(
+                service.figure,
                 unquote(request.match_info["doc_id"]),
                 unquote(request.match_info["figure_id"]),
             )
@@ -1086,7 +1117,11 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         body = await request.json()
         try:
             return web.json_response(
-                service.safe_query(str(body.get("sql", "")), body.get("params", []))
+                await run_query(
+                    service.safe_query,
+                    str(body.get("sql", "")),
+                    body.get("params", []),
+                )
             )
         except ValueError as exc:
             return web.json_response({"detail": str(exc)}, status=400)
@@ -1107,13 +1142,12 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
     app.router.add_get("/datasets/export", dataset_export)
     app.router.add_get("/datasets/summary", dataset_summary)
     app.router.add_post("/query", query)
+    app.on_cleanup.append(stop_query_executor)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, os.environ.get("S2P_BIND_HOST", "::"), port)
     await site.start()
     while True:
-        import asyncio
-
         await asyncio.sleep(3600)
 
 

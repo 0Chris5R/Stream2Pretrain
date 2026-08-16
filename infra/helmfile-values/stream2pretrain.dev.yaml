@@ -20,8 +20,6 @@ nodeSelector:
 redpanda:
   bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
   schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
-  # Smoke mode skips the uncommitted historical backlog. Switch to beginning
-  # only after one controlled document completes the full pipeline.
   startingOffset: end
 
 minio:
@@ -39,6 +37,7 @@ iceberg:
   goldTable: curated
   polarisUrl: http://polaris.polaris.svc.cluster.local:8181/api/catalog
   warehouse: stream2pretrain
+  accessDelegation: none
   credentialSecret: stream2pretrain-polaris
 
 # The existing cluster has no Tempo, Loki, or Alloy release. Empty endpoints
@@ -59,12 +58,23 @@ processor:
     replicas: 1
   curate:
     replicas: 1
+    requireRealModels: false
+    doclingEnabled: false
+    usePresidio: false
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {cpu: 2, memory: 2Gi}
+    modelBundle:
+      bootstrap: false
   iceberg:
     replicas: 1
+    flushRecords: 1
   duckdbApi:
     replicas: 1
   deconGate:
     replicas: 1
+    benchmarkCorpus:
+      kind: synthetic_canary
 
 mixtureController:
   replicas: 1
@@ -93,6 +103,8 @@ sources:
       enabled: false
 
 ingest:
+  hf:
+    replicas: 0
   githubTarballFetcher:
     enabled: false
 

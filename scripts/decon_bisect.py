@@ -128,30 +128,11 @@ def _fetch_attestation(
 def _verify_signature(payload: dict[str, object]) -> bool:
     """Verify the Ed25519 signature on the canonical attestation body."""
     try:
-        from cryptography.hazmat.primitives.asymmetric import ed25519
-        from cryptography.hazmat.primitives.serialization import load_pem_public_key
-        from cryptography.x509 import load_pem_x509_certificate
+        from processor.sign import verify_attestation
     except ImportError:
         print("missing dep: cryptography. install with `uv add cryptography`.")
         sys.exit(EXIT_DEPS_MISSING)
-    import base64
-
-    sig_b64 = payload.get("signature")
-    cert_pem = payload.get("signer_cert")
-    if not isinstance(sig_b64, str) or not isinstance(cert_pem, str):
-        return False
-    body = {k: v for k, v in payload.items() if k not in {"signature", "signer_cert"}}
-    canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    try:
-        cert = load_pem_x509_certificate(cert_pem.encode("ascii"))
-        pk = cert.public_key()
-        if not isinstance(pk, ed25519.Ed25519PublicKey):
-            # Fallback path: signer_cert may be a raw PEM Ed25519 public key.
-            pk = load_pem_public_key(cert_pem.encode("ascii"))  # type: ignore[assignment]
-        pk.verify(base64.b64decode(sig_b64), canonical)
-    except Exception:
-        return False
-    return True
+    return verify_attestation(payload)
 
 
 def _replay_decon(

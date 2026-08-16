@@ -186,11 +186,15 @@ def test_empty_gold_relation_is_gold_shaped() -> None:
 
 def test_iceberg_relation_defensively_deduplicates_recipe_rows(monkeypatch) -> None:
     conn = _FakeConnection()
-    monkeypatch.setattr("processor.duckdb_api._load_table_location", lambda _name: "/warehouse/t")
+    monkeypatch.setattr(
+        "processor.duckdb_api._load_table_reference",
+        lambda _name: ("/warehouse/t", "00001-test"),
+    )
 
     _register_iceberg_relation(conn, "decisions", "curation_decisions")
 
     sql, _params = conn.calls[-1]
+    assert "version = '00001-test'" in sql
     assert "ROW_NUMBER() OVER" in sql
     assert "PARTITION BY doc_id, scoring_version, classifier_revision, policy_revision" in sql
 

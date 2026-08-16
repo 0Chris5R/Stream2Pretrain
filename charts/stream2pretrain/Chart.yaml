@@ -5,7 +5,7 @@ description: |
   Bundles every Stream2Pretrain Deployment, StatefulSet, CronJob, CRD, KEDA
   ScaledObject, NetworkPolicy, ServiceMonitor, and Grafana dashboard.
 
-  Tech stack (frozen, see CLAUDE.md): Redpanda, Bytewax, MinIO, Iceberg V3,
+  Tech stack: Redpanda, Bytewax, MinIO, Iceberg V2,
   Polaris, Resiliparse, Rensa, LSHBloom, FineWeb-Edu (ONNX INT8), Next.js 14,
   DuckDB API, KEDA, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
   cert-manager, OPA Gatekeeper.

@@ -26,6 +26,18 @@ extraEnv:
       secretKeyRef:
         name: polaris-bootstrap
         key: credentials
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: polaris-minio
+        key: accessKey
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: polaris-minio
+        key: secretKey
+  - name: AWS_REGION
+    value: us-east-1
 
 serviceMonitor:
   enabled: true

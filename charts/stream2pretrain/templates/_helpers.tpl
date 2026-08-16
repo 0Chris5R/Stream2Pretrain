@@ -182,6 +182,8 @@ Iceberg + observability).
   value: {{ .Values.iceberg.decisionsTable | quote }}
 - name: S2P_ICEBERG_BENCHMARK_TABLE
   value: {{ .Values.iceberg.benchmarkCandidatesTable | quote }}
+- name: S2P_ICEBERG_ACCESS_DELEGATION
+  value: {{ .Values.iceberg.accessDelegation | quote }}
 - name: POLARIS_URI
   value: {{ .Values.iceberg.polarisUrl | quote }}
 - name: POLARIS_WAREHOUSE
