@@ -34,16 +34,24 @@ def _cfg(token: str | None = "hf_test") -> IngestConfig:
 
 def _models_payload() -> list[dict]:
     return [
-        {"id": "meta-llama/Llama-4-8B", "lastModified": "2026-06-14T10:00:00Z"},
-        {"id": "mistralai/Mistral-Small-3", "lastModified": "2026-06-14T11:00:00Z"},
+        {
+            "id": "meta-llama/Llama-4-8B",
+            "lastModified": "2026-06-14T10:00:00Z",
+            "license": "Apache-2.0",
+        },
+        {
+            "id": "mistralai/Mistral-Small-3",
+            "lastModified": "2026-06-14T11:00:00Z",
+            "license": "MIT",
+        },
         {"id": "no-last-modified-model"},  # missing lastModified -> skipped
     ]
 
 
 def _papers_payload() -> list[dict]:
     return [
-        {"paper": {"id": "2406.12345", "title": "Paper A"}},
-        {"paper": {"id": "2406.67890", "title": "Paper B"}},
+        {"paper": {"id": "2406.12345", "title": "Paper A", "license": "CC-BY-4.0"}},
+        {"paper": {"id": "2406.67890", "title": "Paper B", "license": "CC-BY-SA-4.0"}},
     ]
 
 
@@ -80,7 +88,9 @@ async def test_poll_daily_papers_skipped_without_token(
     fake_producer = FakeProducer()
     fake_minio = FakeMinio()
     emitted = await hf_module.poll_daily_papers(
-        _cfg(token=None), producer=fake_producer, minio=fake_minio  # type: ignore[arg-type]
+        _cfg(token=None),
+        producer=fake_producer,
+        minio=fake_minio,  # type: ignore[arg-type]
     )
     assert emitted == 0
 
@@ -106,6 +116,8 @@ async def test_poll_daily_papers_emits(monkeypatch: pytest.MonkeyPatch, tmp_path
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
     emitted = await hf_module.poll_daily_papers(
-        _cfg(), producer=fake_producer, minio=fake_minio  # type: ignore[arg-type]
+        _cfg(),
+        producer=fake_producer,
+        minio=fake_minio,  # type: ignore[arg-type]
     )
     assert emitted == 2

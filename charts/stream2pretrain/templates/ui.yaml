@@ -51,6 +51,13 @@ spec:
               value: {{ printf "http://%s-duckdb.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.processor.duckdbApi.apiPort | quote }}
             - name: PROMETHEUS_URL
               value: {{ .Values.observability.prometheus.serverAddress | quote }}
+            - name: FOUNDRY_URL
+              value: {{ printf "http://%s-foundry.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.processor.foundry.apiPort | quote }}
+            - name: FOUNDRY_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.processor.foundry.providerSecret | quote }}
+                  key: {{ .Values.processor.foundry.controlTokenKey | quote }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

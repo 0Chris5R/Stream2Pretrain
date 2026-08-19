@@ -158,8 +158,16 @@ Iceberg + observability).
   value: {{ .Values.redpanda.topics.docsCurated | quote }}
 - name: S2P_DECISIONS_TOPIC
   value: {{ .Values.redpanda.topics.curationDecisions | quote }}
+- name: S2P_LICENSE_ADMISSIONS_TOPIC
+  value: {{ .Values.redpanda.topics.licenseAdmissions | quote }}
 - name: S2P_DECON_TOPIC
   value: {{ .Values.redpanda.topics.deconAttest | quote }}
+- name: S2P_FOUNDRY_JOBS_TOPIC
+  value: {{ .Values.redpanda.topics.foundryJobs | quote }}
+- name: S2P_FOUNDRY_EVENTS_TOPIC
+  value: {{ .Values.redpanda.topics.foundryEvents | quote }}
+- name: S2P_FOUNDRY_ARTIFACTS_TOPIC
+  value: {{ .Values.redpanda.topics.foundryArtifacts | quote }}
 - name: MINIO_ENDPOINT
   value: {{ .Values.minio.endpoint | quote }}
 - name: AWS_DEFAULT_REGION
@@ -172,6 +180,8 @@ Iceberg + observability).
   value: {{ .Values.minio.buckets.gold | quote }}
 - name: MINIO_DECON_BUCKET
   value: {{ .Values.minio.buckets.decon | quote }}
+- name: MINIO_POSTTRAIN_BUCKET
+  value: {{ .Values.minio.buckets.posttrain | quote }}
 - name: ICEBERG_CATALOG
   value: {{ .Values.iceberg.catalog | quote }}
 - name: ICEBERG_NAMESPACE
@@ -180,8 +190,8 @@ Iceberg + observability).
   value: {{ .Values.iceberg.goldTable | quote }}
 - name: S2P_ICEBERG_DECISIONS_TABLE
   value: {{ .Values.iceberg.decisionsTable | quote }}
-- name: S2P_ICEBERG_BENCHMARK_TABLE
-  value: {{ .Values.iceberg.benchmarkCandidatesTable | quote }}
+- name: S2P_ICEBERG_LICENSE_ADMISSIONS_TABLE
+  value: {{ .Values.iceberg.licenseAdmissionsTable | quote }}
 - name: S2P_ICEBERG_ACCESS_DELEGATION
   value: {{ .Values.iceberg.accessDelegation | quote }}
 - name: POLARIS_URI

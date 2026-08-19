@@ -38,7 +38,8 @@ from typing import Any
 
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -144,6 +145,8 @@ class _RowView:
     review_text: str | None
     decision: str | None
     cdate: datetime | None
+    paper_license: str | None = None
+    review_license: str | None = None
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> _RowView:
@@ -166,6 +169,8 @@ class _RowView:
             review_text=review_text,
             decision=decision,
             cdate=cdate,
+            paper_license=_first_str(row, ["paper_license", "license", "license_url"]),
+            review_license=_first_str(row, ["review_license", "review_license_url"]),
         )
 
 
@@ -278,10 +283,20 @@ async def _emit_pdf(
     cfg: IngestConfig,
     producer: BronzeProducer,
     minio: MinioWriter,
+    admission_producer: LicenseAdmissionProducer,
 ) -> bool:
     if not view.pdf_bytes or not view.note_id:
         return False
     url = f"https://openreview.net/pdf?id={view.note_id}"
+    admission = decide_license_admission(
+        source_url=url,
+        source_feed=SOURCE_FEED,
+        license_value=view.paper_license,
+        license_source="dataset_metadata" if view.paper_license else "unknown",
+    )
+    await admission_producer.send(admission.decision)
+    if not admission.admitted:
+        return False
     fetched_at = datetime.now(tz=UTC)
     cdate = view.cdate or fetched_at
     key = _backfill_pdf_key(view)
@@ -308,12 +323,12 @@ async def _emit_pdf(
         content_type="application/pdf",
         raw_html_s3_uri=f"s3://{cfg.minio_bronze_bucket}/{key}",
         source_feed=SOURCE_FEED,
-        trace_id=_trace_id(),
+        trace_id=admission.decision.trace_id,
         bytes_size=bytes_size,
         source_format="pdf",
         extraction_pipeline=PIPELINE_PDF_BACKFILL,
-        spdx_license=None,
-        spdx_license_source="unknown",
+        spdx_license=admission.license_id,
+        spdx_license_source="dataset_metadata",
     )
     await producer.send(
         record,
@@ -332,10 +347,20 @@ async def _emit_review(
     cfg: IngestConfig,
     producer: BronzeProducer,
     minio: MinioWriter,
+    admission_producer: LicenseAdmissionProducer,
 ) -> bool:
     if not view.review_text or not view.note_id:
         return False
     url = f"https://openreview.net/forum?id={view.note_id}"
+    admission = decide_license_admission(
+        source_url=url,
+        source_feed=SOURCE_FEED,
+        license_value=view.review_license,
+        license_source="dataset_metadata" if view.review_license else "unknown",
+    )
+    await admission_producer.send(admission.decision)
+    if not admission.admitted:
+        return False
     fetched_at = datetime.now(tz=UTC)
     cdate = view.cdate or fetched_at
     payload = json.dumps(
@@ -375,12 +400,12 @@ async def _emit_review(
         content_type="application/json",
         raw_html_s3_uri=f"s3://{cfg.minio_bronze_bucket}/{key}",
         source_feed=SOURCE_FEED,
-        trace_id=_trace_id(),
+        trace_id=admission.decision.trace_id,
         bytes_size=bytes_size,
         source_format="review",
         extraction_pipeline=PIPELINE_REVIEW_BACKFILL,
-        spdx_license=None,
-        spdx_license_source="unknown",
+        spdx_license=admission.license_id,
+        spdx_license_source="dataset_metadata",
     )
     await producer.send(
         record,
@@ -448,6 +473,11 @@ async def run_backfill(
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-openreview-backfill"
         ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-openreview-backfill-license-admission",
+        ) as admission_producer,
         MinioWriter(
             cfg.minio_endpoint,
             cfg.minio_access_key,
@@ -459,13 +489,25 @@ async def run_backfill(
             stats.rows_seen += 1
             view = _RowView.from_dict(raw)
             try:
-                if await _emit_pdf(view=view, cfg=cfg, producer=producer, minio=minio):
+                if await _emit_pdf(
+                    view=view,
+                    cfg=cfg,
+                    producer=producer,
+                    minio=minio,
+                    admission_producer=admission_producer,
+                ):
                     stats.pdfs_emitted += 1
             except Exception as exc:
                 log.warning("reviewarena.pdf_emit_failed", err=str(exc))
                 stats.skipped += 1
             try:
-                if await _emit_review(view=view, cfg=cfg, producer=producer, minio=minio):
+                if await _emit_review(
+                    view=view,
+                    cfg=cfg,
+                    producer=producer,
+                    minio=minio,
+                    admission_producer=admission_producer,
+                ):
                     stats.reviews_emitted += 1
             except Exception as exc:
                 log.warning("reviewarena.review_emit_failed", err=str(exc))

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 import feedparser
@@ -29,7 +30,8 @@ from ingest.common.feeds import (
     load_feeds_from_yaml,
 )
 from ingest.common.http_client import build_async_client
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import effective_license
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -40,11 +42,22 @@ from schemas.sourcefeed import SourceFeedSpec
 log = get_logger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class FeedEntry:
+    url: str
+    license_value: str | None
+
+
 def discover_entry_urls(feed_text: str) -> list[str]:
     """Return de-duplicated entry URLs from a parsed RSS/Atom payload."""
+    return [entry.url for entry in discover_entries(feed_text)]
+
+
+def discover_entries(feed_text: str) -> list[FeedEntry]:
+    """Return de-duplicated URLs plus entry-level licence metadata."""
     parsed: Any = feedparser.parse(feed_text)
     seen: set[str] = set()
-    urls: list[str] = []
+    entries: list[FeedEntry] = []
     for entry in parsed.get("entries", []):
         link = entry.get("link")
         if not link:
@@ -55,8 +68,11 @@ def discover_entry_urls(feed_text: str) -> list[str]:
                     break
         if link and link not in seen:
             seen.add(link)
-            urls.append(link)
-    return urls
+            rights = entry.get("rights") or entry.get("dc_rights") or entry.get("license")
+            if isinstance(rights, dict):
+                rights = rights.get("href") or rights.get("value")
+            entries.append(FeedEntry(url=str(link), license_value=str(rights) if rights else None))
+    return entries
 
 
 async def poll_feed(
@@ -67,12 +83,11 @@ async def poll_feed(
     minio: MinioWriter,
     bucket: str,
     state_store: FeedStateStore,
+    admission_producer: LicenseAdmissionProducer,
 ) -> int:
     """Run one polling pass over a single feed. Returns docs emitted."""
     cfg_state = state_store.get(feed.name)
-    bucket_limit = TokenBucket(
-        feed.rate_limit.requests_per_second, feed.rate_limit.burst
-    )
+    bucket_limit = TokenBucket(feed.rate_limit.requests_per_second, feed.rate_limit.burst)
 
     headers: dict[str, str] = {
         "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9",
@@ -103,12 +118,17 @@ async def poll_feed(
     if lm := resp.headers.get("last-modified"):
         new_state["last_modified"] = lm
 
-    urls = discover_entry_urls(resp.text)
-    log.info("feed.parsed", feed=feed.name, entries=len(urls))
+    entries = discover_entries(resp.text)
+    log.info("feed.parsed", feed=feed.name, entries=len(entries))
 
     seen_in_pass: set[str] = set()
     emitted = 0
-    for url in urls:
+    for entry in entries:
+        url = entry.url
+        license_id, license_source = effective_license(
+            entry.license_value,
+            feed.license_default,
+        )
         await bucket_limit.acquire()
         try:
             rec = await fetch_and_publish(
@@ -120,6 +140,9 @@ async def poll_feed(
                 bucket=bucket,
                 expected_content_type="text/html",
                 seen=seen_in_pass,
+                license_value=license_id,
+                license_source=license_source,
+                admission_producer=admission_producer,
             )
         except httpx.HTTPError as exc:
             log.warning("entry.fetch_failed", feed=feed.name, url=url, err=str(exc))
@@ -136,14 +159,23 @@ async def run_pass(cfg: IngestConfig, feeds: Iterable[SourceFeedSpec]) -> int:
     state_root = "/var/lib/s2p-state/rss_poller" if not cfg.is_dev else "./.s2p-state/rss"
     state_store = FeedStateStore(state_root)
     total = 0
-    async with build_async_client(cfg) as client, BronzeProducer(
-        cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-rss-poller"
-    ) as producer, MinioWriter(
-        cfg.minio_endpoint,
-        cfg.minio_access_key,
-        cfg.minio_secret_key,
-        bucket=cfg.minio_bronze_bucket,
-    ) as minio:
+    async with (
+        build_async_client(cfg) as client,
+        BronzeProducer(
+            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-rss-poller"
+        ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-rss-license-admission",
+        ) as admission_producer,
+        MinioWriter(
+            cfg.minio_endpoint,
+            cfg.minio_access_key,
+            cfg.minio_secret_key,
+            bucket=cfg.minio_bronze_bucket,
+        ) as minio,
+    ):
         for feed in feeds:
             try:
                 total += await poll_feed(
@@ -153,6 +185,7 @@ async def run_pass(cfg: IngestConfig, feeds: Iterable[SourceFeedSpec]) -> int:
                     minio=minio,
                     bucket=cfg.minio_bronze_bucket,
                     state_store=state_store,
+                    admission_producer=admission_producer,
                 )
             except Exception as exc:
                 log.exception("feed.unhandled_error", feed=feed.name, err=str(exc))

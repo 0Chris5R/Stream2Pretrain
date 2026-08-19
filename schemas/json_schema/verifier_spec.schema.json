@@ -1,0 +1,172 @@
+{
+  "$defs": {
+    "VerifierPredicate": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_spans": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Spans",
+          "type": "array"
+        },
+        "config": {
+          "additionalProperties": true,
+          "title": "Config",
+          "type": "object"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Targets",
+          "type": "array"
+        },
+        "tolerance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tolerance"
+        },
+        "type": {
+          "enum": [
+            "nonempty_report",
+            "manifest_required",
+            "required_nodes",
+            "forbidden_nodes",
+            "required_dependency_nodes",
+            "evidence_membership",
+            "evidence_coverage",
+            "symbolic_equivalence",
+            "numeric_tolerance",
+            "method_partial_order",
+            "fault_identification",
+            "required_relations",
+            "required_qualifications",
+            "configuration_constraints",
+            "report_manifest_consistency"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "weight": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "weight"
+      ],
+      "title": "VerifierPredicate",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "determinism_seed": {
+      "minimum": 0,
+      "title": "Determinism Seed",
+      "type": "integer"
+    },
+    "network_required": {
+      "const": false,
+      "default": false,
+      "title": "Network Required",
+      "type": "boolean"
+    },
+    "normalization": {
+      "const": "weighted_sum_with_hard_gates",
+      "default": "weighted_sum_with_hard_gates",
+      "title": "Normalization",
+      "type": "string"
+    },
+    "predicates": {
+      "items": {
+        "$ref": "#/$defs/VerifierPredicate"
+      },
+      "title": "Predicates",
+      "type": "array"
+    },
+    "runtime_dependencies": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Runtime Dependencies",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "verifier-spec-v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "verifier_id": {
+      "title": "Verifier Id",
+      "type": "string"
+    },
+    "version": {
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "verifier_id",
+    "task_id",
+    "version",
+    "predicates",
+    "determinism_seed"
+  ],
+  "title": "VerifierSpec",
+  "type": "object"
+}

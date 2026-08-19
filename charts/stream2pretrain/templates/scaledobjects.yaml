@@ -112,7 +112,22 @@ spec:
       metadata:
         bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
         consumerGroup: s2p-iceberg-writer
-        topic: {{ .Values.redpanda.topics.docsCurated | quote }}
+        topic: {{ .Values.redpanda.topics.curationDecisions | quote }}
+        lagThreshold: {{ .Values.keda.iceberg.lagThreshold | quote }}
+        offsetResetPolicy: latest
+        {{- if not $kedaAuthEnabled }}
+        sasl: ""
+        tls: "disable"
+        {{- end }}
+      {{- if $kedaAuthEnabled }}
+      authenticationRef:
+        name: {{ $fullName }}-redpanda
+      {{- end }}
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
+        consumerGroup: s2p-iceberg-writer-licenses
+        topic: {{ .Values.redpanda.topics.licenseAdmissions | quote }}
         lagThreshold: {{ .Values.keda.iceberg.lagThreshold | quote }}
         offsetResetPolicy: latest
         {{- if not $kedaAuthEnabled }}

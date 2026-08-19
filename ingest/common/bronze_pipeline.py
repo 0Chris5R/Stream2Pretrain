@@ -10,17 +10,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
 from opentelemetry import trace
 
 from ingest.common.hashing import canonical_url, doc_id_for_url
+from ingest.common.license_admission import decide_license_admission
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
-from schemas.bronze import BronzeRecord
+from schemas.bronze import BronzeRecord, SpdxLicenseSource
 
 if TYPE_CHECKING:
-    from ingest.common.kafka_producer import BronzeProducer
+    from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
     from ingest.common.minio_writer import MinioWriter
 
 
@@ -51,6 +52,9 @@ async def fetch_and_publish(
     expected_content_type: str | None = None,
     extra_headers: dict[str, str] | None = None,
     seen: set[str] | None = None,
+    license_value: str | None = None,
+    license_source: str = "unknown",
+    admission_producer: LicenseAdmissionProducer,
 ) -> BronzeRecord | None:
     """Fetch ``url``, store to MinIO bronze, emit BronzeRecord. Returns the record.
 
@@ -65,6 +69,18 @@ async def fetch_and_publish(
         if doc_id in seen:
             return None
         seen.add(doc_id)
+
+    admission = decide_license_admission(
+        source_url=canon,
+        source_feed=source_feed,
+        license_value=license_value,
+        license_source=license_source,
+    )
+    # The decision must be durably published before a content request starts.
+    # A Kafka failure therefore fails the ingest attempt closed.
+    await admission_producer.send(admission.decision)
+    if not admission.admitted:
+        return None
 
     with tracer.start_as_current_span(
         "fetch_and_publish",
@@ -110,8 +126,7 @@ async def fetch_and_publish(
             )
             s3_span.set_attribute("s3.bytes", stored)
 
-        trace_id_int = trace.get_current_span().get_span_context().trace_id
-        trace_id_hex = format(trace_id_int, "032x")
+        trace_id_hex = admission.decision.trace_id
         record = BronzeRecord(
             doc_id=doc_id,
             url=canon,  # type: ignore[arg-type]
@@ -130,6 +145,8 @@ async def fetch_and_publish(
             trace_id=trace_id_hex,
             etag=resp.headers.get("etag"),
             bytes_size=stored,
+            spdx_license=admission.license_id,
+            spdx_license_source=cast(SpdxLicenseSource, license_source),
         )
         with tracer.start_as_current_span("kafka.produce"):
             await producer.send(record)

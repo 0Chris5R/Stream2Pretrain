@@ -16,7 +16,12 @@ from functools import partial
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
+from ingest.common.license_admission import PERMISSIVE_TRAINING_LICENSES
+
 _RELATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
+_TRAINING_LICENSE_SQL = ", ".join(
+    f"'{value.replace(chr(39), chr(39) * 2)}'" for value in sorted(PERMISSIVE_TRAINING_LICENSES)
+)
 
 
 class DuckDBConnection(Protocol):
@@ -35,6 +40,7 @@ class DuckDBQueryService:
         *,
         gold_relation: str = "gold",
         decisions_relation: str = "decisions",
+        license_admissions_relation: str = "license_admissions",
         refresh_iceberg: bool = False,
         artifact_store: ScientificArtifactStore | None = None,
     ) -> None:
@@ -42,9 +48,12 @@ class DuckDBQueryService:
             raise ValueError("gold_relation must be a simple DuckDB relation name")
         if not _RELATION_RE.fullmatch(decisions_relation):
             raise ValueError("decisions_relation must be a simple relation name")
+        if not _RELATION_RE.fullmatch(license_admissions_relation):
+            raise ValueError("license_admissions_relation must be a simple relation name")
         self._conn = connection
         self._gold = gold_relation
         self._decisions = decisions_relation
+        self._license_admissions = license_admissions_relation
         self._refresh_iceberg = refresh_iceberg
         self._artifact_store = artifact_store
 
@@ -55,6 +64,9 @@ class DuckDBQueryService:
         db_path = os.environ.get("S2P_DUCKDB_DATABASE", ":memory:")
         gold_relation = os.environ.get("S2P_DUCKDB_GOLD_RELATION", "gold")
         decisions_relation = os.environ.get("S2P_DUCKDB_DECISIONS_RELATION", "decisions")
+        license_admissions_relation = os.environ.get(
+            "S2P_DUCKDB_LICENSE_ADMISSIONS_RELATION", "license_admissions"
+        )
         conn = duckdb.connect(db_path, read_only=False)
         _load_extensions(conn)
         if os.environ.get("S2P_DUCKDB_UNSAFE_VERSION_GUESSING") == "1":
@@ -66,6 +78,7 @@ class DuckDBQueryService:
             conn,
             gold_relation=gold_relation,
             decisions_relation=decisions_relation,
+            license_admissions_relation=license_admissions_relation,
             refresh_iceberg=True,
             artifact_store=ScientificArtifactStore.from_env(),
         )
@@ -120,7 +133,38 @@ class DuckDBQueryService:
         GROUP BY route
         ORDER BY documents DESC, route ASC
         """
-        return self._rows(sql, [], relation=self._decisions)
+        rows = self._rows(sql, [], relation=self._decisions)
+        early_quarantines = self._rows(
+            f"""
+            SELECT CAST(COUNT(*) AS BIGINT) AS documents
+            FROM {self._license_admissions} AS admission
+            WHERE admission.status = 'quarantined'
+              AND NOT EXISTS (
+                SELECT 1 FROM {self._decisions} AS decision
+                WHERE decision.doc_id = admission.doc_id
+              )
+            """,
+            [],
+            relation=self._license_admissions,
+        )
+        count = int(early_quarantines[0]["documents"]) if early_quarantines else 0
+        if count:
+            quarantine = next((row for row in rows if row["route"] == "quarantine"), None)
+            if quarantine is None:
+                rows.append(
+                    {
+                        "route": "quarantine",
+                        "documents": count,
+                        "source_words": 0,
+                        "training_words": 0,
+                        "mean_quality": 0.0,
+                        "mean_edu": 0.0,
+                    }
+                )
+            else:
+                quarantine["documents"] = int(quarantine["documents"]) + count
+            rows.sort(key=lambda row: (-int(row["documents"]), str(row["route"])))
+        return rows
 
     def corpus_overview(self) -> dict[str, Any]:
         """Return restart-safe headline counts from durable Iceberg tables.
@@ -149,7 +193,7 @@ class DuckDBQueryService:
             f"""
             SELECT reason, CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._decisions}, UNNEST(reject_reasons) AS rejected(reason)
-            GROUP BY reason
+            GROUP BY 1
             ORDER BY count DESC, reason ASC
             """,
             [],
@@ -175,20 +219,107 @@ class DuckDBQueryService:
             [],
             relation=self._gold,
         )
+        early_license_reasons = self._rows(
+            f"""
+            SELECT
+              CASE WHEN admission.license_id = 'unknown'
+                   THEN 'license_missing'
+                   ELSE 'license_not_permitted'
+              END AS reason,
+              CAST(COUNT(*) AS BIGINT) AS count
+            FROM {self._license_admissions} AS admission
+            WHERE admission.status = 'quarantined'
+              AND NOT EXISTS (
+                SELECT 1 FROM {self._decisions} AS decision
+                WHERE decision.doc_id = admission.doc_id
+              )
+            GROUP BY 1
+            ORDER BY count DESC, reason ASC
+            """,
+            [],
+            relation=self._license_admissions,
+        )
+        early_license_sources = self._rows(
+            f"""
+            SELECT admission.source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
+            FROM {self._license_admissions} AS admission
+            WHERE admission.status = 'quarantined'
+              AND NOT EXISTS (
+                SELECT 1 FROM {self._decisions} AS decision
+                WHERE decision.doc_id = admission.doc_id
+              )
+            GROUP BY admission.source_feed
+            ORDER BY admission.source_feed ASC
+            """,
+            [],
+            relation=self._license_admissions,
+        )
         accepted_by_source = {str(row["source"]): int(row["accepted"]) for row in accepted_sources}
+        totals_by_source = {str(row["source"]): int(row["total"]) for row in decision_sources}
+        for row in early_license_sources:
+            source = str(row["source"])
+            totals_by_source[source] = totals_by_source.get(source, 0) + int(row["total"])
         per_source = [
             {
-                "source": str(row["source"]),
-                "accepted": accepted_by_source.get(str(row["source"]), 0),
-                "total": int(row["total"]),
+                "source": source,
+                "accepted": accepted_by_source.get(source, 0),
+                "total": total,
             }
-            for row in decision_sources
+            for source, total in sorted(totals_by_source.items())
         ]
+        rejection_counts = {str(row["reason"]): int(row["count"]) for row in reasons}
+        for row in early_license_reasons:
+            reason = str(row["reason"])
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + int(row["count"])
+        early_total = sum(int(row["count"]) for row in early_license_reasons)
         return {
-            "durable_decisions": int(decision_totals[0]["durable_decisions"]),
+            "durable_decisions": int(decision_totals[0]["durable_decisions"]) + early_total,
             "training_export_documents": int(training_totals[0]["training_export_documents"]),
-            "rejected_by_reason": {str(row["reason"]): int(row["count"]) for row in reasons},
+            "rejected_by_reason": rejection_counts,
             "per_source_acceptance": per_source,
+        }
+
+    def license_admissions(self, *, recent_limit: int = 20) -> dict[str, Any]:
+        """Summarize and expose the immutable pre-fetch licence ledger."""
+        totals = self._rows(
+            f"""
+            SELECT status, CAST(COUNT(*) AS BIGINT) AS count
+            FROM {self._license_admissions}
+            GROUP BY status
+            ORDER BY status
+            """,
+            [],
+            relation=self._license_admissions,
+        )
+        by_license = self._rows(
+            f"""
+            SELECT license_id, status, CAST(COUNT(*) AS BIGINT) AS count
+            FROM {self._license_admissions}
+            GROUP BY license_id, status
+            ORDER BY count DESC, license_id
+            """,
+            [],
+            relation=self._license_admissions,
+        )
+        recent = self._rows(
+            f"""
+            SELECT decision_id, doc_id, source_feed, source_url,
+                   CAST(observed_at AS VARCHAR) AS observed_at,
+                   status, license_id, license_source, reason,
+                   content_fetch_started
+            FROM {self._license_admissions}
+            ORDER BY observed_at DESC, decision_id
+            LIMIT ?
+            """,
+            [max(1, min(recent_limit, 100))],
+            relation=self._license_admissions,
+        )
+        counts = {str(row["status"]): int(row["count"]) for row in totals}
+        return {
+            "admitted": counts.get("admitted", 0),
+            "quarantined": counts.get("quarantined", 0),
+            "by_license": by_license,
+            "recent": recent,
         }
 
     def documents(
@@ -359,6 +490,7 @@ class DuckDBQueryService:
           route, content_tags, quality_score, edu_score, structural_quality_score,
           reasoning_score, benchmark_score, tokens, policy_revision, scoring_version,
           classifier_revision, projection_version, scientific_artifact_s3_uri
+          , spdx_license, spdx_license_source
         FROM {self._decisions}
         {where}
           AND risk_tier = 1
@@ -458,6 +590,8 @@ class DuckDBQueryService:
                 "min_edu": min_edu,
                 "min_quality": min_quality,
                 "include_structured": include_structured,
+                "license_policy": "strict_allowlist",
+                "allowed_licenses": sorted(PERMISSIVE_TRAINING_LICENSES),
                 "fixtures_included": False,
             },
             "manifest": {
@@ -496,14 +630,28 @@ class DuckDBQueryService:
         params: list[Any] = []
         if not include_fixtures:
             clauses.append("source_feed NOT LIKE 'local-%'")
+        # Defence in depth: even historical or manually inserted rows cannot
+        # be exported unless their content licence is on the same strict
+        # allowlist used before fetch.
+        clauses.append(f"COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})")
         if search and search.strip():
             clauses.append(
                 "(LOWER(text) LIKE ? OR LOWER(doc_id) LIKE ? OR LOWER(source_feed) LIKE ?)"
             )
             needle = f"%{search.strip().lower()}%"
             params.extend([needle, needle, needle])
+        if routes:
+            clauses.append(
+                "("
+                + " OR ".join(
+                    "(route = ? OR LIST_CONTAINS(eligible_routes, ?))"
+                    for _ in routes
+                )
+                + ")"
+            )
+            for value in routes:
+                params.extend([value, value])
         for column, values in (
-            ("route", routes),
             ("source_feed", sources),
             ("source_format", source_formats),
         ):
@@ -636,12 +784,15 @@ class DuckDBQueryService:
         relation: str | None = None,
     ) -> list[dict[str, Any]]:
         if self._refresh_iceberg and relation is not None:
-            table_name = (
-                os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated")
-                if relation == self._gold
-                else os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
-            )
-            _register_iceberg_relation(self._conn, relation, table_name)
+            if relation == self._license_admissions:
+                _register_license_relation(self._conn, relation)
+            else:
+                table_name = (
+                    os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated")
+                    if relation == self._gold
+                    else os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
+                )
+                _register_iceberg_relation(self._conn, relation, table_name)
         result = self._conn.execute(sql, params)
         names = [str(col[0]) for col in (result.description or [])]
         return [dict(zip(names, row, strict=True)) for row in result.fetchall()]
@@ -703,6 +854,44 @@ def _register_iceberg_relation(conn: DuckDBConnection, relation: str, table_name
         "PARTITION BY doc_id, scoring_version, classifier_revision, policy_revision "
         "ORDER BY trace_id ASC"
         ") = 1"
+    )
+
+
+def _register_license_relation(conn: DuckDBConnection, relation: str) -> None:
+    """Expose the pre-fetch admission ledger, de-duplicated by decision id."""
+    table_name = os.environ.get("S2P_ICEBERG_LICENSE_ADMISSIONS_TABLE", "license_admissions")
+    reference = _load_table_reference(table_name)
+    if reference is None:
+        _create_empty_license_relation(conn, relation)
+        return
+    location, version = reference
+    version_arg = f", version = {_sql_string(version)}" if version else ""
+    scan = f"iceberg_scan({_sql_string(location)}{version_arg}, allow_moved_paths = true)"
+    conn.execute(
+        f"CREATE OR REPLACE VIEW {relation} AS "
+        f"SELECT * FROM {scan} "
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY decision_id ORDER BY observed_at ASC) = 1"
+    )
+
+
+def _create_empty_license_relation(conn: DuckDBConnection, relation: str) -> None:
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {relation} AS
+        SELECT
+          CAST(NULL AS VARCHAR) AS decision_id,
+          CAST(NULL AS VARCHAR) AS doc_id,
+          CAST(NULL AS VARCHAR) AS source_feed,
+          CAST(NULL AS VARCHAR) AS source_url,
+          CAST(NULL AS TIMESTAMP) AS observed_at,
+          CAST(NULL AS VARCHAR) AS status,
+          CAST(NULL AS VARCHAR) AS license_id,
+          CAST(NULL AS VARCHAR) AS license_source,
+          CAST(NULL AS VARCHAR) AS reason,
+          CAST(NULL AS VARCHAR) AS trace_id,
+          CAST(FALSE AS BOOLEAN) AS content_fetch_started
+        WHERE FALSE
+        """
     )
 
 
@@ -969,6 +1158,19 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
+    async def license_admissions(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(
+                await run_query(
+                    service.license_admissions,
+                    recent_limit=int(request.query.get("recent_limit", "20")),
+                )
+            )
+        except (TypeError, ValueError):
+            return web.json_response({"detail": "invalid recent_limit"}, status=400)
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
     async def documents(request: web.Request) -> web.Response:
         try:
             return web.json_response(
@@ -1014,7 +1216,7 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
     async def dataset_export(request: web.Request) -> web.Response:
         date_from = request.query.get("date_from")
         date_to = request.query.get("date_to")
-        routes = request.query.getall("route", ["broad_pretraining", "reasoning_candidate"])
+        routes = request.query.getall("route", ["pretrain", "posttrain_candidate"])
         if not date_from or not date_to:
             return web.json_response({"detail": "date_from and date_to are required"}, status=400)
         try:
@@ -1068,7 +1270,7 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
     async def dataset_summary(request: web.Request) -> web.Response:
         date_from = request.query.get("date_from")
         date_to = request.query.get("date_to")
-        routes = request.query.getall("route", ["broad_pretraining", "reasoning_candidate"])
+        routes = request.query.getall("route", ["pretrain", "posttrain_candidate"])
         if not date_from or not date_to:
             return web.json_response({"detail": "date_from and date_to are required"}, status=400)
         try:
@@ -1135,6 +1337,7 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
     app.router.add_get("/quality-histogram", quality)
     app.router.add_get("/curation-summary", curation_summary)
     app.router.add_get("/corpus-overview", corpus_overview)
+    app.router.add_get("/license-admissions", license_admissions)
     app.router.add_get("/documents", documents)
     app.router.add_get("/document-facets", document_facets)
     app.router.add_get("/documents/{doc_id}", document)

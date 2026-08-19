@@ -10,6 +10,7 @@ import {
   Layers,
   ListChecks,
   Radio,
+  FlaskConical,
 } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
@@ -20,6 +21,7 @@ const items = [
   { href: '/sources', label: 'Sources', icon: ListChecks },
   { href: '/decon', label: 'Benchmark Safety', icon: FileSignature },
   { href: '/datasets', label: 'Datasets', icon: Database },
+  { href: '/post-training', label: 'Post-training', icon: FlaskConical },
   { href: '/mixture', label: 'Mixture', icon: Layers },
 ] as const;
 

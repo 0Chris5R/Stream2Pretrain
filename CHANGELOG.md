@@ -7,11 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the scientific-paper post-training foundry: immutable paper bundles,
+  evidence graphs, grounded task/trajectory generation, deterministic verifier
+  compilation, adversarial and mutation validation, signed SFT/RL packages,
+  and Prime Verifiers v1 export.
+- Added strict Hetzner `Qwen3.8-27B` model discovery, exact route/licence
+  records, published minute-quota reservation, streaming checkpoints,
+  idempotent call replay, and catalogue-change records.
+- Added three foundry Redpanda topics, MinIO/Iceberg persistence, Podman and
+  Kubernetes oracle sandboxes, Helm resources, Prometheus/Grafana coverage, a
+  read-only API, and the Post-training UI.
+- Added a once-daily ranked post-training snapshot bounded by transactional
+  provider quota, plus durable leakage-safe 80/20 train/benchmark allocation
+  independently for SFT and RL paper packages.
+- Added immutable pre-fetch licence decisions and folded their admitted or
+  quarantined outcomes into the corpus route ledger and document audit view.
+- Added an authenticated manual foundry run that freezes and drains the same
+  ranked queue as the daily scheduler.
+- Added append-only per-artifact human approval and rejection with reviewer
+  identity, optional reason, API controls, and Post-training UI inspection.
+
 ### Changed
 
-- Missing or `unknown` machine-readable licenses no longer reject non-code
-  documents. Code remains restricted to the permissive SPDX allowlist, and
-  unknown license provenance remains visible in Gold records.
+- Consolidated every model-authored foundry role onto Hetzner
+  `Qwen3.8-27B`; removed the retired second-provider route and the artificial
+  quota reserve.
+- Added a deterministic lossless prompt projection for equation- and
+  table-heavy papers while preserving the complete durable `PaperBundle`.
+- Bounded each evidence-graph compiler pass to a prioritized incremental delta
+  so dense papers cannot truncate structured JSON at the output ceiling.
+- Removed provider qualification benchmarks, score thresholds, availability
+  heartbeats, maximum-gap rules, and provider approval state.
+- Removed copy-ratio, shared-word, and minimum-answer-length gates and metrics.
+- Replaced active `broad_pretraining`, `reasoning_candidate`, and
+  `benchmark_candidate` routing with `pretrain` plus optional
+  `posttrain_candidate`; the 80/20 benchmark split now occurs only after SFT/RL
+  artifact validation.
+- Disabled optional official-artifact oracles by default and retained them as
+  later work; Prometheus and Grafana remain the only observability stack.
+
+
+- Made licence admission fail closed for every content format. Missing,
+  excluded, and dataset-wrapper-only licences are quarantined before body
+  retrieval and cannot enter pretraining export or post-training generation.
 - Reimplemented the DHBW deployment as measured `platform`, `catalog`,
   `topics`, and `application` stages with Helm 3 validation and pinned charts.
 - Replaced the missing local Polaris chart with official Apache Polaris 1.7.0
@@ -22,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default, and added a selectable Kafka starting offset for safe smoke tests.
 - Removed committed demo credential defaults and protected Terraform VMs from
   accidental destruction.
+- Renamed the durable reasoning route to `posttrain_candidate`; the previous
+  value remains an opt-in historical read alias.
 
 ## [0.2.0] - 2026-06-15
 

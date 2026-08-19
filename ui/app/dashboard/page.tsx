@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowUpRight } from 'lucide-react';
+import { ArrowUpRight, FlaskConical } from 'lucide-react';
 
 import { ActivityPanel } from '@/components/activity-panel';
 import { Badge } from '@/components/ui/badge';
@@ -18,11 +18,20 @@ import {
 } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import { queryKeys } from '@/lib/query-keys';
-import { DashboardSummarySchema, type DashboardSummary } from '@/lib/schemas';
+import {
+  DashboardSummarySchema,
+  FoundryDashboardSchema,
+  type DashboardSummary,
+  type FoundryDashboard,
+} from '@/lib/schemas';
 import { formatInt } from '@/lib/utils';
 
 async function fetchDashboard(): Promise<DashboardSummary> {
   return apiFetch('/api/dashboard', DashboardSummarySchema);
+}
+
+async function fetchFoundry(): Promise<FoundryDashboard> {
+  return apiFetch('/api/foundry/dashboard', FoundryDashboardSchema);
 }
 
 export default function DashboardPage() {
@@ -31,18 +40,18 @@ export default function DashboardPage() {
     queryFn: fetchDashboard,
     refetchInterval: 5_000,
   });
+  const foundry = useQuery({
+    queryKey: queryKeys.foundry,
+    queryFn: fetchFoundry,
+    refetchInterval: 10_000,
+  });
   const data = dashboard.data;
   const scored =
     data?.quality_histogram.edu_buckets.reduce((sum, bucket) => sum + bucket.count, 0) ?? 0;
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-        <span className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" /> Live
-        </span>
-      </div>
+      <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="Decisions" value={data ? formatInt(data.durable_decisions) : '-'} />
@@ -55,11 +64,11 @@ export default function DashboardPage() {
           value={data ? `${(acceptanceRate(data) * 100).toFixed(1)}%` : '-'}
         />
         <Metric
-          label="Benchmark reserve"
+          label="Post-train candidates"
           value={
             data
               ? formatInt(
-                  data.route_distribution.find((row) => row.route === 'benchmark_candidate')
+                  data.route_distribution.find((row) => row.route === 'posttrain_candidate')
                     ?.documents ?? 0,
                 )
               : '-'
@@ -68,6 +77,8 @@ export default function DashboardPage() {
       </div>
 
       <ActivityPanel />
+
+      <PostTrainingSummary data={foundry.data} />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>
@@ -206,6 +217,7 @@ export default function DashboardPage() {
         </Card>
       </div>
 
+
       {dashboard.error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
           {(dashboard.error as Error).message}
@@ -225,6 +237,41 @@ function Metric({ label, value }: { label: string; value: string }) {
     </Card>
   );
 }
+function PostTrainingSummary({ data }: { data?: FoundryDashboard }) {
+  const sft = data?.artifacts['sft_trajectory:accepted'] ?? 0;
+  const rl = data?.artifacts['rl_environment:accepted'] ?? 0;
+  const latest = data?.manual_runs[0] ?? data?.daily_runs[0];
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between pb-2">
+        <CardTitle className="flex items-center gap-2 text-sm font-medium">
+          <FlaskConical className="h-4 w-4" /> Post-training foundry
+        </CardTitle>
+        <Link
+          href="/post-training"
+          className="inline-flex items-center gap-1 text-sm hover:underline"
+        >
+          Open <ArrowUpRight className="h-3.5 w-3.5" />
+        </Link>
+      </CardHeader>
+      <CardContent className="grid gap-3 sm:grid-cols-5">
+        <SummaryValue label="SFT accepted" value={formatInt(sft)} />
+        <SummaryValue label="RL accepted" value={formatInt(rl)} />
+        <SummaryValue label="Human approved" value={formatInt(data?.human_audits.approved ?? 0)} />
+        <SummaryValue label="Candidates queued" value={formatInt(data?.queued_candidates ?? 0)} />
+        <SummaryValue label="Latest run" value={latest ? humanize(latest.state) : 'None'} />
+      </CardContent>
+    </Card>
+  );
+}
+function SummaryValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 font-medium tabular-nums">{value}</div>
+    </div>
+  );
+}
 function RouteBadge({ route }: { route: string }) {
   return (
     <Badge
@@ -236,7 +283,11 @@ function RouteBadge({ route }: { route: string }) {
             : 'success'
       }
     >
-      {humanize(route)}
+      {route === 'posttrain_candidate' || route === 'reasoning_candidate'
+        ? 'Post-training'
+        : route === 'benchmark_candidate'
+          ? 'Legacy benchmark'
+        : humanize(route)}
     </Badge>
   );
 }

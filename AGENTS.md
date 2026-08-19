@@ -11,6 +11,31 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 
 ## Decision log
 
+### 2026-08-19 - Post-training foundry contract locked
+
+- `docs/POSTTRAIN_FOUNDRY.md` is the binding source of truth for the
+  scientific-paper to SFT and RL environment foundry.
+- The project keeps the Stream2Pretrain name until the live acceptance gate is
+  complete. A Stream2Train rename is not implied by implementation alone.
+- Hetzner Experiments Inference is the sole provider and `Qwen3.8-27B` is the
+  sole model for every model-authored role. Exact catalogue discovery, licence
+  records, and exact returned-model logging are mandatory.
+- `posttrain_candidate` replaces `reasoning_candidate`; the old value is a
+  historical read alias and is not accepted by the worker unless explicitly
+  enabled.
+- Every pretraining and post-training content path uses the same strict
+  fail-closed licence admission contract. Missing or excluded licences are
+  quarantined before body fetch, extraction, OCR, classifiers, or curation.
+- Provider qualification benchmarks, score thresholds, availability
+  heartbeats, maximum-gap rules, and provider approval are deliberately absent.
+- Human approval and rejection apply per generated SFT/RL artifact. The
+  reviewer is entered manually at audit time and every audit record is retained.
+- Copy-ratio, shared-word, and minimum-answer-length limits are deliberately
+  absent from gates, diagnostics, and logs.
+- Official-artifact oracles and W&B are disabled future work. No live provider
+  credentials or output fixtures may be committed. Replay is regression
+  evidence only.
+
 ### 2026-08-15 - Curation product execution contract locked
 
 - `docs/CURATION_PRODUCT_EXECUTION_PLAN.md` is the binding source of truth for
@@ -222,14 +247,22 @@ cadence on MinIO bronze, and DHBWCloud quotas.
   written by the v0.1 / v0.2 implementation workflows and are still
   internally consistent. Touch them only when content actually changes.
 
-### 2026-08-15 - Provisional missing-license policy
+### 2026-08-19 - Strict content-license admission policy
 
-- Admit non-code documents when no machine-readable license is available.
-  Preserve `spdx_license=None` / `unknown` provenance in Gold rather than
-  fabricating an identifier.
-- Keep code strict: missing licenses and SPDX identifiers outside MIT,
-  BSD-2-Clause, BSD-3-Clause, Apache-2.0, and MPL-2.0 remain excluded.
-- This is a curation policy for the demo, not a legal-compliance determination.
+- Every content-bearing source emits an immutable `license.admissions` record
+  before it may retrieve or process the document body. Publication failure
+  fails the ingest attempt closed.
+- Missing, unknown, non-commercial, no-derivatives, arXiv non-exclusive, and
+  other non-allowlisted licences are quarantined before Bronze storage,
+  extraction, OCR, classifiers, or curation. Replayed legacy Bronze records
+  receive the same defensive check before their MinIO object is read.
+- Dataset wrapper licences such as ODC-By do not establish rights in each
+  contained paper, page, or code file. Only per-record content licences or an
+  explicitly audited source-wide content licence qualify.
+- The Iceberg admission ledger records both admitted and quarantined decisions.
+  Gold and dataset export retain the exact licence identifier and provenance.
+- This is a conservative curation and provenance policy, not a legal-compliance
+  determination.
 
 ### 2026-08-16 - Authoritative 2026 assignment requirements
 

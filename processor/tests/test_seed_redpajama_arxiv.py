@@ -63,7 +63,8 @@ def test_to_seed_document_arxiv_url() -> None:
     assert doc.url == "https://arxiv.org/abs/2308.05670"
     assert doc.source_format == "latex"
     assert doc.extraction_pipeline == "redpajama-arxiv-2023-04"
-    assert doc.spdx_license == "Apache-2.0"
+    assert doc.spdx_license is None
+    assert doc.spdx_license_source == "unknown"
     assert doc.valid_from == datetime(2023, 8, 10, tzinfo=UTC)
 
 

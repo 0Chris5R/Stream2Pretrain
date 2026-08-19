@@ -15,7 +15,7 @@ from ingest.rss_poller.poller import discover_entry_urls, poll_feed
 from schemas.sourcefeed import RateLimitSpec, SourceFeedSpec
 
 RSS_BODY = """<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0"><channel>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
 <title>arXiv cs.CL</title>
 <link>https://arxiv.org/list/cs.CL/recent</link>
 <description>arXiv cs.CL</description>
@@ -23,11 +23,13 @@ RSS_BODY = """<?xml version="1.0" encoding="utf-8"?>
   <title>Paper A</title>
   <link>https://example.com/abs/2026.001</link>
   <guid>https://example.com/abs/2026.001</guid>
+  <dc:rights>https://creativecommons.org/licenses/by/4.0/</dc:rights>
 </item>
 <item>
   <title>Paper B</title>
   <link>https://example.com/abs/2026.002</link>
   <guid>https://example.com/abs/2026.002</guid>
+  <dc:rights>https://creativecommons.org/licenses/by-sa/4.0/</dc:rights>
 </item>
 </channel></rss>
 """
@@ -95,6 +97,7 @@ async def test_poll_feed_emits_records(tmp_path: Path) -> None:
         )
 
     fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
     fake_minio = FakeMinio()
     await fake_producer.start()
     await fake_minio.start()
@@ -107,11 +110,13 @@ async def test_poll_feed_emits_records(tmp_path: Path) -> None:
             minio=fake_minio,  # type: ignore[arg-type]
             bucket="bronze",
             state_store=state,
+            admission_producer=fake_admissions,  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()
     assert emitted == 2
     assert len(fake_producer.sent) == 2
+    assert len(fake_admissions.sent) == 2
     saved = state.get("rss-test")
     assert saved.get("etag") == '"feed-v1"'
 
@@ -125,6 +130,7 @@ async def test_poll_feed_handles_304(tmp_path: Path) -> None:
         return httpx.Response(304)
 
     fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
     fake_minio = FakeMinio()
     await fake_producer.start()
     await fake_minio.start()
@@ -137,6 +143,7 @@ async def test_poll_feed_handles_304(tmp_path: Path) -> None:
             minio=fake_minio,  # type: ignore[arg-type]
             bucket="bronze",
             state_store=state,
+            admission_producer=fake_admissions,  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()

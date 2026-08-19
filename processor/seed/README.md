@@ -10,10 +10,10 @@ composes.
 
 | # | Module                        | HuggingFace id (or source)                          | License      |
 |---|-------------------------------|-----------------------------------------------------|--------------|
-| 1 | ``pes2o``                     | ``allenai/peS2o`` (data/v3/, falls back to default) | ODC-By-1.0   |
+| 1 | ``pes2o``                     | ``allenai/peS2o`` (data/v3/, falls back to default) | Per-paper only; wrapper is not inherited |
 | 2 | ``redpajama_arxiv``           | ``togethercomputer/RedPajama-Data-1T`` (``arxiv``)  | Apache-2.0   |
-| 3 | ``fineweb_edu_filter``        | ``HuggingFaceFW/fineweb-edu`` + URL allowlist       | ODC-By-1.0   |
-| 4 | ``stack_edu_filter``          | ``HuggingFaceTB/stack-edu`` + Python+ML filter      | ODC-By-1.0 wrapper, per-file SPDX preserved |
+| 3 | ``fineweb_edu_filter``        | ``HuggingFaceFW/fineweb-edu`` + URL allowlist       | Per-page only; wrapper is not inherited |
+| 4 | ``stack_edu_filter``          | ``HuggingFaceTB/stack-edu`` + Python+ML filter      | Per-file SPDX only; wrapper is not inherited |
 | 5 | ``wayback_backfill``          | Wayback Machine timemap of the Phase-1 RSS/Atom set | per-feed     |
 
 All five honor the ``valid_from`` precedence rule from
@@ -52,10 +52,11 @@ The ``native_id`` shape per component:
   per IP but archive.org may serve degraded snapshots. The loader catches
   every HTTP exception and continues; it never fails the Job because of a
   single bad capture.
-- **No Apache-2.0 redistribution claim**: per-document licenses are
-  surfaced via ``SilverRecord.spdx_license`` for every component. The
-  Decon-Gate / Iceberg writer downstream is responsible for filtering at
-  Gold-emit time.
+- **No wrapper-licence inheritance**: per-document licences are surfaced via
+  ``SilverRecord.spdx_license``. Rows without an explicit content licence are
+  written to `license.admissions` and quarantined before `docs.normalized`,
+  even if the hosting dataset is ODC-By. Curator and export checks provide
+  additional defence for legacy rows.
 
 ## Running
 

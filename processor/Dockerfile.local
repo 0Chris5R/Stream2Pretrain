@@ -16,6 +16,7 @@ ENV PIP_NO_CACHE_DIR=1 \
 WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 COPY README.md /app/README.md
+COPY docs /app/docs
 COPY schemas /app/schemas
 COPY ingest /app/ingest
 COPY processor /app/processor

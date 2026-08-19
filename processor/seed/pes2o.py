@@ -10,7 +10,8 @@ metadata. Filtering to cs.* relies on the dataset's per-row
 expose that field are accepted (the downstream FineWeb-Edu classifier will
 score them) but tagged with ``extra["cs_filter"] = "missing-field"``.
 
-License: ODC-By-1.0 (inherited from the Dolma collection).
+The collection-level ODC-By licence is not treated as a paper licence. Only a
+per-row licence is eligible for the strict admission gate.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
 
 REPO_ID: str = "allenai/peS2o"
-SPDX: str = "ODC-By-1.0"
+SPDX: str = "unknown"
 
 # v2 knowledge cutoff per the dataset card.
 _V2_CUTOFF = datetime(2023, 1, 3, tzinfo=UTC)
@@ -120,6 +121,15 @@ def native_id_for(row: dict[str, Any]) -> str:
     return text
 
 
+def paper_license_for(row: dict[str, Any]) -> str | None:
+    """Return a per-paper licence without using the dataset wrapper."""
+    for key in ("license", "license_url", "rights", "paper_license"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
     """Convert a peS2o row into a :class:`SeedDocument` or ``None`` if empty."""
     text = row.get("text")
@@ -139,6 +149,7 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         # Caller is expected to pre-filter via :func:`is_cs_row`; we hard-skip
         # if a non-cs row slipped through.
         return None
+    paper_license = paper_license_for(row)
     return SeedDocument(
         repo_id=REPO_ID,
         native_id=nid,
@@ -149,8 +160,8 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         valid_from=valid_from,
         source_format="latex",
         extraction_pipeline="pes2o-seed-2026-06",
-        spdx_license=SPDX,
-        spdx_license_source="dataset_metadata",
+        spdx_license=paper_license,
+        spdx_license_source="dataset_metadata" if paper_license else "unknown",
         extra=extra,
     )
 
@@ -217,5 +228,6 @@ __all__ = [
     "iter_documents",
     "load_hf_stream",
     "native_id_for",
+    "paper_license_for",
     "to_seed_document",
 ]

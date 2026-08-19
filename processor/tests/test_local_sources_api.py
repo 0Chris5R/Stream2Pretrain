@@ -14,7 +14,7 @@ def _spec(name: str = "arxiv-test") -> SourceFeedSpec:
         endpoint="https://rss.arxiv.org/rss/cs.CL",
         poll_interval_seconds=900,
         rate_limit=RateLimitSpec(requests_per_second=1, burst=2),
-        license_default="arxiv-non-exclusive-distribution",
+        license_default="per-record",
     )
 
 

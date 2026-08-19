@@ -15,10 +15,12 @@ s2p_process_up 1
 """
 
 MetricsProvider = Callable[[], bytes]
+ReadinessProvider = Callable[[], bool]
 
 
 class ProbeServer(ThreadingHTTPServer):
     metrics_provider: MetricsProvider | None = None
+    readiness_provider: ReadinessProvider | None = None
 
 
 class IPv6ProbeServer(ProbeServer):
@@ -34,8 +36,17 @@ class _ProbeHandler(BaseHTTPRequestHandler):
     server_version = "Stream2PretrainProbe/1.0"
 
     def do_GET(self) -> None:
-        if self.path in {"/healthz", "/readyz"}:
+        if self.path == "/healthz":
             self._write(200, b"ok\n", "text/plain; charset=utf-8")
+            return
+        if self.path == "/readyz":
+            provider = getattr(self.server, "readiness_provider", None)
+            ready = provider() if callable(provider) else True
+            self._write(
+                200 if ready else 503,
+                b"ok\n" if ready else b"not ready\n",
+                "text/plain; charset=utf-8",
+            )
             return
         if self.path == "/metrics":
             provider = getattr(self.server, "metrics_provider", None)
@@ -60,12 +71,14 @@ def start_probe_server(
     port: int | None = None,
     *,
     metrics_provider: MetricsProvider | None = None,
+    readiness_provider: ReadinessProvider | None = None,
 ) -> ProbeServer:
     """Start `/healthz`, `/readyz`, and `/metrics` in a daemon thread."""
     resolved_port = port if port is not None else int(os.environ.get("S2P_PROBE_PORT", "9090"))
     server_cls = IPv6ProbeServer if ":" in host else ProbeServer
     server = server_cls((host, resolved_port), _ProbeHandler)
     server.metrics_provider = metrics_provider
+    server.readiness_provider = readiness_provider
     thread = threading.Thread(target=server.serve_forever, name="s2p-probes", daemon=True)
     thread.start()
     return server

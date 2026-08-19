@@ -1,7 +1,8 @@
 """Seed loader for ``HuggingFaceFW/fineweb-edu`` filtered by URL allowlist.
 
 FineWeb-Edu is a ~1.3T-token CC-derived English subset (FineWeb-Edu
-classifier score >= 3) under ODC-By-1.0. The allowlist comes from
+classifier score >= 3). Its ODC-By dataset wrapper is not treated as a
+licence for each crawled page. The allowlist comes from
 :file:`charts/stream2pretrain/values.yaml` (``seedLoader.fineweb_url_allowlist``)
 and matches a row's ``url`` column against substring + suffix membership.
 
@@ -19,7 +20,7 @@ from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
 
 REPO_ID: str = "HuggingFaceFW/fineweb-edu"
-SPDX: str = "ODC-By-1.0"
+SPDX: str = "unknown"
 
 # Default allowlist; values.yaml is the canonical source. Kept here so unit
 # tests do not depend on Helm rendering.
@@ -102,6 +103,15 @@ def native_id_for(row: dict[str, Any]) -> str:
     return str(raw) if raw is not None else ""
 
 
+def content_license_for(row: dict[str, Any]) -> str | None:
+    """Return an explicit per-page licence without using the dataset wrapper."""
+    for key in ("license", "license_url", "rights", "content_license"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def to_seed_document(
     row: dict[str, Any], *, allowlist: Iterable[str] = DEFAULT_URL_ALLOWLIST
 ) -> SeedDocument | None:
@@ -123,6 +133,7 @@ def to_seed_document(
     score = row.get("score")
     if isinstance(score, (int, float)):
         extra["fineweb_edu_score"] = f"{float(score):.3f}"
+    content_license = content_license_for(row)
     return SeedDocument(
         repo_id=REPO_ID,
         native_id=nid,
@@ -133,8 +144,8 @@ def to_seed_document(
         valid_from=valid_from,
         source_format="html",
         extraction_pipeline="fineweb-edu-2024",
-        spdx_license=SPDX,
-        spdx_license_source="dataset_metadata",
+        spdx_license=content_license,
+        spdx_license_source="dataset_metadata" if content_license else "unknown",
         extra=extra,
     )
 
@@ -179,6 +190,7 @@ __all__ = [
     "DEFAULT_URL_ALLOWLIST",
     "REPO_ID",
     "SPDX",
+    "content_license_for",
     "derive_valid_from",
     "iter_documents",
     "load_hf_stream",

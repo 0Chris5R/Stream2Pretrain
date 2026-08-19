@@ -19,11 +19,12 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from ingest.arxiv_html_fetcher.fetcher import _arxiv_id_from_url, run_for_ids
+from ingest.arxiv_html_fetcher.fetcher import ArxivCandidate, _arxiv_id_from_url, run_for_ids
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.http_client import build_async_client
+from ingest.common.license_admission import effective_license
 from ingest.oaipmh_poller.poller import _run as run_oaipmh
-from ingest.rss_poller.poller import discover_entry_urls
+from ingest.rss_poller.poller import discover_entries
 from ingest.rss_poller.poller import run_pass as run_rss
 from ingest.sitemap_poller.poller import run_pass as run_sitemap
 from schemas.sourcefeed import SourceFeedSpec
@@ -196,20 +197,32 @@ async def _run_arxiv_rss(
     async with build_async_client(cfg) as client:
         response = await client.get(str(spec.endpoint))
         response.raise_for_status()
-        ids: list[str] = []
-        for url in discover_entry_urls(response.text):
-            arxiv_id = _arxiv_id_from_url(url)
-            if arxiv_id and arxiv_id not in seen and arxiv_id not in ids:
-                ids.append(arxiv_id)
-            if len(ids) >= MAX_RECORDS:
+        candidates: list[ArxivCandidate] = []
+        candidate_ids: set[str] = set()
+        for entry in discover_entries(response.text):
+            arxiv_id = _arxiv_id_from_url(entry.url)
+            if arxiv_id and arxiv_id not in seen and arxiv_id not in candidate_ids:
+                license_id, license_source = effective_license(
+                    entry.license_value,
+                    spec.license_default,
+                )
+                candidates.append(
+                    ArxivCandidate(
+                        arxiv_id=arxiv_id,
+                        license_value=license_id,
+                        license_source=license_source,
+                    )
+                )
+                candidate_ids.add(arxiv_id)
+            if len(candidates) >= MAX_RECORDS:
                 break
     emitted = await run_for_ids(
-        ids,
+        candidates,
         cfg,
         feed_name=spec.name,
         license_default=spec.license_default,
     )
-    return emitted, ids[:emitted]
+    return emitted, [candidate.arxiv_id for candidate in candidates]
 
 
 async def _execute(store: LocalSourceStore, name: str, spec: SourceFeedSpec) -> None:

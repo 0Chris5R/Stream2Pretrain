@@ -19,6 +19,7 @@ arXiv HTML, CPU PDF fallback, or controlled fixture
   -> Iceberg decision audit + clean Gold + signed attestation
   -> local Iceberg warehouse + MinIO scientific assets + decon.attest
   -> DuckDB API + Prometheus + Next.js cockpit
+  -> optional foundry -> signed SFT/RL packages + Post-training UI
 ```
 
 The six controlled fixtures prove separate outcomes:
@@ -114,6 +115,30 @@ the host before the build.
   MixtureRecipe control remain Kubernetes demonstrations.
 - The local UI dashboard uses a small Prometheus instance. Loki, Tempo, and
   Grafana remain Kubernetes deployment tests.
+
+## Post-training foundry
+
+The base profile starts the foundry control API and Post-training page without
+making model calls. The worker is behind the `foundry` profile and starts after
+the Hetzner key is set and `Qwen3.8-27B` is visible through
+authenticated discovery. The full contract and credential checklist are in
+[`../docs/POSTTRAIN_FOUNDRY.md`](../docs/POSTTRAIN_FOUNDRY.md).
+
+```bash
+./scripts/foundry_local.sh base
+./scripts/foundry_local.sh worker
+./scripts/foundry_local.sh status
+```
+
+After the worker starts, open `http://localhost:3100/post-training` and select
+`Run now`. This freezes the
+current ranked candidate queue and uses the production worker path immediately,
+without waiting for the daily UTC schedule. The button cannot bypass quota
+reservation, licence checks, or artifact validation. Reviewers approve or
+reject each generated artifact in the same page and enter their name manually.
+
+The script does not delete local volumes. Official oracle execution is disabled
+and remains later optional work.
 
 ## Validated pilot behavior
 

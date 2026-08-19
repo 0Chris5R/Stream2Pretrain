@@ -78,19 +78,24 @@ spec:
                 licenseDefault:
                   type: string
                   description: |
-                    SPDX license that applies to the feed unless a per-document
-                    license is detected at fetch time. The Gatekeeper policy
-                    rejects "unknown" so unset / unknown values are forced to a
-                    deliberate operator choice. This field is required.
+                    Content licence that applies to every item, or per-record
+                    when the source supplies item-level rights. Dataset wrapper
+                    licences do not qualify. This field is required.
                   enum:
                     - unknown
+                    - per-record
                     - CC-BY-4.0
                     - CC-BY-SA-4.0
+                    - CC-BY-3.0
+                    - CC-BY-SA-3.0
                     - CC0-1.0
                     - Apache-2.0
                     - MIT
+                    - BSD-2-Clause
                     - BSD-3-Clause
-                    - arxiv-non-exclusive-distribution
+                    - MPL-2.0
+                    - ISC
+                    - Unlicense
                 rateLimit:
                   type: object
                   required: [requestsPerSecond, burst]

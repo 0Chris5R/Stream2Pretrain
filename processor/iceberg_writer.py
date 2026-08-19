@@ -44,6 +44,7 @@ from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.probes import start_probe_server
 from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
+from schemas.license_admission import LicenseAdmissionDecision
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -56,6 +57,112 @@ DEFAULT_GOLD_TABLE: str = "curated"
 DECON_TABLE: str = "decon_attestations"
 DEFAULT_BATCH_SIZE: int = 256
 DecisionKey = tuple[str, str, str, str]
+
+
+def _is_missing_catalog_table(exc: Exception) -> bool:
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    return "nosuchtable" in name or "not found" in message or "does not exist" in message
+
+
+class LicenseAdmissionWriter:
+    """Immediately append pre-fetch licence decisions to an Iceberg ledger."""
+
+    def __init__(self, catalog: Catalog) -> None:
+        self._catalog = catalog
+        self._known_ids: set[str] | None = None
+
+    def add(self, decision: LicenseAdmissionDecision) -> bool:
+        table = self._ensure_table()
+        if self._known_ids is None:
+            self._known_ids = self._load_ids(table)
+        if decision.decision_id in self._known_ids:
+            return False
+        table.append(self._to_arrow(decision))
+        self._known_ids.add(decision.decision_id)
+        return True
+
+    def _load_ids(self, table: Table) -> set[str]:
+        return {
+            str(value)
+            for value in table.scan(selected_fields=("decision_id",))
+            .to_arrow()
+            .column("decision_id")
+            .to_pylist()
+        }
+
+    def _ensure_table(self) -> Table:
+        identifier = (
+            os.environ.get("S2P_ICEBERG_NAMESPACE", DEFAULT_GOLD_NAMESPACE),
+            os.environ.get("S2P_ICEBERG_LICENSE_ADMISSIONS_TABLE", "license_admissions"),
+        )
+        try:
+            return self._catalog.load_table(identifier)
+        except Exception as exc:
+            if not _is_missing_catalog_table(exc):
+                raise
+        from pyiceberg.partitioning import PartitionField, PartitionSpec
+        from pyiceberg.schema import Schema
+        from pyiceberg.transforms import IdentityTransform, MonthTransform
+        from pyiceberg.types import BooleanType, NestedField, StringType, TimestamptzType
+
+        with suppress(Exception):
+            self._catalog.create_namespace((identifier[0],))
+        schema = Schema(
+            NestedField(1, "decision_id", StringType(), required=True),
+            NestedField(2, "doc_id", StringType(), required=True),
+            NestedField(3, "source_feed", StringType(), required=True),
+            NestedField(4, "source_url", StringType(), required=True),
+            NestedField(5, "observed_at", TimestamptzType(), required=True),
+            NestedField(6, "status", StringType(), required=True),
+            NestedField(7, "license_id", StringType(), required=True),
+            NestedField(8, "license_source", StringType(), required=True),
+            NestedField(9, "reason", StringType(), required=True),
+            NestedField(10, "trace_id", StringType(), required=True),
+            NestedField(11, "content_fetch_started", BooleanType(), required=True),
+        )
+        spec = PartitionSpec(
+            PartitionField(3, 1000, IdentityTransform(), "source_feed"),
+            PartitionField(6, 1001, IdentityTransform(), "status"),
+            PartitionField(5, 1002, MonthTransform(), "observed_month"),
+        )
+        return self._catalog.create_table(identifier, schema=schema, partition_spec=spec)
+
+    @staticmethod
+    def _to_arrow(decision: LicenseAdmissionDecision) -> pa.Table:
+        import pyarrow as pa
+
+        schema = pa.schema(
+            [
+                pa.field("decision_id", pa.string(), nullable=False),
+                pa.field("doc_id", pa.string(), nullable=False),
+                pa.field("source_feed", pa.string(), nullable=False),
+                pa.field("source_url", pa.string(), nullable=False),
+                pa.field("observed_at", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("status", pa.string(), nullable=False),
+                pa.field("license_id", pa.string(), nullable=False),
+                pa.field("license_source", pa.string(), nullable=False),
+                pa.field("reason", pa.string(), nullable=False),
+                pa.field("trace_id", pa.string(), nullable=False),
+                pa.field("content_fetch_started", pa.bool_(), nullable=False),
+            ]
+        )
+        return pa.Table.from_pydict(
+            {
+                "decision_id": [decision.decision_id],
+                "doc_id": [decision.doc_id],
+                "source_feed": [decision.source_feed],
+                "source_url": [str(decision.source_url)],
+                "observed_at": [decision.observed_at],
+                "status": [decision.status],
+                "license_id": [decision.license_id],
+                "license_source": [decision.license_source],
+                "reason": [decision.reason],
+                "trace_id": [decision.trace_id],
+                "content_fetch_started": [decision.content_fetch_started],
+            },
+            schema=schema,
+        )
 
 
 def gold_identifier() -> tuple[str, str]:
@@ -73,15 +180,6 @@ def decisions_identifier() -> tuple[str, str]:
         "ICEBERG_NAMESPACE", DEFAULT_GOLD_NAMESPACE
     )
     table = os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
-    return (namespace, table)
-
-
-def benchmark_candidates_identifier() -> tuple[str, str]:
-    """Return the physically separate benchmark-reserve table identifier."""
-    namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
-        "ICEBERG_NAMESPACE", DEFAULT_GOLD_NAMESPACE
-    )
-    table = os.environ.get("S2P_ICEBERG_BENCHMARK_TABLE", "benchmark_candidates")
     return (namespace, table)
 
 
@@ -212,21 +310,12 @@ class IcebergWriter:
         rows = list(self._buffer.rows)
         watermark = self._buffer.watermark
         accepted_rows = [row for row in rows if _is_trainable_gold(row)]
-        benchmark_rows = [
-            row for row in rows if row.route == "benchmark_candidate" and not row.reject_reasons
-        ]
         decisions_table = self._ensure_decisions_table()
         decision_rows = self._uncommitted_rows("decisions", decisions_table, rows)
         gold_table = self._ensure_table() if accepted_rows else None
         gold_rows = (
             self._uncommitted_rows("gold", gold_table, accepted_rows)
             if gold_table is not None
-            else []
-        )
-        benchmark_table = self._ensure_benchmark_candidates_table() if benchmark_rows else None
-        benchmark_commit_rows = (
-            self._uncommitted_rows("benchmark", benchmark_table, benchmark_rows)
-            if benchmark_table is not None
             else []
         )
         started = time.perf_counter()
@@ -245,7 +334,7 @@ class IcebergWriter:
             self._remember_rows("decisions", decision_rows)
 
             # The decision snapshot is authoritative. Sign it immediately so
-            # a later Gold/benchmark repair cannot leave an unattested audit
+            # a later Gold repair cannot leave an unattested audit
             # snapshot after an at-least-once replay.
             attestation = self._decon.flush_attestation(
                 snapshot_id=decision_snapshot_id,
@@ -277,30 +366,19 @@ class IcebergWriter:
                     "gold append failed after the durable decision commit; replay is safe"
                 )
             self._remember_rows("gold", gold_rows)
-        if benchmark_commit_rows and benchmark_table is not None:
-            benchmark_snapshot_id = self._append(
-                benchmark_table,
-                self._to_arrow(benchmark_commit_rows),
-                _rows_watermark(benchmark_commit_rows),
-            )
-            if benchmark_snapshot_id is None:
-                raise RuntimeError(
-                    "benchmark reserve append failed after the durable decision commit; replay is safe"
-                )
-            self._remember_rows("benchmark", benchmark_commit_rows)
         elapsed = time.perf_counter() - started
         self._buffer.reset()
         if self._metrics is not None:
             self._metrics.record_iceberg_flush(
                 rows=len(gold_rows),
                 decisions=len(decision_rows),
-                benchmark_candidates=len(benchmark_commit_rows),
+                benchmark_candidates=0,
                 seconds=elapsed,
             )
         return WriterStats(
             rows_committed=len(gold_rows),
             decisions_committed=len(decision_rows),
-            benchmark_candidates_committed=len(benchmark_commit_rows),
+            benchmark_candidates_committed=0,
             snapshot_id=decision_snapshot_id,
             attestation_signed=attestation_signed,
             watermark=watermark,
@@ -375,10 +453,6 @@ class IcebergWriter:
     def _ensure_decisions_table(self) -> Table:
         """Create the authoritative accepted/rejected decision table."""
         return self._ensure_table_at(decisions_identifier())
-
-    def _ensure_benchmark_candidates_table(self) -> Table:
-        """Create the restricted benchmark-candidate table if missing."""
-        return self._ensure_table_at(benchmark_candidates_identifier())
 
     def _ensure_table_at(self, identifier: tuple[str, str]) -> Table:
         """Create one Gold-shaped Iceberg table if missing."""
@@ -944,7 +1018,8 @@ def _is_trainable_gold(record: GoldRecord) -> bool:
     """Defensive writer-side guard for the clean-only Gold contract."""
     return (
         record.risk_tier == 1
-        and record.route in {"broad_pretraining", "reasoning_candidate"}
+        and record.route
+        in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
         and not record.reject_reasons
         and not record.pii_flags
         and not record.contaminated_with
@@ -960,6 +1035,9 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     tracer = common.init_tracer("s2p-iceberg-writer", cfg)
     decon = DeconGate(benchmark_set_version=cfg.benchmark_set_version)
     writer = IcebergWriter.from_config(cfg, decon=decon, metrics=PROCESSOR_METRICS)
+    from processor.iceberg_catalog import load_runtime_catalog
+
+    admission_writer = LicenseAdmissionWriter(load_runtime_catalog(cfg))
     flow = Dataflow("s2p-iceberg-writer")
     # ``beginning`` keeps the writer at-least-once across restarts (the
     # consumer group offset advances from there). See processor/curate.py.
@@ -991,6 +1069,36 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 )
 
     op.inspect("iceberg_write", inp, lambda _step, msg: _ingest(msg))
+
+    admission_source = KafkaSource(
+        brokers=cfg.redpanda_brokers.split(","),
+        topics=[cfg.license_admissions_topic],
+        starting_offset=start_offset,
+        add_config=common.kafka_consumer_config(f"{cfg.consumer_group}-licenses"),
+    )
+    admission_inp = op.input("license_admissions", flow, admission_source)
+
+    def _ingest_admission(msg: object) -> None:
+        with tracer.start_as_current_span("iceberg.license_admission") as span:
+            payload = getattr(msg, "value", None)
+            if payload is None:
+                return
+            try:
+                decision = LicenseAdmissionDecision.model_validate_json(payload)
+                committed = admission_writer.add(decision)
+                span.set_attribute("status", decision.status)
+                span.set_attribute("committed", committed)
+            except Exception as exc:
+                span.record_exception(exc)
+                # Never acknowledge a Kafka admission record that failed to
+                # reach the durable ledger. Bytewax must retry it.
+                raise
+
+    op.inspect(
+        "iceberg_license_admission_write",
+        admission_inp,
+        lambda _step, msg: _ingest_admission(msg),
+    )
     return flow
 
 
@@ -999,7 +1107,11 @@ def main() -> None:
     cfg = common.load_config()
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.iceberg")
-    log.info("starting iceberg writer", topic=cfg.decisions_topic)
+    log.info(
+        "starting iceberg writer",
+        decisions_topic=cfg.decisions_topic,
+        license_admissions_topic=cfg.license_admissions_topic,
+    )
     start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
     common.run_bytewax_flow(flow, cfg, "iceberg-writer")

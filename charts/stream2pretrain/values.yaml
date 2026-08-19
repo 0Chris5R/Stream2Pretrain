@@ -49,7 +49,11 @@ redpanda:
     docsNormalized: docs.normalized
     docsCurated: docs.curated
     curationDecisions: curation.decisions
+    licenseAdmissions: license.admissions
     deconAttest: decon.attest
+    foundryJobs: foundry.jobs
+    foundryEvents: foundry.events
+    foundryArtifacts: foundry.artifacts
 
 # -----------------------------------------------------------------------------
 # MinIO / object storage
@@ -62,6 +66,7 @@ minio:
     silver: s2p-silver
     gold: s2p-gold
     decon: s2p-decon
+    posttrain: s2p-posttrain
   credentialsSecret: stream2pretrain-minio
 
 # -----------------------------------------------------------------------------
@@ -72,7 +77,9 @@ iceberg:
   namespace: gold
   goldTable: curated
   decisionsTable: curation_decisions
-  benchmarkCandidatesTable: benchmark_candidates
+  licenseAdmissionsTable: license_admissions
+  foundryEventsTable: foundry_events
+  posttrainArtifactsTable: posttrain_artifacts
   polarisUrl: http://polaris.polaris.svc.cluster.local:8181/api/catalog
   # Polaris expects the Iceberg REST "warehouse" value to be the catalog name.
   # The physical object-store base location is configured on the Polaris catalog.
@@ -116,6 +123,8 @@ networkPolicy:
       - deepmind.google
       - bair.berkeley.edu
       - blog.eleuther.ai
+    foundry-providers:
+      - inference.hetzner.com
   # Allow DNS to kube-dns.
   dnsNamespace: kube-system
 
@@ -131,7 +140,7 @@ sources:
       endpoint: https://oaipmh.arxiv.org/oai
       set: cs
       pollIntervalSeconds: 7200
-      licenseDefault: arxiv-non-exclusive-distribution
+      licenseDefault: per-record
       kind: cronjob
       schedule: "13 */2 * * *"
     rss:
@@ -143,14 +152,14 @@ sources:
       pollIntervalSeconds: 7200
       kind: cronjob
       schedule: "27 */2 * * *"
-      licenseDefault: arxiv-non-exclusive-distribution
+      licenseDefault: per-record
     # Native arXiv full-paper-HTML fetcher (v0.2.0). Subscribes to
     # ``docs.normalized`` and walks every fresh arXiv id through
     # ``arxiv.org/html/<id>`` (with ``ar5iv.labs.arxiv.org`` as fallback).
     htmlFetcher:
       enabled: true
       feedName: arxiv-html-fetcher
-      licenseDefault: arxiv-non-exclusive-distribution
+      licenseDefault: per-record
       backfill:
         enabled: false
         schedule: "23 4 * * *"
@@ -519,6 +528,34 @@ processor:
       kind: restricted_reserve
       fileName: corpus.json
       mountPath: /etc/stream2pretrain/decon
+  foundry:
+    enabled: true
+    image: stream2pretrain/processor-foundry
+    replicas: 1
+    apiPort: 8092
+    dailyRunHourUtc: 0 # needs-measurement
+    tasksPerPaper: 6
+    acceptedTasksPerPaper: 3
+    queuePollSeconds: 10
+    enableOracles: false
+    oracleRuntimeClass: ""
+    providerSecret: stream2pretrain-foundry-providers
+    controlTokenKey: controlToken
+    hetznerKey: HETZNER_INFERENCE_API_KEY
+    signingKeySecret: stream2pretrain-decon-signing
+    signingKeyKey: ed25519.key
+    signingCertKey: ed25519.crt
+    hetznerModels:
+      - Qwen3.8-27B
+    state:
+      storageClass: ""
+      size: 5Gi # needs-measurement after the first cloud pilot
+    workerResources:
+      requests: {cpu: 250m, memory: 512Mi} # needs-measurement
+      limits: {cpu: 1, memory: 2Gi} # needs-measurement
+    apiResources:
+      requests: {cpu: 50m, memory: 128Mi} # needs-measurement
+      limits: {cpu: 500m, memory: 512Mi} # needs-measurement
 
 # -----------------------------------------------------------------------------
 # Mixture controller (kopf)

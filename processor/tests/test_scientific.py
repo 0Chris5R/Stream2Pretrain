@@ -57,6 +57,29 @@ def test_html_projection_keeps_structure_but_excludes_metadata_and_references() 
     assert "ada@example.invalid" not in projection
 
 
+def test_source_url_id_wins_over_cited_arxiv_id_in_body() -> None:
+    html = b"""
+    <article>
+      <h1 class="ltx_title_document">Identity-safe extraction</h1>
+      <h6 class="ltx_title_abstract">Abstract</h6>
+      <p>We extend arXiv:2106.05735 with a new controlled evaluation.</p>
+      <h2>Methods</h2>
+      <p>The experiment uses a reproducible protocol.</p>
+    </article>
+    """
+
+    document = extract_scientific_html(
+        doc_id="sha256:" + "f" * 64,
+        source_url="https://arxiv.org/html/2112.10074",
+        html=html,
+        plain_text=html.decode(),
+        title=None,
+        extraction_pipeline="test-native-html",
+    )
+
+    assert document.source_identifier == "2112.10074"
+
+
 def test_front_matter_before_abstract_is_excluded_from_training() -> None:
     html = b"""
     <article>

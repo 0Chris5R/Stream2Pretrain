@@ -151,6 +151,93 @@
         }
       ],
       "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Accepted post-training artifacts",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (kind, family) (increase(s2p_foundry_artifacts_total{status=\"accepted\"}[24h]))",
+          "legendFormat": "{{kind}} / {{family}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Provider output tokens by role",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (provider, role) (rate(s2p_foundry_provider_tokens_total{direction=\"output\"}[5m]))",
+          "legendFormat": "{{provider}} / {{role}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Foundry validation gates",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "s2p_foundry_validation_pass",
+          "legendFormat": "{{task_family}} / {{gate}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Provider latency and first token p95",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (provider, role, le) (rate(s2p_foundry_provider_latency_seconds_bucket[5m])))",
+          "legendFormat": "{{provider}} / {{role}} latency",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (provider, role, le) (rate(s2p_foundry_provider_time_to_first_token_seconds_bucket[5m])))",
+          "legendFormat": "{{provider}} / {{role}} first token",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Provider quota remaining",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 56},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "s2p_foundry_quota_remaining{window=\"day\"}",
+          "legendFormat": "{{provider}} / {{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Post-training queue",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 56},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "s2p_foundry_queued_candidates", "refId": "A"}
+      ]
     }
   ]
 }

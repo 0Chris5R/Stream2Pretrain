@@ -1,0 +1,214 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "base_url": {
+      "title": "Base Url",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "credential_label": {
+      "title": "Credential Label",
+      "type": "string"
+    },
+    "dynamic_route": {
+      "default": false,
+      "title": "Dynamic Route",
+      "type": "boolean"
+    },
+    "input_tokens": {
+      "minimum": 0,
+      "title": "Input Tokens",
+      "type": "integer"
+    },
+    "latency_ms": {
+      "minimum": 0,
+      "title": "Latency Ms",
+      "type": "integer"
+    },
+    "model_family": {
+      "title": "Model Family",
+      "type": "string"
+    },
+    "model_license": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model License"
+    },
+    "model_license_source": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model License Source"
+    },
+    "output_tokens": {
+      "minimum": 0,
+      "title": "Output Tokens",
+      "type": "integer"
+    },
+    "output_tokens_per_second": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output Tokens Per Second"
+    },
+    "prompt_version": {
+      "title": "Prompt Version",
+      "type": "string"
+    },
+    "provider": {
+      "enum": [
+        "hetzner",
+        "replay"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "provider_request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Request Id"
+    },
+    "request_attempts": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Request Attempts",
+      "type": "integer"
+    },
+    "request_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Request Hash",
+      "type": "string"
+    },
+    "requested_model": {
+      "title": "Requested Model",
+      "type": "string"
+    },
+    "response_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Response Hash",
+      "type": "string"
+    },
+    "returned_model": {
+      "title": "Returned Model",
+      "type": "string"
+    },
+    "role": {
+      "title": "Role",
+      "type": "string"
+    },
+    "sampling": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "title": "Sampling",
+      "type": "object"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "terms_snapshot_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Terms Snapshot Hash",
+      "type": "string"
+    },
+    "time_to_first_token_ms": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Time To First Token Ms"
+    },
+    "trace_id": {
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "upstream_provider": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Upstream Provider"
+    }
+  },
+  "required": [
+    "trace_id",
+    "provider",
+    "credential_label",
+    "role",
+    "base_url",
+    "requested_model",
+    "returned_model",
+    "model_family",
+    "prompt_version",
+    "request_hash",
+    "response_hash",
+    "input_tokens",
+    "output_tokens",
+    "latency_ms",
+    "terms_snapshot_hash",
+    "started_at",
+    "completed_at"
+  ],
+  "title": "ProviderTrace",
+  "type": "object"
+}

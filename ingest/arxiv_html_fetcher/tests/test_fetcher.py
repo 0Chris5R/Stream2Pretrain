@@ -25,6 +25,8 @@ from ingest.arxiv_html_fetcher.fetcher import (
     FetchOutcome,
     build_metadata_stub,
     canonical_arxiv_url,
+    fetch_arxiv_license,
+    fetch_arxiv_license_with_source,
     fetch_one,
     is_valid_arxiv_id,
     load_backfill_ids,
@@ -35,6 +37,7 @@ from ingest.common.config import IngestConfig
 from ingest.common.http_client import build_async_client
 from ingest.common.rate_limit import TokenBucket
 from schemas.bronze import BronzeRecord
+from schemas.license_admission import LicenseAdmissionDecision
 
 ARXIV_HTML_SAMPLE = """<!DOCTYPE html>
 <html><head>
@@ -64,6 +67,14 @@ AR5IV_HTML_SAMPLE = """<!DOCTYPE html>
 </div>
 </body></html>
 """
+
+
+def _atom_license(value: str) -> str:
+    return (
+        "<feed xmlns='http://www.w3.org/2005/Atom' "
+        "xmlns:arxiv='http://arxiv.org/schemas/atom'><entry>"
+        f"<arxiv:license>{value}</arxiv:license></entry></feed>"
+    )
 
 
 def _cfg() -> IngestConfig:
@@ -132,6 +143,20 @@ class _FakeProducer:
         self.records.append(record)
 
 
+class _FakeAdmissionProducer:
+    def __init__(self) -> None:
+        self.records: list[LicenseAdmissionDecision] = []
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def send(self, record: LicenseAdmissionDecision) -> None:
+        self.records.append(record)
+
+
 def test_is_valid_arxiv_id_accepts_modern_and_legacy_forms() -> None:
     assert is_valid_arxiv_id("2401.12345")
     assert is_valid_arxiv_id("2401.12345v3")
@@ -147,6 +172,65 @@ def test_canonical_arxiv_url_picks_mirror() -> None:
         canonical_arxiv_url("2401.12345", mirror="ar5iv")
         == "https://ar5iv.labs.arxiv.org/html/2401.12345"
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_license_reads_atom_rights() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "export.arxiv.org"
+        return httpx.Response(
+            200, text=_atom_license("http://creativecommons.org/licenses/by/4.0/")
+        )
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        value = await fetch_arxiv_license(
+            "2401.12345",
+            client,
+            bucket=TokenBucket(rate=64.0, burst=64),
+            min_sleep_s=0.0,
+        )
+    finally:
+        await client.aclose()
+
+    assert value == "http://creativecommons.org/licenses/by/4.0/"
+
+
+@pytest.mark.asyncio
+async def test_fetch_arxiv_license_falls_back_to_abs_metadata() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(200, text="<feed xmlns='http://www.w3.org/2005/Atom'/>")
+        if request.url.host == "arxiv.org" and request.url.path == "/abs/2112.10074":
+            return httpx.Response(
+                200,
+                text=(
+                    '<div class="abs-license"><a '
+                    'href="http://creativecommons.org/licenses/by/4.0/">view license</a></div>'
+                ),
+            )
+        raise AssertionError(f"unexpected URL {request.url}")
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        value, source = await fetch_arxiv_license_with_source(
+            "2112.10074",
+            client,
+            bucket=TokenBucket(rate=64.0, burst=64),
+            min_sleep_s=0.0,
+        )
+    finally:
+        await client.aclose()
+
+    assert value == "http://creativecommons.org/licenses/by/4.0/"
+    assert source == "html_meta"
+    assert calls == [
+        "https://export.arxiv.org/api/query?id_list=2112.10074&start=0&max_results=1",
+        "https://arxiv.org/abs/2112.10074",
+    ]
 
 
 @pytest.mark.asyncio
@@ -273,7 +357,7 @@ def test_make_bronze_record_html_branch() -> None:
         outcome=outcome,
         feed_name="arxiv-html-fetcher",
         bucket="bronze",
-        license_default="arxiv-non-exclusive-distribution",
+        license_default="CC-BY-4.0",
         bytes_size=len(ARXIV_HTML_SAMPLE),
     )
     assert content_type == "text/html"
@@ -383,7 +467,7 @@ async def test_run_for_ids_emits_one_record_per_id() -> None:
         ["2401.12345", "2401.12346"],
         _cfg(),
         feed_name="arxiv-html-fetcher",
-        license_default="arxiv-non-exclusive-distribution",
+        license_default="CC-BY-4.0",
         rate_per_second=64.0,
         burst=64,
         min_sleep_s=0.0,
@@ -396,3 +480,75 @@ async def test_run_for_ids_emits_one_record_per_id() -> None:
     assert {r.source_format for r in producer.records} == {"html"}
     assert {r.extraction_pipeline for r in producer.records} == {"arxiv-html-2026-06"}
     assert len(minio.objects) == 2
+
+
+@pytest.mark.asyncio
+async def test_backfill_preflights_license_before_fulltext() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(200, text=_atom_license("CC-BY-4.0"))
+        if request.url.host == "arxiv.org" and "/html/" in request.url.path:
+            return httpx.Response(200, text=ARXIV_HTML_SAMPLE)
+        raise AssertionError(f"unexpected URL {request.url}")
+
+    minio = _FakeMinio()
+    producer = _FakeProducer()
+    admissions = _FakeAdmissionProducer()
+    emitted = await run_for_ids(
+        ["2401.12345"],
+        _cfg(),
+        feed_name="arxiv-html-backfill",
+        license_default=None,
+        rate_per_second=64.0,
+        burst=64,
+        min_sleep_s=0.0,
+        transport=httpx.MockTransport(handler),
+        producer_override=producer,  # type: ignore[arg-type]
+        admission_producer_override=admissions,  # type: ignore[arg-type]
+        minio_override=minio,  # type: ignore[arg-type]
+    )
+
+    assert emitted == 1
+    assert calls[0].startswith("https://export.arxiv.org/api/query")
+    assert "/html/2401.12345" in calls[1]
+    assert admissions.records[0].license_source == "arxiv_api"
+    assert admissions.records[0].status == "admitted"
+
+
+@pytest.mark.asyncio
+async def test_disallowed_backfill_license_never_fetches_body() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            text=_atom_license("https://creativecommons.org/licenses/by-nc-nd/4.0/"),
+        )
+
+    minio = _FakeMinio()
+    producer = _FakeProducer()
+    admissions = _FakeAdmissionProducer()
+    emitted = await run_for_ids(
+        ["2401.12345"],
+        _cfg(),
+        feed_name="arxiv-html-backfill",
+        license_default=None,
+        rate_per_second=64.0,
+        burst=64,
+        min_sleep_s=0.0,
+        transport=httpx.MockTransport(handler),
+        producer_override=producer,  # type: ignore[arg-type]
+        admission_producer_override=admissions,  # type: ignore[arg-type]
+        minio_override=minio,  # type: ignore[arg-type]
+    )
+
+    assert emitted == 0
+    assert len(calls) == 1
+    assert calls[0].startswith("https://export.arxiv.org/api/query")
+    assert admissions.records[0].status == "quarantined"
+    assert not producer.records
+    assert not minio.objects

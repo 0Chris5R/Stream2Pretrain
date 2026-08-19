@@ -295,7 +295,9 @@
     "eligible_routes": {
       "items": {
         "enum": [
+          "pretrain",
           "broad_pretraining",
+          "posttrain_candidate",
           "reasoning_candidate",
           "benchmark_candidate",
           "quarantine",
@@ -621,7 +623,9 @@
     "route": {
       "default": "quarantine",
       "enum": [
+        "pretrain",
         "broad_pretraining",
+        "posttrain_candidate",
         "reasoning_candidate",
         "benchmark_candidate",
         "quarantine",
@@ -724,6 +728,9 @@
       "enum": [
         "github_api",
         "html_meta",
+        "rss_entry",
+        "oai_metadata",
+        "arxiv_api",
         "dataset_metadata",
         "manual_override",
         "unknown"

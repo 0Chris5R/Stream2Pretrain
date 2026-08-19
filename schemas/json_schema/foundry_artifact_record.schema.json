@@ -1,0 +1,291 @@
+{
+  "$defs": {
+    "ValidationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "adversarial_pass": {
+          "title": "Adversarial Pass",
+          "type": "boolean"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "equivalent_pass": {
+          "title": "Equivalent Pass",
+          "type": "boolean"
+        },
+        "false_negative_count": {
+          "minimum": 0,
+          "title": "False Negative Count",
+          "type": "integer"
+        },
+        "false_positive_count": {
+          "minimum": 0,
+          "title": "False Positive Count",
+          "type": "integer"
+        },
+        "metamorphic_pass": {
+          "title": "Metamorphic Pass",
+          "type": "boolean"
+        },
+        "mutation_killed": {
+          "minimum": 0,
+          "title": "Mutation Killed",
+          "type": "integer"
+        },
+        "mutation_total": {
+          "minimum": 0,
+          "title": "Mutation Total",
+          "type": "integer"
+        },
+        "positive_pass": {
+          "title": "Positive Pass",
+          "type": "boolean"
+        },
+        "replay_pass": {
+          "title": "Replay Pass",
+          "type": "boolean"
+        },
+        "security_pass": {
+          "title": "Security Pass",
+          "type": "boolean"
+        },
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "positive_pass",
+        "equivalent_pass",
+        "adversarial_pass",
+        "mutation_killed",
+        "mutation_total",
+        "metamorphic_pass",
+        "replay_pass",
+        "security_pass",
+        "false_positive_count",
+        "false_negative_count"
+      ],
+      "title": "ValidationReport",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "constructor_family": {
+      "title": "Constructor Family",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "critic_family": {
+      "title": "Critic Family",
+      "type": "string"
+    },
+    "dataset_split": {
+      "enum": [
+        "train",
+        "benchmark",
+        "none"
+      ],
+      "title": "Dataset Split",
+      "type": "string"
+    },
+    "deprecated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Deprecated At"
+    },
+    "deprecation_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Deprecation Reason"
+    },
+    "environment_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Environment Hash",
+      "type": "string"
+    },
+    "family": {
+      "enum": [
+        "grounded_explanation",
+        "claim_evidence",
+        "derivation_completion",
+        "method_dag",
+        "figure_table_reasoning",
+        "corruption_diagnosis",
+        "assumption_consequence",
+        "single_paper_research",
+        "experiment_configuration",
+        "result_reproduction"
+      ],
+      "title": "Family",
+      "type": "string"
+    },
+    "job_id": {
+      "title": "Job Id",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "sft_trajectory",
+        "rl_environment"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "package_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Package Hash",
+      "type": "string"
+    },
+    "package_uri": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Package Uri"
+    },
+    "paper_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Paper Hash",
+      "type": "string"
+    },
+    "paper_id": {
+      "title": "Paper Id",
+      "type": "string"
+    },
+    "pool": {
+      "enum": [
+        "sft",
+        "rl"
+      ],
+      "title": "Pool",
+      "type": "string"
+    },
+    "provider_trace_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Provider Trace Ids",
+      "type": "array"
+    },
+    "quality_label": {
+      "enum": [
+        "generated_unverified",
+        "verified_automatic",
+        "verified_adversarial",
+        "human_sampled",
+        "human_audited",
+        "deprecated_verifier_bug"
+      ],
+      "title": "Quality Label",
+      "type": "string"
+    },
+    "signature_backend": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Signature Backend"
+    },
+    "signature_uri": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Signature Uri"
+    },
+    "signer_cert_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Signer Cert Hash"
+    },
+    "status": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "deprecated"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "validation": {
+      "$ref": "#/$defs/ValidationReport"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "job_id",
+    "paper_id",
+    "task_id",
+    "family",
+    "kind",
+    "pool",
+    "dataset_split",
+    "status",
+    "quality_label",
+    "package_hash",
+    "environment_hash",
+    "paper_hash",
+    "provider_trace_ids",
+    "constructor_family",
+    "critic_family",
+    "validation",
+    "created_at"
+  ],
+  "title": "FoundryArtifactRecord",
+  "type": "object"
+}

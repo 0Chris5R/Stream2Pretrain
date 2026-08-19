@@ -51,7 +51,11 @@ create_topic "raw.fetched"      1 1
 create_topic "docs.normalized"  1 1
 create_topic "docs.curated"     1 1
 create_topic "curation.decisions" 1 1
+create_topic "license.admissions" 1 1
 create_topic "decon.attest"     1 1
+create_topic "foundry.jobs"     1 1
+create_topic "foundry.events"   1 1
+create_topic "foundry.artifacts" 1 1
 
 echo
 echo "current topics:"

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Self
 import orjson
 
 from schemas.bronze import BronzeRecord
+from schemas.license_admission import LicenseAdmissionDecision
 
 if TYPE_CHECKING:
     from aiokafka import AIOKafkaProducer
@@ -102,10 +103,37 @@ class BronzeProducer:
     async def send_many(self, records: list[BronzeRecord]) -> int:
         """Send a batch; returns count emitted. Caller handles partial failures."""
         sent = 0
-        for r in records:
-            await self.send(r)
+        for record in records:
+            await self.send(record)
             sent += 1
         return sent
+
+
+class LicenseAdmissionProducer(BronzeProducer):
+    """Publish immutable licence decisions to the admission audit stream."""
+
+    async def send(  # type: ignore[override]
+        self,
+        record: LicenseAdmissionDecision,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        if self._producer is None:
+            raise RuntimeError("LicenseAdmissionProducer.send called before start()")
+        kafka_headers: list[tuple[str, bytes]] = [
+            ("trace_id", record.trace_id.encode("ascii")),
+            ("source_feed", record.source_feed.encode("utf-8")),
+            ("schema", b"LicenseAdmissionDecision/v1"),
+            ("status", record.status.encode("ascii")),
+        ]
+        if headers:
+            kafka_headers.extend((key, value.encode("utf-8")) for key, value in headers.items())
+        await self._producer.send_and_wait(
+            self._topic,
+            record.model_dump_json().encode("utf-8"),
+            key=record.decision_id.encode("ascii"),
+            headers=kafka_headers,
+        )
 
 
 def serialize_bronze(record: BronzeRecord) -> bytes:

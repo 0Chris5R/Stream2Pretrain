@@ -11,4 +11,9 @@ export const queryKeys = {
   documentFacets: (includeFixtures: boolean) => ['document-facets', includeFixtures] as const,
   document: (docId: string) => ['documents', docId] as const,
   mixture: (a: string, b: string) => ['mixture', a, b] as const,
+  foundry: ['foundry'] as const,
+  foundryJob: (jobId: string) => ['foundry', 'job', jobId] as const,
+  foundryArtifacts: ['foundry', 'artifacts'] as const,
+  foundryArtifactInspection: (artifactId: string) =>
+    ['foundry', 'artifacts', artifactId, 'inspection'] as const,
 } as const;

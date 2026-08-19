@@ -238,6 +238,8 @@ export const DatasetSummarySchema = z.object({
     min_edu: z.number().nullable(),
     min_quality: z.number().nullable(),
     include_structured: z.boolean(),
+    license_policy: z.literal('strict_allowlist'),
+    allowed_licenses: z.array(z.string()),
     fixtures_included: z.literal(false),
   }),
   manifest: z.object({
@@ -255,7 +257,9 @@ export const DatasetSummarySchema = z.object({
 export type DatasetSummary = z.infer<typeof DatasetSummarySchema>;
 
 export const CorpusRouteSchema = z.enum([
+  'pretrain',
   'broad_pretraining',
+  'posttrain_candidate',
   'reasoning_candidate',
   'benchmark_candidate',
   'quarantine',
@@ -496,3 +500,365 @@ export const MixtureCompareSchema = z.object({
 });
 
 export type MixtureCompare = z.infer<typeof MixtureCompareSchema>;
+
+export const FoundryQuotaSchema = z.object({
+  provider: z.literal('hetzner'),
+  window: z.enum(['minute', 'day']),
+  observed_requests_used: z.number().int().nonnegative(),
+  observed_input_used: z.number().int().nonnegative(),
+  observed_output_used: z.number().int().nonnegative(),
+  locally_reserved_requests: z.number().int().nonnegative(),
+  locally_reserved_input: z.number().int().nonnegative(),
+  locally_reserved_output: z.number().int().nonnegative(),
+  estimated_remaining_requests: z.number().int().nonnegative().nullable(),
+  estimated_remaining_input: z.number().int().nonnegative().nullable(),
+  estimated_remaining_output: z.number().int().nonnegative().nullable(),
+  reset_at: z.string(),
+  confidence: z.enum(['provider_reported', 'local_exact', 'local_estimate']),
+});
+
+export const FoundryModelSchema = z.object({
+  provider: z.literal('hetzner'),
+  discovered_at: z.string(),
+  response_hash: z.string(),
+  models: z.array(z.record(z.string(), z.unknown())),
+  configured_model_ids: z.array(z.string()),
+  drifted: z.boolean(),
+  previous_response_hash: z.string().nullable(),
+});
+
+export const FoundryJobSummarySchema = z.object({
+  job_id: z.string(),
+  paper_id: z.string(),
+  doc_id: z.string(),
+  state: z.string(),
+  reason: z.string().nullable(),
+  received_at: z.string(),
+  updated_at: z.string(),
+});
+
+export const FoundryValidationSchema = z.object({
+  task_id: z.string(),
+  positive_pass: z.boolean(),
+  equivalent_pass: z.boolean(),
+  adversarial_pass: z.boolean(),
+  mutation_killed: z.number().int().nonnegative(),
+  mutation_total: z.number().int().nonnegative(),
+  metamorphic_pass: z.boolean(),
+  replay_pass: z.boolean(),
+  security_pass: z.boolean(),
+  false_positive_count: z.number().int().nonnegative(),
+  false_negative_count: z.number().int().nonnegative(),
+  details: z.record(z.string(), z.unknown()),
+});
+
+export const ArtifactAuditSchema = z.object({
+  audit_id: z.string(),
+  artifact_id: z.string(),
+  job_id: z.string(),
+  decision: z.enum(['approved', 'rejected']),
+  reviewer: z.string(),
+  reason: z.string().nullable(),
+  created_at: z.string(),
+});
+
+export const FoundryArtifactSchema = z.object({
+  artifact_id: z.string(),
+  job_id: z.string(),
+  paper_id: z.string(),
+  task_id: z.string(),
+  family: z.string(),
+  kind: z.enum(['sft_trajectory', 'rl_environment']),
+  status: z.enum(['accepted', 'rejected', 'deprecated']),
+  quality_label: z.string(),
+  pool: z.enum(['sft', 'rl']),
+  dataset_split: z.enum(['train', 'benchmark', 'none']),
+  package_uri: z.string().nullable(),
+  signature_uri: z.string().nullable(),
+  signature_backend: z.string().nullable(),
+  signer_cert_hash: z.string().nullable(),
+  package_hash: z.string(),
+  environment_hash: z.string(),
+  paper_hash: z.string(),
+  provider_trace_ids: z.array(z.string()),
+  constructor_family: z.string(),
+  critic_family: z.string(),
+  validation: FoundryValidationSchema,
+  created_at: z.string(),
+  deprecated_at: z.string().nullable(),
+  deprecation_reason: z.string().nullable(),
+  human_audit: ArtifactAuditSchema.nullable(),
+  human_audit_history: z.array(ArtifactAuditSchema),
+});
+
+const FoundryTaskSpecSchema = z
+  .object({
+    task_id: z.string(),
+    paper_id: z.string(),
+    family: z.string(),
+    public_instruction: z.string(),
+    public_context_policy: z.object({
+      included_spans: z.array(z.string()),
+      same_paper_distractors: z.array(z.string()),
+      tool_access: z.array(z.string()),
+    }),
+    hidden_targets: z.record(z.string(), z.unknown()),
+    answer_contract: z.string(),
+    verifier_class: z.string(),
+    difficulty: z.object({
+      estimated: z.number().int(),
+      sources: z.array(z.string()),
+    }),
+    reasoning_operations: z.array(z.string()),
+    ambiguity_risks: z.array(z.string()),
+    construction_provenance: z.array(z.string()),
+    route: z.enum(['sft', 'rl', 'reject']),
+  })
+  .passthrough();
+
+const FoundryAnswerSchema = z
+  .object({
+    report: z.string(),
+    answer_manifest: z.record(z.string(), z.unknown()),
+  })
+  .passthrough();
+
+const FoundryTrajectorySchema = z
+  .object({
+    trajectory_id: z.string(),
+    task_id: z.string(),
+    provider_trace_id: z.string(),
+    provider_trace_ids: z.array(z.string()),
+    answer: FoundryAnswerSchema,
+    tool_calls: z.array(z.unknown()),
+    turns: z.array(z.unknown()),
+    accepted: z.boolean(),
+    reward: z.number(),
+    validation: z.record(z.string(), z.unknown()),
+    loss_masked_turns: z.array(z.number().int()),
+  })
+  .passthrough();
+
+export const FoundryArtifactInspectionSchema = z.object({
+  artifact: FoundryArtifactSchema,
+  source: z.enum(['package', 'durable_cache']),
+  package_available: z.boolean(),
+  package_error: z.string().nullable(),
+  task: FoundryTaskSpecSchema.nullable(),
+  prompt: z.record(z.string(), z.unknown()).nullable(),
+  public_context: z.object({
+    paper_text: z.string(),
+    spans: z.array(z.record(z.string(), z.unknown())),
+    equations: z.array(z.unknown()),
+    tables: z.array(z.unknown()),
+    figures: z.array(z.unknown()),
+  }),
+  evidence_graph: z.record(z.string(), z.unknown()).nullable(),
+  trajectories: z.array(FoundryTrajectorySchema),
+  verifier: z.record(z.string(), z.unknown()).nullable(),
+  validation: z.object({
+    report: FoundryValidationSchema.nullable(),
+    valid: z.array(z.unknown()),
+    equivalent: z.array(z.unknown()),
+    adversarial: z.array(z.unknown()),
+    mutations: z.array(z.unknown()),
+    metamorphic: z.array(z.unknown()),
+  }),
+  manifest: z.record(z.string(), z.unknown()).nullable(),
+  provenance: z.array(z.record(z.string(), z.unknown())),
+  files: z.array(
+    z.object({
+      path: z.string(),
+      size: z.number().int().nonnegative(),
+      category: z.string(),
+    }),
+  ),
+  generation_attempts: z.array(
+    z.object({
+      call_key: z.string(),
+      stage: z.enum(['solution', 'grounding_review', 'verifier', 'repair']),
+      response: z.unknown(),
+      trace: z.record(z.string(), z.unknown()),
+      created_at: z.string(),
+    }),
+  ),
+});
+
+export const FoundryEventSchema = z.object({
+  event_id: z.string(),
+  job_id: z.string(),
+  paper_id: z.string(),
+  sequence: z.number().int().nonnegative(),
+  state: z.string(),
+  occurred_at: z.string(),
+  attempt: z.number().int().positive(),
+  idempotency_key: z.string(),
+  provider_trace_id: z.string().nullable(),
+  artifact_hash: z.string().nullable(),
+  reason: z.string().nullable(),
+  metadata: z.record(z.string(), z.unknown()),
+});
+
+export const FoundryProviderTraceSchema = z
+  .object({
+    trace_id: z.string(),
+    provider: z.enum(['hetzner', 'replay']),
+    role: z.string(),
+    requested_model: z.string(),
+    returned_model: z.string(),
+    model_family: z.string(),
+    input_tokens: z.number().int().nonnegative(),
+    output_tokens: z.number().int().nonnegative(),
+    request_attempts: z.number().int().positive(),
+    latency_ms: z.number().int().nonnegative(),
+    completed_at: z.string(),
+  })
+  .passthrough();
+
+export const FoundryDashboardSchema = z.object({
+  jobs: z.record(z.string(), z.number().int().nonnegative()),
+  artifacts: z.record(z.string(), z.number().int().nonnegative()),
+  families: z.record(z.string(), z.number().int().nonnegative()),
+  splits: z.record(z.string(), z.number().int().nonnegative()),
+  providers: z.record(
+    z.string(),
+    z.object({
+      calls: z.number().int().nonnegative(),
+      input_tokens: z.number().int().nonnegative(),
+      output_tokens: z.number().int().nonnegative(),
+    }),
+  ),
+  provider_statuses: z.record(
+    z.string(),
+    z.object({
+      state: z.string(),
+      reason: z.string().nullable(),
+      occurred_at: z.string(),
+    }),
+  ),
+  stages: z.record(z.string(), z.number().int().nonnegative()),
+  recent_jobs: z.array(FoundryJobSummarySchema),
+  quotas: z.array(FoundryQuotaSchema),
+  models: z.array(FoundryModelSchema),
+  human_audits: z.record(z.string(), z.number().int().nonnegative()),
+  daily_run_hour_utc: z.number().int().min(0).max(23),
+  queued_candidates: z.number().int().nonnegative(),
+  daily_runs: z.array(
+    z.object({
+      run_date: z.string(),
+      state: z.string(),
+      cutoff_at: z.string(),
+      started_at: z.string(),
+      completed_at: z.string().nullable(),
+      candidate_count: z.number().int().nonnegative(),
+      processed_count: z.number().int().nonnegative(),
+      stop_reason: z.string().nullable(),
+    }),
+  ),
+  manual_runs: z.array(
+    z.object({
+      run_id: z.string(),
+      state: z.string(),
+      cutoff_at: z.string(),
+      requested_at: z.string(),
+      started_at: z.string().nullable(),
+      completed_at: z.string().nullable(),
+      candidate_count: z.number().int().nonnegative(),
+      max_candidates: z.number().int().positive().nullable().optional(),
+      processed_count: z.number().int().nonnegative(),
+      stop_reason: z.string().nullable(),
+    }),
+  ),
+});
+
+const FoundryCallCountsSchema = z.object({
+  started: z.number().int().nonnegative(),
+  succeeded: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  rate_limited: z.number().int().nonnegative(),
+});
+
+const FoundryTokenCountsSchema = z.object({
+  input: z.number().int().nonnegative(),
+  output: z.number().int().nonnegative(),
+});
+
+const FoundryStageCountsSchema = z.object({
+  received: z.number().int().nonnegative(),
+  graph_compiled: z.number().int().nonnegative(),
+  graph_critiqued: z.number().int().nonnegative(),
+  tasks_proposed: z.number().int().nonnegative(),
+  solutions_generated: z.number().int().nonnegative(),
+  verifiers_compiled: z.number().int().nonnegative(),
+  adversarial_validated: z.number().int().nonnegative(),
+});
+
+export const FoundryActivitySchema = z.object({
+  window: ActivityWindowSchema,
+  start: z.string(),
+  end: z.string(),
+  bucket_seconds: z.number().int().positive(),
+  totals: z.object({
+    calls: FoundryCallCountsSchema,
+    tokens: FoundryTokenCountsSchema,
+    stages: FoundryStageCountsSchema,
+  }),
+  points: z.array(
+    z.object({
+      ts: z.string(),
+      calls: FoundryCallCountsSchema,
+      tokens: FoundryTokenCountsSchema,
+      stages: FoundryStageCountsSchema,
+    }),
+  ),
+  active_calls: z.array(
+    z.object({
+      job_id: z.string(),
+      paper_id: z.string(),
+      call_key: z.string(),
+      role: z.string(),
+      provider: z.string(),
+      attempt: z.number().int().positive(),
+      started_at: z.string(),
+      checkpoint_at: z.string().nullable(),
+      partial_characters: z.number().int().nonnegative(),
+      estimated_input_tokens: z.number().int().nonnegative(),
+      max_output_tokens: z.number().int().nonnegative(),
+    }),
+  ),
+});
+
+export const FoundryManualRunResponseSchema = z.object({
+  run: FoundryDashboardSchema.shape.manual_runs.element,
+  created: z.boolean(),
+});
+
+export const FoundryArtifactAuditResponseSchema = z.object({
+  audit: ArtifactAuditSchema,
+});
+
+export const FoundryArtifactListSchema = z.object({
+  items: z.array(FoundryArtifactSchema),
+});
+
+export const FoundryJobDetailSchema = z.object({
+  job_id: z.string(),
+  idempotency_key: z.string(),
+  paper_id: z.string(),
+  paper_hash: z.string(),
+  doc_id: z.string(),
+  state: z.string(),
+  reason: z.string().nullable(),
+  received_at: z.string(),
+  updated_at: z.string(),
+  events: z.array(FoundryEventSchema),
+  artifacts: z.array(FoundryArtifactSchema),
+  provider_traces: z.array(FoundryProviderTraceSchema),
+});
+
+export type FoundryDashboard = z.infer<typeof FoundryDashboardSchema>;
+export type FoundryActivity = z.infer<typeof FoundryActivitySchema>;
+export type FoundryArtifact = z.infer<typeof FoundryArtifactSchema>;
+export type FoundryArtifactInspection = z.infer<typeof FoundryArtifactInspectionSchema>;
+export type FoundryJobDetail = z.infer<typeof FoundryJobDetailSchema>;
+export type FoundryJobSummary = z.infer<typeof FoundryJobSummarySchema>;

@@ -1,0 +1,509 @@
+{
+  "$defs": {
+    "BundleEquation": {
+      "additionalProperties": false,
+      "properties": {
+        "equation_id": {
+          "title": "Equation Id",
+          "type": "string"
+        },
+        "latex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latex"
+        },
+        "mathml": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mathml"
+        },
+        "source_span_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Span Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "equation_id"
+      ],
+      "title": "BundleEquation",
+      "type": "object"
+    },
+    "BundleFigure": {
+      "additionalProperties": false,
+      "properties": {
+        "alt_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alt Text"
+        },
+        "asset_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Uri"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "figure_id": {
+          "title": "Figure Id",
+          "type": "string"
+        },
+        "image_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image Hash"
+        },
+        "ocr_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Text"
+        },
+        "source_span_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Span Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "figure_id"
+      ],
+      "title": "BundleFigure",
+      "type": "object"
+    },
+    "BundleTable": {
+      "additionalProperties": false,
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "cells": {
+          "items": {
+            "$ref": "#/$defs/BundleTableCell"
+          },
+          "title": "Cells",
+          "type": "array"
+        },
+        "rows": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "source_span_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Span Ids",
+          "type": "array"
+        },
+        "table_id": {
+          "title": "Table Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "table_id"
+      ],
+      "title": "BundleTable",
+      "type": "object"
+    },
+    "BundleTableCell": {
+      "additionalProperties": false,
+      "properties": {
+        "cell_id": {
+          "title": "Cell Id",
+          "type": "string"
+        },
+        "column": {
+          "minimum": 0,
+          "title": "Column",
+          "type": "integer"
+        },
+        "row": {
+          "minimum": 0,
+          "title": "Row",
+          "type": "integer"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell_id",
+        "row",
+        "column",
+        "value"
+      ],
+      "title": "BundleTableCell",
+      "type": "object"
+    },
+    "OfficialArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "build_recipe": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Recipe"
+        },
+        "content_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "immutable_ref": {
+          "title": "Immutable Ref",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "code",
+            "data",
+            "checkpoint",
+            "supplement",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "oracle_recipe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OracleRecipe"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_uri": {
+          "title": "Source Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "kind",
+        "source_uri",
+        "immutable_ref",
+        "content_hash"
+      ],
+      "title": "OfficialArtifact",
+      "type": "object"
+    },
+    "OracleRecipe": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Command",
+          "type": "array"
+        },
+        "cpu_millis": {
+          "minimum": 1,
+          "title": "Cpu Millis",
+          "type": "integer"
+        },
+        "embedded_artifact_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Embedded Artifact Hash",
+          "type": "string"
+        },
+        "expected_output_hash": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Output Hash"
+        },
+        "image": {
+          "pattern": "^.+@sha256:[0-9a-f]{64}$",
+          "title": "Image",
+          "type": "string"
+        },
+        "memory_mib": {
+          "minimum": 1,
+          "title": "Memory Mib",
+          "type": "integer"
+        },
+        "network": {
+          "const": false,
+          "default": false,
+          "title": "Network",
+          "type": "boolean"
+        },
+        "oracle_id": {
+          "title": "Oracle Id",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "oracle_id",
+        "image",
+        "embedded_artifact_hash",
+        "command",
+        "cpu_millis",
+        "memory_mib",
+        "timeout_seconds"
+      ],
+      "title": "OracleRecipe",
+      "type": "object"
+    },
+    "StableSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "ordinal": {
+          "minimum": 0,
+          "title": "Ordinal",
+          "type": "integer"
+        },
+        "public": {
+          "default": true,
+          "title": "Public",
+          "type": "boolean"
+        },
+        "section_id": {
+          "title": "Section Id",
+          "type": "string"
+        },
+        "section_role": {
+          "title": "Section Role",
+          "type": "string"
+        },
+        "span_id": {
+          "title": "Span Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "text_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Text Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "span_id",
+        "section_id",
+        "section_role",
+        "ordinal",
+        "text",
+        "text_hash"
+      ],
+      "title": "StableSpan",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "captions": {
+      "items": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "title": "Captions",
+      "type": "array"
+    },
+    "equations": {
+      "items": {
+        "$ref": "#/$defs/BundleEquation"
+      },
+      "title": "Equations",
+      "type": "array"
+    },
+    "figures": {
+      "items": {
+        "$ref": "#/$defs/BundleFigure"
+      },
+      "title": "Figures",
+      "type": "array"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "official_artifacts": {
+      "items": {
+        "$ref": "#/$defs/OfficialArtifact"
+      },
+      "title": "Official Artifacts",
+      "type": "array"
+    },
+    "paper_family_id": {
+      "title": "Paper Family Id",
+      "type": "string"
+    },
+    "paper_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Paper Hash",
+      "type": "string"
+    },
+    "paper_id": {
+      "title": "Paper Id",
+      "type": "string"
+    },
+    "quality_labels": {
+      "additionalProperties": true,
+      "title": "Quality Labels",
+      "type": "object"
+    },
+    "schema_version": {
+      "default": "paper-bundle-v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scientific_artifact_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Scientific Artifact Hash",
+      "type": "string"
+    },
+    "sections": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Sections",
+      "type": "array"
+    },
+    "source_gold_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Source Gold Hash",
+      "type": "string"
+    },
+    "source_uri": {
+      "title": "Source Uri",
+      "type": "string"
+    },
+    "split": {
+      "const": "posttrain_candidate",
+      "default": "posttrain_candidate",
+      "title": "Split",
+      "type": "string"
+    },
+    "stable_spans": {
+      "items": {
+        "$ref": "#/$defs/StableSpan"
+      },
+      "title": "Stable Spans",
+      "type": "array"
+    },
+    "tables": {
+      "items": {
+        "$ref": "#/$defs/BundleTable"
+      },
+      "title": "Tables",
+      "type": "array"
+    }
+  },
+  "required": [
+    "paper_id",
+    "paper_family_id",
+    "paper_hash",
+    "source_uri",
+    "stable_spans",
+    "source_gold_hash",
+    "scientific_artifact_hash"
+  ],
+  "title": "PaperBundle",
+  "type": "object"
+}

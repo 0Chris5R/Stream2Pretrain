@@ -20,24 +20,28 @@ const QualityHistogramRespSchema = z.object({
   edu_buckets: z.array(z.object({ score: z.number(), count: z.number().int().nonnegative() })),
 });
 
-const RouteSummarySchema = z.array(z.object({
-  route: z.string(),
-  documents: z.number().int().nonnegative(),
-  source_words: z.number().int().nonnegative(),
-  training_words: z.number().int().nonnegative(),
-  mean_quality: z.number(),
-  mean_edu: z.number(),
-}));
+const RouteSummarySchema = z.array(
+  z.object({
+    route: z.string(),
+    documents: z.number().int().nonnegative(),
+    source_words: z.number().int().nonnegative(),
+    training_words: z.number().int().nonnegative(),
+    mean_quality: z.number(),
+    mean_edu: z.number(),
+  }),
+);
 
 const CorpusOverviewSchema = z.object({
   durable_decisions: z.number().int().nonnegative(),
   training_export_documents: z.number().int().nonnegative(),
   rejected_by_reason: z.record(z.string(), z.number().int().nonnegative()),
-  per_source_acceptance: z.array(z.object({
-    source: z.string(),
-    accepted: z.number().int().nonnegative(),
-    total: z.number().int().nonnegative(),
-  })),
+  per_source_acceptance: z.array(
+    z.object({
+      source: z.string(),
+      accepted: z.number().int().nonnegative(),
+      total: z.number().int().nonnegative(),
+    }),
+  ),
 });
 
 async function fetchQualityHistogram(): Promise<{
@@ -83,10 +87,7 @@ export async function GET(): Promise<NextResponse> {
       { status: 503 },
     );
   }
-  const [histogram, routes] = await Promise.all([
-    fetchQualityHistogram(),
-    fetchRouteSummary(),
-  ]);
+  const [histogram, routes] = await Promise.all([fetchQualityHistogram(), fetchRouteSummary()]);
 
   const summary = {
     ...overview,

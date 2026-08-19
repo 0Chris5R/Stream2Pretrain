@@ -16,6 +16,13 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["decon-api:8081"]
+  - job_name: processor-foundry
+    static_configs:
+      - targets: ["processor-foundry:9090"]
+  - job_name: foundry-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["foundry-api:8092"]
   - job_name: redpanda
     metrics_path: /public_metrics
     static_configs:

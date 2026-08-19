@@ -9,6 +9,7 @@ from processor.fetcher import (
     FetcherState,
     fetch_raw_bytes,
     normalize,
+    process_bronze_payload,
     serialize_for_kafka,
 )
 from processor.operators.extract import ResiliparseExtractor
@@ -102,6 +103,19 @@ def test_normalize_code_bronze_decodes_plain_text(bronze_record: BronzeRecord) -
 def test_normalize_returns_none_on_empty_html(bronze_record: BronzeRecord) -> None:
     state = _state(_FakeS3(b""))
     assert normalize(state, bronze_record, b"") is None
+
+
+def test_missing_license_stops_before_minio_and_processing(
+    bronze_record: BronzeRecord,
+) -> None:
+    s3 = _FakeS3(b"must not be read")
+    state = _state(s3)
+    unlicensed = bronze_record.model_copy(
+        update={"spdx_license": None, "spdx_license_source": "unknown"}
+    )
+
+    assert process_bronze_payload(state, unlicensed.model_dump_json().encode()) is None
+    assert s3.calls == []
 
 
 def test_serialize_for_kafka_roundtrip(silver_record: Any) -> None:

@@ -45,6 +45,20 @@ class OAIRecord:
         arxiv_id = self.identifier.split(":", 2)[2]
         return f"https://arxiv.org/abs/{arxiv_id}"
 
+    def license_value(self) -> str | None:
+        """Return a per-record licence from arXiv/DC metadata, if present."""
+        if not self.metadata_xml:
+            return None
+        try:
+            root = ET.fromstring(self.metadata_xml)
+        except ET.ParseError:
+            return None
+        for element in root.iter():
+            local_name = _strip_ns(element.tag).lower()
+            if local_name in {"license", "rights"} and (element.text or "").strip():
+                return (element.text or "").strip()
+        return None
+
 
 class OAIError(Exception):
     """Raised on an OAI-PMH ``<error>`` response."""
@@ -132,15 +146,10 @@ class OAIClient:
         datestamp_el = header.find(f"{{{OAI_NS}}}datestamp")
         identifier = (identifier_el.text or "").strip() if identifier_el is not None else ""
         datestamp = (datestamp_el.text or "").strip() if datestamp_el is not None else ""
-        set_specs = [
-            (s.text or "").strip()
-            for s in header.findall(f"{{{OAI_NS}}}setSpec")
-        ]
+        set_specs = [(s.text or "").strip() for s in header.findall(f"{{{OAI_NS}}}setSpec")]
         deleted = header.attrib.get("status") == "deleted"
         meta_el = rec_el.find(f"{{{OAI_NS}}}metadata")
-        metadata_xml = (
-            ET.tostring(meta_el, encoding="unicode") if meta_el is not None else ""
-        )
+        metadata_xml = ET.tostring(meta_el, encoding="unicode") if meta_el is not None else ""
         raw = ET.tostring(rec_el, encoding="utf-8")
         return OAIRecord(
             identifier=identifier,

@@ -19,7 +19,7 @@ def _sample_feeds() -> list[dict]:
             "endpoint": "https://rss.arxiv.org/rss/cs.CL",
             "poll_interval_seconds": 7200,
             "rate_limit": {"requests_per_second": 1.0, "burst": 4},
-            "license_default": "arxiv-non-exclusive-distribution",
+            "license_default": "per-record",
         },
         {
             "name": "oai-arxiv-cs",
@@ -66,7 +66,7 @@ def test_sourcefeed_accepts_kubernetes_camel_case() -> None:
             "endpoint": "https://rss.arxiv.org/rss/cs.CL",
             "pollIntervalSeconds": 7200,
             "rateLimit": {"requestsPerSecond": 1.0, "burst": 4},
-            "licenseDefault": "arxiv-non-exclusive-distribution",
+            "licenseDefault": "per-record",
             "egressAllow": ["rss.arxiv.org"],
             "acceptContentTypes": ["text/html"],
         }
@@ -74,7 +74,7 @@ def test_sourcefeed_accepts_kubernetes_camel_case() -> None:
 
     assert feed.poll_interval_seconds == 7200
     assert feed.rate_limit.requests_per_second == 1.0
-    assert feed.license_default == "arxiv-non-exclusive-distribution"
+    assert feed.license_default == "per-record"
     assert feed.model_dump(by_alias=True)["pollIntervalSeconds"] == 7200
 
 

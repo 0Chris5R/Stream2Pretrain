@@ -2,6 +2,15 @@
 
 Research date: 2026-06-15. Sources cited inline. Every numerical figure not directly verified against an upstream dataset card or paper is marked `needs-measurement`.
 
+Policy amendment, 2026-08-19: this document preserves the original source
+research, but its wrapper-licence recommendation is superseded. Stream2Pretrain
+does not treat ODC-By, Apache-2.0, or another dataset wrapper as permission for
+each contained paper, page, or file. The seed loader now requires an explicit
+allowlisted per-record content licence and quarantines all other rows before
+curation. The historical volume recommendations below are therefore not
+expected retained volumes under the strict policy and remain
+`needs-measurement`.
+
 ## TL;DR
 
 For a frontier-LLM-research-focused seed corpus that fits a DHBWCloud 2-worker MinIO budget (target 500 GB - 2 TB usable), the recommended Stream2Pretrain v0.1 seed mixture is: **(1) `allenai/peS2o` v3** (academic papers from S2ORC, the Dolma/OLMo academic backbone, ~120 GB on Hub, ~42B+ tokens at v2, freshness cutoff 2023-01-03 for v2; v3 is on Hub but un-carded), **(2) `togethercomputer/RedPajama-Data-1T` arxiv subset** (~92 GB, ~28B tokens, LaTeX-derived arXiv, 2023 cutoff) as a complementary LaTeX-derived view, **(3) `HuggingFaceFW/fineweb-edu`** sampled to a ~50-100 GB AI/ML-domain slice via URL filter (CC-derived web with FineWeb-Edu classifier scores >=3, ODC-By 1.0), **(4) `HuggingFaceTB/stack-edu`** filtered for Python ML repos (~100 GB target, ODC-By, the educational-quality code subset that Dolma 3 Mix uses for its 0.41T code component), and **(5) a custom historical RSS/Atom backfill** of the same Phase-1 source list defined in `SOURCES.md` going back 24 months (arXiv OAI-PMH `from=2024-06-01`, GitHub Releases Atom history, lab blogs via Wayback). Total target: 400-700 GB on disk, 50-90B tokens, all under ODC-By or CC-BY family licenses compatible with our Apache-2.0 release. Wire it in as a dedicated **Bronze backfill mode**: a one-shot Bytewax dataflow that reads HF parquet/zst shards, tags them with `valid_from = original_publication_date`, `valid_to = null`, `source_feed = "seed:<dataset_id>"`, and emits to the same `docs.normalized` topic the live pipeline already consumes - so Silver/Gold curation operators run identically over historical and live documents.

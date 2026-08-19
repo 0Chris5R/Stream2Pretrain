@@ -27,9 +27,10 @@ import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC
 from typing import Any, cast
 
+from ingest.common.license_admission import is_training_permitted
 from processor import common
 from processor.decision_cache import DecisionCache
 from processor.decon_gate import DeconGate, _EmbeddingSketch  # type: ignore[attr-defined]
@@ -57,7 +58,6 @@ from schemas.silver import SilverRecord, SilverSegment
 
 POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
-PERMISSIVE_CODE_LICENSES = {"MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "MPL-2.0"}
 
 
 @dataclass(slots=True)
@@ -433,8 +433,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         silver=silver,
         reject_reasons=list(reject),
         reasoning_score=structure.reasoning_score,
-        benchmark_score=structure.benchmark_score,
-        benchmark_cutoff=_benchmark_cutoff(),
     )
     risk = _risk_from_reject(reject, pii_flags)
     license_id = silver.spdx_license or "unknown"
@@ -494,6 +492,8 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         minhash_num_perms=sig.num_perms,
         lsh_backend=state.lsh.backend,
         license=license_id,
+        # Legacy Gold licence-source enum is narrower than SPDX provenance;
+        # the exact source remains in spdx_license_source and the admission ledger.
         license_source="unknown",
         risk_tier=risk,
         pii_flags=pii_flags,
@@ -532,8 +532,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             silver=silver,
             reject_reasons=list(new_reasons),
             reasoning_score=structure.reasoning_score,
-            benchmark_score=structure.benchmark_score,
-            benchmark_cutoff=_benchmark_cutoff(),
         )
         return post_record.model_copy(
             update={
@@ -600,12 +598,6 @@ def _filter_structured_projection(
     return "\n\n".join(kept), sorted(set(removed)), exclusions
 
 
-def _benchmark_cutoff() -> datetime:
-    raw = os.environ.get("S2P_BENCHMARK_CANDIDATE_CUTOFF", "2025-01-01T00:00:00+00:00")
-    value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
 def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFlag]) -> RiskTier:
     """Map current reject signals onto the 1/2/3 risk-tier ladder."""
     if "decontamination_hit" in reject or "pii_detected" in reject or pii_flags:
@@ -616,20 +608,8 @@ def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFla
 
 
 def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
-    """Keep the code-license guard while paper enforcement is deferred.
-
-    Scientific-source license metadata is recorded without being a hard pilot
-    gate. Code archives remain strict because their source format carries a
-    reliable SPDX identifier.
-    """
-    if silver.source_format != "code":
-        return None
-    license_id = silver.spdx_license
-    if license_id is None or license_id.lower() == "unknown":
-        return "license_excluded"
-    if license_id not in PERMISSIVE_CODE_LICENSES:
-        return "license_excluded"
-    return None
+    """Defensive strict gate for every format, including legacy/replay rows."""
+    return None if is_training_permitted(silver.spdx_license) else "license_excluded"
 
 
 def _uses_scientific_quality_profile(silver: SilverRecord) -> bool:
@@ -646,7 +626,8 @@ def is_trainable_gold(record: GoldRecord) -> bool:
     """True when a GoldRecord is allowed onto ``docs.curated`` and Gold."""
     return (
         record.risk_tier == 1
-        and record.route in {"broad_pretraining", "reasoning_candidate"}
+        and record.route
+        in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
         and not record.reject_reasons
         and not record.pii_flags
         and not record.contaminated_with

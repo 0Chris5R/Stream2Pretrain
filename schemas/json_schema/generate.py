@@ -20,7 +20,18 @@ from pydantic import BaseModel
 from schemas.bronze import BronzeRecord
 from schemas.code import CodeFileRecord
 from schemas.decon import DeconAttestation
+from schemas.foundry import (
+    ArtifactAuditRecord,
+    FoundryArtifactRecord,
+    FoundryEvent,
+    PaperBundle,
+    PaperEvidenceGraph,
+    ProviderTrace,
+    TaskSpec,
+    VerifierSpec,
+)
 from schemas.gold import GoldRecord
+from schemas.license_admission import LicenseAdmissionDecision
 from schemas.scientific import ScientificDocument
 from schemas.silver import SilverRecord
 from schemas.sourcefeed import MixtureRecipeSpec, SourceFeedSpec
@@ -36,6 +47,15 @@ EXPORTS: Final[tuple[tuple[type[BaseModel], str], ...]] = (
     (DeconAttestation, "decon_attestation"),
     (SourceFeedSpec, "source_feed_spec"),
     (MixtureRecipeSpec, "mixture_recipe_spec"),
+    (PaperBundle, "paper_bundle"),
+    (PaperEvidenceGraph, "paper_evidence_graph"),
+    (TaskSpec, "task_spec"),
+    (VerifierSpec, "verifier_spec"),
+    (ProviderTrace, "provider_trace"),
+    (ArtifactAuditRecord, "artifact_audit_record"),
+    (FoundryEvent, "foundry_event"),
+    (FoundryArtifactRecord, "foundry_artifact_record"),
+    (LicenseAdmissionDecision, "license_admission_decision"),
 )
 
 

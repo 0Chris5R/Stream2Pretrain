@@ -14,6 +14,7 @@ from typing import Any
 import boto3
 from confluent_kafka import Consumer, Producer
 
+from ingest.common.license_admission import decide_license_admission
 from schemas.bronze import BronzeRecord
 
 
@@ -40,12 +41,17 @@ def consume_document(topic: str, doc_id: str, timeout_seconds: float) -> dict[st
             message = consumer.poll(1.0)
             if message is None or message.error():
                 continue
+            value = message.value()
+            if value is None:
+                continue
             try:
-                record = json.loads(message.value())
+                record = json.loads(value)
             except (TypeError, ValueError):
                 continue
+            if not isinstance(record, dict):
+                continue
             if record.get("doc_id") == doc_id:
-                return record
+                return {str(key): value for key, value in record.items()}
     finally:
         consumer.close()
     return None
@@ -57,6 +63,14 @@ def main() -> None:
     probe_id = secrets.token_hex(8)
     url = f"https://example.org/stream2pretrain/cluster-smoke/{probe_id}"
     doc_id = "sha256:" + hashlib.sha256(url.encode()).hexdigest()
+    admission = decide_license_admission(
+        source_url=url,
+        source_feed="cluster-smoke",
+        license_value="CC0-1.0",
+        license_source="manual_override",
+    )
+    if admission.decision.doc_id != doc_id:
+        raise RuntimeError("smoke document identity differs from licence admission identity")
     body = " ".join(
         f"Experiment {probe_id}-{index} measures a distinct research signal with "
         f"reproducible method {hashlib.sha256(f'{probe_id}-{index}'.encode()).hexdigest()[:12]}. "
@@ -85,6 +99,15 @@ def main() -> None:
         aws_secret_access_key=required_env("MINIO_SECRET_KEY"),
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
     )
+    producer = Producer({"bootstrap.servers": required_env("REDPANDA_BROKERS")})
+    producer.produce(
+        required_env("S2P_LICENSE_ADMISSIONS_TOPIC"),
+        key=admission.decision.decision_id.encode(),
+        value=admission.decision.model_dump_json().encode(),
+    )
+    if producer.flush(10.0):
+        raise RuntimeError("the controlled licence admission was not delivered")
+
     s3.put_object(
         Bucket=bucket,
         Key=key,
@@ -101,14 +124,13 @@ def main() -> None:
         content_type="text/html",
         raw_html_s3_uri=f"s3://{bucket}/{key}",
         source_feed="cluster-smoke",
-        trace_id=secrets.token_hex(16),
+        trace_id=admission.decision.trace_id,
         bytes_size=len(payload),
         source_format="html",
         extraction_pipeline="cluster-smoke-1.0",
         spdx_license="CC0-1.0",
         spdx_license_source="manual_override",
     )
-    producer = Producer({"bootstrap.servers": required_env("REDPANDA_BROKERS")})
     producer.produce(
         required_env("S2P_RAW_TOPIC"),
         key=doc_id.encode(),
@@ -124,7 +146,8 @@ def main() -> None:
 
     trainable = (
         decision.get("risk_tier") == 1
-        and decision.get("route") in {"broad_pretraining", "reasoning_candidate"}
+        and decision.get("route")
+        in {"broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
         and not decision.get("reject_reasons")
         and not decision.get("pii_flags")
         and not decision.get("contaminated_with")

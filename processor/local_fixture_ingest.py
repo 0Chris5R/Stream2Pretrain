@@ -9,16 +9,15 @@ from __future__ import annotations
 
 import base64
 import gzip
-import hashlib
 import io
 import os
-import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import boto3
 from confluent_kafka import Producer
 
+from ingest.common.license_admission import decide_license_admission
 from schemas.bronze import BronzeRecord
 
 
@@ -115,10 +114,6 @@ FIXTURES = (
 )
 
 
-def _doc_id(url: str) -> str:
-    return f"sha256:{hashlib.sha256(url.encode('utf-8')).hexdigest()}"
-
-
 def _controlled_figure_data_uri() -> str:
     """Generate a readable chart that exercises both OCR and figure routing."""
     from PIL import Image, ImageDraw  # type: ignore[import-not-found]
@@ -192,6 +187,7 @@ def main() -> None:
     bucket = os.environ.get("MINIO_BRONZE_BUCKET", "bronze")
     brokers = os.environ.get("REDPANDA_BROKERS", "redpanda:29092")
     topic = os.environ.get("S2P_RAW_TOPIC", "raw.fetched")
+    admissions_topic = os.environ.get("S2P_LICENSE_ADMISSIONS_TOPIC", "license.admissions")
     s3 = boto3.client(
         "s3",
         endpoint_url=endpoint,
@@ -205,7 +201,20 @@ def main() -> None:
     for fixture in FIXTURES:
         source_feed = fixture.source_feed
         url = f"https://local.stream2pretrain.invalid/v3/fixtures/{fixture.name}"
-        doc_id = _doc_id(url)
+        admission = decide_license_admission(
+            source_url=url,
+            source_feed=source_feed,
+            license_value="CC0-1.0",
+            license_source="manual_override",
+        )
+        doc_id = admission.decision.doc_id
+        producer.produce(
+            admissions_topic,
+            key=admission.decision.decision_id.encode("utf-8"),
+            value=admission.decision.model_dump_json().encode("utf-8"),
+        )
+        if producer.flush(15):
+            raise RuntimeError("the fixture licence admission was not delivered")
         key = (
             f"year={fetched_at:%Y}/month={fetched_at:%m}/day={fetched_at:%d}/"
             f"source={source_feed}/{doc_id.removeprefix('sha256:')}.html.gz"
@@ -226,7 +235,7 @@ def main() -> None:
             content_type="text/html",
             raw_html_s3_uri=f"s3://{bucket}/{key}",
             source_feed=source_feed,
-            trace_id=secrets.token_hex(16),
+            trace_id=admission.decision.trace_id,
             bytes_size=len(payload),
             source_format="html",
             extraction_pipeline="local-controlled-fixture-0.2",
