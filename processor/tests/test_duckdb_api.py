@@ -39,7 +39,13 @@ class _FakeConnection:
 class _OverviewConnection(_FakeConnection):
     def execute(self, sql: str, parameters: Sequence[Any] | None = None) -> _OverviewConnection:
         self.calls.append((sql, parameters))
-        if "durable_decisions" in sql:
+        if "admission.license_id" in sql:
+            self.description = [("reason",), ("count",)]
+            self.rows = [("license_missing", 2)]
+        elif "admission.source_feed" in sql:
+            self.description = [("source",), ("total",)]
+            self.rows = [("arxiv-live", 2)]
+        elif "durable_decisions" in sql:
             self.description = [("durable_decisions",)]
             self.rows = [(9,)]
         elif "training_export_documents" in sql:
@@ -121,11 +127,15 @@ def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
     service = DuckDBQueryService(_OverviewConnection())
 
     assert service.corpus_overview() == {
-        "durable_decisions": 9,
+        "durable_decisions": 11,
         "training_export_documents": 4,
-        "rejected_by_reason": {"near_duplicate": 1, "pii_detected": 1},
+        "rejected_by_reason": {
+            "near_duplicate": 1,
+            "pii_detected": 1,
+            "license_missing": 2,
+        },
         "per_source_acceptance": [
-            {"source": "arxiv-live", "accepted": 3, "total": 3},
+            {"source": "arxiv-live", "accepted": 3, "total": 5},
             {"source": "fixtures", "accepted": 1, "total": 6},
         ],
     }
@@ -161,6 +171,8 @@ def test_dataset_summary_contains_reproducible_revision_manifest() -> None:
 
     assert result["documents"] == 3
     assert result["selection"]["include_structured"] is False
+    assert result["selection"]["license_policy"] == "strict_allowlist"
+    assert "CC-BY-4.0" in result["selection"]["allowed_licenses"]
     assert result["manifest"]["revisions"]["classifier_revision"] == ["classifier_revision-v1"]
     assert result["manifest"]["decision_table"]["table"] == "curation_decisions"
     assert result["manifest"]["export_limit"] == 5_000
@@ -211,7 +223,10 @@ def test_document_filters_are_parameterized_and_hide_fixtures() -> None:
     )
 
     assert "source_feed NOT LIKE 'local-%'" in where
+    assert "COALESCE(spdx_license, license) IN" in where
     assert "LIST_CONTAINS(content_tags, ?)" in where
+    assert "LIST_CONTAINS(eligible_routes, ?)" in where
+    assert "benchmark_candidate" not in where
     assert "figure_count > 0" in where
     assert "edu_score >= ?" in where
     assert "method" not in where
@@ -219,6 +234,7 @@ def test_document_filters_are_parameterized_and_hide_fixtures() -> None:
         "%method%",
         "%method%",
         "%method%",
+        "reasoning_candidate",
         "reasoning_candidate",
         "empirical_evidence",
         3.0,

@@ -8,9 +8,15 @@ import pytest
 
 from processor import common
 from processor.decon_gate import DeconGate
-from processor.iceberg_writer import AttestationSink, IcebergWriter, gold_identifier
+from processor.iceberg_writer import (
+    AttestationSink,
+    IcebergWriter,
+    LicenseAdmissionWriter,
+    gold_identifier,
+)
 from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
+from schemas.license_admission import LicenseAdmissionDecision
 
 
 def _gold() -> GoldRecord:
@@ -146,7 +152,6 @@ class _MemoryWriter(IcebergWriter):
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self.decisions = _MemoryTable()
         self.gold = _MemoryTable()
-        self.benchmark_candidates = _MemoryTable()
 
     def _ensure_decisions_table(self) -> _MemoryTable:
         return self.decisions
@@ -154,11 +159,37 @@ class _MemoryWriter(IcebergWriter):
     def _ensure_table(self) -> _MemoryTable:
         return self.gold
 
-    def _ensure_benchmark_candidates_table(self) -> _MemoryTable:
-        return self.benchmark_candidates
-
     def _set_snapshot_props(self, *_args: object) -> None:
         return None
+
+
+class _AdmissionCatalog:
+    def __init__(self) -> None:
+        self.table = _MemoryTable()
+
+    def load_table(self, _identifier: object) -> _MemoryTable:
+        return self.table
+
+
+def test_license_admission_writer_commits_once_per_decision() -> None:
+    catalog = _AdmissionCatalog()
+    writer = LicenseAdmissionWriter(catalog)  # type: ignore[arg-type]
+    decision = LicenseAdmissionDecision(
+        decision_id="sha256:" + "b" * 64,
+        doc_id="sha256:" + "a" * 64,
+        source_feed="arxiv-cs-ai",
+        source_url="https://arxiv.org/abs/2608.00001",
+        observed_at=datetime(2026, 8, 19, tzinfo=UTC),
+        status="admitted",
+        license_id="CC-BY-4.0",
+        license_source="rss_entry",
+        reason="CC-BY-4.0 is on the training allowlist",
+        trace_id="0" * 32,
+    )
+
+    assert writer.add(decision) is True
+    assert writer.add(decision) is False
+    assert catalog.table.rows == 1
 
 
 def test_writer_persists_rejected_decision_without_adding_it_to_gold() -> None:
@@ -177,10 +208,9 @@ def test_writer_persists_rejected_decision_without_adding_it_to_gold() -> None:
     assert stats.decisions_committed == 1
     assert writer.decisions.rows == 1
     assert writer.gold.rows == 0
-    assert writer.benchmark_candidates.rows == 0
 
 
-def test_writer_isolates_benchmark_candidate_from_training_gold() -> None:
+def test_writer_does_not_materialize_legacy_benchmark_candidate() -> None:
     writer = _MemoryWriter(
         catalog=object(),
         decon=DeconGate(benchmark_set_version="v-test"),
@@ -203,10 +233,9 @@ def test_writer_isolates_benchmark_candidate_from_training_gold() -> None:
     stats = writer.flush()
 
     assert stats.rows_committed == 0
-    assert stats.benchmark_candidates_committed == 1
+    assert stats.benchmark_candidates_committed == 0
     assert writer.decisions.rows == 1
     assert writer.gold.rows == 0
-    assert writer.benchmark_candidates.rows == 1
 
 
 def test_writer_ignores_replayed_decision_recipe() -> None:
@@ -252,7 +281,6 @@ def test_writer_ignores_replay_after_restart_by_scanning_iceberg_keys() -> None:
     )
     restarted_writer.decisions = first_writer.decisions
     restarted_writer.gold = first_writer.gold
-    restarted_writer.benchmark_candidates = first_writer.benchmark_candidates
     restarted_writer.add(record)
     replay = restarted_writer.flush()
 

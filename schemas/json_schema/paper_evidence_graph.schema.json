@@ -1,0 +1,285 @@
+{
+  "$defs": {
+    "CompilerRun": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted": {
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "findings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Findings",
+          "type": "array"
+        },
+        "output_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Output Hash",
+          "type": "string"
+        },
+        "pass_name": {
+          "title": "Pass Name",
+          "type": "string"
+        },
+        "prompt_version": {
+          "title": "Prompt Version",
+          "type": "string"
+        },
+        "provider_trace_id": {
+          "title": "Provider Trace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pass_name",
+        "prompt_version",
+        "provider_trace_id",
+        "output_hash",
+        "accepted"
+      ],
+      "title": "CompilerRun",
+      "type": "object"
+    },
+    "EvidenceEdge": {
+      "additionalProperties": false,
+      "properties": {
+        "relation": {
+          "enum": [
+            "supports",
+            "qualifies",
+            "contradicts",
+            "enables",
+            "precedes",
+            "derives",
+            "depends_on",
+            "compares_with",
+            "invalidates_if_removed",
+            "uses",
+            "produces"
+          ],
+          "title": "Relation",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "relation",
+        "target"
+      ],
+      "title": "EvidenceEdge",
+      "type": "object"
+    },
+    "EvidenceNode": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_symbolic_form": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Symbolic Form"
+        },
+        "canonical_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Text"
+        },
+        "confidence": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "free_symbols": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Free Symbols",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "inputs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "array"
+        },
+        "latex": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latex"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "outputs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "array"
+        },
+        "qualifiers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Qualifiers",
+          "type": "array"
+        },
+        "supporting_spans": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supporting Spans",
+          "type": "array"
+        },
+        "type": {
+          "enum": [
+            "claim",
+            "assumption",
+            "equation",
+            "method_step",
+            "data",
+            "artifact",
+            "metric",
+            "finding",
+            "limitation",
+            "figure_value",
+            "table_value",
+            "fault"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "EvidenceNode",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "compiler_runs": {
+      "items": {
+        "$ref": "#/$defs/CompilerRun"
+      },
+      "title": "Compiler Runs",
+      "type": "array"
+    },
+    "conflicts": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Conflicts",
+      "type": "array"
+    },
+    "edges": {
+      "items": {
+        "$ref": "#/$defs/EvidenceEdge"
+      },
+      "title": "Edges",
+      "type": "array"
+    },
+    "graph_id": {
+      "title": "Graph Id",
+      "type": "string"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/EvidenceNode"
+      },
+      "title": "Nodes",
+      "type": "array"
+    },
+    "paper_id": {
+      "title": "Paper Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "paper-evidence-graph-v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "uncertainties": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Uncertainties",
+      "type": "array"
+    }
+  },
+  "required": [
+    "graph_id",
+    "paper_id",
+    "nodes",
+    "edges"
+  ],
+  "title": "PaperEvidenceGraph",
+  "type": "object"
+}

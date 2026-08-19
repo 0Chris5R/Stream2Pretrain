@@ -914,6 +914,12 @@ def _extract_authors(author_metadata: list[str]) -> list[str]:
 
 
 def _source_identifier(root: Any, source_url: str) -> str | None:
+    # The canonical source URL identifies the paper. Searching the body first
+    # can accidentally select an arXiv id from the bibliography and corrupt
+    # paper-family grouping, split allocation, and audit provenance.
+    url_match = re.search(r"/(?:html|pdf)/([^?#]+)", source_url)
+    if url_match:
+        return url_match.group(1)
     match = re.search(
         r"arXiv:\s*([a-z-]+/)?\d{4}\.\d{4,6}(?:v\d+)?",
         root.get_text(" ", strip=True),
@@ -921,8 +927,7 @@ def _source_identifier(root: Any, source_url: str) -> str | None:
     )
     if match:
         return match.group(0).split(":", 1)[1].strip()
-    url_match = re.search(r"/(?:html|pdf)/([^?#]+)", source_url)
-    return url_match.group(1) if url_match else None
+    return None
 
 
 def _publication_date(root: Any) -> str | None:

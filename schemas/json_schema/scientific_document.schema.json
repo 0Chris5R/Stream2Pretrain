@@ -709,7 +709,7 @@
       "title": "License"
     },
     "projection_version": {
-      "default": "scientific-body-v2",
+      "default": "scientific-body-v3",
       "title": "Projection Version",
       "type": "string"
     },

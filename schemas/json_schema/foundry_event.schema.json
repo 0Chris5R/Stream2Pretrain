@@ -1,0 +1,125 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "artifact_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Artifact Hash"
+    },
+    "attempt": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "job_id": {
+      "title": "Job Id",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "paper_id": {
+      "title": "Paper Id",
+      "type": "string"
+    },
+    "provider_trace_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Trace Id"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "state": {
+      "anyOf": [
+        {
+          "enum": [
+            "RECEIVED",
+            "PROVIDER_CAPACITY_RESERVED",
+            "GRAPH_COMPILED",
+            "GRAPH_CRITIQUED",
+            "TASKS_PROPOSED",
+            "TASKS_ROUTED",
+            "SOLUTIONS_GENERATED",
+            "VERIFIERS_COMPILED",
+            "ADVERSARIAL_VALIDATED",
+            "ACCEPTED_SFT",
+            "ACCEPTED_RL",
+            "REJECTED",
+            "DEPRECATED"
+          ],
+          "type": "string"
+        },
+        {
+          "enum": [
+            "CALL_PLANNED",
+            "QUOTA_RESERVED",
+            "CALL_STARTED",
+            "STREAM_CHECKPOINTED",
+            "CALL_SUCCEEDED",
+            "CALL_FAILED",
+            "CALL_RATE_LIMITED",
+            "QUOTA_RECONCILED"
+          ],
+          "type": "string"
+        }
+      ],
+      "title": "State"
+    }
+  },
+  "required": [
+    "event_id",
+    "job_id",
+    "paper_id",
+    "sequence",
+    "state",
+    "occurred_at",
+    "idempotency_key"
+  ],
+  "title": "FoundryEvent",
+  "type": "object"
+}

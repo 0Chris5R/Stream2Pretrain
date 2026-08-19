@@ -165,6 +165,7 @@ module = [
     "resiliparse.*",
     "sentencepiece.*",
     "sqlitedict.*",
+    "sympy.*",
     "tiktoken.*",
     "transformers.*",
     "types_aiobotocore_s3.*",

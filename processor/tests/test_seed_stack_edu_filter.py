@@ -57,10 +57,10 @@ def test_license_for_per_file_spdx() -> None:
     assert source == "dataset_metadata"
 
 
-def test_license_for_falls_back_to_wrapper() -> None:
+def test_license_for_does_not_substitute_dataset_wrapper() -> None:
     spdx, source = se.license_for({})
-    assert spdx == se.SPDX_WRAPPER
-    assert source == "dataset_metadata"
+    assert spdx is None
+    assert source == "unknown"
 
 
 def test_to_seed_document_python_ml_repo() -> None:

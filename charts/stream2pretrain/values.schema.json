@@ -46,12 +46,17 @@
         "authSecret": {"type": "string"},
         "topics": {
           "type": "object",
-          "required": ["rawFetched", "docsNormalized", "docsCurated", "deconAttest"],
+          "required": ["rawFetched", "docsNormalized", "docsCurated", "curationDecisions", "licenseAdmissions", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
           "properties": {
             "rawFetched": {"type": "string"},
             "docsNormalized": {"type": "string"},
             "docsCurated": {"type": "string"},
-            "deconAttest": {"type": "string"}
+            "curationDecisions": {"type": "string"},
+            "licenseAdmissions": {"type": "string"},
+            "deconAttest": {"type": "string"},
+            "foundryJobs": {"type": "string"},
+            "foundryEvents": {"type": "string"},
+            "foundryArtifacts": {"type": "string"}
           }
         }
       }
@@ -64,12 +69,13 @@
         "region": {"type": "string"},
         "buckets": {
           "type": "object",
-          "required": ["bronze", "silver", "gold", "decon"],
+          "required": ["bronze", "silver", "gold", "decon", "posttrain"],
           "properties": {
             "bronze": {"type": "string"},
             "silver": {"type": "string"},
             "gold": {"type": "string"},
-            "decon": {"type": "string"}
+            "decon": {"type": "string"},
+            "posttrain": {"type": "string"}
           }
         },
         "credentialsSecret": {"type": "string", "minLength": 1}
@@ -77,11 +83,15 @@
     },
     "iceberg": {
       "type": "object",
-      "required": ["catalog", "namespace", "goldTable", "polarisUrl", "warehouse", "credentialSecret", "credentialKey", "scopeKey", "branches"],
+      "required": ["catalog", "namespace", "goldTable", "decisionsTable", "licenseAdmissionsTable", "foundryEventsTable", "posttrainArtifactsTable", "polarisUrl", "warehouse", "credentialSecret", "credentialKey", "scopeKey", "branches"],
       "properties": {
         "catalog": {"type": "string"},
         "namespace": {"type": "string"},
         "goldTable": {"type": "string"},
+        "decisionsTable": {"type": "string"},
+        "licenseAdmissionsTable": {"type": "string"},
+        "foundryEventsTable": {"type": "string"},
+        "posttrainArtifactsTable": {"type": "string"},
         "polarisUrl": {"type": "string", "format": "uri"},
         "warehouse": {"type": "string"},
         "accessDelegation": {"type": "string", "enum": ["vended-credentials", "remote-signing", "none"]},

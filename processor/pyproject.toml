@@ -18,6 +18,7 @@ dependencies = [
     "botocore>=1.34",
     "cryptography>=42.0",
     "prometheus-client>=0.20",
+    "sympy==1.13.3",
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp>=1.27",
@@ -64,6 +65,7 @@ runtime = [
     "aiohttp>=3.9",
     "docling==2.114.0",
     "pandas>=2.1,<4",
+    "sympy==1.13.3",
     # v0.2.0 seed loader: streaming HuggingFace dataset reader.
     "datasets>=2.20",
 ]
@@ -105,6 +107,7 @@ local = [
     "docling==2.114.0",
     "pandas>=2.1,<4",
     "feedparser>=6.0.11",
+    "sympy==1.13.3",
 ]
 dev = [
     "pytest>=8.2",
@@ -122,6 +125,10 @@ s2p-duckdb-api = "processor.duckdb_api:main"
 s2p-local-sources-api = "processor.local_sources_api:main"
 s2p-mixture-controller = "processor.mixture_controller.controller:main"
 s2p-seed-loader = "processor.seed_loader:main"
+s2p-foundry = "processor.foundry.worker:main"
+s2p-foundry-api = "processor.foundry.api:main"
+s2p-foundry-export-replay = "processor.foundry.export_replay:main"
+s2p-foundry-build-oracle = "processor.foundry.oracle_build:main"
 
 [build-system]
 requires = ["hatchling"]

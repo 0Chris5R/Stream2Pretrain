@@ -122,6 +122,9 @@
       "enum": [
         "github_api",
         "html_meta",
+        "rss_entry",
+        "oai_metadata",
+        "arxiv_api",
         "dataset_metadata",
         "manual_override",
         "unknown"

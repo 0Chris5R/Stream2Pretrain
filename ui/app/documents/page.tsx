@@ -348,11 +348,10 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
               </Button>
             ) : null}
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="grid grid-cols-3 gap-2">
             <Score label={classifier} value={document.edu_score.toFixed(2)} />
             <Score label="Composite" value={document.quality_score.toFixed(2)} />
             <Score label="Reasoning evidence" value={percent(document.reasoning_score)} />
-            <Score label="Benchmark evidence" value={percent(document.benchmark_score)} />
           </div>
           <div className="flex flex-wrap gap-1.5">
             {document.content_tags.map((tag) => (
@@ -557,6 +556,10 @@ function AuditView({ document }: { document: DocumentDetail }) {
     [
       'Decontamination',
       `${document.contaminated_with.length ? document.contaminated_with.join(', ') : 'clean'} · ${document.benchmark_set_version}`,
+    ],
+    [
+      'Licence',
+      `${document.spdx_license ?? document.license} · ${document.spdx_license_source || document.license_source}`,
     ],
     ['Policy', `${document.policy_revision} · ${document.scoring_version}`],
     ['Document id', document.doc_id],
@@ -790,7 +793,13 @@ function RouteBadge({ route }: { route: CorpusRoute }) {
       : route === 'retry' || route === 'benchmark_candidate'
         ? 'warning'
         : 'success';
-  return <Badge variant={variant}>{humanize(route)}</Badge>;
+  return <Badge variant={variant}>{routeLabel(route)}</Badge>;
+}
+
+function routeLabel(route: CorpusRoute): string {
+  if (route === 'posttrain_candidate' || route === 'reasoning_candidate') return 'Post-training';
+  if (route === 'benchmark_candidate') return 'Legacy benchmark';
+  return humanize(route);
 }
 
 function routeColor(route: CorpusRoute): string {

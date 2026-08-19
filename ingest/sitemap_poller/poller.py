@@ -29,7 +29,8 @@ from ingest.common.feeds import (
     load_feeds_from_yaml,
 )
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import effective_license
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -89,9 +90,7 @@ async def fetch_sitemap(client: httpx.AsyncClient, url: str) -> str | None:
         return payload.decode("utf-8", errors="replace")
 
 
-async def collect_urls(
-    client: httpx.AsyncClient, root_url: str
-) -> list[tuple[str, str | None]]:
+async def collect_urls(client: httpx.AsyncClient, root_url: str) -> list[tuple[str, str | None]]:
     """Recursively expand a sitemap into a flat ``[(url, lastmod), ...]`` list."""
     queue: list[tuple[str, int]] = [(root_url, 0)]
     out: list[tuple[str, str | None]] = []
@@ -119,6 +118,7 @@ async def poll_feed(
     minio: MinioWriter,
     bucket: str,
     state_store: FeedStateStore,
+    admission_producer: LicenseAdmissionProducer,
 ) -> int:
     """One pass over a sitemap feed."""
     state = state_store.get(feed.name)
@@ -136,6 +136,7 @@ async def poll_feed(
         if lastmod and prev == lastmod:
             continue  # unchanged - skip the page fetch entirely
         await bucket_limit.acquire()
+        license_id, license_source = effective_license(None, feed.license_default)
         try:
             rec = await fetch_and_publish(
                 client,
@@ -146,6 +147,9 @@ async def poll_feed(
                 bucket=bucket,
                 expected_content_type="text/html",
                 seen=seen,
+                license_value=license_id,
+                license_source=license_source,
+                admission_producer=admission_producer,
             )
         except httpx.HTTPError as exc:
             log.warning("sitemap.entry_failed", feed=feed.name, url=url, err=str(exc))
@@ -159,20 +163,27 @@ async def poll_feed(
 
 
 async def run_pass(cfg: IngestConfig, feeds: list[SourceFeedSpec]) -> int:
-    state_root = (
-        "/var/lib/s2p-state/sitemap_poller" if not cfg.is_dev else "./.s2p-state/sitemap"
-    )
+    state_root = "/var/lib/s2p-state/sitemap_poller" if not cfg.is_dev else "./.s2p-state/sitemap"
     state_store = FeedStateStore(state_root)
     headers = build_headers(cfg, accept="application/xml, text/xml;q=0.9")
     total = 0
-    async with build_async_client(cfg, headers=headers) as client, BronzeProducer(
-        cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-sitemap-poller"
-    ) as producer, MinioWriter(
-        cfg.minio_endpoint,
-        cfg.minio_access_key,
-        cfg.minio_secret_key,
-        bucket=cfg.minio_bronze_bucket,
-    ) as minio:
+    async with (
+        build_async_client(cfg, headers=headers) as client,
+        BronzeProducer(
+            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-sitemap-poller"
+        ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-sitemap-license-admission",
+        ) as admission_producer,
+        MinioWriter(
+            cfg.minio_endpoint,
+            cfg.minio_access_key,
+            cfg.minio_secret_key,
+            bucket=cfg.minio_bronze_bucket,
+        ) as minio,
+    ):
         for feed in feeds:
             try:
                 total += await poll_feed(
@@ -182,6 +193,7 @@ async def run_pass(cfg: IngestConfig, feeds: list[SourceFeedSpec]) -> int:
                     minio=minio,
                     bucket=cfg.minio_bronze_bucket,
                     state_store=state_store,
+                    admission_producer=admission_producer,
                 )
             except Exception as exc:
                 log.exception("sitemap.feed_error", feed=feed.name, err=str(exc))

@@ -26,7 +26,7 @@ echo
 echo "Redpanda topics"
 "${COMPOSE[@]}" exec -T redpanda \
   rpk -X brokers=redpanda:29092 topic describe \
-  raw.fetched docs.normalized docs.curated curation.decisions decon.attest -p
+  raw.fetched docs.normalized docs.curated curation.decisions license.admissions decon.attest -p
 
 check_url() {
   local label="$1"
@@ -49,6 +49,7 @@ check_url "Decon API" "http://localhost:8081/healthz"
 check_url "DuckDB API" "http://localhost:8090/healthz"
 check_url "Documents API" "http://localhost:8090/documents?limit=1"
 check_url "Sources API" "http://localhost:3100/api/sources"
+check_url "Foundry API" "http://localhost:8092/healthz"
 
 echo
 echo "Useful pages"
@@ -58,6 +59,7 @@ echo "  Sources:          http://localhost:3100/sources"
 echo "  Benchmark safety: http://localhost:3100/decon"
 echo "  Datasets/export:  http://localhost:3100/datasets"
 echo "  Documents/OCR:    http://localhost:3100/documents"
+echo "  Post-training:    http://localhost:3100/post-training"
 echo "  Redpanda console: http://localhost:8080"
 echo "  MinIO console:    http://localhost:9001  (minioadmin / minioadmin)"
 echo "  Prometheus:       http://localhost:9091"

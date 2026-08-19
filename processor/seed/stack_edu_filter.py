@@ -1,8 +1,8 @@
 """Seed loader for ``HuggingFaceTB/stack-edu`` filtered to Python+ML.
 
 Stack-Edu is the educational-quality code subset Dolma 3 Mix uses for the
-0.41T-token code component. License: ODC-By family with per-file SPDX
-preserved.
+0.41T-token code component. Its dataset wrapper is not inherited; an explicit
+allowlisted per-file SPDX licence is required.
 
 Filter strategy:
 
@@ -25,10 +25,6 @@ from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
 
 REPO_ID: str = "HuggingFaceTB/stack-edu"
-# Wrapper SPDX; per-file licenses propagate via ``row['license']`` and we
-# upgrade the SilverRecord ``spdx_license`` whenever the row carries one.
-SPDX_WRAPPER: str = "ODC-By-1.0"
-
 LANGUAGES: frozenset[str] = frozenset({"python"})
 
 # Curated ML / inference / training repositories. Subset of SOURCES.md
@@ -157,11 +153,11 @@ def native_id_for(row: dict[str, Any]) -> str:
 
 
 def license_for(row: dict[str, Any]) -> tuple[str | None, str]:
-    """Pick the per-file SPDX license if present; fall back to wrapper."""
+    """Pick the per-file SPDX licence; a dataset wrapper cannot license code."""
     raw = row.get("license") or row.get("license_spdx")
     if isinstance(raw, str) and raw.strip():
         return raw.strip(), "dataset_metadata"
-    return SPDX_WRAPPER, "dataset_metadata"
+    return None, "unknown"
 
 
 def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
@@ -252,7 +248,6 @@ __all__ = [
     "ML_KEYWORDS",
     "ML_REPOS",
     "REPO_ID",
-    "SPDX_WRAPPER",
     "derive_valid_from",
     "is_ml_relevant",
     "is_python",

@@ -23,15 +23,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
 
 # Risk-tier follows the MixtureVitae / Common Pile convention:
-#   1 = trainable under current policy (license may be unknown for non-code,
-#       with low PII and low contamination)
+#   1 = trainable under current policy (explicit allowlisted content licence,
+#       low PII, and low contamination)
 #   2 = caution (heuristic uncertainty, restricted licence, partial PII)
 #   3 = drop (explicit dirty signal; should not enter training mixture)
 RiskTier = Literal[1, 2, 3]
 PiiFlag = Literal["email", "phone", "ssn", "credit_card", "ipv4", "ipv6", "passport"]
 CorpusRoute = Literal[
+    "pretrain",
+    # Read compatibility for snapshots written before the route was renamed.
     "broad_pretraining",
+    "posttrain_candidate",
+    # Read compatibility for snapshots written before the foundry landed.
     "reasoning_candidate",
+    # Read compatibility for the removed upstream benchmark-candidate route.
     "benchmark_candidate",
     "quarantine",
     "retry",

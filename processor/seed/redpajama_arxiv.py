@@ -3,10 +3,8 @@
 LaTeX-extracted arXiv papers, ~92 GB / ~28B tokens per Together AI's
 release blog. Cutoff 2023-04 (the exact day is needs-measurement).
 
-License: Apache-2.0 wrapper, with content under arXiv's per-paper licenses
-(``arxiv-non-exclusive-distribution`` for the bulk; we record the wrapper
-SPDX and surface the per-paper license via the ``meta.url`` field on the
-SilverRecord ``extra`` map - downstream operators decide).
+The dataset wrapper is Apache-2.0, but paper content remains under each
+paper's licence. Rows without a per-paper licence are therefore quarantined.
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ from processor.seed.types import SeedDocument
 
 REPO_ID: str = "togethercomputer/RedPajama-Data-1T"
 CONFIG_NAME: str = "arxiv"
-SPDX: str = "Apache-2.0"
+SPDX: str = "unknown"
 
 # RedPajama v1 release date: April 17 2023. Used as a hard fallback when
 # meta.timestamp is absent from a row.
@@ -103,6 +101,30 @@ def native_id_for(row: dict[str, Any]) -> str:
     return ""
 
 
+def paper_license_for(row: dict[str, Any]) -> str | None:
+    """Read only a paper-level licence, never the dataset wrapper licence."""
+    meta = row.get("meta")
+    payload: dict[str, Any] = {}
+    if isinstance(meta, dict):
+        payload = meta
+    elif isinstance(meta, str):
+        import json
+
+        try:
+            decoded = json.loads(meta)
+            if isinstance(decoded, dict):
+                payload = decoded
+        except json.JSONDecodeError:
+            pass
+    value = (
+        payload.get("license")
+        or payload.get("license_url")
+        or row.get("license")
+        or row.get("license_url")
+    )
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
     """Convert one RedPajama-arxiv row into a :class:`SeedDocument`."""
     text = row.get("text")
@@ -124,8 +146,8 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         valid_from=valid_from,
         source_format="latex",
         extraction_pipeline="redpajama-arxiv-2023-04",
-        spdx_license=SPDX,
-        spdx_license_source="dataset_metadata",
+        spdx_license=paper_license_for(row),
+        spdx_license_source=("dataset_metadata" if paper_license_for(row) else "unknown"),
         extra=extra,
     )
 

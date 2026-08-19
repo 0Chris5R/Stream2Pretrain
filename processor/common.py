@@ -129,6 +129,7 @@ class ProcessorConfig:
     proxy_lm_window_minutes: int
     promotion_threshold: float
     promotion_required_windows: int
+    license_admissions_topic: str = "license.admissions"
 
     @property
     def is_dev(self) -> bool:
@@ -172,6 +173,7 @@ def load_config() -> ProcessorConfig:
         proxy_lm_window_minutes=_env_int("S2P_PROXY_LM_WINDOW_MIN", 10),
         promotion_threshold=_env_float("S2P_PROMOTION_THRESHOLD", 0.05),
         promotion_required_windows=_env_int("S2P_PROMOTION_REQUIRED_WINDOWS", 3),
+        license_admissions_topic=_env("S2P_LICENSE_ADMISSIONS_TOPIC", "license.admissions"),
     )
 
 
@@ -200,19 +202,13 @@ def kafka_consumer_config(group_id: str) -> dict[str, str]:
     return {
         "group.id": group_id,
         "auto.offset.reset": "earliest",
-        "fetch.message.max.bytes": str(
-            _env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576)
-        ),
+        "fetch.message.max.bytes": str(_env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576)),
     }
 
 
 def kafka_producer_config() -> dict[str, str]:
     """Config passed to Bytewax KafkaSink for full-document payloads."""
-    return {
-        "message.max.bytes": str(
-            _env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576)
-        )
-    }
+    return {"message.max.bytes": str(_env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576))}
 
 
 def run_bytewax_flow(flow: object, cfg: ProcessorConfig, flow_name: str) -> None:

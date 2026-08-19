@@ -57,14 +57,30 @@ def test_to_seed_document_keeps_arxiv_url() -> None:
         "title": "On a thing",
         "date": "2024-05-01T00:00:00Z",
         "score": 4.2,
+        "license": "CC-BY-4.0",
     }
     doc = ff.to_seed_document(row, allowlist=("arxiv.org",))
     assert doc is not None
     assert doc.repo_id == ff.REPO_ID
     assert doc.url == "https://arxiv.org/abs/2402.01234"
     assert doc.source_format == "html"
-    assert doc.spdx_license == "ODC-By-1.0"
+    assert doc.spdx_license == "CC-BY-4.0"
     assert doc.extra["fineweb_edu_score"] == "4.200"
+
+
+def test_to_seed_document_does_not_inherit_dataset_wrapper_license() -> None:
+    doc = ff.to_seed_document(
+        {
+            "id": "abc-124",
+            "url": "https://arxiv.org/abs/2402.01235",
+            "text": "abstract text",
+        },
+        allowlist=("arxiv.org",),
+    )
+
+    assert doc is not None
+    assert doc.spdx_license is None
+    assert doc.spdx_license_source == "unknown"
 
 
 def test_to_seed_document_drops_offdomain_url() -> None:

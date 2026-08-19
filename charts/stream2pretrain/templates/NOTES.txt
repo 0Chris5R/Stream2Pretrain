@@ -7,7 +7,8 @@ Components:
 - Processor: fetcher (Resiliparse), curate (Bytewax StatefulSet with in-process
   Decon-Gate scan), iceberg-writer (PyIceberg + signed attestation writer),
   decon-gate API (attestation lookup), seed-loader (one-shot Bytewax Job for
-  the 5-component HF seed mixture).
+  the 5-component HF seed mixture), post-training foundry (paper-to-SFT/RL
+  StatefulSet plus control API and per-artifact human audits).
 - Control plane: mixture-controller (kopf) + SourceFeed/MixtureRecipe CRDs.
 {{- if .Values.ui.ingress.enabled }}
 - UI: Next.js 14 reachable at https://{{ .Values.ui.ingress.host }}/ once the
@@ -28,6 +29,11 @@ Required external secrets (create before installing or use sealed-secrets):
       --from-file=ed25519.key=./signing.key
   kubectl -n {{ .Release.Namespace }} create configmap {{ .Values.processor.deconGate.benchmarkCorpus.configMap }} \
       --from-file={{ .Values.processor.deconGate.benchmarkCorpus.fileName }}=./benchmark-corpus.json
+{{- if .Values.processor.foundry.enabled }}
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.processor.foundry.providerSecret }} \
+      --from-literal={{ .Values.processor.foundry.hetznerKey }}=... \
+      --from-literal={{ .Values.processor.foundry.controlTokenKey }}=...
+{{- end }}
 {{- if .Values.keda.auth.enabled }}
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.keda.triggerAuthSecret }} \
       --from-literal=sasl=plain --from-literal=tls=disable \
@@ -38,3 +44,7 @@ Verify:
   kubectl -n {{ .Release.Namespace }} get sourcefeeds,mixturerecipes
   kubectl -n {{ .Release.Namespace }} get scaledobjects
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+{{- if .Values.processor.foundry.enabled }}
+  kubectl -n {{ .Release.Namespace }} get statefulset/{{ include "stream2pretrain.fullname" . }}-foundry
+  # The configured Hetzner Qwen3.8 model must be discoverable before the worker is Ready.
+{{- end }}

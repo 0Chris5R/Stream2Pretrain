@@ -143,13 +143,13 @@ Binary terms are 1 when present and 0 otherwise. This score indicates visible
 reasoning-supporting anatomy. It does not claim that a model has judged the
 reasoning correct.
 
-### 4.4 Benchmark evidence, 0 to 1
+### 4.4 Post-training benchmark allocation
 
-`0.24 * results + 0.18 * methods + 0.18 * evidence_coverage + 0.18 *
-completeness + 0.12 * educational_quality/5 + 0.10 * limitations`
-
-This indicates evidence useful for benchmark-item review. It is not a generated
-benchmark score and never bypasses freshness, source, safety, or reserve rules.
+Pretraining does not score or reserve papers for a benchmark. The persisted
+`benchmark_score` field is zero and retained only so historical snapshots remain
+readable. After a paper has produced accepted SFT or RL artifacts, the foundry
+assigns its paper family within that output pool: four families to `train`, then
+one to `benchmark`. This is the only active generated-data benchmark split.
 
 ### 4.5 Non-scientific structure
 
@@ -158,8 +158,7 @@ bounded combination of title presence, usable length up to 500 words, clean
 extraction, and non-empty content. Code reasoning evidence uses visible
 functions, classes, tests, and code-quality results; its content tags are
 `systems_implementation` and `methods_procedures`. Web reasoning evidence is a
-low-weight completeness/quality baseline. Benchmark evidence for both is zero
-until a source-specific reviewed rule or classifier is added.
+  low-weight completeness/quality baseline.
 
 ## 5. Composite quality, 0 to 5
 
@@ -179,16 +178,14 @@ Blocking reasons are applied before corpus-use routes:
 1. Any blocking reason other than insufficient body routes to `quarantine`.
 2. Insufficient retained scientific body routes to `retry` when it is the only
    problem.
-3. Otherwise the record is eligible for `broad_pretraining`.
-4. Reasoning evidence at least 0.55 adds `reasoning_candidate` eligibility.
-5. Benchmark evidence at least 0.72, a publication date on or after
-   `S2P_BENCHMARK_CANDIDATE_CUTOFF`, and a non-fixture source route the record
-   to the physically separate `benchmark_candidate` table.
-6. Without benchmark reservation, reasoning eligibility becomes the primary
-   route; otherwise broad pretraining remains primary.
+3. Otherwise the record is eligible for `pretrain`.
+4. Reasoning evidence at least 0.55 adds `posttrain_candidate` eligibility and
+   makes it the primary inspection route; the record remains pretraining-eligible.
+5. All other clean records keep `pretrain` as their primary route.
 
-Benchmark candidates never enter the clean training table. Local controlled
-fixtures never enter the reserve, apart from the explicit route-test canary.
+`broad_pretraining`, `reasoning_candidate`, and `benchmark_candidate` are
+read-only compatibility labels for historical snapshots. Current curation
+never creates them.
 
 The current low-quality blocking rule fires only when the primary educational
 score is below 0.75 and scientific structure is below 2.0. It is deliberately

@@ -50,17 +50,21 @@ Notes on rate-limit budget:
 
 ## Seed corpus (v0.2.0)
 
-One-shot Bytewax `seed-loader` Job that streams a 5-component HF mixture into `docs.normalized` as Silver records before live polling kicks in. Every component is permissive-license-compatible with the project's Apache-2.0 release. Per-document `valid_from` is populated from each dataset's native publication-date column so the validity-interval N2 novelty has data to query on day 1.
+One-shot Bytewax `seed-loader` Job that evaluates a 5-component HF mixture before `docs.normalized`. Dataset wrapper licences do not qualify. Only rows with an explicit allowlisted paper, page, or file licence proceed; every other row is written to the licence quarantine ledger. Per-document `valid_from` is populated from each dataset's native publication-date column so the validity-interval N2 novelty has data to query on day 1.
 
 | # | Component | HF id / source | Bronze GB target | Tokens (B) target | License | Role |
 |---|---|---|---|---|---|---|
-| S1 | peS2o v3 filtered to cs.* | `allenai/peS2o` (`data/v3/`) | ~50 | needs-measurement (~12-15B; v2 baseline 42.01B at cutoff 2023-01-03) | ODC-By 1.0 | AI2 academic backbone; filtered to cs.CL/cs.LG/cs.AI/stat.ML where metadata is available |
-| S2 | RedPajama v1 arxiv | `togethercomputer/RedPajama-Data-1T` config `arxiv` | ~92 | ~28 | Apache-2.0 wrapper + per-paper arXiv terms | LaTeX-derived view of arXiv; complementary to peS2o's PDF-derived view; powers the shadow A/B extraction-method demo |
-| S3 | FineWeb-Edu URL-filtered | `HuggingFaceFW/fineweb-edu` (URL allowlist for arxiv.org / openai.com / deepmind.google / huggingface.co/blog / eleuther.ai / bair.berkeley.edu / lilianweng.github.io / sebastianraschka.com / etc.) | ~50 | needs-measurement (~5-10B post-filter) | ODC-By 1.0 | AI/ML-domain web slice carrying FineWeb-Edu classifier scores >=3 |
-| S4 | Stack-Edu Python+ML | `HuggingFaceTB/stack-edu` filtered to Python + AI/ML repos | ~80 | needs-measurement (~8-12B; OLMo-3 used ~410B from this dataset) | ODC-By family | Educational-quality code subset; same dataset OLMo-3 used for code training |
-| S5 | Custom Wayback backfill | arXiv OAI `from=2024-06-01`, GitHub Releases Atom history, HF Daily Papers `before=...`, AI-lab blogs via Wayback Machine | ~5-10 | ~1 | per-source (research fair-use for blog backfill) | Validates streaming "backfill mode" with `valid_from` populated from per-document publication dates |
+| S1 | peS2o v3 filtered to cs.* | `allenai/peS2o` (`data/v3/`) | ~50 | needs-measurement (~12-15B; v2 baseline 42.01B at cutoff 2023-01-03) | ODC-By wrapper; per-paper required | AI2 academic backbone; rows without paper rights are quarantined |
+| S2 | RedPajama v1 arxiv | `togethercomputer/RedPajama-Data-1T` config `arxiv` | ~92 | ~28 | Apache-2.0 wrapper; per-paper required | LaTeX view; rows without an allowlisted paper licence are quarantined |
+| S3 | FineWeb-Edu URL-filtered | `HuggingFaceFW/fineweb-edu` (URL allowlist for arxiv.org / openai.com / deepmind.google / huggingface.co/blog / eleuther.ai / bair.berkeley.edu / lilianweng.github.io / sebastianraschka.com / etc.) | ~50 | needs-measurement (~5-10B post-filter) | ODC-By wrapper; per-page required | Rows without explicit page rights are quarantined |
+| S4 | Stack-Edu Python+ML | `HuggingFaceTB/stack-edu` filtered to Python + AI/ML repos | ~80 | needs-measurement (~8-12B; OLMo-3 used ~410B from this dataset) | ODC-By wrapper; per-file SPDX required | Only allowlisted per-file code licences proceed |
+| S5 | Custom Wayback backfill | arXiv OAI `from=2024-06-01`, GitHub Releases Atom history, HF Daily Papers `before=...`, AI-lab blogs via Wayback Machine | ~5-10 | ~1 | explicit per-source or per-record licence required | Validates streaming backfill time semantics; unlicensed archive rows are quarantined |
 
-Total target: ~275-280 GB Bronze, ~55-65B tokens. The seed loader rides the same `docs.normalized` topic and Silver/Gold operators the live pollers use, so seeding is structurally a backfill mode, not a parallel pipeline. Day-1 demo benefits: `gold_as_of('2023-06-01')` queries return material; Decon-Gate has snapshots to attest; quality histograms have meaningful distributions.
+The original discovery target was ~275-280 GB and ~55-65B tokens. Retained
+volume after strict per-record licence admission is `needs-measurement`. The
+seed loader otherwise rides the same `docs.normalized` topic and Silver/Gold
+operators as live content, so seeding remains a backfill mode rather than a
+parallel policy path.
 
 ## Phase-2 Expansion Set (breadth, plug-in after Week 6)
 

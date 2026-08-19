@@ -15,7 +15,7 @@ human-label fields and called ground truth.
 Reviewers create `validation/scientific_labels.jsonl`, one row per paper:
 
 ```json
-{"arxiv_id":"1706.03762","extraction_correct":true,"training_usefulness":4.5,"reasoning_evidence":0.9,"benchmark_evidence":0.1,"expected_route":"reasoning_candidate","sections":{"abstract":"keep","introduction":"keep","references":"remove"},"figure_ocr":[{"figure_id":"figure-1","cer":0.04,"wer":0.08,"numeric_exact_match":1.0}]}
+{"arxiv_id":"1706.03762","extraction_correct":true,"training_usefulness":4.5,"reasoning_evidence":0.9,"benchmark_evidence":0.1,"expected_route":"posttrain_candidate","sections":{"abstract":"keep","introduction":"keep","references":"remove"},"figure_ocr":[{"figure_id":"figure-1","cer":0.04,"wer":0.08,"numeric_exact_match":1.0}]}
 ```
 
 Required review fields are extraction correctness, a 0..5 training-usefulness

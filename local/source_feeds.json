@@ -11,7 +11,7 @@
         "respect_x_poll_interval": false
       },
       "auth": { "type": "none" },
-      "license_default": "arxiv-non-exclusive-distribution",
+      "license_default": "per-record",
       "enabled": true,
       "egress_allow": ["rss.arxiv.org", "arxiv.org", "ar5iv.labs.arxiv.org"],
       "accept_content_types": ["application/rss+xml", "text/html", "application/pdf"]

@@ -23,6 +23,10 @@ DOCS_NORMALIZED: Final[str] = "docs.normalized"
 DOCS_CURATED: Final[str] = "docs.curated"
 DECON_ATTEST: Final[str] = "decon.attest"
 CURATION_DECISIONS: Final[str] = "curation.decisions"
+LICENSE_ADMISSIONS: Final[str] = "license.admissions"
+FOUNDRY_JOBS: Final[str] = "foundry.jobs"
+FOUNDRY_EVENTS: Final[str] = "foundry.events"
+FOUNDRY_ARTIFACTS: Final[str] = "foundry.artifacts"
 
 # v0.2.0 deliberately does NOT add a ``docs.code`` topic. Per-file code
 # records produced by ``ingest/github_release_tarball_fetcher`` ride the same
@@ -39,7 +43,11 @@ ALL_TOPICS: Final[tuple[str, ...]] = (
     DOCS_NORMALIZED,
     DOCS_CURATED,
     CURATION_DECISIONS,
+    LICENSE_ADMISSIONS,
     DECON_ATTEST,
+    FOUNDRY_JOBS,
+    FOUNDRY_EVENTS,
+    FOUNDRY_ARTIFACTS,
 )
 
 
@@ -97,7 +105,19 @@ def dev_topic_configs() -> list[TopicConfig]:
             CURATION_DECISIONS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
+            LICENSE_ADMISSIONS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+        ),
+        TopicConfig(
             DECON_ATTEST, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+        ),
+        TopicConfig(
+            FOUNDRY_JOBS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+        ),
+        TopicConfig(
+            FOUNDRY_EVENTS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+        ),
+        TopicConfig(
+            FOUNDRY_ARTIFACTS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
     ]
 
@@ -122,6 +142,18 @@ def prod_topic_configs() -> list[TopicConfig]:
             CURATION_DECISIONS, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS
         ),
         TopicConfig(
+            LICENSE_ADMISSIONS, partitions=6, replication_factor=3, retention_ms=_PROD_RETENTION_MS
+        ),
+        TopicConfig(
             DECON_ATTEST, partitions=3, replication_factor=3, retention_ms=_PROD_RETENTION_MS
+        ),
+        TopicConfig(
+            FOUNDRY_JOBS, partitions=6, replication_factor=3, retention_ms=_PROD_RETENTION_MS
+        ),
+        TopicConfig(
+            FOUNDRY_EVENTS, partitions=6, replication_factor=3, retention_ms=_PROD_RETENTION_MS
+        ),
+        TopicConfig(
+            FOUNDRY_ARTIFACTS, partitions=6, replication_factor=3, retention_ms=_PROD_RETENTION_MS
         ),
     ]

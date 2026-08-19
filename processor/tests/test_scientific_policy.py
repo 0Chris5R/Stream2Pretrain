@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from processor.scientific_policy import representative_segments, route_document
 from processor.tests.test_curate import _silver
 from schemas.silver import SilverSegment
@@ -58,12 +56,11 @@ def test_representative_segments_zero_limit_is_empty() -> None:
     assert representative_segments([_segment("abstract", "abstract", 10)], limit=0) == []
 
 
-def test_recent_evidence_rich_paper_is_reserved_from_training() -> None:
+def test_evidence_rich_paper_is_pretrain_and_posttrain_eligible() -> None:
     silver = _silver("scientific body " * 100).model_copy(
         update={
             "source_feed": "arxiv-html-live",
             "url": "https://arxiv.org/html/2608.00001",
-            "valid_from": datetime(2026, 8, 15, tzinfo=UTC),
         }
     )
 
@@ -71,43 +68,33 @@ def test_recent_evidence_rich_paper_is_reserved_from_training() -> None:
         silver=silver,
         reject_reasons=[],
         reasoning_score=0.8,
-        benchmark_score=0.9,
-        benchmark_cutoff=datetime(2025, 1, 1, tzinfo=UTC),
     )
 
-    assert decision.route == "benchmark_candidate"
-    assert decision.eligible_routes == [
-        "broad_pretraining",
-        "reasoning_candidate",
-        "benchmark_candidate",
-    ]
+    assert decision.route == "posttrain_candidate"
+    assert decision.eligible_routes == ["pretrain", "posttrain_candidate"]
 
 
-def test_controlled_local_fixture_never_enters_benchmark_reserve() -> None:
+def test_lower_reasoning_document_is_pretrain_only() -> None:
     silver = _silver("scientific body " * 100).model_copy(
         update={
             "source_feed": "local-controlled-fixtures-v3",
-            "valid_from": datetime(2026, 8, 15, tzinfo=UTC),
         }
     )
 
     decision = route_document(
         silver=silver,
         reject_reasons=[],
-        reasoning_score=0.8,
-        benchmark_score=0.9,
-        benchmark_cutoff=datetime(2025, 1, 1, tzinfo=UTC),
+        reasoning_score=0.4,
     )
 
-    assert decision.route == "reasoning_candidate"
-    assert "benchmark_candidate" not in decision.eligible_routes
+    assert decision.route == "pretrain"
+    assert decision.eligible_routes == ["pretrain"]
 
 
-def test_explicit_reserve_canary_proves_benchmark_route() -> None:
+def test_upstream_curation_never_allocates_a_benchmark_split() -> None:
     silver = _silver("scientific body " * 100).model_copy(
         update={
             "source_feed": "local-benchmark-reserve-canary",
-            "valid_from": datetime(2026, 8, 15, tzinfo=UTC),
         }
     )
 
@@ -115,9 +102,7 @@ def test_explicit_reserve_canary_proves_benchmark_route() -> None:
         silver=silver,
         reject_reasons=[],
         reasoning_score=0.8,
-        benchmark_score=0.9,
-        benchmark_cutoff=datetime(2025, 1, 1, tzinfo=UTC),
     )
 
-    assert decision.route == "benchmark_candidate"
-    assert "canary" in decision.reasons[-1]
+    assert decision.route == "posttrain_candidate"
+    assert "benchmark_candidate" not in decision.eligible_routes

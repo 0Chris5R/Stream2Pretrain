@@ -193,7 +193,7 @@ def test_bronze_to_durable_decision_within_30s(dev_stack: StackEndpoints) -> Non
     assert decision["doc_id"] == doc_id
     assert decision["route"] in {
         "broad_pretraining",
-        "reasoning_candidate",
+        "posttrain_candidate",
         "benchmark_candidate",
         "quarantine",
         "retry",
@@ -202,7 +202,7 @@ def test_bronze_to_durable_decision_within_30s(dev_stack: StackEndpoints) -> Non
 
     trainable = (
         decision["risk_tier"] == 1
-        and decision["route"] in {"broad_pretraining", "reasoning_candidate"}
+        and decision["route"] in {"broad_pretraining", "posttrain_candidate"}
         and not decision["reject_reasons"]
         and not decision["pii_flags"]
         and not decision["contaminated_with"]

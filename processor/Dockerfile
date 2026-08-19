@@ -41,6 +41,7 @@ RUN pip install --no-cache-dir uv==0.4.27
 WORKDIR /src
 COPY pyproject.toml /src/pyproject.toml
 COPY README.md /src/README.md
+COPY docs /src/docs
 COPY schemas /src/schemas
 COPY ingest /src/ingest
 COPY processor /src/processor
@@ -190,6 +191,10 @@ COPY --from=builder /usr/local/bin/s2p-iceberg-writer   /usr/local/bin/s2p-icebe
 COPY --from=builder /usr/local/bin/s2p-decon-api        /usr/local/bin/s2p-decon-api
 COPY --from=builder /usr/local/bin/s2p-duckdb-api       /usr/local/bin/s2p-duckdb-api
 COPY --from=builder /usr/local/bin/s2p-mixture-controller /usr/local/bin/s2p-mixture-controller
+COPY --from=builder /usr/local/bin/s2p-foundry          /usr/local/bin/s2p-foundry
+COPY --from=builder /usr/local/bin/s2p-foundry-api      /usr/local/bin/s2p-foundry-api
+COPY --from=builder /usr/local/bin/s2p-foundry-export-replay /usr/local/bin/s2p-foundry-export-replay
+COPY --from=builder /usr/local/bin/s2p-foundry-build-oracle /usr/local/bin/s2p-foundry-build-oracle
 COPY --from=builder /src                                /app
 COPY --from=models  /opt/models                         /opt/models
 COPY --from=builder /opt/models/docling                 /opt/models/docling

@@ -1,0 +1,196 @@
+{{- if .Values.processor.foundry.enabled }}
+{{- $component := "foundry" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: {{ .Values.processor.foundry.replicas }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+        stream2pretrain.io/egress-class: foundry-providers
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: worker
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["s2p-foundry"]
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $component | quote }}
+            - name: S2P_CONSUMER_GROUP
+              value: s2p-foundry
+            - name: S2P_STATE_DIR
+              value: /var/lib/s2p/foundry
+            - name: S2P_FOUNDRY_STATE_DIR
+              value: /var/lib/s2p/foundry
+            - name: S2P_FOUNDRY_PROVIDER_MODE
+              value: live
+            - name: S2P_FOUNDRY_ENABLE_ORACLES
+              value: {{ ternary "1" "0" .Values.processor.foundry.enableOracles | quote }}
+            - name: S2P_FOUNDRY_ORACLE_RUNTIME
+              value: kubernetes
+            {{- if .Values.processor.foundry.oracleRuntimeClass }}
+            - name: S2P_FOUNDRY_ORACLE_RUNTIME_CLASS
+              value: {{ .Values.processor.foundry.oracleRuntimeClass | quote }}
+            {{- end }}
+            - name: S2P_FOUNDRY_DAILY_RUN_HOUR_UTC
+              value: {{ .Values.processor.foundry.dailyRunHourUtc | quote }}
+            - name: S2P_FOUNDRY_TASKS_PER_PAPER
+              value: {{ .Values.processor.foundry.tasksPerPaper | quote }}
+            - name: S2P_FOUNDRY_ACCEPTED_TASKS_PER_PAPER
+              value: {{ .Values.processor.foundry.acceptedTasksPerPaper | quote }}
+            - name: S2P_FOUNDRY_QUEUE_POLL_SECONDS
+              value: {{ .Values.processor.foundry.queuePollSeconds | quote }}
+            - name: S2P_FOUNDRY_EVENTS_TABLE
+              value: {{ .Values.iceberg.foundryEventsTable | quote }}
+            - name: S2P_FOUNDRY_ARTIFACTS_TABLE
+              value: {{ .Values.iceberg.posttrainArtifactsTable | quote }}
+            - name: S2P_HETZNER_MODELS
+              value: {{ join "," .Values.processor.foundry.hetznerModels | quote }}
+            - name: HETZNER_INFERENCE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.processor.foundry.providerSecret | quote }}
+                  key: {{ .Values.processor.foundry.hetznerKey | quote }}
+            - name: S2P_FOUNDRY_SIGNING_KEY
+              value: /var/run/secrets/stream2pretrain/foundry-signing/ed25519.key
+            - name: S2P_FOUNDRY_SIGNING_CERT
+              value: /var/run/secrets/stream2pretrain/foundry-signing/ed25519.crt
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.processor.foundry.workerResources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/s2p/foundry
+            - name: tmp
+              mountPath: /tmp
+            - name: foundry-signing
+              mountPath: /var/run/secrets/stream2pretrain/foundry-signing
+              readOnly: true
+        - name: api
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["s2p-foundry-api"]
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.processor.foundry.apiPort }}
+          env:
+            - name: S2P_BIND_HOST
+              value: 0.0.0.0
+            - name: S2P_FOUNDRY_API_PORT
+              value: {{ .Values.processor.foundry.apiPort | quote }}
+            - name: S2P_FOUNDRY_STATE_DIR
+              value: /var/lib/s2p/foundry
+            - name: S2P_FOUNDRY_DAILY_RUN_HOUR_UTC
+              value: {{ .Values.processor.foundry.dailyRunHourUtc | quote }}
+            - name: S2P_FOUNDRY_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.processor.foundry.providerSecret | quote }}
+                  key: {{ .Values.processor.foundry.controlTokenKey | quote }}
+            - name: MINIO_ENDPOINT
+              value: {{ .Values.minio.endpoint | quote }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.minio.region | quote }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.credentialsSecret | quote }}
+                  key: accessKey
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.credentialsSecret | quote }}
+                  key: secretKey
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.processor.foundry.apiResources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/s2p/foundry
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: foundry-signing
+          secret:
+            secretName: {{ .Values.processor.foundry.signingKeySecret | quote }}
+            items:
+              - key: {{ .Values.processor.foundry.signingKeyKey | quote }}
+                path: ed25519.key
+              - key: {{ .Values.processor.foundry.signingCertKey | quote }}
+                path: ed25519.crt
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+        labels:
+          {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.processor.foundry.state.storageClass }}
+        storageClassName: {{ .Values.processor.foundry.state.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.processor.foundry.state.size | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: {{ .Values.processor.foundry.apiPort }}
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  selector:
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+{{- end }}

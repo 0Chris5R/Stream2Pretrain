@@ -56,9 +56,7 @@ def test_resolve_reviewarena_id_picks_best_candidate() -> None:
 
 
 def test_resolve_reviewarena_id_returns_none_when_no_match() -> None:
-    chosen = backfill.resolve_reviewarena_id(
-        override=None, search_fn=lambda *, search: []
-    )
+    chosen = backfill.resolve_reviewarena_id(override=None, search_fn=lambda *, search: [])
     assert chosen is None
 
 
@@ -109,6 +107,8 @@ async def test_run_backfill_streams_rows(monkeypatch: pytest.MonkeyPatch, tmp_pa
             "reviews": [{"review": "R1"}, {"review": "R2"}],
             "decision": "Accept",
             "cdate": 1718457600000,
+            "paper_license": "CC-BY-4.0",
+            "review_license": "CC-BY-4.0",
         },
         {
             "id": "p2",
@@ -119,6 +119,8 @@ async def test_run_backfill_streams_rows(monkeypatch: pytest.MonkeyPatch, tmp_pa
             "reviews": [{"review": "R3"}],
             "decision": "Reject",
             "cdate": 1719000000000,
+            "paper_license": "CC-BY-SA-4.0",
+            "review_license": "CC-BY-4.0",
         },
         # Row missing both pdf and review - should be counted but emit nothing.
         {"id": "p3", "venue": "ICML.cc/2025/Conference", "year": 2025},
@@ -130,6 +132,7 @@ async def test_run_backfill_streams_rows(monkeypatch: pytest.MonkeyPatch, tmp_pa
         return rows
 
     fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
     fake_minio = FakeMinio()
 
     # Patch the producer/minio context managers used inside run_backfill.
@@ -142,6 +145,11 @@ async def test_run_backfill_streams_rows(monkeypatch: pytest.MonkeyPatch, tmp_pa
         backfill,
         "MinioWriter",
         lambda *a, **kw: fake_minio,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        backfill,
+        "LicenseAdmissionProducer",
+        lambda *a, **kw: fake_admissions,  # type: ignore[arg-type]
     )
 
     stats = await backfill.run_backfill(
@@ -181,12 +189,16 @@ async def test_run_backfill_returns_empty_when_unresolved(
 
 
 @pytest.mark.asyncio
-async def test_run_backfill_respects_max_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_run_backfill_respects_max_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.chdir(tmp_path)
     fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
     fake_minio = FakeMinio()
     monkeypatch.setattr(backfill, "BronzeProducer", lambda *a, **kw: fake_producer)
     monkeypatch.setattr(backfill, "MinioWriter", lambda *a, **kw: fake_minio)
+    monkeypatch.setattr(backfill, "LicenseAdmissionProducer", lambda *a, **kw: fake_admissions)
 
     rows = [
         {
@@ -196,6 +208,8 @@ async def test_run_backfill_respects_max_rows(monkeypatch: pytest.MonkeyPatch, t
             "pdf": {"bytes": b"%PDF" + str(i).encode()},
             "reviews": [{"review": f"R{i}"}],
             "cdate": 1718457600000 + i,
+            "paper_license": "CC-BY-4.0",
+            "review_license": "CC-BY-4.0",
         }
         for i in range(10)
     ]

@@ -26,6 +26,44 @@ requires the DHBW cluster. These are evidence, credential, and target-environmen
 steps, not permission to substitute synthetic labels, partial benchmark
 coverage, or invented capacity numbers.
 
+Post-training amendment (2026-08-19):
+[`POSTTRAIN_FOUNDRY.md`](POSTTRAIN_FOUNDRY.md) is the binding contract for the
+implemented scientific-paper to SFT and RL environment foundry. It extends this
+curation contract without weakening any curation requirement. The durable
+eligibility route is now `posttrain_candidate`; `reasoning_candidate` is a
+legacy read alias only. The foundry consumes structured, licence-cleared
+scientific artifacts after curation, uses exactly two approved provider routes,
+discovers their configured models at worker startup, and records exact returned
+model provenance on every call. Provider qualification benchmarks, score
+thresholds, availability heartbeats, and provider approvals were explicitly
+removed by the team on 2026-08-19. Human approve/reject decisions instead apply
+to individual generated SFT/RL artifacts and record the reviewer manually. The
+same decision removed copy-ratio, shared-word, and minimum-answer-length checks
+entirely. Optional official-artifact oracles remain disabled future work. The
+current name remains Stream2Pretrain until the live acceptance and rename gate
+in that document is complete.
+
+Deployment-policy amendment (2026-08-19): every licence-admitted clean training
+document is eligible for pretraining through `eligible_routes`,
+independent of its primary inspection route. A document with a missing or
+excluded licence is durably quarantined before its body is fetched or any
+extraction, OCR, model, or curation stage runs. Each decision is first written
+as a pre-fetch event and exposed as part of the same corpus route ledger.
+Dataset wrapper licences are not inherited by contained documents.
+Once per UTC day, the foundry freezes and ranks the
+current post-training candidates, runs them serially until measured provider
+quota is reached, and leaves the remainder durable for the next ranking.
+Accepted paper-family packages are assigned separately within the SFT and RL
+pools in retry-stable blocks of five: four train and one benchmark. A paper can
+never contribute to train and benchmark within the same pool. The default
+pretraining export enforces the same strict allowlist and includes exact
+licence provenance; all post-training derivatives use that gate again as a
+defensive check. The 20 percent
+post-training benchmark split is an SFT/RL holdout. Pretraining never creates a
+benchmark split; the 80/20 allocation occurs only after accepted SFT/RL output
+exists. The foundry trusts upstream licence admission and performs no second
+licence check, hash, or ledger operation.
+
 ## 1. Product principles
 
 1. The default UI is a curation product, not an implementation report.
@@ -374,6 +412,10 @@ Dataset builder filters:
 - score ranges;
 - include/exclude structured surrogates;
 - output format.
+
+Licence policy is not an optional dataset filter. Every export is restricted to
+the shared strict content-licence allowlist and includes `spdx_license` and
+`spdx_license_source` in each record and its manifest.
 
 It previews document/token counts and produces an export manifest containing all
 model, extractor, policy, benchmark, and table snapshot revisions. Implement an

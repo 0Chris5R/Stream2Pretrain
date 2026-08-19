@@ -3,7 +3,8 @@
 The single Helm chart that deploys every Stream2Pretrain component on a
 Kubernetes cluster: ingest CronJobs/Deployments, the Bytewax curate StatefulSet,
 the iceberg-writer Deployment, the DuckDB query API, the Decon-Gate attestation
-API, the Next.js UI, the kopf mixture-controller plus its SourceFeed REST API,
+API, the post-training foundry StatefulSet/API, the Next.js UI, the
+kopf mixture-controller plus its SourceFeed REST API,
 the SourceFeed and MixtureRecipe CRDs, KEDA
 ScaledObjects, NetworkPolicies, ServiceMonitors, the Stream2Pretrain Grafana
 dashboard, and OPA Gatekeeper constraints.
@@ -29,6 +30,7 @@ to `.Chart.AppVersion`. Producing those images is a CI job. Expected refs:
 - `<registry>/stream2pretrain/processor-duckdb-api:<tag>`
 - `<registry>/stream2pretrain/decon-gate:<tag>`
 - `<registry>/stream2pretrain/mixture-controller:<tag>`
+- `<registry>/stream2pretrain/processor-foundry:<tag>`
 - `<registry>/stream2pretrain/ui:<tag>`
 
 Override the registry via `--set image.registry=ghcr.io/myorg`.
@@ -63,6 +65,7 @@ via `sealed-secrets` or External Secrets Operator before `helm install`:
 | `stream2pretrain-decon-signing` (`.Values.processor.deconGate.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), optional `ed25519.crt` | Decon-Gate signer |
 | `stream2pretrain-decon-benchmarks` (`.Values.processor.deconGate.benchmarkCorpus.configMap`) | `corpus.json` | Decon-Gate benchmark corpus |
 | `stream2pretrain-keda-redpanda` (`.Values.keda.triggerAuthSecret`) | `sasl`, `tls`, `username`, `password` | KEDA Kafka trigger            |
+| `stream2pretrain-foundry-providers` (`.Values.processor.foundry.providerSecret`) | `HETZNER_INFERENCE_API_KEY`, `controlToken` | foundry worker, API, and UI manual trigger |
 
 ## CRDs
 
@@ -95,6 +98,8 @@ Constraint that:
 - Decon flag rate (overall and per benchmark)
 - Iceberg flush latency p95
 - SourceFeed poll outcomes
+- Foundry SFT/RL acceptance, provider usage and latency, validation gates,
+  mutation kill rate, quota remaining, and queue depth
 
 The chart wraps it in a ConfigMap with the `grafana_dashboard: "1"` label so
 the kube-prometheus-stack Grafana sidecar auto-loads it.
@@ -131,7 +136,8 @@ charts/stream2pretrain/
     secret-tokens.yaml        -- references only; populate externally
     networkpolicies.yaml      -- default-deny + per-egress-class allow
     ingest-*.yaml             -- one file per ingest component
-    processor-*.yaml          -- fetcher / curate / iceberg-writer
+    processor-*.yaml          -- fetcher / curate / iceberg-writer / foundry
+    foundry-oracle-rbac.yaml  -- bounded Job permissions + oracle deny-all network policy
     mixturecontroller.yaml
     ui.yaml                   -- Deployment + Service + IngressRoute + Cert
     scaledobjects.yaml        -- KEDA ScaledObject + TriggerAuthentication

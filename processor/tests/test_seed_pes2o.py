@@ -65,6 +65,7 @@ def test_to_seed_document_basic() -> None:
         "year": 2024,
         "month": 9,
         "s2_fields_of_study": ["Computer Science"],
+        "license_url": "https://creativecommons.org/licenses/by/4.0/",
     }
     doc = pes2o.to_seed_document(row)
     assert doc is not None
@@ -74,9 +75,19 @@ def test_to_seed_document_basic() -> None:
     assert doc.text.startswith("neural ranking")
     assert doc.lang == "en"
     assert doc.source_format == "latex"
-    assert doc.spdx_license == "ODC-By-1.0"
+    assert doc.spdx_license == "https://creativecommons.org/licenses/by/4.0/"
     assert doc.spdx_license_source == "dataset_metadata"
     assert doc.valid_from == datetime(2024, 9, 1, tzinfo=UTC)
+
+
+def test_to_seed_document_does_not_inherit_dataset_wrapper_license() -> None:
+    doc = pes2o.to_seed_document(
+        {"id": 8, "text": "paper", "s2_fields_of_study": ["Computer Science"]}
+    )
+
+    assert doc is not None
+    assert doc.spdx_license is None
+    assert doc.spdx_license_source == "unknown"
 
 
 def test_to_seed_document_drops_non_cs_rows() -> None:

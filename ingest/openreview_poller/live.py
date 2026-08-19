@@ -38,7 +38,8 @@ from typing import Any
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -289,12 +290,30 @@ async def emit_submission(
     minio: MinioWriter,
     http: Any,
     bucket: TokenBucket,
+    admission_producer: LicenseAdmissionProducer,
 ) -> bool:
     """Fetch + persist one submission. Returns True iff a record was emitted."""
     if not note.pdf_path:
         log.warning("openreview.note_missing_pdf", note=note.id, venue=venue.venue_id)
         return False
     pdf_url = f"https://openreview.net{note.pdf_path}"
+    raw_license = _str_or_none(note.content.get("license")) or _str_or_none(
+        note.content.get("license_url")
+    )
+    admission = decide_license_admission(
+        source_url=pdf_url,
+        source_feed=SOURCE_FEED,
+        license_value=raw_license,
+        license_source="dataset_metadata" if raw_license else "unknown",
+    )
+    await admission_producer.send(admission.decision)
+    if not admission.admitted:
+        log.info(
+            "openreview.license_quarantined",
+            note=note.id,
+            license=admission.license_id,
+        )
+        return False
     await bucket.acquire()
     try:
         status, body = await fetch_pdf_bytes(http, pdf_url)
@@ -332,12 +351,12 @@ async def emit_submission(
         content_type="application/pdf",
         raw_html_s3_uri=f"s3://{cfg.minio_bronze_bucket}/{key}",
         source_feed=SOURCE_FEED,
-        trace_id=_trace_id(),
+        trace_id=admission.decision.trace_id,
         bytes_size=bytes_size,
         source_format="pdf",
         extraction_pipeline=PIPELINE_PDF_PENDING,
-        spdx_license=None,
-        spdx_license_source="unknown",
+        spdx_license=admission.license_id,
+        spdx_license_source="dataset_metadata",
     )
     await producer.send(
         record,
@@ -358,6 +377,7 @@ async def emit_review_thread(
     cfg: IngestConfig,
     producer: BronzeProducer,
     minio: MinioWriter,
+    admission_producer: LicenseAdmissionProducer,
 ) -> int:
     """Persist every reply note (review/decision/rebuttal) under a forum."""
     emitted = 0
@@ -370,6 +390,18 @@ async def emit_review_thread(
         if not note.content:
             continue
         url = f"https://openreview.net/forum?id={forum_id}&noteId={note.id}"
+        raw_license = _str_or_none(note.content.get("license")) or _str_or_none(
+            note.content.get("license_url")
+        )
+        admission = decide_license_admission(
+            source_url=url,
+            source_feed=SOURCE_FEED,
+            license_value=raw_license,
+            license_source="dataset_metadata" if raw_license else "unknown",
+        )
+        await admission_producer.send(admission.decision)
+        if not admission.admitted:
+            continue
         cdate = _ms_to_dt(note.cdate_ms) or fetched_at
         payload = json.dumps(
             {
@@ -408,12 +440,12 @@ async def emit_review_thread(
             content_type="application/json",
             raw_html_s3_uri=f"s3://{cfg.minio_bronze_bucket}/{key}",
             source_feed=SOURCE_FEED,
-            trace_id=_trace_id(),
+            trace_id=admission.decision.trace_id,
             bytes_size=bytes_size,
             source_format="review",
             extraction_pipeline=PIPELINE_REVIEW,
-            spdx_license=None,
-            spdx_license_source="unknown",
+            spdx_license=admission.license_id,
+            spdx_license_source="dataset_metadata",
         )
         await producer.send(
             record,
@@ -447,6 +479,7 @@ async def poll_venue(
     or_client: OpenReviewClientProtocol,
     state_store: FeedStateStore,
     bucket: TokenBucket,
+    admission_producer: LicenseAdmissionProducer,
 ) -> tuple[int, int, int]:
     """One venue pass; returns (submissions_emitted, reviews_emitted, skipped)."""
     state = state_store.get(venue.state_key)
@@ -483,6 +516,7 @@ async def poll_venue(
             minio=minio,
             http=http,
             bucket=bucket,
+            admission_producer=admission_producer,
         )
         if not ok:
             continue
@@ -491,12 +525,8 @@ async def poll_venue(
         # get_notes(forum=...) returns the root note plus all replies.
         # Same async-blocking concern as the get_all_notes call above.
         try:
-            raw_replies = await asyncio.to_thread(
-                or_client.get_notes, forum=note.forum
-            )
-            forum_replies = list(
-                _iter_notes(raw_replies, venue_id=venue.venue_id)
-            )
+            raw_replies = await asyncio.to_thread(or_client.get_notes, forum=note.forum)
+            forum_replies = list(_iter_notes(raw_replies, venue_id=venue.venue_id))
         except Exception as exc:
             log.warning("openreview.forum_fetch_failed", note=note.id, err=str(exc))
             forum_replies = []
@@ -507,6 +537,7 @@ async def poll_venue(
             cfg=cfg,
             producer=producer,
             minio=minio,
+            admission_producer=admission_producer,
         )
         seen.add(note.id)
 
@@ -542,6 +573,11 @@ async def run_pass(
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-openreview-poller"
         ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-openreview-license-admission",
+        ) as admission_producer,
         MinioWriter(
             cfg.minio_endpoint,
             cfg.minio_access_key,
@@ -561,6 +597,7 @@ async def run_pass(
                     or_client=or_client,
                     state_store=state_store,
                     bucket=bucket,
+                    admission_producer=admission_producer,
                 )
             except Exception as exc:
                 log.warning("openreview.venue_failed", venue=venue.venue_id, err=str(exc))

@@ -1,0 +1,87 @@
+{
+  "additionalProperties": false,
+  "description": "One fail-closed licence decision made before content retrieval.",
+  "properties": {
+    "content_fetch_started": {
+      "const": false,
+      "default": false,
+      "title": "Content Fetch Started",
+      "type": "boolean"
+    },
+    "decision_id": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "doc_id": {
+      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "license_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "License Id",
+      "type": "string"
+    },
+    "license_source": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "License Source",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "reason": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "source_feed": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Feed",
+      "type": "string"
+    },
+    "source_url": {
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1,
+      "title": "Source Url",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "admitted",
+        "quarantined"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "trace_id": {
+      "description": "W3C trace-id (lowercase hex, 32 chars).",
+      "pattern": "^[0-9a-f]{32}$",
+      "title": "Trace Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "decision_id",
+    "doc_id",
+    "source_feed",
+    "source_url",
+    "observed_at",
+    "status",
+    "license_id",
+    "license_source",
+    "reason",
+    "trace_id"
+  ],
+  "title": "LicenseAdmissionDecision",
+  "type": "object"
+}

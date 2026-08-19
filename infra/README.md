@@ -44,7 +44,8 @@ The release graph and exact chart versions are in `../helmfile.yaml` and
 - Project-specific `image_id` and `key_pair` values in
   `infra/terraform/terraform.tfvars`.
 - A reachable MinIO service named `minio` in namespace `minio`, the four
-  application buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-decon`,
+  application buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`, and
+  `s2p-posttrain`,
   and externally managed credentials.
 - Application images with identical digests available on every eligible node.
   The current cluster has them only on the control-plane node, so the DHBW
@@ -63,6 +64,7 @@ Required externally managed objects:
 | `stream2pretrain` | Secret `stream2pretrain-github` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-hf` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-decon-signing` | `ed25519.key`, `ed25519.crt` |
+| `stream2pretrain` | Secret `stream2pretrain-foundry-providers` | `HETZNER_INFERENCE_API_KEY`, `controlToken` |
 | `stream2pretrain` | ConfigMap `stream2pretrain-decon-benchmarks` | `corpus.json` |
 
 Use Sealed Secrets, External Secrets, or another team-approved mechanism. The
@@ -98,7 +100,7 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 
 `platform` installs cert-manager, Traefik, kube-prometheus-stack, KEDA,
 Gatekeeper, and Redpanda. `catalog` installs the official Apache Polaris 1.7.0
-chart. `topics` idempotently creates the four one-partition, one-replica topics
+chart. `topics` idempotently creates the configured one-partition, one-replica topics
 matching the measured live cluster. `application` installs the local
 Stream2Pretrain chart. Loki, Tempo, and
 Alloy are excluded until their MinIO credentials, retention, storage, and
@@ -108,6 +110,12 @@ The dev Polaris configuration uses in-memory persistence. Pod replacement can
 lose catalog state. A production catalog requires a relational JDBC service,
 credential secret, recovery test, and measured persistent storage before it can
 be added to this deployment path.
+
+The post-training foundry additionally requires its provider Secret, signing
+key, and `s2p-posttrain` bucket. Its single-writer worker starts after both
+configured models are present in authenticated model discovery. See
+[`../docs/POSTTRAIN_FOUNDRY.md`](../docs/POSTTRAIN_FOUNDRY.md) for the runtime
+and audit workflow.
 
 ## Existing cluster migration
 

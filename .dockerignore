@@ -25,12 +25,20 @@ build
 .mypy_cache
 .ruff_cache
 .pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.pytest_cache
 
 # Node
 node_modules
 .next
 .turbo
 out
+**/node_modules
+**/.next
+**/.turbo
+**/out
+*.tsbuildinfo
 
 # Local env / secrets
 .env
@@ -40,10 +48,10 @@ out
 
 # Lecture / docs / large local artifacts the runtime never needs
 lecture_slides
-docs
 RESEARCH.md
 CLAUDE.md
 SOURCES.md
+.claude
 
 # Test fixtures and notebooks
 *.ipynb

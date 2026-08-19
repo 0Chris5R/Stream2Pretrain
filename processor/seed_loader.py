@@ -60,6 +60,7 @@ from typing import Any
 
 import boto3
 
+from ingest.common.license_admission import decide_license_admission
 from processor import common
 from processor.seed import (
     fineweb_edu_filter,
@@ -70,6 +71,7 @@ from processor.seed import (
 )
 from processor.seed.cursor import CursorStore, SeedCursor
 from processor.seed.types import SeedDocument
+from schemas.license_admission import LicenseAdmissionDecision
 from schemas.silver import SilverRecord, SilverTags
 
 CURSOR_FLUSH_INTERVAL: int = 200
@@ -219,6 +221,17 @@ def to_silver(doc: SeedDocument, *, trace_id: str | None = None) -> SilverRecord
     )
 
 
+def seed_admission(doc: SeedDocument) -> LicenseAdmissionDecision:
+    """Decide a seed row before it can enter downstream model processing."""
+    source_url = _normalize_seed_url(doc.repo_id, doc.url, doc.native_id)
+    return decide_license_admission(
+        source_url=source_url,
+        source_feed=f"seed:{doc.repo_id}",
+        license_value=doc.spdx_license,
+        license_source=doc.spdx_license_source,
+    ).decision
+
+
 # ---------------------------------------------------------------------------
 # Component dispatch
 # ---------------------------------------------------------------------------
@@ -276,6 +289,7 @@ def stream_component(
     cursor_store: CursorStore,
     cfg: SeedLoaderConfig,
     on_record: Callable[[str, SilverRecord], None],
+    on_admission: Callable[[LicenseAdmissionDecision], None] | None = None,
 ) -> SeedCursor:
     """Stream one component end-to-end; return the final cursor.
 
@@ -289,8 +303,12 @@ def stream_component(
     cursor = cursor_store.load(repo_id)
     rows_since_flush = 0
     for doc in factory(cursor, cfg):
-        record = to_silver(doc)
-        on_record(repo_id, record)
+        admission = seed_admission(doc)
+        if on_admission is not None:
+            on_admission(admission)
+        if admission.status == "admitted":
+            record = to_silver(doc, trace_id=admission.trace_id)
+            on_record(repo_id, record)
         cursor.advance(doc.native_id)
         rows_since_flush += 1
         if rows_since_flush >= CURSOR_FLUSH_INTERVAL:
@@ -360,26 +378,36 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
             self._rows_since_flush = 0
             self._docs = factory(cursor, seed_cfg)
 
-        def next_batch(self) -> list[tuple[str, SilverRecord]]:
+        def next_batch(
+            self,
+        ) -> list[tuple[str, SilverRecord | None, LicenseAdmissionDecision]]:
             try:
                 doc = next(self._docs)
             except StopIteration:
                 # Final cursor flush before signalling completion.
                 self._cursor_store.save(self._cursor)
                 raise
-            record = to_silver(doc)
+            admission = seed_admission(doc)
+            record = (
+                to_silver(doc, trace_id=admission.trace_id)
+                if admission.status == "admitted"
+                else None
+            )
             self._cursor.advance(doc.native_id)
             self._rows_since_flush += 1
             if self._rows_since_flush >= CURSOR_FLUSH_INTERVAL:
                 self._cursor_store.save(self._cursor)
                 self._rows_since_flush = 0
-            return [(self._repo_id, record)]
+            return [(self._repo_id, record, admission)]
 
     flow = Dataflow("s2p-seed-loader")
     inp = op.input("seed.source", flow, _Source())
 
-    def _to_kafka(item: tuple[str, SilverRecord]) -> KafkaSinkMessage:
-        repo_id, rec = item
+    def _to_kafka(
+        item: tuple[str, SilverRecord | None, LicenseAdmissionDecision],
+    ) -> KafkaSinkMessage:
+        repo_id, rec, _ = item
+        assert rec is not None
         headers = [
             ("trace_id", rec.trace_id.encode("ascii")),
             ("source_feed", f"seed:{repo_id}".encode()),
@@ -390,7 +418,8 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
             headers=headers,
         )
 
-    mapped = op.map("seed.to_kafka", inp, _to_kafka)
+    admitted = op.filter("seed.license_admitted", inp, lambda item: item[1] is not None)
+    mapped = op.map("seed.to_kafka", admitted, _to_kafka)
     if not seed_cfg.dry_run:
         sink = KafkaSink(
             brokers=cfg.redpanda_brokers.split(","),
@@ -398,6 +427,27 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
             add_config=common.kafka_producer_config(),
         )
         op.output("seed.sink", mapped, sink)
+        admission_sink = KafkaSink(
+            brokers=cfg.redpanda_brokers.split(","),
+            topic=cfg.license_admissions_topic,
+            add_config=common.kafka_producer_config(),
+        )
+
+        def _admission_to_kafka(
+            item: tuple[str, SilverRecord | None, LicenseAdmissionDecision],
+        ) -> KafkaSinkMessage:
+            decision = item[2]
+            return KafkaSinkMessage(
+                key=decision.decision_id.encode("ascii"),
+                value=decision.model_dump_json().encode("utf-8"),
+                headers=[
+                    ("trace_id", decision.trace_id.encode("ascii")),
+                    ("schema", b"LicenseAdmissionDecision/v1"),
+                ],
+            )
+
+        admission_rows = op.map("seed.admission_to_kafka", inp, _admission_to_kafka)
+        op.output("seed.admission_sink", admission_rows, admission_sink)
     else:
         op.inspect("seed.dry_run", mapped)
     return flow
@@ -418,9 +468,16 @@ def run_inprocess(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> di
     )
     cursor_store = CursorStore(s3, bucket=seed_cfg.state_bucket)
     sink = _build_sink(cfg, seed_cfg)
+    admission_sink = _build_admission_sink(cfg, seed_cfg)
     stats: dict[str, int] = {}
     for name in seed_cfg.components:
-        cursor = stream_component(name, cursor_store=cursor_store, cfg=seed_cfg, on_record=sink)
+        cursor = stream_component(
+            name,
+            cursor_store=cursor_store,
+            cfg=seed_cfg,
+            on_record=sink,
+            on_admission=admission_sink,
+        )
         stats[name] = cursor.rows_emitted
     return {
         "started_at": datetime.now(tz=UTC).isoformat(),
@@ -468,6 +525,49 @@ def _build_sink(
     return _produce
 
 
+def _build_admission_sink(
+    cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig
+) -> Callable[[LicenseAdmissionDecision], None]:
+    if seed_cfg.dry_run:
+        log = common.get_logger("s2p.seed_loader")
+
+        def _print(decision: LicenseAdmissionDecision) -> None:
+            log.info(
+                "seed.license_admission",
+                doc_id=decision.doc_id,
+                status=decision.status,
+                license=decision.license_id,
+            )
+
+        return _print
+
+    from confluent_kafka import Producer  # type: ignore[import-not-found]
+
+    producer = Producer(
+        {
+            "bootstrap.servers": cfg.redpanda_brokers,
+            "client.id": "s2p-seed-license-admission",
+            "compression.type": "zstd",
+            "linger.ms": "20",
+            "enable.idempotence": "true",
+        }
+    )
+
+    def _produce(decision: LicenseAdmissionDecision) -> None:
+        producer.produce(
+            cfg.license_admissions_topic,
+            key=decision.decision_id.encode("ascii"),
+            value=decision.model_dump_json().encode("utf-8"),
+            headers=[
+                ("trace_id", decision.trace_id.encode("ascii")),
+                ("schema", b"LicenseAdmissionDecision/v1"),
+            ],
+        )
+        producer.poll(0)
+
+    return _produce
+
+
 def main() -> None:
     """Entry point for the seed loader Job container."""
     cfg = common.load_config()
@@ -500,6 +600,7 @@ __all__ = [
     "load_seed_config",
     "main",
     "run_inprocess",
+    "seed_admission",
     "stream_component",
     "to_silver",
 ]

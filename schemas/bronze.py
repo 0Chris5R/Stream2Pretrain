@@ -71,6 +71,9 @@ SourceFormat = Literal[
 SpdxLicenseSource = Literal[
     "github_api",
     "html_meta",
+    "rss_entry",
+    "oai_metadata",
+    "arxiv_api",
     "dataset_metadata",
     "manual_override",
     "unknown",
@@ -84,8 +87,8 @@ SpdxLicenseSource = Literal[
   (``the-stack-v2``, ``stack-edu``, etc.).
 - ``manual_override``: a SourceFeed CRD ``license_default`` value applied
   because the source publishes no machine-readable license.
-- ``unknown``: classifier could not determine a license. The provisional
-  policy admits unknown non-code content but keeps code on the SPDX allowlist.
+- ``unknown``: no machine-readable licence was available. The fail-closed
+  admission policy quarantines this record before content processing.
 """
 
 

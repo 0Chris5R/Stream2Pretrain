@@ -21,7 +21,8 @@ from datetime import UTC, datetime
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.metrics import INGEST_METRICS
 from ingest.common.minio_writer import MinioWriter
@@ -56,7 +57,19 @@ async def _emit_payload(
     producer: BronzeProducer,
     minio: MinioWriter,
     extra_meta: dict[str, str] | None = None,
+    license_value: str | None = None,
+    admission_producer: LicenseAdmissionProducer | None = None,
 ) -> bool:
+    admission = decide_license_admission(
+        source_url=url,
+        source_feed=source_feed,
+        license_value=license_value,
+        license_source="dataset_metadata" if license_value else "unknown",
+    )
+    if admission_producer is not None:
+        await admission_producer.send(admission.decision)
+    if not admission.admitted:
+        return False
     doc_id = doc_id_for_url(url)
     fetched_at = datetime.now(tz=UTC)
     key = bronze_object_key(
@@ -89,15 +102,22 @@ async def _emit_payload(
             extension=extension,
         ),
         source_feed=source_feed,
-        trace_id=_trace_id(),
+        trace_id=admission.decision.trace_id,
         bytes_size=stored,
+        spdx_license=admission.license_id,
+        spdx_license_source="dataset_metadata",
     )
     await producer.send(record)
     return True
 
 
 async def poll_models(
-    cfg: IngestConfig, *, producer: BronzeProducer, minio: MinioWriter, limit: int = 100
+    cfg: IngestConfig,
+    *,
+    producer: BronzeProducer,
+    minio: MinioWriter,
+    admission_producer: LicenseAdmissionProducer | None = None,
+    limit: int = 100,
 ) -> int:
     """Fetch the most recently modified models. Dedup by id+lastModified."""
     state = FeedStateStore(
@@ -134,8 +154,10 @@ async def poll_models(
                 continue
             url = f"https://huggingface.co/{model_id}"
             payload = json.dumps(item, sort_keys=True).encode("utf-8")
+            card_data = item.get("cardData") if isinstance(item.get("cardData"), dict) else {}
+            license_value = card_data.get("license") or item.get("license")
             try:
-                await _emit_payload(
+                accepted = await _emit_payload(
                     payload=payload,
                     url=url,
                     source_feed=SOURCE_FEED_MODELS,
@@ -144,9 +166,14 @@ async def poll_models(
                     producer=producer,
                     minio=minio,
                     extra_meta={"hf_model_id": model_id, "hf_last_modified": last_modified},
+                    license_value=license_value if isinstance(license_value, str) else None,
+                    admission_producer=admission_producer,
                 )
             except Exception as exc:
                 log.warning("hf_models.emit_failed", model=model_id, err=str(exc))
+                continue
+            if not accepted:
+                seen[model_id] = last_modified
                 continue
             seen[model_id] = last_modified
             emitted += 1
@@ -155,14 +182,19 @@ async def poll_models(
     if len(seen) > 5000:
         items = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:2500]
         seen = dict(items)
-    FeedStateStore(
-        "/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf"
-    ).put(SOURCE_FEED_MODELS, {"seen": seen})
+    FeedStateStore("/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf").put(
+        SOURCE_FEED_MODELS, {"seen": seen}
+    )
     return emitted
 
 
 async def poll_daily_papers(
-    cfg: IngestConfig, *, producer: BronzeProducer, minio: MinioWriter, limit: int = 100
+    cfg: IngestConfig,
+    *,
+    producer: BronzeProducer,
+    minio: MinioWriter,
+    admission_producer: LicenseAdmissionProducer | None = None,
+    limit: int = 100,
 ) -> int:
     """HF Daily Papers (bearer required)."""
     if not cfg.hf_token:
@@ -205,7 +237,7 @@ async def poll_daily_papers(
             url = f"https://huggingface.co/papers/{arxiv_id}"
             payload = json.dumps(item, sort_keys=True).encode("utf-8")
             try:
-                await _emit_payload(
+                accepted = await _emit_payload(
                     payload=payload,
                     url=url,
                     source_feed=SOURCE_FEED_PAPERS,
@@ -214,9 +246,18 @@ async def poll_daily_papers(
                     producer=producer,
                     minio=minio,
                     extra_meta={"hf_paper_id": arxiv_id},
+                    license_value=(
+                        paper.get("license")
+                        if isinstance(paper, dict) and isinstance(paper.get("license"), str)
+                        else None
+                    ),
+                    admission_producer=admission_producer,
                 )
             except Exception as exc:
                 log.warning("hf_papers.emit_failed", paper=arxiv_id, err=str(exc))
+                continue
+            if not accepted:
+                seen_ids.add(arxiv_id)
                 continue
             seen_ids.add(arxiv_id)
             emitted += 1
@@ -228,16 +269,28 @@ async def poll_daily_papers(
 
 
 async def run_pass(cfg: IngestConfig) -> tuple[int, int]:
-    async with BronzeProducer(
-        cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-hf-poller"
-    ) as producer, MinioWriter(
-        cfg.minio_endpoint,
-        cfg.minio_access_key,
-        cfg.minio_secret_key,
-        bucket=cfg.minio_bronze_bucket,
-    ) as minio:
-        models = await poll_models(cfg, producer=producer, minio=minio)
-        papers = await poll_daily_papers(cfg, producer=producer, minio=minio)
+    async with (
+        BronzeProducer(
+            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-hf-poller"
+        ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-hf-license-admission",
+        ) as admission_producer,
+        MinioWriter(
+            cfg.minio_endpoint,
+            cfg.minio_access_key,
+            cfg.minio_secret_key,
+            bucket=cfg.minio_bronze_bucket,
+        ) as minio,
+    ):
+        models = await poll_models(
+            cfg, producer=producer, minio=minio, admission_producer=admission_producer
+        )
+        papers = await poll_daily_papers(
+            cfg, producer=producer, minio=minio, admission_producer=admission_producer
+        )
         return models, papers
 
 

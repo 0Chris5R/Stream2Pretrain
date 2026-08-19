@@ -26,6 +26,7 @@ import boto3
 import orjson
 from botocore.exceptions import BotoCoreError, ClientError
 
+from ingest.common.license_admission import is_training_permitted
 from processor import common
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.operators.extract import ResiliparseExtractor
@@ -295,6 +296,10 @@ def process_bronze_payload(
 ) -> SilverRecord | None:
     """Deserialize a Kafka payload, run the pipeline, return the silver row."""
     bronze = common.bronze_loads(payload)
+    # Defence in depth for legacy producers and replayed topics. This check is
+    # intentionally before the MinIO GET, extraction, OCR, and model pipeline.
+    if not is_training_permitted(bronze.spdx_license):
+        return None
     raw_html = fetch_raw_bytes(state, bronze)
     silver = normalize(state, bronze, raw_html)
     if silver is not None and metrics is not None:

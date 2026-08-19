@@ -30,6 +30,7 @@ minio:
     silver: s2p-silver
     gold: s2p-gold
     decon: s2p-decon
+    posttrain: s2p-posttrain
 
 iceberg:
   catalog: stream2pretrain
@@ -75,6 +76,10 @@ processor:
     replicas: 1
     benchmarkCorpus:
       kind: synthetic_canary
+  # Enable only after distributing the image and creating the provider/signing
+  # Secrets.
+  foundry:
+    enabled: false
 
 mixtureController:
   replicas: 1

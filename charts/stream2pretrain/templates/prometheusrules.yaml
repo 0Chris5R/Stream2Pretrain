@@ -56,4 +56,31 @@ spec:
           annotations:
             summary: Stream2Pretrain curator has unavailable replicas
             description: StatefulSet {{ "{{ $labels.statefulset }}" }} has fewer ready replicas than requested.
+        {{- if .Values.processor.foundry.enabled }}
+        - alert: Stream2PretrainFoundryUnavailable
+          expr: |
+            kube_statefulset_replicas{
+              namespace="{{ .Release.Namespace }}",
+              statefulset="{{ $fullName }}-foundry"
+            }
+            >
+            kube_statefulset_status_replicas_ready{
+              namespace="{{ .Release.Namespace }}",
+              statefulset="{{ $fullName }}-foundry"
+            }
+          labels:
+            severity: warning
+            service: stream2pretrain
+          annotations:
+            summary: Stream2Pretrain post-training foundry is unavailable
+            description: The foundry worker is not ready; inspect provider discovery, quota, and credentials.
+        - alert: Stream2PretrainFoundryProviderRateLimited
+          expr: increase(s2p_foundry_provider_calls_total{status="rate_limited"}[5m]) > 0
+          labels:
+            severity: warning
+            service: stream2pretrain
+          annotations:
+            summary: A foundry provider rejected calls for rate limits
+            description: Provider {{ "{{ $labels.provider }}" }} rate-limited role {{ "{{ $labels.role }}" }}.
+        {{- end }}
 {{- end }}

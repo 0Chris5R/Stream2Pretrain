@@ -7,10 +7,8 @@ All decisions are deterministic and versioned by ``S2P_POLICY_REVISION``.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Set
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from schemas.gold import CorpusRoute, SegmentScore
 from schemas.silver import SilverRecord, SilverSegment
@@ -157,22 +155,14 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
     )
     reasoning = max(0.0, min(1.0, reasoning))
 
-    benchmark = (
-        0.24 * float(has_results)
-        + 0.18 * float(has_methods)
-        + 0.18 * evidence_coverage
-        + 0.18 * completeness
-        + 0.12 * (edu_score / 5.0)
-        + 0.10 * float("limitations" in roles)
-    )
-    benchmark = max(0.0, min(1.0, benchmark))
-
     tags = _content_tags(silver, roles)
     return ScientificScores(
         extraction_completeness=completeness,
         structural_quality_score=structural,
         reasoning_score=reasoning,
-        benchmark_score=benchmark,
+        # Benchmark allocation is a post-training artifact decision. The
+        # pretraining curator deliberately does not estimate it.
+        benchmark_score=0.0,
         content_tags=tags,
     )
 
@@ -239,8 +229,6 @@ def route_document(
     silver: SilverRecord,
     reject_reasons: list[str],
     reasoning_score: float,
-    benchmark_score: float,
-    benchmark_cutoff: datetime,
 ) -> RouteDecision:
     """Choose one primary route and list every eligible downstream use."""
     blocking = [reason for reason in reject_reasons if reason != "insufficient_scientific_body"]
@@ -256,38 +244,15 @@ def route_document(
             eligible_routes=["retry"],
             reasons=["insufficient retained scientific body; retry extraction"],
         )
-    eligible: list[CorpusRoute] = ["broad_pretraining"]
+    eligible: list[CorpusRoute] = ["pretrain"]
     reasons = ["clean body projection passed privacy, quality, dedup, and decontamination gates"]
     if reasoning_score >= 0.55:
-        eligible.append("reasoning_candidate")
-        reasons.append("methods/results and structured evidence support reasoning use")
+        eligible.append("posttrain_candidate")
+        reasons.append("methods/results and structured evidence support post-training use")
 
-    freshness_date = _source_freshness_date(silver)
-    is_fresh = freshness_date >= benchmark_cutoff
-    is_real_source = not silver.source_feed.startswith("local-")
-    is_controlled_reserve_canary = silver.source_feed == "local-benchmark-reserve-canary"
-    if benchmark_score >= 0.72 and is_fresh and (is_real_source or is_controlled_reserve_canary):
-        eligible.append("benchmark_candidate")
-        reasons.append(
-            "controlled reserve canary qualifies for isolated benchmark-route verification"
-            if is_controlled_reserve_canary
-            else "fresh, evidence-rich paper qualifies for restricted benchmark review"
-        )
-        return RouteDecision("benchmark_candidate", eligible, reasons)
     if reasoning_score >= 0.55:
-        return RouteDecision("reasoning_candidate", eligible, reasons)
-    return RouteDecision("broad_pretraining", eligible, reasons)
-
-
-def _source_freshness_date(silver: SilverRecord) -> datetime:
-    """Use the arXiv publication month rather than the local fetch timestamp."""
-    match = re.search(r"/(?:html|pdf)/(\d{2})(\d{2})\.\d+", str(silver.url))
-    if match:
-        year = 2000 + int(match.group(1))
-        month = int(match.group(2))
-        if 1 <= month <= 12:
-            return datetime(year, month, 1, tzinfo=UTC)
-    return silver.valid_from
+        return RouteDecision("posttrain_candidate", eligible, reasons)
+    return RouteDecision("pretrain", eligible, reasons)
 
 
 def _content_tags(silver: SilverRecord, roles: Set[str]) -> list[str]:

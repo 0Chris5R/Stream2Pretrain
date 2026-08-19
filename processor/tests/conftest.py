@@ -73,6 +73,8 @@ def bronze_record(fixed_now: datetime) -> BronzeRecord:
         raw_html_s3_uri="s3://bronze/2026/06/15/source=test/a.html.gz",
         source_feed="rss-test",
         trace_id="0123456789abcdef0123456789abcdef",
+        spdx_license="CC-BY-4.0",
+        spdx_license_source="rss_entry",
     )
 
 

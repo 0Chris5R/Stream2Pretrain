@@ -48,6 +48,7 @@ def _mk_note(
     content: dict[str, Any] = {
         "title": {"value": title},
         "abstract": {"value": "An abstract."},
+        "license": {"value": "CC-BY-4.0"},
     }
     if pdf is not None:
         content["pdf"] = {"value": pdf}
@@ -115,7 +116,9 @@ def test_extract_value_unwraps_v2_wrapper() -> None:
 
 
 def test_note_view_handles_missing_pdf() -> None:
-    note = live._NoteView.from_obj(_mk_note(note_id="n1", pdf=None), venue_id="ICLR.cc/2026/Conference")
+    note = live._NoteView.from_obj(
+        _mk_note(note_id="n1", pdf=None), venue_id="ICLR.cc/2026/Conference"
+    )
     assert note.pdf_path is None
     assert note.title == "Sample paper"
 
@@ -157,8 +160,10 @@ async def test_poll_venue_emits_submission_and_reviews(
 
     transport = httpx.MockTransport(_pdf_handler)
     fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
     fake_minio = FakeMinio()
     await fake_producer.start()
+    await fake_admissions.start()
     await fake_minio.start()
     bucket = TokenBucket(rate=100.0, burst=10)
     state_store = FeedStateStore(tmp_path / "state")
@@ -174,6 +179,7 @@ async def test_poll_venue_emits_submission_and_reviews(
             or_client=or_client,
             state_store=state_store,
             bucket=bucket,
+            admission_producer=fake_admissions,  # type: ignore[arg-type]
         )
 
     assert submissions == 1
@@ -202,8 +208,10 @@ async def test_poll_venue_skips_seen(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     or_client = _FakeOR(submissions={invitation: [submission]})
     transport = httpx.MockTransport(_pdf_handler)
     fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
     fake_minio = FakeMinio()
     await fake_producer.start()
+    await fake_admissions.start()
     await fake_minio.start()
     bucket = TokenBucket(rate=100.0, burst=10)
     state_store = FeedStateStore(tmp_path / "state")
@@ -219,6 +227,7 @@ async def test_poll_venue_skips_seen(monkeypatch: pytest.MonkeyPatch, tmp_path: 
             or_client=or_client,
             state_store=state_store,
             bucket=bucket,
+            admission_producer=fake_admissions,  # type: ignore[arg-type]
         )
 
     assert submissions == 0
@@ -242,8 +251,10 @@ async def test_poll_venue_skips_pdf_failures(
 
     transport = httpx.MockTransport(handler)
     fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
     fake_minio = FakeMinio()
     await fake_producer.start()
+    await fake_admissions.start()
     await fake_minio.start()
     bucket = TokenBucket(rate=100.0, burst=10)
     state_store = FeedStateStore(tmp_path / "state")
@@ -258,6 +269,7 @@ async def test_poll_venue_skips_pdf_failures(
             or_client=or_client,
             state_store=state_store,
             bucket=bucket,
+            admission_producer=fake_admissions,  # type: ignore[arg-type]
         )
 
     assert submissions == 0

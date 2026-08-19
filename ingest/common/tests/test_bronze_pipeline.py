@@ -16,6 +16,7 @@ from .conftest import FakeMinio, FakeProducer
 async def test_fetch_and_publish_happy_path(
     fake_producer: FakeProducer, fake_minio: FakeMinio
 ) -> None:
+    admissions = FakeProducer()
     body = b"<html><body>hello</body></html>"
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -39,6 +40,9 @@ async def test_fetch_and_publish_happy_path(
             producer=fake_producer,  # type: ignore[arg-type]
             minio=fake_minio,  # type: ignore[arg-type]
             bucket="bronze",
+            license_value="CC-BY-4.0",
+            license_source="rss_entry",
+            admission_producer=admissions,  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()
@@ -49,6 +53,7 @@ async def test_fetch_and_publish_happy_path(
     assert rec.etag == '"abc"'
     assert rec.raw_html_s3_uri.startswith("s3://bronze/")
     assert len(fake_producer.sent) == 1
+    assert admissions.sent[0]["record"].status == "admitted"
     stored = next(iter(fake_minio.objects.values()))
     assert stored["payload"] == body
 
@@ -57,6 +62,8 @@ async def test_fetch_and_publish_happy_path(
 async def test_fetch_and_publish_skips_304(
     fake_producer: FakeProducer, fake_minio: FakeMinio
 ) -> None:
+    admissions = FakeProducer()
+
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(304)
 
@@ -69,6 +76,9 @@ async def test_fetch_and_publish_skips_304(
             producer=fake_producer,  # type: ignore[arg-type]
             minio=fake_minio,  # type: ignore[arg-type]
             bucket="bronze",
+            license_value="CC-BY-4.0",
+            license_source="rss_entry",
+            admission_producer=admissions,  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()
@@ -81,6 +91,8 @@ async def test_fetch_and_publish_skips_304(
 async def test_fetch_and_publish_dedups_seen(
     fake_producer: FakeProducer, fake_minio: FakeMinio
 ) -> None:
+    admissions = FakeProducer()
+
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"x", headers={"content-type": "text/html"})
 
@@ -88,17 +100,64 @@ async def test_fetch_and_publish_dedups_seen(
     seen: set[str] = set()
     try:
         r1 = await fetch_and_publish(
-            client, "https://x.io/a", source_feed="t",
-            producer=fake_producer, minio=fake_minio, bucket="bronze", seen=seen,
+            client,
+            "https://x.io/a",
+            source_feed="t",
+            producer=fake_producer,
+            minio=fake_minio,
+            bucket="bronze",
+            seen=seen,
+            license_value="CC-BY-4.0",
+            license_source="rss_entry",
+            admission_producer=admissions,  # type: ignore[arg-type]
         )
         r2 = await fetch_and_publish(
-            client, "https://x.io/a", source_feed="t",
-            producer=fake_producer, minio=fake_minio, bucket="bronze", seen=seen,
+            client,
+            "https://x.io/a",
+            source_feed="t",
+            producer=fake_producer,
+            minio=fake_minio,
+            bucket="bronze",
+            seen=seen,
+            license_value="CC-BY-4.0",
+            license_source="rss_entry",
+            admission_producer=admissions,  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()
     assert r1 is not None
     assert r2 is None
+
+
+@pytest.mark.asyncio
+async def test_missing_license_stops_before_http_fetch(
+    fake_producer: FakeProducer, fake_minio: FakeMinio
+) -> None:
+    admissions = FakeProducer()
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=b"must-not-be-fetched")
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        record = await fetch_and_publish(
+            client,
+            "https://example.com/unlicensed",
+            source_feed="rss-test",
+            producer=fake_producer,  # type: ignore[arg-type]
+            minio=fake_minio,  # type: ignore[arg-type]
+            bucket="bronze",
+            admission_producer=admissions,  # type: ignore[arg-type]
+        )
+    finally:
+        await client.aclose()
+    assert record is None
+    assert calls == 0
+    assert not fake_minio.objects
+    assert admissions.sent[0]["record"].status == "quarantined"
 
 
 def test_parse_http_date_handles_none() -> None:

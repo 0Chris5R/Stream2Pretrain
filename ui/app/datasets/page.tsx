@@ -35,7 +35,7 @@ async function fetchFacets(): Promise<DocumentFacets> {
 export default function DatasetsPage() {
   const [dateFrom, setDateFrom] = useState(day(-30));
   const [dateTo, setDateTo] = useState(day(0));
-  const [routes, setRoutes] = useState(['broad_pretraining', 'reasoning_candidate']);
+  const [routes, setRoutes] = useState(['pretrain', 'posttrain_candidate']);
   const [source, setSource] = useState('');
   const [sourceFormat, setSourceFormat] = useState('');
   const [tags, setTags] = useState<string[]>([]);
@@ -143,7 +143,7 @@ export default function DatasetsPage() {
           <div className="grid gap-3 lg:grid-cols-[2fr_2fr_1fr_1fr]">
             <ChipField
               label="Routes"
-              values={['broad_pretraining', 'reasoning_candidate']}
+              values={['pretrain', 'posttrain_candidate']}
               selected={routes}
               toggle={toggleRoute}
             />
@@ -153,7 +153,7 @@ export default function DatasetsPage() {
               selected={tags}
               toggle={toggleTag}
             />
-          <Field label="Min source quality">
+            <Field label="Min source quality">
               <Input
                 type="number"
                 min="0"
@@ -177,14 +177,16 @@ export default function DatasetsPage() {
             </Field>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={includeStructured}
-                onChange={(event) => setIncludeStructured(event.target.checked)}
-              />{' '}
-              Include tables, equations, and figure captions
-            </label>
+            <div className="flex flex-wrap gap-4">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={includeStructured}
+                  onChange={(event) => setIncludeStructured(event.target.checked)}
+                />{' '}
+                Include tables, equations, and figure captions
+              </label>
+            </div>
             <div className="flex gap-2">
               <select
                 className="h-10 rounded-md border bg-background px-3 text-sm"
@@ -233,7 +235,7 @@ export default function DatasetsPage() {
             <SelectionRow label="Window" value={`${dateFrom} to ${dateTo}`} />
             <SelectionRow label="Routes" value={routes.join(', ') || 'none'} />
             <SelectionRow label="Safety" value="Risk tier 1, no rejections" />
-            <SelectionRow label="Benchmark reserve" value="Excluded" />
+            <SelectionRow label="Licences" value="Strict allowlist" />
           </CardContent>
         </Card>
         <Card>

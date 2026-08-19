@@ -34,8 +34,11 @@ import asyncio
 import json
 import re
 import secrets
+import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +53,8 @@ from ingest.arxiv_html_fetcher.extractor import (
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission, normalize_license
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -63,6 +67,8 @@ log = get_logger(__name__)
 ARXIV_HTML_BASE = "https://arxiv.org/html"
 AR5IV_HTML_BASE = "https://ar5iv.labs.arxiv.org/html"
 ARXIV_PDF_BASE = "https://arxiv.org/pdf"
+ARXIV_ABS_BASE = "https://arxiv.org/abs"
+ARXIV_API_QUERY = "https://export.arxiv.org/api/query"
 
 # arXiv asks for max 4 req/s plus a 1 s sleep between requests. We honour
 # both via the token bucket (rate=4/s, burst=4) and an explicit
@@ -70,6 +76,14 @@ ARXIV_PDF_BASE = "https://arxiv.org/pdf"
 _DEFAULT_RPS = 4.0
 _DEFAULT_BURST = 4
 _DEFAULT_MIN_SLEEP_S = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class ArxivCandidate:
+    arxiv_id: str
+    license_value: str | None = None
+    license_source: str = "unknown"
+
 
 # ``2401.12345``, ``2401.12345v2`` (new scheme) and ``cs/0703123`` (legacy).
 _ARXIV_ID_RE = re.compile(r"^(?:[a-z\-]+/)?\d{4}\.\d{4,6}(?:v\d+)?$|^[a-z\-]+/\d{7}(?:v\d+)?$")
@@ -144,6 +158,110 @@ def _parse_last_modified(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+async def fetch_arxiv_license(
+    arxiv_id: str,
+    client: httpx.AsyncClient,
+    *,
+    bucket: TokenBucket,
+    min_sleep_s: float = _DEFAULT_MIN_SLEEP_S,
+) -> str | None:
+    """Read item-level rights from arXiv metadata before body fetch."""
+    value, _ = await fetch_arxiv_license_with_source(
+        arxiv_id,
+        client,
+        bucket=bucket,
+        min_sleep_s=min_sleep_s,
+    )
+    return value
+
+
+class _AbsLicenseParser(HTMLParser):
+    """Extract only the rights link from an arXiv abstract page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._license_depth = 0
+        self.value: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if tag == "div" and "abs-license" in classes:
+            self._license_depth = 1
+            return
+        if self._license_depth:
+            self._license_depth += 1
+            if tag == "a" and attributes.get("href"):
+                self.value = attributes["href"]
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._license_depth:
+            self._license_depth -= 1
+
+
+def _license_from_abs_html(payload: bytes) -> str | None:
+    parser = _AbsLicenseParser()
+    parser.feed(payload.decode("utf-8", errors="replace"))
+    return parser.value
+
+
+async def fetch_arxiv_license_with_source(
+    arxiv_id: str,
+    client: httpx.AsyncClient,
+    *,
+    bucket: TokenBucket,
+    min_sleep_s: float = _DEFAULT_MIN_SLEEP_S,
+) -> tuple[str | None, str]:
+    """Return arXiv rights plus exact metadata provenance before body fetch."""
+    await bucket.acquire()
+    if min_sleep_s > 0:
+        await asyncio.sleep(min_sleep_s)
+    root: ET.Element | None = None
+    try:
+        response = await client.get(
+            ARXIV_API_QUERY,
+            params={"id_list": arxiv_id, "start": "0", "max_results": "1"},
+        )
+    except httpx.HTTPError as exc:
+        log.warning("arxiv_html.license_metadata_failed", arxiv_id=arxiv_id, err=str(exc))
+    else:
+        if response.status_code == 200:
+            try:
+                root = ET.fromstring(response.content)
+            except ET.ParseError:
+                log.warning("arxiv_html.license_metadata_invalid", arxiv_id=arxiv_id)
+        else:
+            log.warning(
+                "arxiv_html.license_metadata_status",
+                arxiv_id=arxiv_id,
+                status=response.status_code,
+            )
+    node = root.find(".//{http://arxiv.org/schemas/atom}license") if root is not None else None
+    if node is not None and node.text and node.text.strip():
+        return node.text.strip(), "arxiv_api"
+
+    if root is None:
+        log.warning(
+            "arxiv_html.license_metadata_fallback",
+            arxiv_id=arxiv_id,
+        )
+
+    # The public Atom response does not consistently include arxiv:license.
+    # The abstract page exposes the same item-level metadata without fetching
+    # or processing the paper body, so admission remains fail-closed and early.
+    await bucket.acquire()
+    if min_sleep_s > 0:
+        await asyncio.sleep(min_sleep_s)
+    try:
+        abs_response = await client.get(f"{ARXIV_ABS_BASE}/{arxiv_id}")
+        abs_response.raise_for_status()
+    except httpx.HTTPError as exc:
+        log.warning("arxiv_html.license_abs_failed", arxiv_id=arxiv_id, err=str(exc))
+        return None, "unknown"
+    value = _license_from_abs_html(abs_response.content)
+    return (value, "html_meta") if value else (None, "unknown")
 
 
 async def fetch_one(
@@ -389,7 +507,7 @@ async def stream_ids_from_topic(
     sources_filter: Iterable[str] = ("arxiv-oai-cs", "arxiv-rss-cs"),
     max_records: int | None = None,
     commit_callback: Callable[[Any], None] | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[ArxivCandidate]:
     """Yield arXiv ids from a ``docs.normalized`` Kafka subscription.
 
     Offsets are NOT committed inside this generator: doing so would mean
@@ -432,7 +550,11 @@ async def stream_ids_from_topic(
             arxiv_id = _arxiv_id_from_url(url) or body.get("arxiv_id")
             if not arxiv_id or not is_valid_arxiv_id(arxiv_id):
                 continue
-            yield arxiv_id
+            yield ArxivCandidate(
+                arxiv_id=arxiv_id,
+                license_value=body.get("spdx_license") or body.get("license"),
+                license_source=body.get("spdx_license_source") or "unknown",
+            )
             emitted += 1
             if max_records is not None and emitted >= max_records:
                 return
@@ -455,7 +577,7 @@ def _arxiv_id_from_url(url: str) -> str | None:
 
 
 async def run_for_ids(
-    ids: Iterable[str],
+    ids: Iterable[str | ArxivCandidate],
     cfg: IngestConfig,
     *,
     feed_name: str,
@@ -465,6 +587,7 @@ async def run_for_ids(
     min_sleep_s: float = _DEFAULT_MIN_SLEEP_S,
     transport: httpx.AsyncBaseTransport | None = None,
     producer_override: BronzeProducer | None = None,
+    admission_producer_override: LicenseAdmissionProducer | None = None,
     minio_override: MinioWriter | None = None,
 ) -> int:
     """Fetch every arXiv id in ``ids`` and emit Bronze records. Returns count."""
@@ -475,6 +598,7 @@ async def run_for_ids(
     async with build_async_client(cfg, headers=headers, transport=transport) as client:
         producer_cm: BronzeProducer
         minio_cm: MinioWriter
+        admission_cm: LicenseAdmissionProducer | None
         owns_producer = producer_override is None
         owns_minio = minio_override is None
         if producer_override is not None:
@@ -484,6 +608,16 @@ async def run_for_ids(
                 cfg.redpanda_brokers,
                 topic=cfg.raw_topic,
                 client_id="s2p-arxiv-html-fetcher",
+            )
+        if admission_producer_override is not None:
+            admission_cm = admission_producer_override
+        elif producer_override is not None:
+            admission_cm = None
+        else:
+            admission_cm = LicenseAdmissionProducer(
+                cfg.redpanda_brokers,
+                topic=cfg.license_admissions_topic,
+                client_id="s2p-arxiv-license-admission",
             )
         if minio_override is not None:
             minio_cm = minio_override
@@ -496,12 +630,60 @@ async def run_for_ids(
             )
         if owns_producer:
             await producer_cm.start()
+        owns_admission_producer = admission_cm is not None and admission_producer_override is None
+        if owns_admission_producer:
+            await admission_cm.start()
         if owns_minio:
             await minio_cm.start()
         try:
-            for arxiv_id in ids:
+            for candidate_value in ids:
+                candidate = (
+                    candidate_value
+                    if isinstance(candidate_value, ArxivCandidate)
+                    else ArxivCandidate(
+                        arxiv_id=candidate_value,
+                        license_value=license_default,
+                        license_source=(
+                            "manual_override"
+                            if normalize_license(license_default) != "unknown"
+                            else "unknown"
+                        ),
+                    )
+                )
+                arxiv_id = candidate.arxiv_id
                 if not is_valid_arxiv_id(arxiv_id):
                     log.warning("arxiv_html.invalid_id", id=arxiv_id)
+                    continue
+                license_value = candidate.license_value
+                license_source = candidate.license_source
+                if normalize_license(license_value) == "unknown":
+                    license_value = license_default
+                    license_source = (
+                        "manual_override"
+                        if normalize_license(license_default) != "unknown"
+                        else "unknown"
+                    )
+                if normalize_license(license_value) == "unknown":
+                    license_value, license_source = await fetch_arxiv_license_with_source(
+                        arxiv_id,
+                        client,
+                        bucket=bucket,
+                        min_sleep_s=min_sleep_s,
+                    )
+                admission = decide_license_admission(
+                    source_url=canonical_arxiv_url(arxiv_id, mirror="arxiv"),
+                    source_feed=feed_name,
+                    license_value=license_value,
+                    license_source=license_source,
+                )
+                if admission_cm is not None:
+                    await admission_cm.send(admission.decision)
+                if not admission.admitted:
+                    log.info(
+                        "arxiv_html.license_quarantined",
+                        arxiv_id=arxiv_id,
+                        license=admission.license_id,
+                    )
                     continue
                 try:
                     outcome = await fetch_one(
@@ -528,7 +710,7 @@ async def run_for_ids(
                     outcome=outcome,
                     feed_name=feed_name,
                     bucket=cfg.minio_bronze_bucket,
-                    license_default=license_default,
+                    license_default=admission.license_id,
                     bytes_size=len(payload),
                 )
                 stored = await minio_cm.put_bronze(
@@ -545,7 +727,14 @@ async def run_for_ids(
                     },
                 )
                 # Refresh bytes_size with the gzipped count actually persisted.
-                record = record.model_copy(update={"bytes_size": stored})
+                record = record.model_copy(
+                    update={
+                        "bytes_size": stored,
+                        "trace_id": admission.decision.trace_id,
+                        "spdx_license": admission.license_id,
+                        "spdx_license_source": license_source,
+                    }
+                )
                 await producer_cm.send(record)
                 emitted += 1
                 log.info(
@@ -559,6 +748,8 @@ async def run_for_ids(
         finally:
             if owns_producer:
                 await producer_cm.stop()
+            if owns_admission_producer and admission_cm is not None:
+                await admission_cm.stop()
             if owns_minio:
                 await minio_cm.stop()
     return emitted
@@ -580,8 +771,8 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--license-default",
-        default="arxiv-non-exclusive-distribution",
-        help="SPDX id used when the page metadata does not announce one.",
+        default=None,
+        help="Explicit licence for a trusted backfill manifest; live records use per-paper metadata.",
     )
     p.add_argument(
         "--max-records",
@@ -625,19 +816,19 @@ async def _async_main(args: argparse.Namespace) -> int:
     def _capture_consumer(c: Any) -> None:
         consumer_ref["consumer"] = c
 
-    async def _id_generator() -> AsyncIterator[str]:
-        async for arxiv_id in stream_ids_from_topic(
+    async def _id_generator() -> AsyncIterator[ArxivCandidate]:
+        async for candidate in stream_ids_from_topic(
             cfg,
             topic=args.stream_topic,
             max_records=args.max_records,
             commit_callback=_capture_consumer,
         ):
-            yield arxiv_id
+            yield candidate
 
     async def _drain() -> int:
-        ids: list[str] = []
-        async for arxiv_id in _id_generator():
-            ids.append(arxiv_id)
+        ids: list[ArxivCandidate] = []
+        async for candidate in _id_generator():
+            ids.append(candidate)
             if len(ids) >= 32:
                 break
         if not ids:

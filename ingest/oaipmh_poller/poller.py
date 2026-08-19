@@ -18,9 +18,9 @@ from ingest.common.feeds import (
     load_feeds_from_kube,
     load_feeds_from_yaml,
 )
-from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission, normalize_license
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -52,20 +52,27 @@ async def poll_feed(
     from_ts = feed_state.get("until") or "2024-01-01"
 
     headers = build_headers(cfg, accept="application/xml, text/xml;q=0.9")
-    bucket = TokenBucket(
-        feed.rate_limit.requests_per_second, feed.rate_limit.burst
-    )
+    bucket = TokenBucket(feed.rate_limit.requests_per_second, feed.rate_limit.burst)
     new_until = _today_iso()
 
     emitted = 0
-    async with build_async_client(cfg, headers=headers) as client, BronzeProducer(
-        cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-oai-poller"
-    ) as producer, MinioWriter(
-        cfg.minio_endpoint,
-        cfg.minio_access_key,
-        cfg.minio_secret_key,
-        bucket=cfg.minio_bronze_bucket,
-    ) as minio:
+    async with (
+        build_async_client(cfg, headers=headers) as client,
+        BronzeProducer(
+            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-oai-poller"
+        ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-oai-license-admission",
+        ) as admission_producer,
+        MinioWriter(
+            cfg.minio_endpoint,
+            cfg.minio_access_key,
+            cfg.minio_secret_key,
+            bucket=cfg.minio_bronze_bucket,
+        ) as minio,
+    ):
         oai = OAIClient(str(feed.endpoint), client)
         async for record in oai.list_records(
             metadata_prefix=metadata_prefix,
@@ -77,7 +84,35 @@ async def poll_feed(
             if record.deleted:
                 continue
             url = record.arxiv_abs_url() or f"oai://{feed.endpoint}/{record.identifier}"
-            doc_id = doc_id_for_url(url) if url.startswith("http") else f"sha256:{_sha256(url)}"
+            per_record_license = normalize_license(record.license_value())
+            license_source = "oai_metadata"
+            if per_record_license == "unknown":
+                per_record_license = normalize_license(feed.license_default)
+                license_source = "manual_override" if per_record_license != "unknown" else "unknown"
+            trace_id = _random_trace_id()
+            decision_url = (
+                url
+                if url.startswith("http")
+                else f"{str(feed.endpoint).rstrip('/')}#record={record.identifier}"
+            )
+            admission = decide_license_admission(
+                source_url=decision_url,
+                source_feed=feed.name,
+                license_value=per_record_license,
+                license_source=license_source,
+                trace_id=trace_id,
+            )
+            await admission_producer.send(admission.decision)
+            if not admission.admitted:
+                log.info(
+                    "oai.license_quarantined",
+                    feed=feed.name,
+                    identifier=record.identifier,
+                    license=admission.license_id,
+                )
+                continue
+            url = decision_url
+            doc_id = admission.decision.doc_id
             fetched_at = datetime.now(tz=UTC)
             key = bronze_object_key(
                 source_feed=feed.name,
@@ -110,8 +145,10 @@ async def poll_feed(
                     extension="oai.xml.gz",
                 ),
                 source_feed=feed.name,
-                trace_id=_random_trace_id(),
+                trace_id=trace_id,
                 bytes_size=stored,
+                spdx_license=admission.license_id,
+                spdx_license_source=license_source,  # type: ignore[arg-type]
             )
             await producer.send(br)
             emitted += 1
@@ -143,9 +180,7 @@ def _load_feeds(cfg: IngestConfig) -> list[SourceFeedSpec]:
 
 
 async def _run(cfg: IngestConfig, feeds: list[SourceFeedSpec], **kw: Any) -> int:
-    state_root = (
-        "/var/lib/s2p-state/oaipmh_poller" if not cfg.is_dev else "./.s2p-state/oaipmh"
-    )
+    state_root = "/var/lib/s2p-state/oaipmh_poller" if not cfg.is_dev else "./.s2p-state/oaipmh"
     state_store = FeedStateStore(state_root)
     total = 0
     for feed in feeds:

@@ -1,0 +1,285 @@
+{
+  "$defs": {
+    "Difficulty": {
+      "additionalProperties": false,
+      "properties": {
+        "estimated": {
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Estimated",
+          "type": "integer"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "estimated"
+      ],
+      "title": "Difficulty",
+      "type": "object"
+    },
+    "EvidenceEdge": {
+      "additionalProperties": false,
+      "properties": {
+        "relation": {
+          "enum": [
+            "supports",
+            "qualifies",
+            "contradicts",
+            "enables",
+            "precedes",
+            "derives",
+            "depends_on",
+            "compares_with",
+            "invalidates_if_removed",
+            "uses",
+            "produces"
+          ],
+          "title": "Relation",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "relation",
+        "target"
+      ],
+      "title": "EvidenceEdge",
+      "type": "object"
+    },
+    "HiddenTargets": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_evidence_sets": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Accepted Evidence Sets",
+          "type": "array"
+        },
+        "configuration_constraints": {
+          "additionalProperties": true,
+          "title": "Configuration Constraints",
+          "type": "object"
+        },
+        "expected_values": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Expected Values",
+          "type": "object"
+        },
+        "forbidden_faults": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Forbidden Faults",
+          "type": "array"
+        },
+        "forbidden_nodes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Forbidden Nodes",
+          "type": "array"
+        },
+        "required_faults": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Faults",
+          "type": "array"
+        },
+        "required_nodes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Nodes",
+          "type": "array"
+        },
+        "required_oracle_results": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Oracle Results",
+          "type": "array"
+        },
+        "required_qualifications": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Qualifications",
+          "type": "array"
+        },
+        "required_relations": {
+          "items": {
+            "$ref": "#/$defs/EvidenceEdge"
+          },
+          "title": "Required Relations",
+          "type": "array"
+        }
+      },
+      "title": "HiddenTargets",
+      "type": "object"
+    },
+    "PublicContextPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "included_spans": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Included Spans",
+          "type": "array"
+        },
+        "same_paper_distractors": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Same Paper Distractors",
+          "type": "array"
+        },
+        "tool_access": {
+          "items": {
+            "enum": [
+              "search",
+              "open",
+              "find",
+              "calculator",
+              "symbolic"
+            ],
+            "type": "string"
+          },
+          "title": "Tool Access",
+          "type": "array"
+        }
+      },
+      "required": [
+        "included_spans"
+      ],
+      "title": "PublicContextPolicy",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "ambiguity_risks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Ambiguity Risks",
+      "type": "array"
+    },
+    "answer_contract": {
+      "const": "report_plus_manifest_v1",
+      "default": "report_plus_manifest_v1",
+      "title": "Answer Contract",
+      "type": "string"
+    },
+    "construction_provenance": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Construction Provenance",
+      "type": "array"
+    },
+    "difficulty": {
+      "$ref": "#/$defs/Difficulty"
+    },
+    "family": {
+      "enum": [
+        "grounded_explanation",
+        "claim_evidence",
+        "derivation_completion",
+        "method_dag",
+        "figure_table_reasoning",
+        "corruption_diagnosis",
+        "assumption_consequence",
+        "single_paper_research",
+        "experiment_configuration",
+        "result_reproduction"
+      ],
+      "title": "Family",
+      "type": "string"
+    },
+    "hidden_targets": {
+      "$ref": "#/$defs/HiddenTargets"
+    },
+    "paper_id": {
+      "title": "Paper Id",
+      "type": "string"
+    },
+    "public_context_policy": {
+      "$ref": "#/$defs/PublicContextPolicy"
+    },
+    "public_instruction": {
+      "title": "Public Instruction",
+      "type": "string"
+    },
+    "reasoning_operations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reasoning Operations",
+      "type": "array"
+    },
+    "route": {
+      "enum": [
+        "sft",
+        "rl",
+        "reject"
+      ],
+      "title": "Route",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "task-spec-v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "verifier_class": {
+      "title": "Verifier Class",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id",
+    "paper_id",
+    "family",
+    "public_instruction",
+    "public_context_policy",
+    "hidden_targets",
+    "verifier_class",
+    "difficulty",
+    "route"
+  ],
+  "title": "TaskSpec",
+  "type": "object"
+}

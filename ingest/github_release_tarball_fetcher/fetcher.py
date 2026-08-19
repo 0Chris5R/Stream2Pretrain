@@ -42,6 +42,8 @@ import httpx
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
+from ingest.common.kafka_producer import LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -96,10 +98,7 @@ class ReleaseRef:
 
     @property
     def tarball_url(self) -> str:
-        return (
-            f"https://api.github.com/repos/{self.owner}/{self.repo}"
-            f"/tarball/{self.tag}"
-        )
+        return f"https://api.github.com/repos/{self.owner}/{self.repo}/tarball/{self.tag}"
 
 
 @dataclass(frozen=True)
@@ -202,9 +201,7 @@ def code_s3_uri(*, bucket: str, owner: str, repo: str, ref: str, path: str) -> s
     return f"s3://{bucket}/{code_object_key(owner=owner, repo=repo, ref=ref, path=path)}"
 
 
-async def fetch_repo_license(
-    client: httpx.AsyncClient, ref: ReleaseRef
-) -> str | None:
+async def fetch_repo_license(client: httpx.AsyncClient, ref: ReleaseRef) -> str | None:
     """Return the SPDX id reported by the GitHub License API.
 
     Uses ``GET /repos/{owner}/{repo}`` (cheap, single request). ``None`` if
@@ -229,9 +226,7 @@ async def fetch_repo_license(
     return spdx
 
 
-async def fetch_tarball(
-    client: httpx.AsyncClient, ref: ReleaseRef
-) -> bytes | None:
+async def fetch_tarball(client: httpx.AsyncClient, ref: ReleaseRef) -> bytes | None:
     """Download the release tarball; ``None`` on non-200."""
     try:
         resp = await client.get(
@@ -266,6 +261,7 @@ async def process_release(
     producer: BronzeProducerProtocol,
     bucket: TokenBucket,
     valid_from: datetime | None = None,
+    admission_producer: LicenseAdmissionProducer | None = None,
 ) -> int:
     """Fetch the tarball for ``ref`` and emit one code BronzeRecord per file.
 
@@ -276,7 +272,15 @@ async def process_release(
     """
     await bucket.acquire()
     spdx = await fetch_repo_license(client, ref)
-    if spdx is None or spdx not in fetcher_cfg.allowed_licenses:
+    admission = decide_license_admission(
+        source_url=f"https://github.com/{ref.owner}/{ref.repo}/releases/tag/{ref.tag}",
+        source_feed=SOURCE_FEED,
+        license_value=spdx,
+        license_source="github_api" if spdx else "unknown",
+    )
+    if admission_producer is not None:
+        await admission_producer.send(admission.decision)
+    if not admission.admitted or spdx not in fetcher_cfg.allowed_licenses:
         log.info(
             "tarball.skip_license",
             repo=ref.full_name,
@@ -339,13 +343,9 @@ async def _emit_one_file(
     producer: BronzeProducerProtocol,
     valid_from: datetime,
 ) -> None:
-    file_url = (
-        f"https://github.com/{ref.owner}/{ref.repo}/blob/{ref.tag}/{extracted.path}"
-    )
+    file_url = f"https://github.com/{ref.owner}/{ref.repo}/blob/{ref.tag}/{extracted.path}"
     doc_id = doc_id_for_url(file_url)
-    key = code_object_key(
-        owner=ref.owner, repo=ref.repo, ref=ref.tag, path=extracted.path
-    )
+    key = code_object_key(owner=ref.owner, repo=ref.repo, ref=ref.tag, path=extracted.path)
     await minio.put_bronze(
         key=key,
         payload=extracted.data,
@@ -457,9 +457,7 @@ class BronzeRecordProducer:
         if self._owns_producer:
             self._producer = None
 
-    async def send(
-        self, record: BronzeRecord, *, headers: dict[str, str] | None = None
-    ) -> None:
+    async def send(self, record: BronzeRecord, *, headers: dict[str, str] | None = None) -> None:
         if self._producer is None:
             raise RuntimeError("BronzeRecordProducer.send called before start()")
         payload = record.model_dump_json(by_alias=True).encode("utf-8")
@@ -516,6 +514,7 @@ async def _consume_loop(
     bucket: TokenBucket,
     stop_event: asyncio.Event,
     metrics: TarballMetrics | None = None,
+    admission_producer: LicenseAdmissionProducer | None = None,
 ) -> int:
     """Inner consume-loop, broken out for tests to drive deterministically.
 
@@ -576,6 +575,7 @@ async def _consume_loop(
                 producer=producer,
                 bucket=bucket,
                 valid_from=valid_from,
+                admission_producer=admission_producer,
             )
             total += emitted
             succeeded = True
@@ -626,23 +626,26 @@ async def run(
     if cfg.github_token:
         extra_headers["Authorization"] = f"Bearer {cfg.github_token}"
     headers = build_headers(cfg, accept="application/vnd.github+json", extra=extra_headers)
-    bucket = TokenBucket(
-        rate=fetcher_cfg.request_rate_per_second, burst=fetcher_cfg.request_burst
-    )
+    bucket = TokenBucket(rate=fetcher_cfg.request_rate_per_second, burst=fetcher_cfg.request_burst)
     metrics = metrics or TarballMetrics()
     stop_event = asyncio.Event()
     await consumer.start()
     try:
-        async with build_async_client(
-            cfg, headers=headers
-        ) as client, BronzeRecordProducer(
-            cfg.redpanda_brokers, topic=cfg.raw_topic
-        ) as producer, MinioWriter(
-            cfg.minio_endpoint,
-            cfg.minio_access_key,
-            cfg.minio_secret_key,
-            bucket=cfg.minio_bronze_bucket,
-        ) as minio:
+        async with (
+            build_async_client(cfg, headers=headers) as client,
+            BronzeRecordProducer(cfg.redpanda_brokers, topic=cfg.raw_topic) as producer,
+            LicenseAdmissionProducer(
+                cfg.redpanda_brokers,
+                topic=cfg.license_admissions_topic,
+                client_id="s2p-gh-tarball-license-admission",
+            ) as admission_producer,
+            MinioWriter(
+                cfg.minio_endpoint,
+                cfg.minio_access_key,
+                cfg.minio_secret_key,
+                bucket=cfg.minio_bronze_bucket,
+            ) as minio,
+        ):
             return await _consume_loop(
                 cfg,
                 fetcher_cfg,
@@ -653,6 +656,7 @@ async def run(
                 bucket=bucket,
                 stop_event=stop_event,
                 metrics=metrics,
+                admission_producer=admission_producer,
             )
     finally:
         await consumer.stop()
@@ -687,25 +691,17 @@ def _fetcher_config_from_env() -> FetcherConfig:
 
     licenses_raw = os.environ.get("S2P_TARBALL_ALLOWED_LICENSES", "")
     if licenses_raw.strip():
-        licenses = frozenset(
-            s.strip() for s in licenses_raw.split(",") if s.strip()
-        )
+        licenses = frozenset(s.strip() for s in licenses_raw.split(",") if s.strip())
     else:
         licenses = DEFAULT_ALLOWED_LICENSES
 
     return FetcherConfig(
-        allowed_extensions=_csv(
-            "S2P_TARBALL_ALLOWED_EXTENSIONS", DEFAULT_ALLOWED_EXTENSIONS
-        ),
-        max_file_size_bytes=_int(
-            "S2P_TARBALL_MAX_FILE_SIZE_BYTES", DEFAULT_MAX_FILE_SIZE_BYTES
-        ),
+        allowed_extensions=_csv("S2P_TARBALL_ALLOWED_EXTENSIONS", DEFAULT_ALLOWED_EXTENSIONS),
+        max_file_size_bytes=_int("S2P_TARBALL_MAX_FILE_SIZE_BYTES", DEFAULT_MAX_FILE_SIZE_BYTES),
         allowed_licenses=licenses,
         request_rate_per_second=_float("S2P_TARBALL_RATE_PER_SECOND", 1.0),
         request_burst=_int("S2P_TARBALL_BURST", 4),
-        consumer_group=os.environ.get(
-            "S2P_TARBALL_CONSUMER_GROUP", "s2p-github-tarball-fetcher"
-        ),
+        consumer_group=os.environ.get("S2P_TARBALL_CONSUMER_GROUP", "s2p-github-tarball-fetcher"),
     )
 
 
