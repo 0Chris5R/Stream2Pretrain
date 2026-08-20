@@ -9,6 +9,7 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
+  suspend: false
   schedule: {{ .Values.sources.github.releases.schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3

@@ -32,9 +32,10 @@ if [[ ! -f "${CRD_FILE}" ]]; then
   exit 1
 fi
 
-# The Phase-1 set, expressed as inline manifests so the script has no Python
-# dependency. Endpoints, intervals, and rate limits track SOURCES.md and
-# ingest/feeds.dev.yaml verbatim.
+# The controller-supported Phase-1 set, expressed as inline manifests so the
+# script has no Python dependency. Dedicated Deployments/CronJobs retain the
+# REST/JSON and GitHub release sources that cannot be cloned from the generic
+# RSS, Atom, OAI-PMH, or sitemap poller templates.
 read -r -d '' MANIFEST <<'YAML' || true
 ---
 apiVersion: stream2pretrain.io/v1alpha1
@@ -115,83 +116,6 @@ spec:
     burst: 4
   licenseDefault: per-record
   egressAllow: ["oaipmh.arxiv.org", "export.arxiv.org"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: github-events
-spec:
-  name: github-events
-  protocol: rest-json
-  endpoint: https://api.github.com/events
-  pollIntervalSeconds: 60
-  rateLimit:
-    requestsPerSecond: 1.0
-    burst: 1
-    respectXPollInterval: true
-  licenseDefault: unknown
-  auth:
-    type: bearer
-    secretName: github-token
-    secretKey: token
-  egressAllow: ["api.github.com", "github.com"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: github-releases
-spec:
-  name: github-releases
-  protocol: atom
-  endpoint: https://github.com
-  pollIntervalSeconds: 7200
-  rateLimit:
-    requestsPerSecond: 2.0
-    burst: 4
-  licenseDefault: unknown
-  egressAllow: ["github.com", "api.github.com"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: hf-models
-spec:
-  name: hf-models
-  protocol: rest-json
-  endpoint: https://huggingface.co/api/models
-  pollIntervalSeconds: 900
-  rateLimit:
-    requestsPerSecond: 1.0
-    burst: 2
-  licenseDefault: unknown
-  auth:
-    type: bearer
-    secretName: hf-token
-    secretKey: token
-  egressAllow: ["huggingface.co", "hf.co"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: hf-daily-papers
-spec:
-  name: hf-daily-papers
-  protocol: rest-json
-  endpoint: https://huggingface.co/api/daily_papers
-  pollIntervalSeconds: 21600
-  rateLimit:
-    requestsPerSecond: 0.5
-    burst: 1
-  licenseDefault: unknown
-  auth:
-    type: bearer
-    secretName: hf-token
-    secretKey: token
-  egressAllow: ["huggingface.co", "hf.co"]
   enabled: true
 ---
 apiVersion: stream2pretrain.io/v1alpha1
