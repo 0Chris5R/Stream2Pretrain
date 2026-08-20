@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
 
-from processor.scientific import _infer_pdf_title, extract_scientific_html
+from processor.scientific import ScientificProcessor, _infer_pdf_title, extract_scientific_html
 from schemas.scientific import ScientificDocument, ScientificFigure
 
 pytest.importorskip("bs4")
 pytest.importorskip("lxml")
+
+
+class _FakeS3:
+    def put_object(self, **_kwargs: object) -> None:
+        return None
 
 
 def test_html_projection_keeps_structure_but_excludes_metadata_and_references() -> None:
@@ -274,3 +281,30 @@ def test_raw_ocr_is_audit_only_until_policy_accepts_it() -> None:
             }
         ).structured_text_surrogate()
     )
+
+
+def test_oversized_decoded_figure_is_rejected_before_rgb_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    source = image_module.new("RGB", (2, 2), color="white")
+    payload = io.BytesIO()
+    source.save(payload, format="PNG")
+    monkeypatch.setattr(image_module, "MAX_IMAGE_PIXELS", 3)
+
+    processor = ScientificProcessor(
+        s3_client=_FakeS3(),
+        bucket="silver",
+        models_dir="/tmp/models",
+        user_agent="test",
+        require_real_models=False,
+    )
+    figure = ScientificFigure(figure_id="figure-1", source_url="data:image/png;base64,")
+
+    with pytest.raises(image_module.DecompressionBombWarning):
+        processor._enrich_image_payload(
+            "sha256:" + "a" * 64,
+            figure,
+            payload.getvalue(),
+            "image/png",
+        )
