@@ -23,6 +23,7 @@ import pytest
 
 from ingest.arxiv_html_fetcher.fetcher import (
     FetchOutcome,
+    _is_arxiv_source_feed,
     build_metadata_stub,
     canonical_arxiv_url,
     fetch_arxiv_license,
@@ -67,6 +68,14 @@ AR5IV_HTML_SAMPLE = """<!DOCTYPE html>
 </div>
 </body></html>
 """
+
+
+def test_stream_source_filter_matches_deployed_feed_names() -> None:
+    assert _is_arxiv_source_feed("oai-arxiv-cs", None)
+    assert _is_arxiv_source_feed("rss-arxiv-cs-lg", None)
+    assert _is_arxiv_source_feed("arxiv-oai-cs", None)
+    assert not _is_arxiv_source_feed("hf-daily-papers", None)
+    assert _is_arxiv_source_feed("custom-arxiv", ("custom-arxiv",))
 
 
 def _atom_license(value: str) -> str:
@@ -286,6 +295,40 @@ async def test_fetch_one_falls_back_to_ar5iv_on_404() -> None:
     assert outcome.fallback_used is True
     assert outcome.extraction_pipeline == "ar5iv-2026-06"
     assert outcome.extracted is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_one_rejects_redirected_landing_page_and_uses_pdf() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.host == "arxiv.org" and "/html/" in request.url.path:
+            return httpx.Response(404, text="missing")
+        if request.url.host == "ar5iv.labs.arxiv.org":
+            return httpx.Response(200, text="<html><body><h1>Abstract landing page</h1></body></html>")
+        if request.url.host == "arxiv.org" and "/pdf/" in request.url.path:
+            return httpx.Response(
+                200,
+                content=b"%PDF-1.7\ncontrolled",
+                headers={"content-type": "application/pdf"},
+            )
+        raise AssertionError(f"unexpected url: {request.url}")
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        outcome = await fetch_one(
+            "2104.00001",
+            client,
+            bucket=TokenBucket(rate=64.0, burst=64),
+            min_sleep_s=0.0,
+        )
+    finally:
+        await client.aclose()
+
+    assert outcome.status == 200
+    assert outcome.source_format == "pdf"
+    assert any("/pdf/2104.00001" in url for url in calls)
 
 
 @pytest.mark.asyncio

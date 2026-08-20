@@ -307,6 +307,7 @@ ingest:
   # ``sources.arxiv.htmlFetcher.enabled``.
   arxivHtmlFetcher:
     image: stream2pretrain/ingest-arxiv-html
+    tag: ""
     replicas: 1
     # Bound how many ids one Deployment loop drains before yielding back
     # to KEDA. Empty / 0 means unlimited. Useful for testing on small
@@ -455,6 +456,7 @@ openreviewPoller:
 processor:
   fetcher:
     image: stream2pretrain/processor-fetcher
+    tag: ""
     replicas: 2
     resources:
       requests: {cpu: 200m, memory: 512Mi}
@@ -462,6 +464,7 @@ processor:
     concurrency: 32
   curate:
     image: stream2pretrain/processor-curate
+    tag: ""
     replicas: 1
     requireRealModels: true
     doclingEnabled: true

@@ -12,8 +12,31 @@ def test_normalizes_creative_commons_url() -> None:
     assert normalize_license("https://creativecommons.org/licenses/by/4.0/") == "CC-BY-4.0"
 
 
-def test_unknown_and_noncommercial_licenses_are_quarantined() -> None:
-    for value in (None, "", "CC-BY-NC-4.0", "arxiv-non-exclusive-distribution"):
+def test_unknown_non_code_license_is_admitted_with_provenance() -> None:
+    for value in (None, ""):
+        result = decide_license_admission(
+            source_url="https://arxiv.org/abs/2608.00001",
+            source_feed="arxiv-cs-ai",
+            license_value=value,
+            license_source="rss_entry",
+        )
+        assert result.admitted is True
+        assert result.license_id == "unknown"
+        assert "non-code demo policy" in result.decision.reason
+        assert result.decision.content_fetch_started is False
+
+
+def test_unknown_code_and_explicitly_disallowed_licenses_are_quarantined() -> None:
+    unknown_code = decide_license_admission(
+        source_url="https://github.com/example/repo/releases/tag/v1",
+        source_feed="github-release-tarball",
+        license_value=None,
+        license_source="unknown",
+        source_format="code",
+    )
+    assert unknown_code.admitted is False
+
+    for value in ("CC-BY-NC-4.0", "arxiv-non-exclusive-distribution"):
         result = decide_license_admission(
             source_url="https://arxiv.org/abs/2608.00001",
             source_feed="arxiv-cs-ai",
@@ -21,7 +44,6 @@ def test_unknown_and_noncommercial_licenses_are_quarantined() -> None:
             license_source="rss_entry",
         )
         assert result.admitted is False
-        assert result.decision.content_fetch_started is False
 
 
 def test_dataset_wrapper_does_not_admit_document_content() -> None:

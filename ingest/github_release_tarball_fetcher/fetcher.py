@@ -277,6 +277,7 @@ async def process_release(
         source_feed=SOURCE_FEED,
         license_value=spdx,
         license_source="github_api" if spdx else "unknown",
+        source_format="code",
     )
     if admission_producer is not None:
         await admission_producer.send(admission.decision)

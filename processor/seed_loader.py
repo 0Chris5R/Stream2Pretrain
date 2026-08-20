@@ -229,6 +229,7 @@ def seed_admission(doc: SeedDocument) -> LicenseAdmissionDecision:
         source_feed=f"seed:{doc.repo_id}",
         license_value=doc.spdx_license,
         license_source=doc.spdx_license_source,
+        source_format=doc.source_format,
     ).decision
 
 

@@ -1,4 +1,9 @@
-"""Fail-closed licence admission shared by every ingest component."""
+"""Licence admission shared by every ingest component.
+
+The demo policy admits non-code documents whose machine-readable licence is
+missing while preserving ``unknown`` provenance. Code remains fail-closed.
+Explicitly non-permitted licences remain quarantined for every format.
+"""
 
 from __future__ import annotations
 
@@ -73,8 +78,12 @@ def normalize_license(value: str | None) -> str:
     return aliases.get(lowered, cleaned)
 
 
-def is_training_permitted(value: str | None) -> bool:
-    return normalize_license(value) in PERMISSIVE_TRAINING_LICENSES
+def is_training_permitted(value: str | None, *, source_format: str = "web") -> bool:
+    """Return whether content may enter training under the current demo policy."""
+    normalized = normalize_license(value)
+    if normalized in PERMISSIVE_TRAINING_LICENSES:
+        return True
+    return normalized == "unknown" and source_format != "code"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,23 +105,26 @@ def decide_license_admission(
     source_feed: str,
     license_value: str | None,
     license_source: str,
+    source_format: str = "web",
     trace_id: str | None = None,
     observed_at: datetime | None = None,
 ) -> AdmissionResult:
-    """Build a deterministic, fail-closed decision before content fetch."""
+    """Build a deterministic decision before content fetch."""
     canon = canonical_url(source_url)
     doc_id = doc_id_for_url(canon)
     normalized = normalize_license(license_value)
-    admitted = normalized in PERMISSIVE_TRAINING_LICENSES
+    admitted = is_training_permitted(normalized, source_format=source_format)
     status = "admitted" if admitted else "quarantined"
-    if admitted:
+    if admitted and normalized == "unknown":
+        reason = "machine-readable licence is missing; admitted by non-code demo policy"
+    elif admitted:
         reason = f"{normalized} is on the training allowlist"
     elif normalized == "unknown":
         reason = "machine-readable licence is missing"
     else:
         reason = f"{normalized} is not on the training allowlist"
     digest = hashlib.sha256(
-        f"{doc_id}\0{source_feed}\0{normalized}\0{license_source}\0{status}".encode()
+        f"{doc_id}\0{source_feed}\0{source_format}\0{normalized}\0{license_source}\0{status}".encode()
     ).hexdigest()
     decision = LicenseAdmissionDecision(
         decision_id=f"sha256:{digest}",

@@ -32,7 +32,7 @@ spec:
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       containers:
         - name: fetcher
-          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image) | quote }}
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image "tag" .Values.processor.fetcher.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["s2p-fetcher"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}

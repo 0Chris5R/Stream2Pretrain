@@ -279,6 +279,7 @@
           "required": ["image", "replicas", "scaling", "resources"],
           "properties": {
             "image": {"type": "string", "minLength": 1},
+            "tag": {"type": "string"},
             "replicas": {"type": "integer", "minimum": 0},
             "maxRecordsPerLoop": {"type": "integer", "minimum": 0},
             "scaling": {
