@@ -356,7 +356,7 @@ Known limits are:
 - Container images are present only on the control node, so the DHBW override schedules application pods there. The worker nodes need an internal registry or verified image import before cross-node scheduling.
 - Manual UI scaling was verified. Stateful processor scaling and KEDA broker-offset integration are not yet validated.
 - Polaris uses an in-memory catalog backend in the dev profile. MinIO data is persistent, but production catalog recovery needs a relational backend.
-- Ingress, DNS, TLS, network policy, Gatekeeper enforcement, Tempo, and Loki are disabled in the measured profile.
+- Ingress, DNS, and TLS use Traefik, ExternalDNS with RFC2136, and the shared wildcard certificate. NetworkPolicy, Gatekeeper enforcement, Tempo, and Loki remain disabled in the measured profile.
 - Production throughput, safe partition counts, and maximum corpus size are `needs-measurement`.
 - Live post-training acceptance yield, provider usage, and foundry cloud resources are `needs-measurement`. The worker requires the Hetzner credential and `Qwen3.8-27B` to be visible through authenticated discovery.
 - License detection is a curation heuristic. It is not legal advice or a compliance guarantee.

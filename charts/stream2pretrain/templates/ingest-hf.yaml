@@ -102,6 +102,7 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $papers) | nindent 4 }}
 spec:
+  suspend: false
   schedule: {{ .Values.sources.huggingface.dailyPapers.schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
