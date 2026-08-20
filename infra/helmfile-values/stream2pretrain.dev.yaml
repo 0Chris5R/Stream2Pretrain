@@ -6,7 +6,7 @@ profile: dev
 
 image:
   registry: docker.io
-  tag: "0.2.0"
+  tag: "0.2.0-2e1d99b"
   # Images currently exist only in the control-plane containerd store. Never
   # hide an incomplete image distribution step behind a remote pull attempt.
   pullPolicy: Never
@@ -76,10 +76,9 @@ processor:
     replicas: 1
     benchmarkCorpus:
       kind: synthetic_canary
-  # Enable only after distributing the image and creating the provider/signing
-  # Secrets.
+  # Single-writer foundry on the measured control-plane image cache.
   foundry:
-    enabled: false
+    enabled: true
 
 mixtureController:
   replicas: 1
