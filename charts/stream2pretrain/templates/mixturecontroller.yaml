@@ -30,7 +30,7 @@ spec:
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       containers:
         - name: controller
-          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.mixtureController.image) | quote }}
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.mixtureController.image "tag" .Values.mixtureController.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["s2p-mixture-controller"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}

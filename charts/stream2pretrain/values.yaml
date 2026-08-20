@@ -562,6 +562,7 @@ processor:
 # -----------------------------------------------------------------------------
 mixtureController:
   image: stream2pretrain/mixture-controller
+  tag: ""
   replicas: 1
   apiPort: 8080
   resources:
