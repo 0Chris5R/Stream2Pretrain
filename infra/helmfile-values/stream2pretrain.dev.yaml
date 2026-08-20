@@ -57,8 +57,10 @@ keda:
 processor:
   fetcher:
     replicas: 1
+    tag: "0.2.0-619290f"
   curate:
     replicas: 1
+    tag: "0.2.0-619290f"
     requireRealModels: false
     doclingEnabled: false
     usePresidio: false
@@ -111,13 +113,16 @@ sources:
     # Keep the Helm CronJobs rendered but suspended as clone templates.
     enabled: false
     htmlFetcher:
-      enabled: false
+      enabled: true
   # Blog SourceFeeds clone the suspended RSS template above, so a second
   # aggregate blog CronJob would only duplicate polling.
   blogs:
     enabled: false
 
 ingest:
+  arxivHtmlFetcher:
+    tag: "0.2.0-619290f"
+    maxRecordsPerLoop: 32
   hf:
     replicas: 0
   githubTarballFetcher:
