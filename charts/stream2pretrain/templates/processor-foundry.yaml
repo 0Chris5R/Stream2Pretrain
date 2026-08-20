@@ -108,7 +108,7 @@ spec:
               containerPort: {{ .Values.processor.foundry.apiPort }}
           env:
             - name: S2P_BIND_HOST
-              value: 0.0.0.0
+              value: "::"
             - name: S2P_FOUNDRY_API_PORT
               value: {{ .Values.processor.foundry.apiPort | quote }}
             - name: S2P_FOUNDRY_STATE_DIR
