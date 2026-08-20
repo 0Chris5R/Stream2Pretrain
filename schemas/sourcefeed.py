@@ -29,6 +29,7 @@ FeedProtocol = Literal[
 
 LicenseDefault = Literal[
     "per-record",
+    "arxiv-non-exclusive-distribution",
     "unknown",
     "CC-BY-4.0",
     "CC-BY-SA-4.0",

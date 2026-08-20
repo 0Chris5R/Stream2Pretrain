@@ -17,7 +17,7 @@ def test_sourcefeed_status_maps_kubernetes_crd_shape() -> None:
             "endpoint": "https://rss.arxiv.org/rss/cs.CL",
             "pollIntervalSeconds": 7200,
             "rateLimit": {"requestsPerSecond": 1.0, "burst": 4},
-            "licenseDefault": "per-record",
+            "licenseDefault": "arxiv-non-exclusive-distribution",
             "enabled": True,
         },
         "status": {
