@@ -65,7 +65,7 @@ via `sealed-secrets` or External Secrets Operator before `helm install`:
 | `stream2pretrain-decon-signing` (`.Values.processor.deconGate.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), optional `ed25519.crt` | Decon-Gate signer |
 | `stream2pretrain-decon-benchmarks` (`.Values.processor.deconGate.benchmarkCorpus.configMap`) | `corpus.json` | Decon-Gate benchmark corpus |
 | `stream2pretrain-keda-redpanda` (`.Values.keda.triggerAuthSecret`) | `sasl`, `tls`, `username`, `password` | KEDA Kafka trigger            |
-| `stream2pretrain-foundry-providers` (`.Values.processor.foundry.providerSecret`) | `HETZNER_INFERENCE_API_KEY`, `controlToken` | foundry worker, API, and UI manual trigger |
+| `stream2pretrain-foundry-providers` (`.Values.processor.foundry.providerSecret`, when enabled) | `HETZNER_INFERENCE_API_KEY`, `controlToken` | foundry worker, API, and UI manual trigger |
 
 ## CRDs
 
@@ -139,7 +139,8 @@ charts/stream2pretrain/
     processor-*.yaml          -- fetcher / curate / iceberg-writer / foundry
     foundry-oracle-rbac.yaml  -- bounded Job permissions + oracle deny-all network policy
     mixturecontroller.yaml
-    ui.yaml                   -- Deployment + Service + IngressRoute + Cert
+    ui.yaml                   -- Deployment + Service
+    ui-ingress.yaml           -- standard Kubernetes Ingress
     scaledobjects.yaml        -- KEDA ScaledObject + TriggerAuthentication
     servicemonitors.yaml
     grafana-dashboards.yaml   -- ConfigMap embedding dashboards/*.json

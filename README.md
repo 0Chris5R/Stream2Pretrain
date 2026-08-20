@@ -202,7 +202,7 @@ The API and document screenshots in section 11 use the same live cluster data sh
 | PVC | Curator state and platform storage. |
 | ServiceMonitor and PrometheusRule | Metrics discovery and availability alerts. |
 
-The Helm chart parameterizes replica counts, resources, images, topics, endpoints, model settings, and ingress. Helmfile deploys platform, catalog, and application tiers in dependency order.
+The Helm chart parameterizes replica counts, resources, images, topics, endpoints, model settings, and ingress. Helmfile deploys edge, platform, catalog, and application tiers in dependency order.
 
 Horizontal scale was demonstrated on the DHBW cluster. The UI Deployment scaled from one to three ready replicas in 14 measured seconds. The pod screenshot shows all three replicas. A temporary request for twenty replicas left seven unavailable, triggered `Stream2PretrainDeploymentUnavailable`, and the alert cleared after restoring one replica.
 
@@ -216,7 +216,9 @@ The application templates allow replica changes for stateless components. Kafka 
 - Terraform, Ansible, kubectl, Helm 3, Helmfile, and uv
 - Container images built from the included Dockerfiles
 - A reviewed `terraform.tfvars`
-- Kubernetes Secrets for MinIO, Polaris, GitHub, Hugging Face, decon signing, foundry providers, and Grafana
+- The existing DHBW RFC2136 inventory outside Git
+- Kubernetes Secrets for MinIO, Polaris, GitHub, Hugging Face, decon signing,
+  and Grafana, plus the foundry provider Secret when the foundry is enabled
 
 Use `uv` for every Python command.
 
@@ -242,6 +244,10 @@ export KUBECONFIG=$PWD/infra/kubeconfig-stream2pretrain.yaml
 ./scripts/setup_dhbw_demo.sh topics
 ```
 
+For the existing cluster, run `./scripts/setup_dhbw_demo.sh edge` instead of
+reapplying the complete platform tier. It changes only the public edge and
+avoids the unsafe full application upgrade.
+
 Create the required Secrets without committing their values. Then install the self-contained benchmark canaries and the application:
 
 ```bash
@@ -262,7 +268,8 @@ Required Secret names are:
 - `stream2pretrain/stream2pretrain-github`
 - `stream2pretrain/stream2pretrain-hf`
 - `stream2pretrain/stream2pretrain-decon-signing`
-- `stream2pretrain/stream2pretrain-foundry-providers` with `HETZNER_INFERENCE_API_KEY` and `controlToken`
+- `stream2pretrain/stream2pretrain-foundry-providers` with
+  `HETZNER_INFERENCE_API_KEY` and `controlToken` when the foundry is enabled
 
 ### Run the end-to-end check
 

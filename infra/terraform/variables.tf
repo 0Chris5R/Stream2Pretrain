@@ -61,11 +61,11 @@ variable "network_name" {
 variable "ip_family" {
   description = "Address family used in the generated Ansible inventory."
   type        = string
-  default     = "ipv6"
+  default     = "dual"
 
   validation {
-    condition     = contains(["ipv4", "ipv6"], var.ip_family)
-    error_message = "ip_family must be either ipv4 or ipv6."
+    condition     = contains(["ipv4", "ipv6", "dual"], var.ip_family)
+    error_message = "ip_family must be ipv4, ipv6, or dual."
   }
 }
 
@@ -82,7 +82,7 @@ variable "interpreter_python" {
 }
 
 variable "security_groups" {
-  description = "OpenStack security groups attached to all VMs."
+  description = "OpenStack security groups attached to all VMs. The lecture deployment uses the project default group."
   type        = list(string)
   default     = ["default"]
 }

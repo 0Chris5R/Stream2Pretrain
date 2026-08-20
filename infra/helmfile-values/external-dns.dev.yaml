@@ -1,0 +1,71 @@
+provider:
+  name: rfc2136
+
+sources:
+  - ingress
+
+# Never delete records that are not represented by this cluster. The unique
+# owner and prefix also isolate Stream2Pretrain from the existing registry
+# ExternalDNS instance in the same DNS zone.
+policy: upsert-only
+registry: txt
+txtOwnerId: stream2pretrain
+txtPrefix: _stream2pretrain.
+
+domainFilters:
+  - s241221-at-student-dhbw-mannheim-de.users.dhbw.site
+
+managedRecordTypes:
+  - A
+  - AAAA
+  - CNAME
+
+env:
+  - name: RFC2136_TSIG_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: rfc2136-tsig
+        key: tsig-secret-key
+  - name: RFC2136_TSIG_KEYNAME
+    valueFrom:
+      secretKeyRef:
+        name: rfc2136-tsig
+        key: tsig-keyname
+  - name: RFC2136_TSIG_ALGORITHM
+    valueFrom:
+      secretKeyRef:
+        name: rfc2136-tsig
+        key: tsig-algorithm
+
+extraArgs:
+  rfc2136-host: certificates.dhbw.cloud
+  rfc2136-port: "53"
+  rfc2136-zone: s241221-at-student-dhbw-mannheim-de.users.dhbw.site
+  rfc2136-tsig-keyname: $(RFC2136_TSIG_KEYNAME)
+  rfc2136-tsig-secret: $(RFC2136_TSIG_SECRET)
+  rfc2136-tsig-secret-alg: $(RFC2136_TSIG_ALGORITHM)
+  rfc2136-tsig-axfr: null
+  exclude-target-net:
+    - 10.0.0.0/8
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - fc00::/7
+    - fe80::/10
+    - ::1/128
+
+logLevel: info
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring

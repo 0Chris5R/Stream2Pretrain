@@ -87,7 +87,10 @@ mixtureController:
 ui:
   replicas: 1
   ingress:
-    enabled: false
+    enabled: true
+    host: stream2pretrain-app.s241221-at-student-dhbw-mannheim-de.users.dhbw.site
+    ingressClassName: traefik
+    tlsSecret: ""
 
 # DNS-based egress policies are not implementable by standard Kubernetes
 # NetworkPolicy. Keep policies disabled until concrete cluster CIDRs are

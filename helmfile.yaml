@@ -17,6 +17,8 @@ repositories:
     url: https://charts.redpanda.com
   - name: apache-polaris
     url: https://downloads.apache.org/polaris/helm-chart/
+  - name: external-dns
+    url: https://kubernetes-sigs.github.io/external-dns/
 
 environments:
   dev: {}
@@ -35,7 +37,7 @@ releases:
     namespace: cert-manager
     chart: jetstack/cert-manager
     version: v1.15.3
-    labels: {tier: platform}
+    labels: {tier: edge, component: certificates}
     values:
       - infra/helmfile-values/cert-manager.{{ .Environment.Name }}.yaml
 
@@ -43,10 +45,18 @@ releases:
     namespace: traefik
     chart: traefik/traefik
     version: 30.1.0
-    labels: {tier: platform}
+    labels: {tier: edge, component: edge}
     needs: [cert-manager/cert-manager]
     values:
       - infra/helmfile-values/traefik.{{ .Environment.Name }}.yaml
+
+  - name: external-dns
+    namespace: external-dns
+    chart: external-dns/external-dns
+    version: 1.19.0
+    labels: {tier: edge, component: edge}
+    values:
+      - infra/helmfile-values/external-dns.{{ .Environment.Name }}.yaml
 
   - name: kube-prometheus-stack
     namespace: monitoring
