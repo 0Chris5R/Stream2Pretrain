@@ -167,14 +167,26 @@ required_secrets() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local missing=0
   local item
+  local namespace
+  local remainder
+  local secret
+  local key
   for item in \
-    stream2pretrain/stream2pretrain-minio \
-    stream2pretrain/stream2pretrain-polaris \
-    stream2pretrain/stream2pretrain-github \
-    stream2pretrain/stream2pretrain-hf \
-    stream2pretrain/stream2pretrain-decon-signing; do
-    if ! kubectl get secret -n "${item%%/*}" "${item##*/}" >/dev/null 2>&1; then
-      printf 'Missing required Secret: %s\n' "$item" >&2
+    stream2pretrain/stream2pretrain-minio/accessKey \
+    stream2pretrain/stream2pretrain-minio/secretKey \
+    stream2pretrain/stream2pretrain-polaris/credential \
+    stream2pretrain/stream2pretrain-polaris/scope \
+    stream2pretrain/stream2pretrain-github/token \
+    stream2pretrain/stream2pretrain-hf/token \
+    stream2pretrain/stream2pretrain-decon-signing/ed25519.key; do
+    namespace="${item%%/*}"
+    remainder="${item#*/}"
+    secret="${remainder%%/*}"
+    key="${remainder#*/}"
+    if ! kubectl get secret -n "$namespace" "$secret" \
+      -o "go-template={{ index .data \"$key\" }}" 2>/dev/null \
+      | grep -q .; then
+      printf 'Missing required Secret key: %s\n' "$item" >&2
       missing=1
     fi
   done
@@ -184,10 +196,21 @@ required_secrets() {
     --values "$ROOT_DIR/infra/helmfile-values/stream2pretrain.$ENVIRONMENT.yaml" \
     --show-only templates/processor-foundry.yaml \
     | grep -q '^kind: StatefulSet$'; then
-    if ! kubectl get secret -n stream2pretrain stream2pretrain-foundry-providers >/dev/null 2>&1; then
-      printf 'Missing required Secret: stream2pretrain/stream2pretrain-foundry-providers\n' >&2
-      missing=1
-    fi
+    for item in \
+      stream2pretrain/stream2pretrain-foundry-providers/HETZNER_INFERENCE_API_KEY \
+      stream2pretrain/stream2pretrain-foundry-providers/controlToken \
+      stream2pretrain/stream2pretrain-decon-signing/ed25519.crt; do
+      namespace="${item%%/*}"
+      remainder="${item#*/}"
+      secret="${remainder%%/*}"
+      key="${remainder#*/}"
+      if ! kubectl get secret -n "$namespace" "$secret" \
+        -o "go-template={{ index .data \"$key\" }}" 2>/dev/null \
+        | grep -q .; then
+        printf 'Missing required Secret key: %s\n' "$item" >&2
+        missing=1
+      fi
+    done
   fi
   if ! kubectl get configmap -n stream2pretrain stream2pretrain-decon-benchmarks >/dev/null 2>&1; then
     printf 'Missing required ConfigMap: stream2pretrain/stream2pretrain-decon-benchmarks\n' >&2

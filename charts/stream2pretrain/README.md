@@ -62,7 +62,7 @@ via `sealed-secrets` or External Secrets Operator before `helm install`:
 | `stream2pretrain-minio` (`.Values.minio.credentialsSecret`)      | `accessKey`, `secretKey`          | every component               |
 | `stream2pretrain-github` (`.Values.sources.github.events.tokenSecret`) | `token` (PAT, `read:public`)      | ingest-github-events / -releases |
 | `stream2pretrain-hf` (`.Values.sources.huggingface.models.tokenSecret`) | `token` (HF user token)           | ingest-hf                     |
-| `stream2pretrain-decon-signing` (`.Values.processor.deconGate.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), optional `ed25519.crt` | Decon-Gate signer |
+| `stream2pretrain-decon-signing` (`.Values.processor.deconGate.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), `ed25519.crt` when Foundry is enabled | Decon-Gate and Foundry signer |
 | `stream2pretrain-decon-benchmarks` (`.Values.processor.deconGate.benchmarkCorpus.configMap`) | `corpus.json` | Decon-Gate benchmark corpus |
 | `stream2pretrain-keda-redpanda` (`.Values.keda.triggerAuthSecret`) | `sasl`, `tls`, `username`, `password` | KEDA Kafka trigger            |
 | `stream2pretrain-foundry-providers` (`.Values.processor.foundry.providerSecret`, when enabled) | `HETZNER_INFERENCE_API_KEY`, `controlToken` | foundry worker, API, and UI manual trigger |
