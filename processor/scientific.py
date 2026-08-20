@@ -9,6 +9,7 @@ import io
 import os
 import re
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -516,7 +517,13 @@ class ScientificProcessor:
     ) -> ScientificFigure:
         from PIL import Image  # type: ignore[import-not-found]
 
-        image = Image.open(io.BytesIO(payload)).convert("RGB")
+        # Pillow's built-in decompression-bomb threshold is based on decoded
+        # pixels rather than compressed bytes. Promote its warning to an
+        # exception before ``convert`` allocates the full raster; the caller
+        # records the skipped figure as an extraction warning and continues.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            image = Image.open(io.BytesIO(payload)).convert("RGB")
         figure_type, confidence = self._classifier.classify(image)
         ocr_text = self._ocr.read(image)
         digest = hashlib.sha256(payload).hexdigest()
