@@ -50,7 +50,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: per-record
+  licenseDefault: arxiv-non-exclusive-distribution
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -66,7 +66,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: per-record
+  licenseDefault: arxiv-non-exclusive-distribution
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -82,7 +82,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: per-record
+  licenseDefault: arxiv-non-exclusive-distribution
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -98,7 +98,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: per-record
+  licenseDefault: arxiv-non-exclusive-distribution
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -114,7 +114,7 @@ spec:
   rateLimit:
     requestsPerSecond: 4.0
     burst: 4
-  licenseDefault: per-record
+  licenseDefault: arxiv-non-exclusive-distribution
   egressAllow: ["oaipmh.arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
