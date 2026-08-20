@@ -57,7 +57,7 @@ keda:
 processor:
   fetcher:
     replicas: 1
-    tag: "0.2.0-619290f"
+    tag: "0.2.0-1f4cf19"
   curate:
     replicas: 1
     tag: "0.2.0-619290f"
