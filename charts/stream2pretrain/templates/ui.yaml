@@ -53,11 +53,13 @@ spec:
               value: {{ .Values.observability.prometheus.serverAddress | quote }}
             - name: FOUNDRY_URL
               value: {{ printf "http://%s-foundry.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.processor.foundry.apiPort | quote }}
+            {{- if .Values.processor.foundry.enabled }}
             - name: FOUNDRY_CONTROL_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.processor.foundry.providerSecret | quote }}
                   key: {{ .Values.processor.foundry.controlTokenKey | quote }}
+            {{- end }}
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -104,39 +106,3 @@ spec:
       targetPort: http
   selector:
     {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-{{- if .Values.ui.ingress.enabled }}
----
-apiVersion: traefik.io/v1alpha1
-kind: IngressRoute
-metadata:
-  name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-spec:
-  entryPoints:
-    {{- toYaml .Values.ui.ingress.entryPoints | nindent 4 }}
-  routes:
-    - match: Host(`{{ .Values.ui.ingress.host }}`)
-      kind: Rule
-      services:
-        - name: {{ $name }}
-          port: 80
-  tls:
-    secretName: {{ .Values.ui.ingress.tlsSecret | quote }}
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: {{ .Values.ui.ingress.tlsSecret }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-spec:
-  secretName: {{ .Values.ui.ingress.tlsSecret | quote }}
-  dnsNames:
-    - {{ .Values.ui.ingress.host | quote }}
-  issuerRef:
-    name: {{ .Values.ui.ingress.clusterIssuer | quote }}
-    kind: ClusterIssuer
-{{- end }}

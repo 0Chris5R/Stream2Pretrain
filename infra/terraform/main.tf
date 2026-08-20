@@ -12,6 +12,7 @@ locals {
     },
     var.extra_metadata,
   )
+
 }
 
 resource "openstack_compute_instance_v2" "master" {
@@ -63,22 +64,22 @@ resource "local_file" "ansible_inventory" {
       children = {
         stream2pretrain = {
           children = {
-            stream2pretrain_k3s_server = {
+            gridflex_k3s_server = {
               hosts = {
                 (local.master_ansible_host) = {
-                  ansible_user       = var.ssh_user
-                  interpreter_python = var.interpreter_python
-                  ip_family          = var.ip_family
-                  k3s_role           = "server"
+                  ansible_user               = var.ssh_user
+                  ansible_python_interpreter = var.interpreter_python
+                  ip_family                  = var.ip_family
+                  k3s_role                   = "server"
                 }
               }
             }
-            stream2pretrain_k3s_agent = {
+            gridflex_k3s_agent = {
               vars = {
-                interpreter_python = var.interpreter_python
-                ip_family          = var.ip_family
-                k3s_server_host    = local.master_ansible_host
-                k3s_role           = "agent"
+                ansible_python_interpreter = var.interpreter_python
+                ip_family                  = var.ip_family
+                k3s_server_host            = local.master_ansible_host
+                k3s_role                   = "agent"
               }
               hosts = {
                 for worker in openstack_compute_instance_v2.worker :
@@ -95,9 +96,9 @@ resource "local_file" "ansible_inventory" {
 }
 
 locals {
-  master_ansible_host = var.ip_family == "ipv6" ? openstack_compute_instance_v2.master.network[0].fixed_ip_v6 : openstack_compute_instance_v2.master.network[0].fixed_ip_v4
+  master_ansible_host = contains(["ipv6", "dual"], var.ip_family) ? openstack_compute_instance_v2.master.network[0].fixed_ip_v6 : openstack_compute_instance_v2.master.network[0].fixed_ip_v4
   worker_ansible_hosts = {
     for worker in openstack_compute_instance_v2.worker :
-    worker.name => (var.ip_family == "ipv6" ? worker.network[0].fixed_ip_v6 : worker.network[0].fixed_ip_v4)
+    worker.name => (contains(["ipv6", "dual"], var.ip_family) ? worker.network[0].fixed_ip_v6 : worker.network[0].fixed_ip_v4)
   }
 }

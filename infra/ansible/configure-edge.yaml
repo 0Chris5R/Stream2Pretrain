@@ -1,0 +1,139 @@
+---
+- name: Configure Stream2Pretrain DNS and TLS
+  hosts: gridflex_k3s_server
+  become: true
+  gather_facts: false
+
+  vars:
+    kubeconfig_root: /etc/rancher/k3s/k3s.yaml
+    # The RFC2136 endpoint currently shares the DHBW ACME host. Its name works
+    # directly on fresh dual-stack clusters and through DNS64 on the preserved
+    # IPv6-only cluster.
+    rfc2136_dns_host: certificates.dhbw.cloud
+    cert_manager_cluster_issuer_name: dhbw-acme
+    cert_manager_rfc2136_secret_name: rfc2136-tsig
+    cert_manager_wildcard_secret_name: stream2pretrain-wildcard-tls
+    external_dns_rfc2136_secret_name: rfc2136-tsig
+    traefik_namespace: traefik
+
+  tasks:
+    - name: Validate the separate DHBW DNS inventory
+      ansible.builtin.assert:
+        that:
+          - cert_manager_email | default('') | length > 0
+          - rfc2136_zone | default('') | length > 0
+          - rfc2136_tsig_secret_value | default('') | length > 0
+          - rfc2136_tsig_secret_alg | default('') | length > 0
+          - rfc2136_tsig_secret_keyname | default('') | length > 0
+        fail_msg: >-
+          Supply the lecture-style dns-credentials.yaml as a second Ansible
+          inventory. No DNS credential may be committed to this repository.
+      no_log: true
+
+    - name: Ensure edge namespaces exist
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_root }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ item }}"
+      loop:
+        - cert-manager
+        - external-dns
+        - "{{ traefik_namespace }}"
+
+    - name: Store the RFC2136 key for cert-manager
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_root }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ cert_manager_rfc2136_secret_name }}"
+            namespace: cert-manager
+          type: Opaque
+          data:
+            tsig-secret-key: "{{ rfc2136_tsig_secret_value | b64encode }}"
+      no_log: true
+
+    - name: Store the RFC2136 configuration for ExternalDNS
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_root }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ external_dns_rfc2136_secret_name }}"
+            namespace: external-dns
+          type: Opaque
+          data:
+            tsig-secret-key: "{{ rfc2136_tsig_secret_value | b64encode }}"
+            tsig-keyname: "{{ rfc2136_tsig_secret_keyname | b64encode }}"
+            tsig-algorithm: "{{ rfc2136_tsig_secret_alg | lower | b64encode }}"
+      no_log: true
+
+    - name: Configure the DHBW ACME ClusterIssuer
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_root }}"
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: "{{ cert_manager_cluster_issuer_name }}"
+          spec:
+            acme:
+              server: https://certificates.dhbw.cloud/directory
+              email: "{{ cert_manager_email }}"
+              privateKeySecretRef:
+                name: dhbw-acme-account-key
+              solvers:
+                - selector:
+                    dnsZones:
+                      - "{{ rfc2136_zone }}"
+                  dns01:
+                    rfc2136:
+                      nameserver: "{{ rfc2136_dns_host }}:53"
+                      tsigKeyName: "{{ rfc2136_tsig_secret_keyname }}"
+                      tsigAlgorithm: >-
+                        {{ rfc2136_tsig_secret_alg | replace('-', '') | upper }}
+                      tsigSecretSecretRef:
+                        name: "{{ cert_manager_rfc2136_secret_name }}"
+                        key: tsig-secret-key
+      no_log: true
+
+    - name: Request the shared wildcard certificate
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_root }}"
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: stream2pretrain-wildcard
+            namespace: "{{ traefik_namespace }}"
+          spec:
+            secretName: "{{ cert_manager_wildcard_secret_name }}"
+            dnsNames:
+              - "*.{{ rfc2136_zone }}"
+            issuerRef:
+              name: "{{ cert_manager_cluster_issuer_name }}"
+              kind: ClusterIssuer
+
+    - name: Register the wildcard as Traefik's default certificate
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_root }}"
+        state: present
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: TLSStore
+          metadata:
+            name: default
+            namespace: "{{ traefik_namespace }}"
+          spec:
+            defaultCertificate:
+              secretName: "{{ cert_manager_wildcard_secret_name }}"

@@ -1,0 +1,34 @@
+{{- if .Values.ui.ingress.enabled }}
+{{- $component := "ui" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.ui.ingress.host | quote }}
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ui.ingress.ingressClassName | quote }}
+  rules:
+    - host: {{ .Values.ui.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - {{ .Values.ui.ingress.host | quote }}
+      {{- with .Values.ui.ingress.tlsSecret }}
+      secretName: {{ .Values.ui.ingress.tlsSecret | quote }}
+      {{- end }}
+{{- end }}

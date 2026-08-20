@@ -1,7 +1,9 @@
 ---
-# Traefik dev values. Runs as a DaemonSet on workers so any node accepts 80/443.
+# Traefik dev values. k3s ServiceLB publishes 80/443 on the measured public
+# node IPv6 addresses and forwards them to two Traefik replicas.
 deployment:
-  kind: DaemonSet
+  kind: Deployment
+  replicas: 2
 ports:
   web:
     redirectTo:
@@ -10,7 +12,7 @@ ports:
     tls:
       enabled: true
 service:
-  type: ClusterIP
+  type: LoadBalancer
 ingressClass:
   enabled: true
   isDefaultClass: true

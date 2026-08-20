@@ -1,0 +1,154 @@
+---
+- name: Add IPv4 egress to an existing IPv6-only k3s cluster
+  hosts: stream2pretrain
+  become: true
+  gather_facts: true
+
+  vars:
+    nat64_instance: stream2pretrain
+    nat64_prefix: 64:ff9b::/96
+    nat64_port_range: 61001-65535
+
+  tasks:
+    - name: Validate that every node can translate between both address families
+      ansible.builtin.assert:
+        that:
+          - ansible_default_ipv4.address | default('') | length > 0
+          - ansible_default_ipv6.address | default('') | length > 0
+        fail_msg: >-
+          NAT64 requires working IPv4 and IPv6 default routes on every node.
+
+    - name: Install Jool NAT64
+      ansible.builtin.apt:
+        name:
+          - jool-dkms
+          - jool-tools
+        state: present
+        update_cache: true
+        cache_valid_time: 86400
+
+    - name: Create the Jool configuration directory
+      ansible.builtin.file:
+        path: /etc/jool
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Reserve a non-overlapping host port range for Jool
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-z-stream2pretrain-nat64.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          net.ipv4.ip_local_port_range = 1024 60999
+
+    - name: Read the active host ephemeral port range
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.ip_local_port_range
+      register: nat64_active_port_range
+      changed_when: false
+
+    - name: Apply the non-overlapping host ephemeral port range
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - -w
+          - net.ipv4.ip_local_port_range=1024 60999
+      when: nat64_active_port_range.stdout.split() != ['1024', '60999']
+      changed_when: true
+
+    - name: Configure the per-node NAT64 instance
+      ansible.builtin.copy:
+        dest: /etc/jool/jool.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {
+            "instance": "{{ nat64_instance }}",
+            "framework": "netfilter",
+            "global": {
+              "pool6": "{{ nat64_prefix }}",
+              "lowest-ipv6-mtu": 1280,
+              "logging-debug": false
+            },
+            "pool4": [
+              {
+                "protocol": "TCP",
+                "prefix": "{{ ansible_default_ipv4.address }}/32",
+                "port range": "{{ nat64_port_range }}"
+              },
+              {
+                "protocol": "UDP",
+                "prefix": "{{ ansible_default_ipv4.address }}/32",
+                "port range": "{{ nat64_port_range }}"
+              },
+              {
+                "protocol": "ICMP",
+                "prefix": "{{ ansible_default_ipv4.address }}/32",
+                "port range": "0-65535"
+              }
+            ]
+          }
+      notify: Restart Jool
+
+    - name: Disable the unused stateless translator
+      ansible.builtin.systemd:
+        name: jool_siit
+        enabled: false
+        state: stopped
+
+    - name: Enable the stateful translator
+      ansible.builtin.systemd:
+        name: jool
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart Jool
+      ansible.builtin.systemd:
+        name: jool
+        state: restarted
+
+- name: Enable DNS64 for IPv4-only upstream names
+  hosts: gridflex_k3s_server
+  become: true
+  gather_facts: false
+
+  vars:
+    kubeconfig_root: /etc/rancher/k3s/k3s.yaml
+    nat64_prefix: 64:ff9b::/96
+
+  tasks:
+    - name: Configure the bundled CoreDNS DNS64 plugin
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_root }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: coredns-custom
+            namespace: kube-system
+          data:
+            nat64.override: |
+              dns64 {{ nat64_prefix }}
+      register: coredns_dns64
+
+    - name: Restart CoreDNS after changing its imported configuration
+      ansible.builtin.command:
+        cmd: /usr/local/bin/kubectl -n kube-system rollout restart deployment/coredns
+      environment:
+        KUBECONFIG: "{{ kubeconfig_root }}"
+      when: coredns_dns64.changed
+      changed_when: true
+
+    - name: Wait for CoreDNS to become ready
+      ansible.builtin.command:
+        cmd: /usr/local/bin/kubectl -n kube-system rollout status deployment/coredns --timeout=120s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_root }}"
+      when: coredns_dns64.changed
+      changed_when: false

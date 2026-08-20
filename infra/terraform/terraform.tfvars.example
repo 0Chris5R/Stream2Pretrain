@@ -5,7 +5,7 @@
 # target project before applying.
 cluster_name = "stream2pretrain"
 network_name = "DHBWV6"
-ip_family    = "ipv6"
+ip_family    = "dual"
 
 # Required project-specific inputs. Resolve these with the OpenStack CLI rather
 # than copying another project member's identifiers.

@@ -5,9 +5,12 @@
   gather_facts: true
 
   vars:
-    # Keep this role focused on the Kubernetes base layer. The project Helmfile
-    # owns Traefik, cert-manager, ExternalDNS, and the application stack.
-    ip_family: ipv6
+    # Keep this role focused on the Kubernetes base layer. Helmfile owns the
+    # pinned Traefik, cert-manager, ExternalDNS, and application releases. DNS
+    # credentials are supplied to configure-edge.yaml as the lecture's second
+    # inventory, so there is one owner per in-cluster resource.
+    ip_family: dual
+    ip_family_primary: ipv6
     k3s_extra_exec_args: "--disable=traefik"
     cert_manager_email: ""
     rfc2136_zone: ""

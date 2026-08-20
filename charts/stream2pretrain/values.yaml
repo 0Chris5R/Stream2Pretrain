@@ -644,10 +644,9 @@ ui:
   ingress:
     enabled: true
     host: stream2pretrain.local
-    tlsSecret: stream2pretrain-ui-tls
-    clusterIssuer: letsencrypt-prod
-    entryPoints:
-      - websecure
+    ingressClassName: traefik
+    # Empty uses Traefik's platform-managed default wildcard certificate.
+    tlsSecret: ""
   env:
     duckdbCacheSeconds: 30
 

@@ -6,6 +6,7 @@ COMMAND="${1:-verify}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 KUBECONFIG_PATH="${KUBECONFIG:-$ROOT_DIR/infra/kubeconfig-stream2pretrain.yaml}"
 OPENRC_PATH="${OPENRC_PATH:-}"
+DNS_CREDENTIALS_INVENTORY="${DNS_CREDENTIALS_INVENTORY:-$ROOT_DIR/../cloud/dns-credentials.yaml}"
 if [[ -x /opt/homebrew/opt/helm@3/bin/helm ]]; then
   DEFAULT_HELM_BINARY=/opt/homebrew/opt/helm@3/bin/helm
 else
@@ -58,11 +59,7 @@ validate() {
   "$HELM_BINARY" lint "$ROOT_DIR/charts/stream2pretrain" \
     -f "$ROOT_DIR/charts/stream2pretrain/values-$ENVIRONMENT.yaml" \
     -f "$ROOT_DIR/infra/helmfile-values/stream2pretrain.$ENVIRONMENT.yaml"
-  local tier
-  for tier in platform catalog application; do
-    helmfile -b "$HELM_BINARY" -f "$ROOT_DIR/helmfile.yaml" -e "$ENVIRONMENT" \
-      --selector "tier=$tier" lint
-  done
+  helmfile -b "$HELM_BINARY" -f "$ROOT_DIR/helmfile.yaml" -e "$ENVIRONMENT" lint
 }
 
 plan_cluster() {
@@ -80,6 +77,21 @@ apply_cluster() {
   ansible-playbook \
     -i "$ROOT_DIR/infra/terraform/generated-inventory.yml" \
     "$ROOT_DIR/infra/ansible/deploy.yaml"
+  ensure_ipv4_egress
+}
+
+ensure_ipv4_egress() {
+  export KUBECONFIG="$KUBECONFIG_PATH"
+
+  if kubectl get nodes \
+    -o jsonpath='{range .items[*].spec.podCIDRs[*]}{.}{"\n"}{end}' \
+    | grep -q '\.'; then
+    return
+  fi
+
+  ansible-playbook \
+    -i "$ROOT_DIR/infra/terraform/generated-inventory.yml" \
+    "$ROOT_DIR/infra/ansible/configure-nat64.yaml"
 }
 
 apply_tier() {
@@ -88,6 +100,60 @@ apply_tier() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   helmfile -b "$HELM_BINARY" -f "$ROOT_DIR/helmfile.yaml" -e "$ENVIRONMENT" \
     --selector "tier=$tier" apply
+}
+
+apply_named_release() {
+  local release_name="$1"
+  require_tool helmfile
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  helmfile -b "$HELM_BINARY" -f "$ROOT_DIR/helmfile.yaml" -e "$ENVIRONMENT" \
+    --selector "name=$release_name" apply
+}
+
+configure_dns() {
+  require_tool ansible-playbook
+
+  if [[ ! -f "$DNS_CREDENTIALS_INVENTORY" ]]; then
+    printf 'DNS credential inventory does not exist: %s\n' "$DNS_CREDENTIALS_INVENTORY" >&2
+    exit 1
+  fi
+
+  ansible-playbook \
+    -i "$ROOT_DIR/infra/terraform/generated-inventory.yml" \
+    -i "$DNS_CREDENTIALS_INVENTORY" \
+    "$ROOT_DIR/infra/ansible/configure-edge.yaml"
+}
+
+apply_ui_ingress() {
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  "$HELM_BINARY" template stream2pretrain "$ROOT_DIR/charts/stream2pretrain" \
+    --namespace stream2pretrain \
+    --values "$ROOT_DIR/charts/stream2pretrain/values-$ENVIRONMENT.yaml" \
+    --values "$ROOT_DIR/infra/helmfile-values/stream2pretrain.$ENVIRONMENT.yaml" \
+    --show-only templates/ui-ingress.yaml \
+    | kubectl apply -f -
+}
+
+apply_edge() {
+  ensure_ipv4_egress
+  apply_named_release cert-manager
+  apply_named_release traefik
+  configure_dns
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  kubectl wait --for=condition=Ready clusterissuer/dhbw-acme --timeout=120s
+  kubectl -n traefik wait --for=condition=Ready \
+    certificate/stream2pretrain-wildcard --timeout=180s
+  apply_named_release external-dns
+  apply_ui_ingress
+  kubectl -n traefik rollout status deployment/traefik --timeout=120s
+  kubectl -n external-dns rollout status deployment/external-dns --timeout=120s
+
+  local stale_issuer
+  stale_issuer="$(kubectl -n stream2pretrain get certificate stream2pretrain-ui-tls \
+    -o jsonpath='{.spec.issuerRef.name}' 2>/dev/null || true)"
+  if [[ "$stale_issuer" == "letsencrypt-prod" ]]; then
+    kubectl -n stream2pretrain delete certificate stream2pretrain-ui-tls
+  fi
 }
 
 bootstrap_polaris() {
@@ -112,6 +178,17 @@ required_secrets() {
       missing=1
     fi
   done
+  if "$HELM_BINARY" template stream2pretrain "$ROOT_DIR/charts/stream2pretrain" \
+    --namespace stream2pretrain \
+    --values "$ROOT_DIR/charts/stream2pretrain/values-$ENVIRONMENT.yaml" \
+    --values "$ROOT_DIR/infra/helmfile-values/stream2pretrain.$ENVIRONMENT.yaml" \
+    --show-only templates/processor-foundry.yaml \
+    | grep -q '^kind: StatefulSet$'; then
+    if ! kubectl get secret -n stream2pretrain stream2pretrain-foundry-providers >/dev/null 2>&1; then
+      printf 'Missing required Secret: stream2pretrain/stream2pretrain-foundry-providers\n' >&2
+      missing=1
+    fi
+  fi
   if ! kubectl get configmap -n stream2pretrain stream2pretrain-decon-benchmarks >/dev/null 2>&1; then
     printf 'Missing required ConfigMap: stream2pretrain/stream2pretrain-decon-benchmarks\n' >&2
     missing=1
@@ -215,7 +292,12 @@ case "$COMMAND" in
   platform)
     validate
     required_platform_secret
+    apply_edge
     apply_tier "$COMMAND"
+    ;;
+  edge)
+    validate
+    apply_edge
     ;;
   catalog)
     validate
@@ -239,7 +321,7 @@ case "$COMMAND" in
     verify
     ;;
   *)
-    printf 'Usage: %s {validate|plan|cluster|platform|catalog|topics|application|verify}\n' "$0" >&2
+    printf 'Usage: %s {validate|plan|cluster|platform|edge|catalog|topics|application|verify}\n' "$0" >&2
     exit 2
     ;;
 esac

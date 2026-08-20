@@ -13,8 +13,9 @@ not based on target-cluster measurements.
 ## Safety boundary
 
 - Terraform protects every VM with `prevent_destroy`.
-- The deployment script never creates credentials, deletes PVCs, or runs a
-  forced Helm upgrade.
+- The deployment script copies the existing RFC2136 credential into Kubernetes
+  Secrets but never creates, prints, or commits a new credential. It does not
+  delete PVCs or run a forced Helm upgrade.
 - OpenStack state, plans, credentials, generated inventory, and kubeconfig are
   ignored by Git.
 - The live application release cannot be adopted in one Helm upgrade because
@@ -37,13 +38,20 @@ The release graph and exact chart versions are in `../helmfile.yaml` and
 
 ## Prerequisites
 
-- Terraform, Ansible, `kubectl`, Helmfile, and Helm 3. Helm 4 is not supported
+- Terraform, Ansible, `kubectl`, Helmfile, Helm 3, and `uv`.
+  Helm 4 is not supported
   by the pinned charts. Set `HELM_BINARY` when Helm 3 is not the default.
 - DHBWCloud credentials through `OS_CLOUD`, exported `OS_*` variables, or an
   explicit `OPENRC_PATH`.
 - Project-specific `image_id` and `key_pair` values in
   `infra/terraform/terraform.tfvars`.
-- A reachable MinIO service named `minio` in namespace `minio`, the four
+- The OpenStack project `default` security group used by the lecture exercise.
+  This is appropriate for the isolated course prototype, but its permissive
+  ingress rules are not a production security baseline.
+- The existing, non-committed DHBW DNS inventory. By default the script reads
+  `../cloud/dns-credentials.yaml`; set `DNS_CREDENTIALS_INVENTORY` when it is
+  stored elsewhere.
+- A reachable MinIO service named `minio` in namespace `minio`, the five
   application buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`, and
   `s2p-posttrain`,
   and externally managed credentials.
@@ -52,7 +60,7 @@ The release graph and exact chart versions are in `../helmfile.yaml` and
   override temporarily schedules application pods there with `pullPolicy:
   Never`.
 
-Required externally managed objects:
+Required externally managed objects for enabled components:
 
 | Namespace | Object | Required keys |
 | --- | --- | --- |
@@ -64,7 +72,7 @@ Required externally managed objects:
 | `stream2pretrain` | Secret `stream2pretrain-github` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-hf` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-decon-signing` | `ed25519.key`, `ed25519.crt` |
-| `stream2pretrain` | Secret `stream2pretrain-foundry-providers` | `HETZNER_INFERENCE_API_KEY`, `controlToken` |
+| `stream2pretrain` | Secret `stream2pretrain-foundry-providers` (foundry only) | `HETZNER_INFERENCE_API_KEY`, `controlToken` |
 | `stream2pretrain` | ConfigMap `stream2pretrain-decon-benchmarks` | `corpus.json` |
 
 Use Sealed Secrets, External Secrets, or another team-approved mechanism. The
@@ -94,13 +102,18 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 ./scripts/setup_dhbw_demo.sh topics
 ./scripts/setup_dhbw_demo.sh application
 
+# Safe existing-cluster edge migration. This avoids the full application
+# upgrade and applies only cert-manager, Traefik, ExternalDNS, and UI ingress.
+./scripts/setup_dhbw_demo.sh edge
+
 # Read-only cluster health summary
 ./scripts/setup_dhbw_demo.sh verify
 ```
 
-`platform` installs cert-manager, Traefik, kube-prometheus-stack, KEDA,
-Gatekeeper, and Redpanda. `catalog` installs the official Apache Polaris 1.7.0
-chart. `topics` idempotently creates the configured one-partition, one-replica topics
+`platform` installs cert-manager, Traefik, ExternalDNS,
+kube-prometheus-stack, KEDA, Gatekeeper, and Redpanda. `catalog` installs the
+official Apache Polaris 1.7.0 chart. `topics` idempotently creates the
+configured one-partition, one-replica topics
 matching the measured live cluster. `application` installs the local
 Stream2Pretrain chart. Loki, Tempo, and
 Alloy are excluded until their MinIO credentials, retention, storage, and
@@ -112,7 +125,7 @@ credential secret, recovery test, and measured persistent storage before it can
 be added to this deployment path.
 
 The post-training foundry additionally requires its provider Secret, signing
-key, and `s2p-posttrain` bucket. Its single-writer worker starts after both
+key, and `s2p-posttrain` bucket. Its single-writer worker starts after all
 configured models are present in authenticated model discovery. See
 [`../docs/POSTTRAIN_FOUNDRY.md`](../docs/POSTTRAIN_FOUNDRY.md) for the runtime
 and audit workflow.
@@ -139,10 +152,34 @@ the live application workloads.
 
 ## DNS and TLS
 
-The verified demo path uses port forwarding. Public ingress remains opt-in
-because no RFC2136 zone or TSIG credentials are committed. Replace every marker
-in `infra/dns/cert-manager-issuer.yaml`, review the intended CIDRs, and apply it
-only after the team supplies the real DNS data.
+The DHBW profile follows Exercise Track 1 and publishes
+`stream2pretrain-app.s241221-at-student-dhbw-mannheim-de.users.dhbw.site`. Traefik
+uses k3s ServiceLB on ports 80 and 443. ExternalDNS manages only this zone with
+the unique owner `stream2pretrain`, the prefix `_stream2pretrain.`, and
+`upsert-only` policy, so the existing `registry` record and its ownership TXT
+record are not adopted or deleted.
+
+cert-manager uses the DHBW ACME directory at
+`https://certificates.dhbw.cloud/directory` and RFC2136 DNS-01. As shown in the
+lecture, the DNS credential file is passed as a second Ansible inventory. The
+playbook creates namespace-local TSIG Secrets, a DHBW ClusterIssuer, and one
+wildcard certificate registered as Traefik's default. Application Ingresses do
+not create a separate certificate. The secret value is never present in Helm
+values or Git.
+
+Fresh clusters use the lecture role's dual-stack mode with IPv6 as the primary
+family. The preserved live cluster was originally installed with IPv6-only pod
+CIDRs, so `edge` detects that state and adds Jool NAT64 plus CoreDNS DNS64
+without recreating k3s or its local persistent volumes. Application pods can
+then reach IPv4-only upstream services while public ingress remains IPv6.
+The Jool port-pool split follows the packaged Jool example. Its sustained
+connection capacity remains `needs-measurement` on the course workload.
+
+The lecture Terraform attaches the project `default` security group to all
+three nodes, so this deployment does the same. The live group was verified to
+allow all ingress. That keeps the lab setup simple and ensures k3s overlay
+traffic works, but it must be documented as a prototype limitation rather than
+presented as production hardening.
 
 ## Destructive operations
 

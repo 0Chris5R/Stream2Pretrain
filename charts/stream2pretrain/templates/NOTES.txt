@@ -11,8 +11,8 @@ Components:
   StatefulSet plus control API and per-artifact human audits).
 - Control plane: mixture-controller (kopf) + SourceFeed/MixtureRecipe CRDs.
 {{- if .Values.ui.ingress.enabled }}
-- UI: Next.js 14 reachable at https://{{ .Values.ui.ingress.host }}/ once the
-  Certificate {{ .Values.ui.ingress.tlsSecret }} is Ready.
+- UI: Next.js 14 reachable at https://{{ .Values.ui.ingress.host }}/ once DNS
+  resolves and the platform wildcard certificate is Ready.
 {{- else }}
 - UI: Next.js 14 available through:
   kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "stream2pretrain.fullname" . }}-ui 3000:80
