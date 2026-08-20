@@ -298,7 +298,7 @@ def process_bronze_payload(
     bronze = common.bronze_loads(payload)
     # Defence in depth for legacy producers and replayed topics. This check is
     # intentionally before the MinIO GET, extraction, OCR, and model pipeline.
-    if not is_training_permitted(bronze.spdx_license):
+    if not is_training_permitted(bronze.spdx_license, source_format=bronze.source_format):
         return None
     raw_html = fetch_raw_bytes(state, bronze)
     silver = normalize(state, bronze, raw_html)

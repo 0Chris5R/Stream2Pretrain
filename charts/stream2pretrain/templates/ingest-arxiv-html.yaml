@@ -20,7 +20,7 @@ inside the pod. If a fine-grained KEDA selector becomes available later we
 can swap this for a metrics-api-based scaler without churning the rest of
 the chart.
 */ -}}
-{{- if and .Values.sources.arxiv.enabled .Values.sources.arxiv.htmlFetcher.enabled }}
+{{- if .Values.sources.arxiv.htmlFetcher.enabled }}
 {{- $component := "ingest-arxiv-html" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $hf := .Values.ingest.arxivHtmlFetcher }}
@@ -48,7 +48,7 @@ spec:
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       containers:
         - name: arxiv-html
-          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" $hf.image) | quote }}
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" $hf.image "tag" $hf.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           args:
@@ -146,7 +146,7 @@ spec:
           {{- include "stream2pretrain.scheduling" . | nindent 10 }}
           containers:
             - name: arxiv-html-backfill
-              image: {{ include "stream2pretrain.image" (dict "ctx" . "image" $hf.image) | quote }}
+              image: {{ include "stream2pretrain.image" (dict "ctx" . "image" $hf.image "tag" $hf.tag) | quote }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
               args:

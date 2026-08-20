@@ -105,13 +105,30 @@ def test_normalize_returns_none_on_empty_html(bronze_record: BronzeRecord) -> No
     assert normalize(state, bronze_record, b"") is None
 
 
-def test_missing_license_stops_before_minio_and_processing(
+def test_missing_non_code_license_is_processed(
+    bronze_record: BronzeRecord,
+) -> None:
+    s3 = _FakeS3(b"<html><body><p>This is an English document with enough readable content for extraction.</p></body></html>")
+    state = _state(s3)
+    unlicensed = bronze_record.model_copy(
+        update={"spdx_license": None, "spdx_license_source": "unknown"}
+    )
+
+    assert process_bronze_payload(state, unlicensed.model_dump_json().encode()) is not None
+    assert len(s3.calls) == 1
+
+
+def test_missing_code_license_stops_before_minio_and_processing(
     bronze_record: BronzeRecord,
 ) -> None:
     s3 = _FakeS3(b"must not be read")
     state = _state(s3)
     unlicensed = bronze_record.model_copy(
-        update={"spdx_license": None, "spdx_license_source": "unknown"}
+        update={
+            "source_format": "code",
+            "spdx_license": None,
+            "spdx_license_source": "unknown",
+        }
     )
 
     assert process_bronze_payload(state, unlicensed.model_dump_json().encode()) is None

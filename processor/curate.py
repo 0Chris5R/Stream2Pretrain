@@ -608,8 +608,12 @@ def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFla
 
 
 def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
-    """Defensive strict gate for every format, including legacy/replay rows."""
-    return None if is_training_permitted(silver.spdx_license) else "license_excluded"
+    """Apply the provisional non-code policy to legacy and replay rows."""
+    return (
+        None
+        if is_training_permitted(silver.spdx_license, source_format=silver.source_format)
+        else "license_excluded"
+    )
 
 
 def _uses_scientific_quality_profile(silver: SilverRecord) -> bool:

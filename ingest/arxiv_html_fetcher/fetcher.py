@@ -284,7 +284,7 @@ async def fetch_one(
     fetched_at = datetime.now(tz=UTC)
     resp = await client.get(primary_url)
 
-    if resp.status_code == 200 and resp.content:
+    if resp.status_code == 200 and resp.content and _looks_like_fulltext_html(resp.content):
         extracted = extract_arxiv_html(resp.content, pipeline=ARXIV_PIPELINE)
         return FetchOutcome(
             status=200,
@@ -298,7 +298,10 @@ async def fetch_one(
             last_modified=_parse_last_modified(resp.headers.get("last-modified")),
         )
 
-    if resp.status_code != 404:
+    primary_missing = resp.status_code == 404 or (
+        resp.status_code == 200 and not _looks_like_fulltext_html(resp.content)
+    )
+    if not primary_missing:
         # Anything other than 404 falls through to a metadata stub: the
         # retry transport already exhausted 5xx/429 paths, and 403 / 410 are
         # terminal.
@@ -322,7 +325,9 @@ async def fetch_one(
     fb_fetched_at = datetime.now(tz=UTC)
     fb_resp = await client.get(fallback_url)
 
-    if fb_resp.status_code == 200 and fb_resp.content:
+    if fb_resp.status_code == 200 and fb_resp.content and _looks_like_fulltext_html(
+        fb_resp.content
+    ):
         extracted = extract_arxiv_html(fb_resp.content, pipeline=AR5IV_PIPELINE)
         return FetchOutcome(
             status=200,
@@ -336,7 +341,10 @@ async def fetch_one(
             last_modified=_parse_last_modified(fb_resp.headers.get("last-modified")),
         )
 
-    if fb_resp.status_code != 404:
+    fallback_missing = fb_resp.status_code == 404 or (
+        fb_resp.status_code == 200 and not _looks_like_fulltext_html(fb_resp.content)
+    )
+    if not fallback_missing:
         return FetchOutcome(
             status=fb_resp.status_code,
             url=fallback_url,
@@ -387,6 +395,12 @@ async def fetch_one(
         last_modified=_parse_last_modified(pdf_resp.headers.get("last-modified")),
         source_format="metadata",
     )
+
+
+def _looks_like_fulltext_html(content: bytes) -> bool:
+    """Reject arXiv abstract/landing pages returned through mirror redirects."""
+    lowered = content[:262144].lower()
+    return b"<article" in lowered or b"ltx_page_main" in lowered
 
 
 def build_metadata_stub(arxiv_id: str, outcome: FetchOutcome) -> bytes:
@@ -504,7 +518,7 @@ async def stream_ids_from_topic(
     *,
     topic: str,
     consumer_group: str = "s2p-arxiv-html-fetcher",
-    sources_filter: Iterable[str] = ("arxiv-oai-cs", "arxiv-rss-cs"),
+    sources_filter: Iterable[str] | None = None,
     max_records: int | None = None,
     commit_callback: Callable[[Any], None] | None = None,
 ) -> AsyncIterator[ArxivCandidate]:
@@ -544,7 +558,7 @@ async def stream_ids_from_topic(
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
             source = (body.get("source_feed") or "").strip()
-            if source not in set(sources_filter):
+            if not _is_arxiv_source_feed(source, sources_filter):
                 continue
             url = body.get("url") or body.get("source_url") or ""
             arxiv_id = _arxiv_id_from_url(url) or body.get("arxiv_id")
@@ -560,6 +574,15 @@ async def stream_ids_from_topic(
                 return
     finally:
         await consumer.stop()
+
+
+def _is_arxiv_source_feed(source: str, sources_filter: Iterable[str] | None) -> bool:
+    """Match current SourceFeed names while retaining the older aliases."""
+    if sources_filter is not None:
+        return source in set(sources_filter)
+    return source in {"oai-arxiv-cs", "arxiv-oai-cs", "arxiv-rss-cs"} or source.startswith(
+        "rss-arxiv-cs-"
+    )
 
 
 _ARXIV_URL_RE = re.compile(

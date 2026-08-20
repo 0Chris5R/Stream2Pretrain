@@ -32,7 +32,7 @@ spec:
       {{- if .Values.processor.curate.modelBundle.bootstrap }}
       initContainers:
         - name: model-bootstrap
-          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image) | quote }}
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image "tag" .Values.processor.curate.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           command: ["python", "-m", "processor.model_bootstrap"]
@@ -91,7 +91,7 @@ spec:
       {{- end }}
       containers:
         - name: curate
-          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image) | quote }}
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image "tag" .Values.processor.curate.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
