@@ -37,7 +37,5 @@ def test_naive_datetime_is_treated_as_utc() -> None:
 
 def test_source_feed_with_slash_is_safe() -> None:
     fetched = datetime(2026, 1, 2, tzinfo=UTC)
-    key = bronze_object_key(
-        source_feed="orgs/feed", doc_id="sha256:y", fetched_at=fetched
-    )
+    key = bronze_object_key(source_feed="orgs/feed", doc_id="sha256:y", fetched_at=fetched)
     assert "source=orgs_feed" in key

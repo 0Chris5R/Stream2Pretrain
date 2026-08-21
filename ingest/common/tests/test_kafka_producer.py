@@ -73,6 +73,8 @@ async def test_send_calls_underlying_producer() -> None:
     assert len(sent) == 1
     assert sent[0]["topic"] == "raw.fetched"
     assert sent[0]["key"].startswith(b"sha256:")
-    assert sent[0]["headers"][b"schema"] == b"BronzeRecord/v1" if isinstance(
-        next(iter(sent[0]["headers"])), bytes
-    ) else sent[0]["headers"]["schema"] == b"BronzeRecord/v1"
+    assert (
+        sent[0]["headers"][b"schema"] == b"BronzeRecord/v1"
+        if isinstance(next(iter(sent[0]["headers"])), bytes)
+        else sent[0]["headers"]["schema"] == b"BronzeRecord/v1"
+    )

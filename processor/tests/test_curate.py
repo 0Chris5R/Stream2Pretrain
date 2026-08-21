@@ -329,19 +329,19 @@ def test_process_silver_payload_drops_rejected_rows(
         state.close()
 
 
-def test_missing_paper_license_is_trainable(cfg: ProcessorConfig, long_english_text: str) -> None:
+def test_missing_paper_license_is_quarantined(cfg: ProcessorConfig, long_english_text: str) -> None:
     state = build_state(cfg)
     try:
         silver = _silver(long_english_text, doc_id="sha256:" + "6" * 64).model_copy(
             update={"spdx_license": None, "spdx_license_source": "unknown"}
         )
         payload = process_silver_payload(state, silver_dumps(silver))
-        assert payload is not None
+        assert payload is None
         decision_payload, trainable = process_silver_decision_payload(state, silver_dumps(silver))
         gold = gold_loads(decision_payload)
-        assert "license_excluded" not in gold.reject_reasons
+        assert "license_excluded" in gold.reject_reasons
         assert gold.license == "unknown"
-        assert trainable
+        assert not trainable
     finally:
         state.close()
 

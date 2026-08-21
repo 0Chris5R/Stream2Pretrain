@@ -38,9 +38,7 @@ def init_tracer(service_name: str, cfg: IngestConfig) -> trace.Tracer:
     if _INITIALIZED:
         return trace.get_tracer(service_name)
 
-    resource = Resource.create(
-        {SERVICE_NAME: service_name, "service.namespace": "stream2pretrain"}
-    )
+    resource = Resource.create({SERVICE_NAME: service_name, "service.namespace": "stream2pretrain"})
     provider = TracerProvider(resource=resource)
 
     if cfg.otel_endpoint:

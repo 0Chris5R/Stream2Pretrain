@@ -1,0 +1,404 @@
+name: Build and deploy main
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: stream2pretrain-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: v3.15.4
+  HELMFILE_VERSION: v1.7.3
+
+jobs:
+  validate:
+    name: Validate repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
+          enable-cache: true
+
+      - name: Install Helm 3
+        uses: azure/setup-helm@v4
+        with:
+          version: "${{ env.HELM_VERSION }}"
+
+      - name: Install Helmfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_version="${HELMFILE_VERSION#v}"
+          archive="$RUNNER_TEMP/helmfile.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${archive_version}_linux_amd64.tar.gz" \
+            --output "$archive"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/helmfile" /usr/local/bin/helmfile
+          helmfile version
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages --all-groups --locked
+
+      - name: Run Python checks
+        run: |
+          uv run ruff check schemas ingest processor tests scripts
+          uv run ruff format --check schemas ingest processor tests scripts
+          uv run pytest
+
+      - name: Lint Helm chart and release graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm lint charts/stream2pretrain \
+            -f charts/stream2pretrain/values-dev.yaml \
+            -f infra/helmfile-values/stream2pretrain.dev.yaml
+          helmfile \
+            --helm-binary "$(command -v helm)" \
+            --file helmfile.yaml \
+            --environment dev \
+            lint
+
+  build:
+    name: Build ${{ matrix.image }}
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: ingest-rss
+            context: .
+            dockerfile: ingest/rss_poller/Dockerfile
+          - image: ingest-oaipmh
+            context: .
+            dockerfile: ingest/oaipmh_poller/Dockerfile
+          - image: ingest-sitemap
+            context: .
+            dockerfile: ingest/sitemap_poller/Dockerfile
+          - image: ingest-github-events
+            context: .
+            dockerfile: ingest/github_events/Dockerfile
+          - image: ingest-github-releases
+            context: .
+            dockerfile: ingest/github_releases/Dockerfile
+          - image: ingest-hf
+            context: .
+            dockerfile: ingest/hf_poller/Dockerfile
+          - image: ingest-arxiv-html
+            context: .
+            dockerfile: ingest/arxiv_html_fetcher/Dockerfile
+          - image: ingest-github-tarball-fetcher
+            context: .
+            dockerfile: ingest/github_release_tarball_fetcher/Dockerfile
+          - image: ingest-openreview
+            context: .
+            dockerfile: ingest/openreview_poller/Dockerfile
+          - image: processor
+            context: .
+            dockerfile: processor/Dockerfile
+          - image: ui
+            context: ui
+            dockerfile: Dockerfile
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image registry
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "registry=ghcr.io/${owner}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  deploy:
+    name: Deploy application release
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    env:
+      CISCO_VPN_SERVER: ${{ vars.CISCO_VPN_SERVER }}
+      CISCO_VPN_USERNAME: ${{ vars.CISCO_VPN_USERNAME }}
+      CISCO_VPN_PASSWORD: ${{ secrets.CISCO_VPN_PASSWORD }}
+      CISCO_VPN_AUTHGROUP: ${{ vars.CISCO_VPN_AUTHGROUP }}
+      CISCO_VPN_SERVERCERT: ${{ vars.CISCO_VPN_SERVERCERT }}
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
+      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Helm 3
+        uses: azure/setup-helm@v4
+        with:
+          version: "${{ env.HELM_VERSION }}"
+
+      - name: Install Helmfile and Helm diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_version="${HELMFILE_VERSION#v}"
+          archive="$RUNNER_TEMP/helmfile.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/helmfile/helmfile/releases/download/${HELMFILE_VERSION}/helmfile_${archive_version}_linux_amd64.tar.gz" \
+            --output "$archive"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sudo install -m 0755 "$RUNNER_TEMP/helmfile" /usr/local/bin/helmfile
+          helm plugin install https://github.com/databus23/helm-diff --version v3.9.12
+
+      - name: Install Cisco AnyConnect-compatible VPN client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends openconnect vpnc-scripts jq
+
+      - name: Connect to VPN and deploy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          : "${CISCO_VPN_SERVER:?Missing CISCO_VPN_SERVER}"
+          : "${CISCO_VPN_USERNAME:?Missing CISCO_VPN_USERNAME}"
+          : "${CISCO_VPN_PASSWORD:?Missing CISCO_VPN_PASSWORD}"
+          : "${KUBECONFIG_B64:?Missing KUBECONFIG_B64}"
+
+          kubeconfig="$RUNNER_TEMP/stream2pretrain-kubeconfig"
+          printf '%s' "$KUBECONFIG_B64" | base64 --decode > "$kubeconfig"
+          chmod 600 "$kubeconfig"
+          export KUBECONFIG="$kubeconfig"
+
+          vpnc_script="$(dpkg -L vpnc-scripts | awk '/\/vpnc-script$/ {print; exit}')"
+          if [[ -z "$vpnc_script" || ! -x "$vpnc_script" ]]; then
+            echo "The vpnc-scripts package did not provide an executable vpnc-script." >&2
+            dpkg -L vpnc-scripts >&2 || true
+            exit 1
+          fi
+
+          vpn_log="$RUNNER_TEMP/openconnect.log"
+          vpn_args=(
+            --protocol=anyconnect
+            --user="$CISCO_VPN_USERNAME"
+            --passwd-on-stdin
+            --script="$vpnc_script"
+          )
+          if [[ -n "${CISCO_VPN_AUTHGROUP:-}" ]]; then
+            vpn_args+=(--authgroup="$CISCO_VPN_AUTHGROUP")
+          fi
+          if [[ -n "${CISCO_VPN_SERVERCERT:-}" ]]; then
+            vpn_args+=(--servercert="$CISCO_VPN_SERVERCERT")
+          fi
+
+          printf '%s\n' "$CISCO_VPN_PASSWORD" \
+            | sudo -n openconnect "${vpn_args[@]}" "$CISCO_VPN_SERVER" \
+                >"$vpn_log" 2>&1 &
+          vpn_pid=$!
+          cleanup() {
+            sudo -n kill "$vpn_pid" 2>/dev/null || true
+            sudo -n pkill -TERM -x openconnect 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          tunnel_ready=false
+          vpn_interface=""
+          for _ in $(seq 1 60); do
+            if ! kill -0 "$vpn_pid" 2>/dev/null; then
+              tail -n 80 "$vpn_log" >&2 || true
+              exit 1
+            fi
+            vpn_interface="$(ip -o link show up | awk -F': ' '$2 ~ /^tun[0-9]+/ {print $2; exit}')"
+            if [[ -n "$vpn_interface" ]]; then
+              tunnel_ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$tunnel_ready" != true ]]; then
+            tail -n 80 "$vpn_log" >&2 || true
+            echo "Cisco VPN tunnel did not become ready." >&2
+            exit 1
+          fi
+
+          if [[ -z "$vpn_interface" ]]; then
+            echo "Cisco VPN tunnel interface was not found." >&2
+            ip -br link >&2 || true
+            exit 1
+          fi
+          ip -o link show dev "$vpn_interface" >&2 || true
+          ip -6 -o addr show dev "$vpn_interface" >&2 || true
+
+          api_server="$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}')"
+          api_host="${api_server#https://}"
+          if [[ "$api_host" == \[*\]* ]]; then
+            api_host="${api_host#\[}"
+            api_host="${api_host%%\]*}"
+          else
+            api_host="${api_host%%:*}"
+          fi
+
+          if [[ "$api_host" == *:* ]] && ! ip -6 route get "$api_host" >/dev/null 2>&1; then
+            vpn_peer="$(ip -6 -o addr show dev "$vpn_interface" scope global \
+              | sed -n 's/.* peer \([^ ]*\)\/[0-9][0-9]*.*/\1/p' \
+              | head -n 1)"
+            route_ready=false
+            for _ in $(seq 1 30); do
+              if [[ -n "$vpn_peer" ]]; then
+                route_args=("$api_host/128" via "$vpn_peer" dev "$vpn_interface" onlink)
+              else
+                route_args=("$api_host/128" dev "$vpn_interface")
+              fi
+              if sudo -n ip -6 route replace "${route_args[@]}"; then
+                route_ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$route_ready" != true ]]; then
+              ip -br link >&2 || true
+              ip -6 route >&2 || true
+              echo "Could not install an IPv6 route to the Kubernetes API through the VPN." >&2
+              exit 1
+            fi
+          fi
+          ip -6 route get "$api_host" >&2 || true
+
+          kubectl --request-timeout=20s get nodes
+
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          registry="ghcr.io/${owner}"
+
+          kubectl create namespace stream2pretrain --dry-run=client -o yaml | kubectl apply -f -
+
+          report_deploy_failure() {
+            echo "::group::Kubernetes deployment diagnostics"
+            kubectl -n stream2pretrain get deployment,statefulset,pod -o wide || true
+            kubectl -n stream2pretrain get events \
+              --sort-by=.metadata.creationTimestamp | tail -n 160 || true
+
+            while read -r pod; do
+              [[ -n "$pod" ]] || continue
+              echo "::group::Pod description: $pod"
+              kubectl -n stream2pretrain describe pod "$pod" || true
+              echo "Recent container logs:"
+              kubectl -n stream2pretrain logs "$pod" \
+                --all-containers --prefix --tail=120 || true
+              echo "Previous container logs:"
+              kubectl -n stream2pretrain logs "$pod" \
+                --all-containers --previous --prefix --tail=120 || true
+              echo "::endgroup::"
+            done < <(
+              kubectl -n stream2pretrain get pods -o json \
+                | jq -r '
+                    .items[]
+                    | select(
+                        any(
+                          .metadata.ownerReferences[]?;
+                          .kind == "ReplicaSet" or .kind == "StatefulSet"
+                        )
+                      )
+                    | select(
+                        .status.phase == "Pending"
+                        or .status.phase == "Failed"
+                        or any(.status.containerStatuses[]?; (.ready // false) | not)
+                      )
+                    | .metadata.name
+                  ' \
+                || true
+            )
+            echo "::endgroup::"
+          }
+
+          helm_overrides=(
+            --set "image.registry=${registry}"
+            --set "image.tag=${GITHUB_SHA}"
+            --set "image.pullPolicy=IfNotPresent"
+            --set "processor.fetcher.tag=${GITHUB_SHA}"
+            --set "processor.curate.tag=${GITHUB_SHA}"
+            --set "ingest.arxivHtmlFetcher.tag=${GITHUB_SHA}"
+            --set "mixtureController.tag=${GITHUB_SHA}"
+            --set "processor.fetcher.image=stream2pretrain/processor"
+            --set "processor.curate.image=stream2pretrain/processor"
+            --set "processor.iceberg.image=stream2pretrain/processor"
+            --set "processor.duckdbApi.image=stream2pretrain/processor"
+            --set "processor.deconGate.image=stream2pretrain/processor"
+            --set "processor.foundry.image=stream2pretrain/processor"
+            --set "mixtureController.image=stream2pretrain/processor"
+            --set "seedLoader.image=stream2pretrain/processor"
+          )
+
+          if [[ -n "${GHCR_PULL_TOKEN:-}" ]]; then
+            : "${GHCR_PULL_USERNAME:?GHCR_PULL_USERNAME is required with GHCR_PULL_TOKEN}"
+            auth="$(printf '%s:%s' "$GHCR_PULL_USERNAME" "$GHCR_PULL_TOKEN" | base64 --wrap=0)"
+            jq -n --arg auth "$auth" \
+              '{auths: {"ghcr.io": {auth: $auth}}}' \
+              > "$RUNNER_TEMP/dockerconfig.json"
+            kubectl -n stream2pretrain create secret generic stream2pretrain-ghcr \
+              --type kubernetes.io/dockerconfigjson \
+              --from-file=.dockerconfigjson="$RUNNER_TEMP/dockerconfig.json" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            helm_overrides+=(--set "image.pullSecrets[0]=stream2pretrain-ghcr")
+          else
+            echo "GHCR_PULL_TOKEN is empty. The published images must be public."
+          fi
+
+          if ! helmfile \
+            --helm-binary "$(command -v helm)" \
+            --file helmfile.yaml \
+            --environment dev \
+            --selector name=stream2pretrain \
+            apply \
+            --reset-values \
+            --wait \
+            --wait-for-jobs \
+            --timeout 600 \
+            --description "github-actions ${GITHUB_SHA}" \
+            --suppress-secrets \
+            "${helm_overrides[@]}"; then
+            report_deploy_failure
+            exit 1
+          fi
+
+          while read -r workload; do
+            kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
+          done < <(kubectl -n stream2pretrain get deployment,statefulset -o name)
+
+          kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+            python - < scripts/cluster_smoke.py

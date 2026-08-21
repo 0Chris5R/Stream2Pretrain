@@ -608,7 +608,7 @@ def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFla
 
 
 def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
-    """Apply the provisional non-code policy to legacy and replay rows."""
+    """Apply the fail-closed licence policy to legacy and replay rows."""
     return (
         None
         if is_training_permitted(silver.spdx_license, source_format=silver.source_format)

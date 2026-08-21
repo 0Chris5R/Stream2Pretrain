@@ -7,42 +7,46 @@ high; expansion happens in Phase 2 via SourceFeed CRD updates.
 
 from __future__ import annotations
 
-CURATED_REPOS: frozenset[str] = frozenset({
-    "huggingface/transformers",
-    "vllm-project/vllm",
-    "pytorch/pytorch",
-    "ggerganov/llama.cpp",
-    "karpathy/llm.c",
-    "unslothai/unsloth",
-    "meta-llama/llama",
-    "openai/whisper",
-    "anthropics/courses",
-    "apple/ml-tic-lm",
-    "mlfoundations/dclm",
-    "huggingface/datatrove",
-    "NVIDIA-NeMo/Curator",
-    "allenai/dolma",
-    "bytewax/bytewax",
-    "redpanda-data/redpanda",
-    "apache/iceberg",
-    "MaterializeInc/materialize",
-    "risingwavelabs/risingwave",
-    "pathwaycom/pathway",
-    "unclecode/crawl4ai",
-    "firecrawl/firecrawl",
-})
+CURATED_REPOS: frozenset[str] = frozenset(
+    {
+        "huggingface/transformers",
+        "vllm-project/vllm",
+        "pytorch/pytorch",
+        "ggerganov/llama.cpp",
+        "karpathy/llm.c",
+        "unslothai/unsloth",
+        "meta-llama/llama",
+        "openai/whisper",
+        "anthropics/courses",
+        "apple/ml-tic-lm",
+        "mlfoundations/dclm",
+        "huggingface/datatrove",
+        "NVIDIA-NeMo/Curator",
+        "allenai/dolma",
+        "bytewax/bytewax",
+        "redpanda-data/redpanda",
+        "apache/iceberg",
+        "MaterializeInc/materialize",
+        "risingwavelabs/risingwave",
+        "pathwaycom/pathway",
+        "unclecode/crawl4ai",
+        "firecrawl/firecrawl",
+    }
+)
 
 # Org-level wildcard (any repo under these orgs counts).
-CURATED_ORGS: frozenset[str] = frozenset({
-    "huggingface",
-    "openai",
-    "anthropics",
-    "deepmind",
-    "google-deepmind",
-    "meta-llama",
-    "facebookresearch",
-    "EleutherAI",
-})
+CURATED_ORGS: frozenset[str] = frozenset(
+    {
+        "huggingface",
+        "openai",
+        "anthropics",
+        "deepmind",
+        "google-deepmind",
+        "meta-llama",
+        "facebookresearch",
+        "EleutherAI",
+    }
+)
 
 
 def is_relevant_repo(full_name: str) -> bool:

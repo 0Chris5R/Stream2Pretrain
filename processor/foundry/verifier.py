@@ -138,9 +138,7 @@ def normalize_spec(
         if predicate.type == "evidence_membership":
             configured = predicate.config.get("allowed_spans", [])
             allowed_spans = predicate.allowed_spans or (
-                [str(value) for value in configured]
-                if isinstance(configured, list)
-                else []
+                [str(value) for value in configured] if isinstance(configured, list) else []
             )
             predicate = predicate.model_copy(
                 update={

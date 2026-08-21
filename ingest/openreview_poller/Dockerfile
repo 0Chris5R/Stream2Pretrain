@@ -10,9 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 RUN pip install --no-cache-dir uv==0.4.27
 WORKDIR /src
 COPY pyproject.toml /src/pyproject.toml
+COPY README.md /src/README.md
 COPY schemas /src/schemas
-COPY ingest/common /src/ingest/common
-COPY ingest/openreview_poller /src/ingest/openreview_poller
+COPY ingest /src/ingest
+COPY processor /src/processor
+COPY tests /src/tests
 RUN uv pip install --system --no-cache \
         -e . \
         -e ./ingest/common \

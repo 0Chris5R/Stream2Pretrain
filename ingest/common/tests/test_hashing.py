@@ -10,8 +10,7 @@ from ingest.common.hashing import canonical_url, content_sha256, doc_id_for_url
 class TestCanonicalUrl:
     def test_lowercases_scheme_and_host(self) -> None:
         assert (
-            canonical_url("HTTPS://Example.COM/Path?B=2&A=1")
-            == "https://example.com/Path?A=1&B=2"
+            canonical_url("HTTPS://Example.COM/Path?B=2&A=1") == "https://example.com/Path?A=1&B=2"
         )
 
     def test_drops_default_ports(self) -> None:
@@ -53,7 +52,5 @@ class TestDocIdForUrl:
 class TestContentSha256:
     def test_empty_string(self) -> None:
         # Pre-computed sha256("") for sanity.
-        expected = (
-            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        )
+        expected = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         assert content_sha256(b"") == expected

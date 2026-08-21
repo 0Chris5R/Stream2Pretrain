@@ -325,8 +325,10 @@ async def fetch_one(
     fb_fetched_at = datetime.now(tz=UTC)
     fb_resp = await client.get(fallback_url)
 
-    if fb_resp.status_code == 200 and fb_resp.content and _looks_like_fulltext_html(
-        fb_resp.content
+    if (
+        fb_resp.status_code == 200
+        and fb_resp.content
+        and _looks_like_fulltext_html(fb_resp.content)
     ):
         extracted = extract_arxiv_html(fb_resp.content, pipeline=AR5IV_PIPELINE)
         return FetchOutcome(

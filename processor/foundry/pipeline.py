@@ -188,9 +188,7 @@ class FoundryPipeline:
                     "tasks": len(solved),
                     "trajectories": sum(len(value.trajectories) for value in solved),
                     "skipped_tasks": len(task_failures),
-                    "degraded_solutions": sum(
-                        len(value.solution_failures) for value in solved
-                    ),
+                    "degraded_solutions": sum(len(value.solution_failures) for value in solved),
                 },
             )
             artifacts = self._validate_and_package(

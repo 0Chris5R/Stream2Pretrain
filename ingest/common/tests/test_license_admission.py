@@ -12,7 +12,7 @@ def test_normalizes_creative_commons_url() -> None:
     assert normalize_license("https://creativecommons.org/licenses/by/4.0/") == "CC-BY-4.0"
 
 
-def test_unknown_non_code_license_is_admitted_with_provenance() -> None:
+def test_unknown_license_is_quarantined_with_provenance() -> None:
     for value in (None, ""):
         result = decide_license_admission(
             source_url="https://arxiv.org/abs/2608.00001",
@@ -20,9 +20,9 @@ def test_unknown_non_code_license_is_admitted_with_provenance() -> None:
             license_value=value,
             license_source="rss_entry",
         )
-        assert result.admitted is True
+        assert result.admitted is False
         assert result.license_id == "unknown"
-        assert "non-code demo policy" in result.decision.reason
+        assert "machine-readable licence is missing" in result.decision.reason
         assert result.decision.content_fetch_started is False
 
 

@@ -558,12 +558,9 @@ def _solution_contract_violations(
     if missing_nodes:
         violations.append("missing required node IDs: " + ", ".join(sorted(missing_nodes)))
     required_relations = {
-        (edge.source, edge.relation, edge.target)
-        for edge in task.hidden_targets.required_relations
+        (edge.source, edge.relation, edge.target) for edge in task.hidden_targets.required_relations
     }
-    submitted_relations = {
-        (edge.source, edge.relation, edge.target) for edge in manifest.relations
-    }
+    submitted_relations = {(edge.source, edge.relation, edge.target) for edge in manifest.relations}
     missing_relations = required_relations - submitted_relations
     if missing_relations:
         violations.append(f"missing {len(missing_relations)} required relations")

@@ -67,7 +67,9 @@ def test_parse_garbage_returns_empty() -> None:
 async def test_collect_urls_expands_index_and_decompresses_gzip() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("sitemap.xml"):
-            return httpx.Response(200, text=SITEMAP_INDEX, headers={"content-type": "application/xml"})
+            return httpx.Response(
+                200, text=SITEMAP_INDEX, headers={"content-type": "application/xml"}
+            )
         if request.url.path.endswith("sitemap-pages.xml.gz"):
             data = gzip.compress(SITEMAP_URLSET.encode("utf-8"))
             return httpx.Response(

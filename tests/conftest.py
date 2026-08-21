@@ -94,9 +94,7 @@ def dev_stack() -> Iterator[StackEndpoints]:
     is available. Tearing the stack down is opt-in (``S2P_TEARDOWN_STACK=1``)
     so successive test runs do not pay the start-up cost on a laptop.
     """
-    pre_running = _port_open(REDPANDA_HOST, REDPANDA_PORT) and _port_open(
-        MINIO_HOST, MINIO_PORT
-    )
+    pre_running = _port_open(REDPANDA_HOST, REDPANDA_PORT) and _port_open(MINIO_HOST, MINIO_PORT)
     started_here = False
     if not pre_running:
         if os.environ.get("S2P_USE_RUNNING_STACK") == "1":

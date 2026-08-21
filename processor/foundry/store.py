@@ -185,9 +185,7 @@ class FoundryStore:
         self._ensure_manual_run_columns()
         self._ensure_pool_assignment_columns()
         if recover_processing:
-            self._conn.execute(
-                "UPDATE candidate_queue SET state='queued' WHERE state='processing'"
-            )
+            self._conn.execute("UPDATE candidate_queue SET state='queued' WHERE state='processing'")
 
     def _ensure_candidate_queue_columns(self) -> None:
         existing = {
@@ -444,9 +442,7 @@ class FoundryStore:
             self._conn.execute("UPDATE jobs SET graph_json=? WHERE job_id=?", (payload, job_id))
 
     def load_graph(self, job_id: str) -> bytes | None:
-        row = self._conn.execute(
-            "SELECT graph_json FROM jobs WHERE job_id=?", (job_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT graph_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None or row["graph_json"] is None:
             return None
         return bytes(row["graph_json"])
@@ -959,9 +955,7 @@ class FoundryStore:
         rows = self._conn.execute(
             "SELECT artifact_json FROM artifacts WHERE job_id=? ORDER BY created_at", (job_id,)
         ).fetchall()
-        return [
-            FoundryArtifactRecord.model_validate_json(row["artifact_json"]) for row in rows
-        ]
+        return [FoundryArtifactRecord.model_validate_json(row["artifact_json"]) for row in rows]
 
     def artifact(self, artifact_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(

@@ -167,14 +167,18 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
     headers = build_headers(cfg, accept="application/atom+xml")
     bucket = TokenBucket(rate=2.0, burst=4)
     total = 0
-    async with build_async_client(cfg, headers=headers) as client, BronzeProducer(
-        cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-releases"
-    ) as producer, MinioWriter(
-        cfg.minio_endpoint,
-        cfg.minio_access_key,
-        cfg.minio_secret_key,
-        bucket=cfg.minio_bronze_bucket,
-    ) as minio:
+    async with (
+        build_async_client(cfg, headers=headers) as client,
+        BronzeProducer(
+            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-releases"
+        ) as producer,
+        MinioWriter(
+            cfg.minio_endpoint,
+            cfg.minio_access_key,
+            cfg.minio_secret_key,
+            bucket=cfg.minio_bronze_bucket,
+        ) as minio,
+    ):
         for repo in repos:
             try:
                 total += await poll_repo(

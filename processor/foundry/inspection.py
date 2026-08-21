@@ -47,7 +47,9 @@ class ArtifactInspector:
         package_view.update(
             {
                 "artifact": artifact,
-                "source": "package" if artifact.get("package_uri") and not package_error else "durable_cache",
+                "source": "package"
+                if artifact.get("package_uri") and not package_error
+                else "durable_cache",
                 "package_available": bool(artifact.get("package_uri")),
                 "package_error": package_error,
                 "generation_attempts": attempts,
@@ -164,16 +166,12 @@ def _rejected_view(
             else None
         ),
         "public_context": {
-            "paper_text": "\n\n".join(
-                f"[{span['span_id']}]\n{span['text']}" for span in spans
-            ),
+            "paper_text": "\n\n".join(f"[{span['span_id']}]\n{span['text']}" for span in spans),
             "spans": spans,
             "equations": [value.model_dump(mode="json") for value in bundle.equations]
             if bundle
             else [],
-            "tables": [value.model_dump(mode="json") for value in bundle.tables]
-            if bundle
-            else [],
+            "tables": [value.model_dump(mode="json") for value in bundle.tables] if bundle else [],
             "figures": [value.model_dump(mode="json") for value in bundle.figures]
             if bundle
             else [],
