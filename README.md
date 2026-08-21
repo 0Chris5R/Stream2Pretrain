@@ -108,6 +108,7 @@ The repository is organized by responsibility:
 - [`charts/stream2pretrain/`](charts/stream2pretrain) contains the application Helm chart.
 - [`infra/`](infra) contains OpenStack, k3s, Helmfile, and platform configuration.
 - [`scripts/`](scripts) contains deployment, bootstrap, smoke, and benchmark tools.
+- [`docs/continuous-deployment.md`](docs/continuous-deployment.md) documents the main-branch image build, VPN, and application deployment workflow.
 
 ## 5. Processing Logic
 

@@ -643,10 +643,7 @@ class DuckDBQueryService:
         if routes:
             clauses.append(
                 "("
-                + " OR ".join(
-                    "(route = ? OR LIST_CONTAINS(eligible_routes, ?))"
-                    for _ in routes
-                )
+                + " OR ".join("(route = ? OR LIST_CONTAINS(eligible_routes, ?))" for _ in routes)
                 + ")"
             )
             for value in routes:

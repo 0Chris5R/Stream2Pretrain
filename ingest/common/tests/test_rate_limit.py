@@ -33,8 +33,10 @@ async def test_subsequent_acquire_blocks_until_refill() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_acquire_serialises() -> None:
     bucket = TokenBucket(rate=50.0, burst=1)
+
     async def waiter() -> None:
         await bucket.acquire()
+
     t0 = time.monotonic()
     await asyncio.gather(waiter(), waiter(), waiter())
     elapsed = time.monotonic() - t0

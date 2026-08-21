@@ -1,8 +1,8 @@
 """Licence admission shared by every ingest component.
 
-The demo policy admits non-code documents whose machine-readable licence is
-missing while preserving ``unknown`` provenance. Code remains fail-closed.
-Explicitly non-permitted licences remain quarantined for every format.
+Every content format is fail-closed. Missing or unknown licences remain
+quarantined before content retrieval, while explicitly allowlisted licences
+are admitted and explicitly excluded licences remain quarantined.
 """
 
 from __future__ import annotations
@@ -79,11 +79,14 @@ def normalize_license(value: str | None) -> str:
 
 
 def is_training_permitted(value: str | None, *, source_format: str = "web") -> bool:
-    """Return whether content may enter training under the current demo policy."""
+    """Return whether content may enter training under the allowlist policy.
+
+    ``source_format`` remains part of the call contract for component
+    compatibility, but admission is intentionally fail-closed for every
+    content format.
+    """
     normalized = normalize_license(value)
-    if normalized in PERMISSIVE_TRAINING_LICENSES:
-        return True
-    return normalized == "unknown" and source_format != "code"
+    return normalized in PERMISSIVE_TRAINING_LICENSES
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,9 +118,7 @@ def decide_license_admission(
     normalized = normalize_license(license_value)
     admitted = is_training_permitted(normalized, source_format=source_format)
     status = "admitted" if admitted else "quarantined"
-    if admitted and normalized == "unknown":
-        reason = "machine-readable licence is missing; admitted by non-code demo policy"
-    elif admitted:
+    if admitted:
         reason = f"{normalized} is on the training allowlist"
     elif normalized == "unknown":
         reason = "machine-readable licence is missing"

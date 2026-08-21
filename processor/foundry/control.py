@@ -93,8 +93,7 @@ class ProviderControlPlane:
         )
         if (
             cached is not None
-            and cached[1].returned_model
-            in self.config.providers[provider_name].preferred_models
+            and cached[1].returned_model in self.config.providers[provider_name].preferred_models
         ):
             return cached
         resolved_attempt = attempt or self.store.next_provider_call_attempt(job_id)

@@ -51,9 +51,7 @@ class _FakeCodeProducer:
         self.sent: list[BronzeRecord] = []
         self.headers: list[dict[str, str] | None] = []
 
-    async def send(
-        self, record: BronzeRecord, *, headers: dict[str, str] | None = None
-    ) -> None:
+    async def send(self, record: BronzeRecord, *, headers: dict[str, str] | None = None) -> None:
         self.sent.append(record)
         self.headers.append(headers)
 
@@ -91,9 +89,7 @@ def test_parse_release_url(url: str, expected: ReleaseRef | None) -> None:
 
 
 def test_code_object_key_layout() -> None:
-    key = code_object_key(
-        owner="huggingface", repo="transformers", ref="v5.0.0", path="src/foo.py"
-    )
+    key = code_object_key(owner="huggingface", repo="transformers", ref="v5.0.0", path="src/foo.py")
     assert key == "code/repo=huggingface__transformers/ref=v5.0.0/src/foo.py"
     uri = code_s3_uri(
         bucket="bronze",
@@ -184,9 +180,7 @@ async def test_process_release_skips_disallowed_license() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if str(request.url).endswith("/repos/evil/gpl-only"):
-            return httpx.Response(
-                200, json={"license": {"spdx_id": "GPL-3.0"}}
-            )
+            return httpx.Response(200, json={"license": {"spdx_id": "GPL-3.0"}})
         # The tarball endpoint must not be hit if the license check rejects.
         return httpx.Response(500, text="should not be called")
 

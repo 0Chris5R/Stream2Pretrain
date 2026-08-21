@@ -37,8 +37,15 @@ def _events_payload() -> list[dict]:
         {
             "id": "1",
             "type": "ReleaseEvent",
-            "repo": {"name": "huggingface/transformers", "url": "https://api.github.com/repos/huggingface/transformers"},
-            "payload": {"release": {"html_url": "https://github.com/huggingface/transformers/releases/v5.0.0"}},
+            "repo": {
+                "name": "huggingface/transformers",
+                "url": "https://api.github.com/repos/huggingface/transformers",
+            },
+            "payload": {
+                "release": {
+                    "html_url": "https://github.com/huggingface/transformers/releases/v5.0.0"
+                }
+            },
         },
         {
             "id": "2",
@@ -50,13 +57,17 @@ def _events_payload() -> list[dict]:
             "id": "3",
             "type": "PullRequestEvent",
             "repo": {"name": "vllm-project/vllm"},
-            "payload": {"pull_request": {"html_url": "https://github.com/vllm-project/vllm/pull/9001"}},
+            "payload": {
+                "pull_request": {"html_url": "https://github.com/vllm-project/vllm/pull/9001"}
+            },
         },
     ]
 
 
 @pytest.mark.asyncio
-async def test_run_loop_emits_for_curated_repos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_loop_emits_for_curated_repos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
 
     fake_producer = FakeProducer()

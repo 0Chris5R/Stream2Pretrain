@@ -306,7 +306,9 @@ async def test_fetch_one_rejects_redirected_landing_page_and_uses_pdf() -> None:
         if request.url.host == "arxiv.org" and "/html/" in request.url.path:
             return httpx.Response(404, text="missing")
         if request.url.host == "ar5iv.labs.arxiv.org":
-            return httpx.Response(200, text="<html><body><h1>Abstract landing page</h1></body></html>")
+            return httpx.Response(
+                200, text="<html><body><h1>Abstract landing page</h1></body></html>"
+            )
         if request.url.host == "arxiv.org" and "/pdf/" in request.url.path:
             return httpx.Response(
                 200,

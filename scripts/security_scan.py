@@ -59,7 +59,9 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 PUBLIC_ADMIN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"allowed_admin_cidrs\s*=\s*\[[^\]]*(?:0\.0\.0\.0/0|::/0)"),
-    re.compile(r"variable\s+\"allowed_admin_cidrs\"[\s\S]{0,300}?default\s*=\s*\[[^\]]*(?:0\.0\.0\.0/0|::/0)"),
+    re.compile(
+        r"variable\s+\"allowed_admin_cidrs\"[\s\S]{0,300}?default\s*=\s*\[[^\]]*(?:0\.0\.0\.0/0|::/0)"
+    ),
 )
 
 

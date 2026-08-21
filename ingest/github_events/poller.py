@@ -184,14 +184,18 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
 
     iteration = 0
     total_emitted = 0
-    async with build_async_client(cfg, headers=headers) as client, BronzeProducer(
-        cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-events"
-    ) as producer, MinioWriter(
-        cfg.minio_endpoint,
-        cfg.minio_access_key,
-        cfg.minio_secret_key,
-        bucket=cfg.minio_bronze_bucket,
-    ) as minio:
+    async with (
+        build_async_client(cfg, headers=headers) as client,
+        BronzeProducer(
+            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-events"
+        ) as producer,
+        MinioWriter(
+            cfg.minio_endpoint,
+            cfg.minio_access_key,
+            cfg.minio_secret_key,
+            bucket=cfg.minio_bronze_bucket,
+        ) as minio,
+    ):
         while not stop.is_set():
             req_headers: dict[str, str] = {}
             if last_etag:

@@ -293,9 +293,7 @@ def test_solver_turn_drops_symbolic_null_from_numeric_results() -> None:
     turn = SolverTurn.model_validate(_normalize_solver_turn_data(raw))
 
     assert turn.answer_manifest is not None
-    assert [value.id for value in turn.answer_manifest.numeric_results] == [
-        "measured_exponent"
-    ]
+    assert [value.id for value in turn.answer_manifest.numeric_results] == ["measured_exponent"]
     assert turn.answer_manifest.numeric_results[0].value == pytest.approx(1 / 3)
 
 

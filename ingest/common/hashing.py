@@ -49,7 +49,8 @@ def canonical_url(url: str) -> str:
         netloc = host
     # Drop tracking params; sort the rest.
     kept = [
-        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=False)
+        (k, v)
+        for k, v in parse_qsl(parts.query, keep_blank_values=False)
         if not _TRACKING_PARAMS.match(k)
     ]
     kept.sort()
