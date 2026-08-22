@@ -82,6 +82,10 @@ async function main() {
     }
 
     const body = await page.locator("body").innerText().catch(() => "");
+    const bodyFontFamily = await page
+      .locator("body")
+      .evaluate((element) => getComputedStyle(element).fontFamily)
+      .catch(() => "");
     const headings = await page.locator("h1, h2").allTextContents().catch(() => []);
     const links = await page.locator("a").allTextContents().catch(() => []);
     const buttons = await page.locator("button").allTextContents().catch(() => []);
@@ -111,6 +115,7 @@ async function main() {
       navigationStatus,
       navigationError,
       title: await page.title().catch(() => ""),
+      bodyFontFamily,
       headings,
       links: links.map((value) => value.trim()).filter(Boolean),
       buttons: buttons.map((value) => value.trim()).filter(Boolean),
@@ -174,6 +179,8 @@ async function main() {
       result.navigationStatus >= 400 ||
       result.failureMarkers.length ||
       result.pageErrors.length ||
+      !result.bodyFontFamily ||
+      /times new roman|(^|,\s*)serif($|,)/i.test(result.bodyFontFamily) ||
       result.responses.some((response) => response.status >= 400),
   ) || probes.some((probe) => probe.status < 200 || probe.status >= 300 || !probe.validJson);
   if (broken) process.exitCode = 1;
