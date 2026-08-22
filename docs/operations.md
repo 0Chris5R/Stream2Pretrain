@@ -156,12 +156,18 @@ kubectl -n stream2pretrain patch mixturerecipe production \
 
 ## 8. Backups
 
-- MinIO buckets `bronze`, `silver`, `gold`, `decon-attestations` are the
-  only authoritative state. Snapshot them with `mc mirror` to a remote S3
-  on a daily schedule.
-- Iceberg metadata lives inside the buckets (`<warehouse>/_metadata/`).
-- Polaris's Postgres holds a denormalised view; rebuilding from the buckets
-  is supported but takes minutes.
+- Mirror `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`, and
+  `s2p-posttrain` to a second failure domain on the reviewed schedule.
+- Iceberg data and metadata live in `s2p-gold`; snapshot expiry and orphan
+  removal must run through the guarded Iceberg maintenance command, not a
+  bucket-wide age deletion.
+- Back up Redpanda if the configured replay horizon is operationally required,
+  plus the curator and foundry state PVCs for in-flight recovery.
+- Production Polaris requires its relational database backup and a tested
+  catalog restore. The DHBW dev profile is in-memory and is not a recoverable
+  production catalog.
+- See [`storage-scaling.md`](./storage-scaling.md) for the complete ownership
+  and lifecycle contract.
 
 ## 9. Quotas and DHBWCloud caveats
 

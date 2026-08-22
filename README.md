@@ -172,6 +172,9 @@ The Iceberg tables partition by language, risk tier, and month of `valid_from`. 
 Iceberg is appropriate because files alone do not provide reliable snapshot identity, schema evolution, or catalog discovery. Polaris provides the catalog boundary. DuckDB reads the exact metadata file selected by Polaris rather than guessing the latest object.
 
 The full field list is documented in [`docs/data-model.md`](docs/data-model.md).
+The byte-level ownership, August 2026 storage incident, and production scaling
+contract are documented in
+[`docs/storage-scaling.md`](docs/storage-scaling.md).
 
 ## 7. User-facing UI
 

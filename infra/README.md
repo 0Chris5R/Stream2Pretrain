@@ -130,6 +130,13 @@ configured models are present in authenticated model discovery. See
 [`../docs/POSTTRAIN_FOUNDRY.md`](../docs/POSTTRAIN_FOUNDRY.md) for the runtime
 and audit workflow.
 
+Bulk corpus storage must not share a k3s node root filesystem in a production
+deployment. The current `local-path` MinIO volume cannot gain physical capacity
+by editing its PVC, and it is not a valid target for a PVC autoresizer. See
+[`../docs/storage-scaling.md`](../docs/storage-scaling.md) for the data-owner
+map, safe maintenance boundary, and the external S3 or expandable-CSI migration
+plan.
+
 ## Existing cluster migration
 
 Do not run the `application` stage against the current release yet. Four
