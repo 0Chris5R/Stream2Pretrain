@@ -646,6 +646,10 @@ jobs:
               deployment/stream2pretrain-ingest-github-tarball-fetcher --tail=240
             kubectl -n stream2pretrain logs \
               deployment/stream2pretrain-ingest-arxiv-html --tail=240
+            kubectl -n stream2pretrain rollout status \
+              deployment/stream2pretrain-duckdb --timeout=180s
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+              python - < scripts/validate_corpus_live.py
             echo "::endgroup::"
             exit 0
           fi
