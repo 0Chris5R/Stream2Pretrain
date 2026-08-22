@@ -1,0 +1,49 @@
+{{- if .Values.processor.iceberg.maintenance.enabled }}
+{{- $component := "iceberg-maintenance" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  schedule: {{ .Values.processor.iceberg.maintenance.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+          {{- include "stream2pretrain.imagePullSecrets" . | nindent 10 }}
+          {{- include "stream2pretrain.podSecurityContext" . | nindent 10 }}
+          {{- include "stream2pretrain.scheduling" . | nindent 10 }}
+          containers:
+            - name: maintenance
+              image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.iceberg.image) | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["s2p-iceberg-maintenance"]
+              args: ["--apply"]
+              {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
+              env:
+                {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
+                - name: S2P_COMPONENT
+                  value: {{ $component | quote }}
+              resources:
+                {{- toYaml .Values.processor.iceberg.maintenance.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+{{- end }}

@@ -120,6 +120,7 @@ dev = [
 s2p-fetcher = "processor.fetcher:main"
 s2p-curate = "processor.curate:main"
 s2p-iceberg-writer = "processor.iceberg_writer:main"
+s2p-iceberg-maintenance = "processor.iceberg_maintenance:main"
 s2p-decon-api = "processor.decon_api:main"
 s2p-duckdb-api = "processor.duckdb_api:main"
 s2p-local-sources-api = "processor.local_sources_api:main"
