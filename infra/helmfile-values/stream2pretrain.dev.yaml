@@ -121,7 +121,7 @@ sources:
 ingest:
   arxivHtmlFetcher:
     tag: "0.2.0-619290f"
-    maxRecordsPerLoop: 32
+    maxRecordsPerLoop: 0
   hf:
     replicas: 0
   githubTarballFetcher:
