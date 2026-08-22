@@ -43,8 +43,8 @@ RUN pip install --no-cache-dir uv==0.8.17
 WORKDIR /src
 
 # Keep the large, locked ML dependency environment independent of application
-# source. A normal processor edit then rebuilds only the small workspace wheels
-# instead of reinstalling and re-exporting the entire runtime dependency graph.
+# source. Workspace packages are imported from the separate /app source layer
+# at runtime, so an ordinary edit never changes or re-exports this venv layer.
 COPY pyproject.toml uv.lock README.md /src/
 COPY ingest/common/pyproject.toml /src/ingest/common/pyproject.toml
 COPY ingest/rss_poller/pyproject.toml /src/ingest/rss_poller/pyproject.toml
@@ -65,20 +65,6 @@ RUN uv sync \
         --extra "${S2P_INSTALL_EXTRA}" \
         --no-dev \
         --no-install-workspace
-
-# Install only the selected processor workspace and its two local runtime
-# dependencies. Documentation, charts, UI code, tests, and unrelated pollers
-# must not invalidate this source layer or enter the runtime image.
-COPY schemas /src/schemas
-COPY ingest/common /src/ingest/common
-COPY processor /src/processor
-
-RUN uv sync \
-        --locked \
-        --package stream2pretrain-processor \
-        --extra "${S2P_INSTALL_EXTRA}" \
-        --no-dev \
-        --no-editable
 
 # Docling's standard CPU pipeline needs layout, TableFormer, and formula
 # artifacts. Download them with the exact runtime version and keep the model
@@ -209,12 +195,36 @@ RUN groupadd --system --gid 65532 nonroot \
 
 COPY --from=builder /src/.venv                         /src/.venv
 COPY schemas                                            /app/schemas
+COPY ingest/__init__.py                                 /app/ingest/__init__.py
+COPY ingest/common                                      /app/ingest/common
+COPY ingest/arxiv_html_fetcher                          /app/ingest/arxiv_html_fetcher
+COPY ingest/oaipmh_poller                               /app/ingest/oaipmh_poller
+COPY ingest/rss_poller                                  /app/ingest/rss_poller
+COPY ingest/sitemap_poller                              /app/ingest/sitemap_poller
 COPY processor                                          /app/processor
 # The foundry records the reviewed provider-terms document path in its policy
 # audit. Keep only that required documentation subtree in the runtime image.
 COPY docs/provider-terms                                /app/docs/provider-terms
 COPY --from=models  /opt/models                         /opt/models
 COPY --from=builder /opt/models/docling                 /opt/models/docling
+COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entrypoint
+
+RUN for command in \
+      s2p-fetcher \
+      s2p-curate \
+      s2p-iceberg-writer \
+      s2p-iceberg-maintenance \
+      s2p-decon-api \
+      s2p-duckdb-api \
+      s2p-local-sources-api \
+      s2p-mixture-controller \
+      s2p-seed-loader \
+      s2p-foundry \
+      s2p-foundry-api \
+      s2p-foundry-export-replay \
+      s2p-foundry-build-oracle; do \
+        ln -s /usr/local/bin/s2p-entrypoint "/usr/local/bin/${command}"; \
+    done
 
 WORKDIR /app
 USER nonroot
