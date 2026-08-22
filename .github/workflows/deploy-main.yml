@@ -1093,6 +1093,18 @@ jobs:
             report_deploy_failure
             exit 1
           fi
+          public_http_status="$(
+            curl --silent --show-error --max-time 15 \
+              --output "$RUNNER_TEMP/public-health-http.txt" \
+              --write-out '%{http_code}' \
+              "http://$PUBLIC_SITE_HOST/api/health" || true
+          )"
+          if [[ "$public_http_status" != "200" ]]; then
+            echo "The public hostname is not routing HTTP to this Ingress (status: $public_http_status)." >&2
+            cat "$RUNNER_TEMP/public-health-http.txt" >&2 || true
+            report_deploy_failure
+            exit 1
+          fi
           if ! kubectl -n stream2pretrain wait \
             --for=condition=Ready "certificate/$public_tls_secret" --timeout=300s; then
             report_deploy_failure
