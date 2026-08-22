@@ -22,6 +22,10 @@ class ProviderError(RuntimeError):
     pass
 
 
+class ProviderOutputError(ProviderError):
+    """The provider completed a call but returned unusable structured output."""
+
+
 class ProviderRateLimitedError(ProviderError):
     pass
 
@@ -464,10 +468,27 @@ def _parse_json_content(content: str) -> dict[str, Any] | list[Any]:
         cleaned = cleaned.removesuffix("```").strip()
     try:
         value = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise ProviderError("model did not return valid JSON") from exc
+    except json.JSONDecodeError as strict_error:
+        # Some OpenAI-compatible gateways ignore json_object framing and wrap
+        # an otherwise valid root in prose, Markdown, or thinking tags. Scan
+        # for complete roots and select the one ending latest in the response;
+        # the final answer then wins over JSON examples in earlier reasoning.
+        decoder = json.JSONDecoder()
+        candidates: list[tuple[int, int, dict[str, Any] | list[Any]]] = []
+        for start, character in enumerate(cleaned):
+            if character not in "{[":
+                continue
+            try:
+                candidate, end = decoder.raw_decode(cleaned, start)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, (dict, list)):
+                candidates.append((end, end - start, candidate))
+        if not candidates:
+            raise ProviderOutputError("model did not return valid JSON") from strict_error
+        _, _, value = max(candidates, key=lambda item: (item[0], item[1]))
     if not isinstance(value, (dict, list)):
-        raise ProviderError("model JSON root must be an object or array")
+        raise ProviderOutputError("model JSON root must be an object or array")
     return value
 
 
@@ -528,6 +549,7 @@ __all__ = [
     "ProviderBudgetExhaustedError",
     "ProviderDriftError",
     "ProviderError",
+    "ProviderOutputError",
     "ProviderRateLimitedError",
     "ReplayProvider",
     "StructuredGeneration",

@@ -157,28 +157,16 @@ class EvidenceGraphCompiler:
                 role="graph_repair",
                 system=_repair_system_prompt(),
                 user=_repair_prompt(bundle, graph, critique, oracle_results or []),
-                max_output_tokens=10_000,
+                max_output_tokens=6_000,
             )
             traces.append(repair_trace)
-            repaired = GraphPatch.model_validate(repaired_data)
-            graph = PaperEvidenceGraph(
-                graph_id=graph.graph_id,
-                paper_id=graph.paper_id,
-                nodes=repaired.nodes,
-                edges=repaired.edges,
-                uncertainties=repaired.uncertainties,
-                conflicts=repaired.conflicts,
-                compiler_runs=[
-                    *graph.compiler_runs,
-                    CompilerRun(
-                        pass_name="repair",
-                        prompt_version=self.control.config.prompt_version,
-                        provider_trace_id=repair_trace.trace_id,
-                        output_hash=sha256(repaired_data),
-                        accepted=True,
-                        findings=critique.repair_instructions,
-                    ),
-                ],
+            repaired = BoundedGraphPatch.model_validate(repaired_data)
+            graph = _merge_patch(
+                graph,
+                repaired,
+                "repair",
+                repair_trace,
+                findings=critique.repair_instructions,
             )
             validate_graph_against_bundle(graph, bundle)
             recheck_data, recheck_trace = self.control.call(
@@ -229,6 +217,8 @@ def _merge_patch(
     patch: GraphPatch,
     pass_name: str,
     trace: ProviderTrace,
+    *,
+    findings: list[str] | None = None,
 ) -> PaperEvidenceGraph:
     nodes = {node.id: node for node in graph.nodes}
     for node_id in patch.remove_node_ids:
@@ -248,6 +238,7 @@ def _merge_patch(
         provider_trace_id=trace.trace_id,
         output_hash=trace.response_hash,
         accepted=True,
+        findings=findings or [],
     )
     return PaperEvidenceGraph(
         graph_id=graph.graph_id,
@@ -276,14 +267,16 @@ REQUIRED_JSON_SCHEMA:
 
 
 def _repair_system_prompt() -> str:
-    schema = canonical_json(GraphPatch.model_json_schema()).decode()
+    schema = canonical_json(BoundedGraphPatch.model_json_schema()).decode()
     return f"""You repair a hidden scientific evidence graph. Use only the supplied PaperBundle.
-Return one JSON object that validates exactly against REQUIRED_JSON_SCHEMA below. Do not rename
-fields. In particular, EvidenceNode uses canonical_text and supporting_spans, never text or spans.
-Use only the node-type and edge-relation enum values in the schema. uncertainties and conflicts
-are arrays of strings, not objects. Never use outside knowledge, invent missing experimental
-details, or cite a span ID absent from the bundle. Separate explicit statements from inference and
-leave ambiguous regions uncertain.
+Return one prioritized incremental JSON patch that validates exactly against REQUIRED_JSON_SCHEMA
+below. Correct only the critic findings: omit unchanged nodes and edges, replace a node by emitting
+its corrected version with the same ID, and use remove_node_ids or remove_edges for deletions. Add
+at most 24 nodes and 40 edges. Do not rename fields. In particular, EvidenceNode uses
+canonical_text and supporting_spans, never text or spans. Use only the node-type and edge-relation
+enum values in the schema. uncertainties and conflicts are arrays of strings, not objects. Never
+use outside knowledge, invent missing experimental details, or cite a span ID absent from the
+bundle. Separate explicit statements from inference and leave ambiguous regions uncertain.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
 
@@ -332,7 +325,8 @@ def _repair_prompt(
     oracle_results: list[OracleResult],
 ) -> str:
     return (
-        "Return a complete replacement graph payload with nodes, edges, uncertainties, conflicts.\n"
+        "Return only a bounded delta against GRAPH that resolves the CRITIQUE; do not restate "
+        "unchanged graph content.\n"
         f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"GRAPH:\n{canonical_json(graph).decode()}\n"

@@ -14,7 +14,7 @@ from processor.foundry.graph import EvidenceGraphCompiler
 from processor.foundry.oracles import OracleCoordinator, OracleRuntimeError
 from processor.foundry.packaging import EnvironmentPackager, PackageResult
 from processor.foundry.paper_adapter import bundle_json, paper_bundle_from_gold
-from processor.foundry.providers import ProviderError
+from processor.foundry.providers import ProviderError, ProviderOutputError
 from processor.foundry.quota import QuotaExceededError
 from processor.foundry.store import FoundryStore
 from processor.foundry.tasking import SolvedTask, TaskFactory, TaskOutputError
@@ -198,6 +198,19 @@ class FoundryPipeline:
                 solved=solved,
                 common_traces=[*graph_traces, *task_traces],
                 oracle_results=oracle_results,
+            )
+        except ProviderOutputError as exc:
+            # A completed but malformed structured response is deterministic
+            # candidate-level failure, not a transient transport failure. Mark
+            # it rejected so the ranked snapshot can advance to later papers.
+            reason = str(exc)
+            self._transition(job_id, bundle.paper_id, "REJECTED", reason=reason)
+            return PipelineResult(
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                final_state="REJECTED",
+                artifacts=[],
+                rejection_reason=reason,
             )
         except (ProviderError, QuotaExceededError):
             # Bytewax retries from the last immutable stage. Completed provider
