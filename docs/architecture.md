@@ -105,12 +105,19 @@ handles partitioning, state, and recovery.
 ### Storage: MinIO + Iceberg + Polaris
 
 - **MinIO**: S3 API, single chart, single dev node.
-  Buckets: `bronze`, `silver`, `gold`, `decon-attestations`, `checkpoints`.
+  Application buckets: `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`,
+  and `s2p-posttrain`.
 - **Iceberg V2**: append-only decision and accepted-only Gold tables, plus
   signed attestation metadata. The `_row_id` field is reserved and remains
   null until real V3 row lineage is implemented. Partitioning is detailed in
   `data-model.md`.
 - **Polaris** (lite mode): Iceberg REST catalog, RBAC, single-replica in dev.
+
+The current normalized Silver record is transported by Redpanda; its
+structured scientific JSON and figure assets live in `s2p-silver`. There is no
+separate Silver Iceberg table in the deployed pipeline. Storage ownership and
+the production scaling boundary are detailed in
+[`storage-scaling.md`](./storage-scaling.md).
 
 ### Serving: DuckDB + Next.js UI
 

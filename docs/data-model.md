@@ -11,7 +11,7 @@ batch. The wire shape is enforced by the Pydantic models in `schemas/`.
 | Tier | Purpose | On-disk format | Retention | Source of truth |
 |---|---|---|---|---|
 | Bronze | Raw fetched bytes + metadata pointer | gzipped HTML on MinIO + `BronzeRecord` JSON on `raw.fetched` | 30 days (prod) | `schemas/bronze.py` |
-| Silver | Normalised + tagged but pre-quality-filter | Parquet in Iceberg | 90 days | `schemas/silver.py` |
+| Silver | Normalised + tagged but pre-quality-filter | `docs.normalized` in Redpanda; structured artifacts in `s2p-silver` | topic retention / aligned with source | `schemas/silver.py` |
 | Scientific artifact | Structured sections, tables, equations, figures, citations, OCR and extractor provenance | JSON and figure assets in MinIO | aligned with source | `schemas/scientific.py` |
 | Decisions | Every accepted or rejected scored outcome plus its full signal vector | Parquet in Iceberg | indefinite | `schemas/gold.py` |
 | Gold | Curated, mixture-ready training shard | Parquet in Iceberg | indefinite | `schemas/gold.py` |

@@ -66,7 +66,12 @@ RUN uv sync \
         --no-dev \
         --no-install-workspace
 
-COPY . /src
+# Install only the selected processor workspace and its two local runtime
+# dependencies. Documentation, charts, UI code, tests, and unrelated pollers
+# must not invalidate this source layer or enter the runtime image.
+COPY schemas /src/schemas
+COPY ingest/common /src/ingest/common
+COPY processor /src/processor
 
 RUN uv sync \
         --locked \
@@ -203,7 +208,11 @@ RUN groupadd --system --gid 65532 nonroot \
  && chown -R nonroot:nonroot ${S2P_STATE_DIR}
 
 COPY --from=builder /src/.venv                         /src/.venv
-COPY .                                                  /app
+COPY schemas                                            /app/schemas
+COPY processor                                          /app/processor
+# The foundry records the reviewed provider-terms document path in its policy
+# audit. Keep only that required documentation subtree in the runtime image.
+COPY docs/provider-terms                                /app/docs/provider-terms
 COPY --from=models  /opt/models                         /opt/models
 COPY --from=builder /opt/models/docling                 /opt/models/docling
 
