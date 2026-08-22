@@ -238,9 +238,38 @@ class ScientificProcessor:
         pdf: bytes,
         extraction_pipeline: str,
     ) -> ScientificProcessingResult:
+        """Convert a PDF with Docling, falling back to bounded text extraction."""
+        if self._docling_enabled:
+            try:
+                return self._process_pdf_docling(
+                    doc_id=doc_id,
+                    source_url=source_url,
+                    pdf=pdf,
+                    extraction_pipeline=extraction_pipeline,
+                )
+            except Exception as exc:
+                if self._require_real_models:
+                    raise
+                fallback_warning = f"docling_fallback:{type(exc).__name__}"
+        else:
+            fallback_warning = "docling_disabled:pypdf"
+        return self._process_pdf_fallback(
+            doc_id=doc_id,
+            source_url=source_url,
+            pdf=pdf,
+            extraction_pipeline=extraction_pipeline,
+            warning=fallback_warning,
+        )
+
+    def _process_pdf_docling(
+        self,
+        *,
+        doc_id: str,
+        source_url: str,
+        pdf: bytes,
+        extraction_pipeline: str,
+    ) -> ScientificProcessingResult:
         """Convert one bounded PDF with Docling's standard CPU pipeline."""
-        if not self._docling_enabled:
-            raise RuntimeError("Docling PDF processing is disabled")
         converter = self._get_docling_converter()
         from docling.datamodel.base_models import DocumentStream  # type: ignore[import-not-found]
         from docling_core.types.doc import (  # type: ignore[import-not-found]
@@ -409,6 +438,65 @@ class ScientificProcessor:
             figures=figures,
             citations=citations,
             warnings=warnings,
+        )
+        return self._store_document(document=document, plain_text=plain_text)
+
+    def _process_pdf_fallback(
+        self,
+        *,
+        doc_id: str,
+        source_url: str,
+        pdf: bytes,
+        extraction_pipeline: str,
+        warning: str,
+    ) -> ScientificProcessingResult:
+        """Extract bounded per-page text when the heavier Docling path is unavailable."""
+        from pypdf import PdfReader  # type: ignore[import-untyped]
+
+        reader = PdfReader(io.BytesIO(pdf), strict=False)
+        page_limit = min(len(reader.pages), self._max_pdf_pages)
+        sections: list[ScientificSection] = []
+        page_texts: list[str] = []
+        for index, page in enumerate(reader.pages[:page_limit]):
+            value = _clean(page.extract_text() or "")
+            if not value:
+                continue
+            page_texts.append(value)
+            sections.append(
+                ScientificSection(
+                    section_id=f"page-{index + 1}",
+                    level=2,
+                    title=f"Page {index + 1}",
+                    text=value,
+                    role="other",
+                    include_in_training=True,
+                    word_count=_word_count(value),
+                    paragraphs=[
+                        ScientificParagraph(
+                            paragraph_id=f"page-{index + 1}-text",
+                            text=value,
+                            include_in_training=True,
+                        )
+                    ],
+                )
+            )
+        plain_text = "\n\n".join(page_texts).strip()
+        metadata = reader.metadata
+        metadata_title = _clean(str(getattr(metadata, "title", "") or "")) or None
+        title = metadata_title or _infer_pdf_title(plain_text)
+        fallback_warnings = [warning]
+        if len(reader.pages) > page_limit:
+            fallback_warnings.append("page_limit_reached")
+        if title is None:
+            fallback_warnings.append("title_not_detected")
+        document = ScientificDocument(
+            doc_id=doc_id,
+            source_url=source_url,
+            title=title,
+            text_sha256=hashlib.sha256(plain_text.encode("utf-8")).hexdigest(),
+            extraction_pipeline=f"{extraction_pipeline}+pypdf",
+            sections=sections,
+            warnings=fallback_warnings,
         )
         return self._store_document(document=document, plain_text=plain_text)
 

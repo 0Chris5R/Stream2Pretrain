@@ -41,6 +41,8 @@ redpanda:
   bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
   schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
   startingOffset: beginning
+  # Processor stages retain 64 KiB of record-framing headroom below this.
+  maxMessageBytes: 2097152
   saslMechanism: ""
   authSecret: ""
   topics:
@@ -470,6 +472,9 @@ openreviewPoller:
 processor:
   fetcher:
     image: stream2pretrain/processor-fetcher
+    # Full Docling requires its pinned model bundle. The bounded pypdf path is
+    # the resilient default for this streaming worker.
+    doclingEnabled: false
     # Bytewax persists offsets locally rather than committing Kafka consumer
     # group offsets. Keep one pod attached to one durable checkpoint. Scale
     # workers/partitions as one measured Bytewax execution, not via HPA/KEDA.

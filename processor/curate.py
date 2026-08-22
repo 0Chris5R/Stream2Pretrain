@@ -708,8 +708,10 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     from bytewax.dataflow import Dataflow
 
     tracer = common.init_tracer("s2p-curate", cfg)
+    log = common.get_logger("s2p.curate")
     state = build_state(cfg)
     flow = Dataflow("s2p-curate")
+    payload_max_bytes = common.kafka_payload_max_bytes()
     # Default to ``beginning`` so a restart with no committed group offset
     # replays the topic instead of dropping in-flight bytes (at-least-once
     # semantics; matches the Kappa/streaming-first contract). Operators can
@@ -736,6 +738,21 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 )
             except Exception as exc:
                 span.record_exception(exc)
+                PROCESSOR_METRICS.record_failure(stage="curate", reason=type(exc).__name__)
+                log.warning(
+                    "curation record failed",
+                    error=str(exc),
+                    exception_type=type(exc).__name__,
+                    exc_info=True,
+                )
+                return None
+            if len(decision) > payload_max_bytes:
+                PROCESSOR_METRICS.record_failure(stage="curate", reason="payload_too_large")
+                log.warning(
+                    "curation payload exceeds bounded Kafka record size",
+                    payload_bytes=len(decision),
+                    payload_max_bytes=payload_max_bytes,
+                )
                 return None
             key = getattr(msg, "key", None) or b""
             decision_message = KafkaSinkMessage(key=key, value=decision)

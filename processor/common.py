@@ -211,6 +211,20 @@ def kafka_producer_config() -> dict[str, str]:
     return {"message.max.bytes": str(_env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576))}
 
 
+def kafka_payload_max_bytes() -> int:
+    """Largest payload that is safe below the configured Kafka record limit."""
+    message_max = _env_int("S2P_KAFKA_MESSAGE_MAX_BYTES", 1_048_576)
+    configured = _env_int("S2P_KAFKA_PAYLOAD_MAX_BYTES", message_max - 65_536)
+    if message_max <= 65_536:
+        raise RuntimeError("S2P_KAFKA_MESSAGE_MAX_BYTES must be greater than 65536")
+    if configured <= 0 or configured >= message_max:
+        raise RuntimeError(
+            "S2P_KAFKA_PAYLOAD_MAX_BYTES must be positive and smaller than "
+            "S2P_KAFKA_MESSAGE_MAX_BYTES"
+        )
+    return configured
+
+
 def run_bytewax_flow(flow: object, cfg: ProcessorConfig, flow_name: str) -> None:
     """Run one flow with durable source-offset recovery enabled.
 
@@ -398,6 +412,7 @@ __all__ = [
     "gold_dumps",
     "gold_loads",
     "init_tracer",
+    "kafka_payload_max_bytes",
     "load_config",
     "new_trace_id",
     "silver_dumps",

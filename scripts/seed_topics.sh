@@ -37,7 +37,8 @@ create_topic() {
         --partitions "$partitions" \
         --replicas "$replicas" \
         --config "retention.ms=${RETENTION_MS_DEV}" \
-        --config "cleanup.policy=delete" 2> >(tee /tmp/rpk_err >&2) ; then
+        --config "cleanup.policy=delete" \
+        --config "max.message.bytes=2097152" 2> >(tee /tmp/rpk_err >&2) ; then
     if grep -q 'TOPIC_ALREADY_EXISTS' /tmp/rpk_err 2>/dev/null; then
       echo "  -> already exists, skipping"
     else

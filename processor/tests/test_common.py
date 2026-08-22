@@ -6,6 +6,8 @@ import sys
 from datetime import UTC, datetime
 from types import ModuleType
 
+import pytest
+
 from processor.common import (
     bronze_loads,
     decon_dumps,
@@ -13,6 +15,7 @@ from processor.common import (
     gold_dumps,
     gold_loads,
     kafka_consumer_config,
+    kafka_payload_max_bytes,
     kafka_producer_config,
     kafka_starting_offset,
     load_config,
@@ -101,6 +104,15 @@ def test_kafka_message_configs_follow_environment(monkeypatch) -> None:
         "fetch.message.max.bytes": "2097152",
     }
     assert kafka_producer_config() == {"message.max.bytes": "2097152"}
+    assert kafka_payload_max_bytes() == 2031616
+
+
+def test_kafka_payload_limit_requires_framing_headroom(monkeypatch) -> None:
+    monkeypatch.setenv("S2P_KAFKA_MESSAGE_MAX_BYTES", "2097152")
+    monkeypatch.setenv("S2P_KAFKA_PAYLOAD_MAX_BYTES", "2097152")
+
+    with pytest.raises(RuntimeError, match="must be positive and smaller"):
+        kafka_payload_max_bytes()
 
 
 def test_run_bytewax_flow_initializes_and_reuses_recovery(monkeypatch, tmp_path) -> None:

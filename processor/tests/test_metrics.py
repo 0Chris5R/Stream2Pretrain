@@ -10,6 +10,7 @@ def test_processor_metrics_render_dashboard_contract() -> None:
     metrics.record_curated(source_feed="arxiv-rss", quality_score=3.25, edu_score=4.0)
     metrics.record_dropped(reasons=["license_excluded"], quality_score=0.75, edu_score=1.0)
     metrics.record_route(route="reasoning_candidate")
+    metrics.record_failure(stage="normalize", reason="payload_too_large")
     metrics.record_decon_scan(benchmarks=["MMLU"])
     metrics.record_iceberg_flush(rows=2, decisions=3, benchmark_candidates=1, seconds=0.12)
 
@@ -39,3 +40,7 @@ def test_processor_metrics_render_dashboard_contract() -> None:
         in body
     )
     assert "s2p_iceberg_flush_seconds_bucket" in body
+    assert (
+        's2p_processor_failures_total{namespace="stream2pretrain",reason="payload_too_large",stage="normalize"} 1.0'
+        in body
+    )
