@@ -19,14 +19,14 @@ WORKDIR /src
 COPY pyproject.toml /src/pyproject.toml
 COPY README.md /src/README.md
 COPY schemas /src/schemas
-# uv validates every declared workspace member before resolving even when the
-# command installs only this fetcher. The full Python source tree is under 4 MB
-# and keeps the container build consistent with the root workspace metadata.
+# The install command ignores root workspace source mappings and receives each
+# required local package explicitly, so unrelated components stay out of this
+# image context and cannot invalidate its dependency layer.
 COPY ingest/__init__.py /src/ingest/__init__.py
 COPY ingest/common /src/ingest/common
 COPY ingest/arxiv_html_fetcher /src/ingest/arxiv_html_fetcher
 
-RUN uv pip install --system --no-cache \
+RUN uv pip install --system --no-cache --no-config --no-sources \
         -e . \
         -e ./ingest/common \
         -e ./ingest/arxiv_html_fetcher

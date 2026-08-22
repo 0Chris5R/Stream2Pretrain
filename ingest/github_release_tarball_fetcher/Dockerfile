@@ -13,7 +13,7 @@ COPY schemas /src/schemas
 COPY ingest/__init__.py /src/ingest/__init__.py
 COPY ingest/common /src/ingest/common
 COPY ingest/github_release_tarball_fetcher /src/ingest/github_release_tarball_fetcher
-RUN uv pip install --system --no-cache \
+RUN uv pip install --system --no-cache --no-config --no-sources \
         -e . \
         -e ./ingest/common \
         -e ./ingest/github_release_tarball_fetcher

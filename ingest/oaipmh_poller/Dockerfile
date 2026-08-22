@@ -20,7 +20,7 @@ COPY ingest/__init__.py /src/ingest/__init__.py
 COPY ingest/common /src/ingest/common
 COPY ingest/oaipmh_poller /src/ingest/oaipmh_poller
 
-RUN uv pip install --system --no-cache \
+RUN uv pip install --system --no-cache --no-config --no-sources \
         -e . \
         -e ./ingest/common \
         -e ./ingest/oaipmh_poller
