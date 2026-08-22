@@ -17,7 +17,7 @@ import pytest
 
 from processor.foundry.config import FoundryConfig, ProviderConfig
 from processor.foundry.control import ProviderControlPlane
-from processor.foundry.graph import BoundedGraphPatch
+from processor.foundry.graph import BoundedGraphPatch, EvidenceGraphCompiler
 from processor.foundry.inspection import ArtifactInspector, inspect_package
 from processor.foundry.lakehouse import _schema_column_names
 from processor.foundry.oracle_build import tree_hash
@@ -277,6 +277,59 @@ def test_graph_pass_rejects_more_than_24_incremental_nodes() -> None:
 
     with pytest.raises(ValueError, match="at most 24 items"):
         BoundedGraphPatch(nodes=nodes)
+
+
+def test_graph_repair_is_a_bounded_delta_that_preserves_valid_nodes() -> None:
+    class RepairControl:
+        config = SimpleNamespace(prompt_version="test-v1")
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.critic_calls = 0
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.calls.append(kwargs)
+            role = kwargs["role"]
+            if role == "structure_compiler":
+                data: dict[str, Any] = {
+                    "nodes": [
+                        {
+                            "id": "claim:1",
+                            "type": "claim",
+                            "canonical_text": "The reported result is supported.",
+                            "supporting_spans": ["section-1.span1"],
+                        }
+                    ]
+                }
+            elif role == "graph_critic":
+                self.critic_calls += 1
+                data = (
+                    {
+                        "accepted": False,
+                        "findings": ["Record the qualification."],
+                        "repair_instructions": ["Add the uncertainty."],
+                    }
+                    if self.critic_calls == 1
+                    else {"accepted": True}
+                )
+            elif role == "graph_repair":
+                data = {"uncertainties": ["The result is limited to the reported setting."]}
+            else:
+                data = {}
+            return data, _trace(f"trace:{len(self.calls)}")
+
+    control = RepairControl()
+    graph, _ = EvidenceGraphCompiler(control).compile(  # type: ignore[arg-type]
+        job_id="job:1",
+        bundle=_bundle(),
+    )
+
+    assert [node.id for node in graph.nodes] == ["claim:1"]
+    assert graph.uncertainties == ["The result is limited to the reported setting."]
+    repair_call = next(call for call in control.calls if call["role"] == "graph_repair")
+    assert repair_call["max_output_tokens"] == 6_000
+    assert "prioritized incremental JSON patch" in repair_call["system"]
+    assert "do not restate unchanged graph content" in repair_call["user"]
 
 
 def test_solver_turn_drops_symbolic_null_from_numeric_results() -> None:
