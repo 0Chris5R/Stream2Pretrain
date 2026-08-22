@@ -62,12 +62,30 @@ def main() -> None:
             "SELECT state,COUNT(*) AS count FROM candidate_queue GROUP BY state"
         ).fetchall()
     }
+    verifier_attempts = []
+    for row in connection.execute(
+        """
+        SELECT job_id,call_key,response_json,created_at
+        FROM provider_results
+        WHERE call_key LIKE 'verifier_%'
+        ORDER BY created_at DESC LIMIT 100
+        """
+    ).fetchall():
+        verifier_attempts.append(
+            {
+                "job_id": str(row["job_id"]),
+                "call_key": str(row["call_key"]),
+                "created_at": str(row["created_at"]),
+                "response": _json(row["response_json"]),
+            }
+        )
     artifact_counts = Counter(f"{artifact['kind']}:{artifact['status']}" for artifact in artifacts)
     payload = {
         "database_bytes": database.stat().st_size,
         "job_counts": dict(Counter(str(job["state"]) for job in jobs)),
         "artifact_counts": dict(sorted(artifact_counts.items())),
         "candidate_queue": queue,
+        "verifier_attempts": verifier_attempts,
         "jobs": jobs,
         "artifacts": artifacts,
     }
