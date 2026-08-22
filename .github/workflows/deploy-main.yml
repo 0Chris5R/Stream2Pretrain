@@ -921,6 +921,12 @@ jobs:
             exit 1
           fi
 
+          # The observed Phase-1 burst proved one partition is insufficient.
+          # Four is a bounded DHBW dev setting that removes head-of-line
+          # blocking and permits coordinated workers; prod remains
+          # needs-measurement through the capacity benchmark.
+          S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh
+
           helm_overrides=(
             --set "image.registry=${registry}"
             --set "image.tag=${GITHUB_SHA}"

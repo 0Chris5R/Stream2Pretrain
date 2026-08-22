@@ -8,11 +8,12 @@ import json
 import os
 import secrets
 import time
+import zlib
 from datetime import UTC, datetime
 from typing import Any
 
 import boto3
-from confluent_kafka import Consumer, Producer
+from confluent_kafka import Consumer, Producer, TopicPartition
 
 from ingest.common.license_admission import decide_license_admission
 from schemas.bronze import BronzeRecord
@@ -25,16 +26,46 @@ def required_env(name: str) -> str:
     return value
 
 
-def consume_document(topic: str, doc_id: str, timeout_seconds: float) -> dict[str, Any] | None:
+def topic_partition_count(producer: Producer, topic: str) -> int:
+    metadata = producer.list_topics(topic, timeout=10.0)
+    topic_metadata = metadata.topics.get(topic)
+    if topic_metadata is None or topic_metadata.error is not None:
+        raise RuntimeError(f"cannot inspect smoke topic {topic}: {topic_metadata}")
+    count = len(topic_metadata.partitions)
+    if count < 1:
+        raise RuntimeError(f"smoke topic has no partitions: {topic}")
+    return count
+
+
+def tail_consumer(topic: str) -> Consumer:
+    """Create a consumer assigned to the current tail of every topic partition."""
     consumer = Consumer(
         {
             "bootstrap.servers": required_env("REDPANDA_BROKERS"),
             "group.id": f"s2p-cluster-smoke-{secrets.token_hex(6)}",
-            "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
         }
     )
-    consumer.subscribe([topic])
+    metadata = consumer.list_topics(topic, timeout=10.0)
+    topic_metadata = metadata.topics.get(topic)
+    if topic_metadata is None or topic_metadata.error is not None:
+        consumer.close()
+        raise RuntimeError(f"cannot inspect smoke topic {topic}: {topic_metadata}")
+    assignments: list[TopicPartition] = []
+    for partition in sorted(topic_metadata.partitions):
+        topic_partition = TopicPartition(topic, partition)
+        _, high = consumer.get_watermark_offsets(topic_partition, timeout=10.0)
+        assignments.append(TopicPartition(topic, partition, high))
+    if not assignments:
+        consumer.close()
+        raise RuntimeError(f"smoke topic has no partitions: {topic}")
+    consumer.assign(assignments)
+    return consumer
+
+
+def consume_document(
+    consumer: Consumer, topic: str, doc_id: str, timeout_seconds: float
+) -> dict[str, Any] | None:
     deadline = time.monotonic() + timeout_seconds
     try:
         while time.monotonic() < deadline:
@@ -60,9 +91,18 @@ def consume_document(topic: str, doc_id: str, timeout_seconds: float) -> dict[st
 def main() -> None:
     started = time.monotonic()
     now = datetime.now(UTC)
-    probe_id = secrets.token_hex(8)
-    url = f"https://example.org/stream2pretrain/cluster-smoke/{probe_id}"
-    doc_id = "sha256:" + hashlib.sha256(url.encode()).hexdigest()
+    raw_topic = required_env("S2P_RAW_TOPIC")
+    producer = Producer({"bootstrap.servers": required_env("REDPANDA_BROKERS")})
+    raw_partition_count = topic_partition_count(producer, raw_topic)
+    for _ in range(100):
+        probe_id = secrets.token_hex(8)
+        url = f"https://example.org/stream2pretrain/cluster-smoke/{probe_id}"
+        doc_id = "sha256:" + hashlib.sha256(url.encode()).hexdigest()
+        probe_partition = zlib.crc32(doc_id.encode()) % raw_partition_count
+        if raw_partition_count == 1 or probe_partition != 0:
+            break
+    else:
+        raise RuntimeError("could not select a fresh smoke partition")
     admission = decide_license_admission(
         source_url=url,
         source_feed="cluster-smoke",
@@ -99,7 +139,12 @@ def main() -> None:
         aws_secret_access_key=required_env("MINIO_SECRET_KEY"),
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
     )
-    producer = Producer({"bootstrap.servers": required_env("REDPANDA_BROKERS")})
+    normalized_topic = required_env("S2P_NORMALIZED_TOPIC")
+    decision_topic = required_env("S2P_DECISIONS_TOPIC")
+    curated_topic = required_env("S2P_CURATED_TOPIC")
+    normalized_consumer = tail_consumer(normalized_topic)
+    decision_consumer = tail_consumer(decision_topic)
+    curated_consumer = tail_consumer(curated_topic)
     producer.produce(
         required_env("S2P_LICENSE_ADMISSIONS_TOPIC"),
         key=admission.decision.decision_id.encode(),
@@ -132,17 +177,24 @@ def main() -> None:
         spdx_license_source="manual_override",
     )
     producer.produce(
-        required_env("S2P_RAW_TOPIC"),
+        raw_topic,
         key=doc_id.encode(),
         value=json.dumps(bronze.model_dump(mode="json")).encode(),
+        partition=probe_partition,
     )
     if producer.flush(10.0):
         raise RuntimeError("the controlled Bronze record was not delivered")
 
-    decision_topic = required_env("S2P_DECISIONS_TOPIC")
-    decision = consume_document(decision_topic, doc_id, 60.0)
+    normalized = consume_document(normalized_consumer, normalized_topic, doc_id, 90.0)
+    if normalized is None:
+        decision_consumer.close()
+        curated_consumer.close()
+        raise RuntimeError(f"no {normalized_topic} result for {doc_id} within 90 seconds")
+
+    decision = consume_document(decision_consumer, decision_topic, doc_id, 120.0)
     if decision is None:
-        raise RuntimeError(f"no {decision_topic} result for {doc_id} within 60 seconds")
+        curated_consumer.close()
+        raise RuntimeError(f"no {decision_topic} result for {doc_id} within 120 seconds")
 
     trainable = (
         decision.get("risk_tier") == 1
@@ -154,9 +206,11 @@ def main() -> None:
     )
     curated_seen = False
     if trainable:
-        curated_seen = consume_document(required_env("S2P_CURATED_TOPIC"), doc_id, 30.0) is not None
+        curated_seen = consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
         if not curated_seen:
             raise RuntimeError(f"training-eligible document missing from docs.curated: {doc_id}")
+    else:
+        curated_consumer.close()
 
     print(
         json.dumps(
@@ -167,6 +221,7 @@ def main() -> None:
                 "risk_tier": decision.get("risk_tier"),
                 "reject_reasons": decision.get("reject_reasons"),
                 "curated_seen": curated_seen,
+                "probe_partition": probe_partition,
                 "elapsed_seconds": round(time.monotonic() - started, 3),
             },
             sort_keys=True,

@@ -70,6 +70,8 @@ spec:
               value: "67108864"
             - name: S2P_MAX_EXPANDED_OBJECT_BYTES
               value: "67108864"
+            - name: S2P_WAYBACK_LOOKUP_ENABLED
+              value: "0"
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30

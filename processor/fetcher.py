@@ -382,7 +382,12 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
 
     tracer = common.init_tracer("s2p-fetcher", cfg)
     log = common.get_logger("s2p.fetcher")
-    state = build_state(cfg)
+    # A synchronous Wayback HTTP call per record cannot keep up with bursty
+    # ingestion. Keep the optional enrichment available for controlled runs,
+    # while the live streaming path falls back to fetched_at when source dates
+    # are absent.
+    with_wayback = os.environ.get("S2P_WAYBACK_LOOKUP_ENABLED", "0") == "1"
+    state = build_state(cfg, with_wayback=with_wayback)
     flow = Dataflow("s2p-fetcher")
     # ``beginning`` ensures a fresh deploy or offset reset replays from the
     # topic's retention window (at-least-once). Override via env if a debug
