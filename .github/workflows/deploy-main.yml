@@ -375,19 +375,25 @@ jobs:
             kubectl -n stream2pretrain wait \
               --for=condition=Ready \
               pod/stream2pretrain-foundry-0 --timeout=180s
-            kubectl -n stream2pretrain port-forward \
-              pod/stream2pretrain-foundry-0 18092:8092 \
+            # `kubectl port-forward` connects to loopback inside the Pod, but
+            # this IPv6-only cluster binds the API to the Pod's `::` address.
+            # The API-server Service proxy reaches that IPv6 endpoint directly.
+            foundry_api="http://127.0.0.1:18092/api/v1/namespaces/stream2pretrain/services/http:stream2pretrain-foundry:8092/proxy"
+            kubectl proxy \
+              --address=127.0.0.1 \
+              --accept-hosts='^127\.0\.0\.1$' \
+              --port=18092 \
               >"$RUNNER_TEMP/foundry-port-forward.log" 2>&1 &
             foundry_port_forward_pid=$!
             for _ in $(seq 1 30); do
-              curl --fail --silent http://127.0.0.1:18092/healthz >/dev/null && break
+              curl --fail --silent "${foundry_api}/healthz" >/dev/null && break
               if ! kill -0 "$foundry_port_forward_pid" 2>/dev/null; then
                 cat "$RUNNER_TEMP/foundry-port-forward.log" >&2
                 exit 1
               fi
               sleep 1
             done
-            curl --fail --silent --show-error http://127.0.0.1:18092/healthz
+            curl --fail --silent --show-error "${foundry_api}/healthz"
 
             control_token="$(
               kubectl -n stream2pretrain get secret \
@@ -399,7 +405,7 @@ jobs:
                 -H "Authorization: Bearer ${control_token}" \
                 -H 'Content-Type: application/json' \
                 --data '{"max_candidates":1}' \
-                http://127.0.0.1:18092/api/foundry/runs/manual
+                "${foundry_api}/api/foundry/runs/manual"
             )"
             unset control_token
             printf '%s\n' "$request" | jq '{created,run}'
@@ -416,7 +422,7 @@ jobs:
             for _ in $(seq 1 180); do
               dashboard="$(
                 curl --fail --silent --show-error \
-                  http://127.0.0.1:18092/api/foundry/dashboard
+                  "${foundry_api}/api/foundry/dashboard"
               )"
               run="$(
                 printf '%s' "$dashboard" \
