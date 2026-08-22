@@ -66,13 +66,21 @@ spec:
                 port:
                   number: 80
     {{- end }}
-  {{ with .Values.ui.ingress.tlsSecret }}
+  {{- if or .Values.ui.ingress.tlsSecret .Values.ui.ingress.aliasTlsSecret }}
   tls:
+    {{- with .Values.ui.ingress.tlsSecret }}
     - hosts:
         - {{ $.Values.ui.ingress.host | quote }}
+      secretName: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ui.ingress.aliasTlsSecret }}
+    {{- if $.Values.ui.ingress.aliases }}
+    - hosts:
         {{- range $.Values.ui.ingress.aliases }}
         - {{ . | quote }}
         {{- end }}
       secretName: {{ . | quote }}
-  {{ end }}
+    {{- end }}
+    {{- end }}
+  {{- end }}
 {{- end }}

@@ -149,7 +149,7 @@ Iceberg + observability).
 - name: S2P_KAFKA_START_OFFSET
   value: {{ .Values.redpanda.startingOffset | quote }}
 - name: S2P_KAFKA_MESSAGE_MAX_BYTES
-  value: {{ .Values.redpanda.maxMessageBytes | quote }}
+  value: {{ .Values.redpanda.maxMessageBytes | int64 | quote }}
 - name: S2P_RAW_TOPIC
   value: {{ .Values.redpanda.topics.rawFetched | quote }}
 - name: S2P_NORMALIZED_TOPIC
