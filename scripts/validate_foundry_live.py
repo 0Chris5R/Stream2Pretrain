@@ -159,9 +159,31 @@ def main() -> int:
         timeout_seconds = int(os.environ.get("S2P_FOUNDRY_VALIDATION_TIMEOUT_SECONDS", "2700"))
         deadline = time.monotonic() + timeout_seconds
         terminal_run: dict[str, Any] | None = None
+        last_progress: tuple[Any, Any, Any] | None = None
         while time.monotonic() < deadline:
             dashboard = _request_json(opener, base_url, "/api/foundry/dashboard")
             run = find_run(dashboard, run_id)
+            if run is not None:
+                progress = (
+                    run.get("state"),
+                    run.get("processed_count"),
+                    run.get("candidate_count"),
+                )
+                if progress != last_progress:
+                    print(
+                        json.dumps(
+                            {
+                                "validation_progress": {
+                                    "state": progress[0],
+                                    "processed_count": progress[1],
+                                    "candidate_count": progress[2],
+                                }
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                    last_progress = progress
             if run is not None and run.get("state") in TERMINAL_STATES:
                 terminal_run = run
                 break

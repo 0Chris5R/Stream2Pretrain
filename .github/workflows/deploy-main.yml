@@ -445,13 +445,17 @@ jobs:
               pod/stream2pretrain-foundry-0 --timeout=180s
             # Run inside the API sidecar so the Foundry bearer token is never
             # consumed by the Kubernetes API server or printed by the runner.
+            validation_status=0
             kubectl -n stream2pretrain exec -i \
               statefulset/stream2pretrain-foundry -c api -- python - \
-              < scripts/validate_foundry_live.py
+              < scripts/validate_foundry_live.py || validation_status=$?
             kubectl -n stream2pretrain exec -i \
               statefulset/stream2pretrain-foundry -c api -- python - \
-              < scripts/foundry_diagnostics.py
+              < scripts/foundry_diagnostics.py || true
             echo "::endgroup::"
+            if [[ "$validation_status" -ne 0 ]]; then
+              exit "$validation_status"
+            fi
             exit 0
           fi
 
