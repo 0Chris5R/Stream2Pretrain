@@ -7,13 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, diagnose, inspect storage, or recover orphaned Iceberg metadata
+        description: Deploy, diagnose, audit UI, inspect storage, or recover orphaned Iceberg metadata
         required: true
         default: deploy
         type: choice
         options:
           - deploy
           - diagnose
+          - audit-ui
           - inspect-storage
           - recover-storage
 
@@ -233,6 +234,7 @@ jobs:
           fi
 
           vpn_log="$RUNNER_TEMP/openconnect.log"
+          ui_port_forward_pid=""
           vpn_args=(
             --protocol=anyconnect
             --user="$CISCO_VPN_USERNAME"
@@ -251,6 +253,9 @@ jobs:
                 >"$vpn_log" 2>&1 &
           vpn_pid=$!
           cleanup() {
+            if [[ -n "$ui_port_forward_pid" ]]; then
+              kill "$ui_port_forward_pid" 2>/dev/null || true
+            fi
             sudo -n kill "$vpn_pid" 2>/dev/null || true
             sudo -n pkill -TERM -x openconnect 2>/dev/null || true
           }
@@ -320,6 +325,35 @@ jobs:
           ip -6 route get "$api_host" >&2 || true
 
           kubectl --request-timeout=20s get nodes
+
+          if [[ "$DEPLOY_MODE" == "audit-ui" ]]; then
+            echo "::group::Rendered browser audit"
+            audit_dir="$RUNNER_TEMP/ui-audit"
+            mkdir -p "$audit_dir"
+            kubectl -n stream2pretrain port-forward \
+              service/stream2pretrain-ui 18080:3000 \
+              >"$RUNNER_TEMP/ui-port-forward.log" 2>&1 &
+            ui_port_forward_pid=$!
+            for _ in $(seq 1 30); do
+              curl --fail --silent http://127.0.0.1:18080/api/health >/dev/null && break
+              if ! kill -0 "$ui_port_forward_pid" 2>/dev/null; then
+                cat "$RUNNER_TEMP/ui-port-forward.log" >&2
+                exit 1
+              fi
+              sleep 1
+            done
+            curl --fail --silent --show-error http://127.0.0.1:18080/api/health
+            google-chrome --version
+            npm install \
+              --prefix "$RUNNER_TEMP/browser-runtime" \
+              --no-audit --no-fund --silent \
+              playwright@1.55.0
+            NODE_PATH="$RUNNER_TEMP/browser-runtime/node_modules" \
+              CHROME_BIN="$(command -v google-chrome)" \
+              node scripts/browser_audit.cjs http://127.0.0.1:18080 "$audit_dir"
+            echo "::endgroup::"
+            exit 0
+          fi
 
           if [[ "$DEPLOY_MODE" == "recover-storage" ]]; then
             echo "::group::Pause storage writers"
@@ -504,6 +538,7 @@ jobs:
               .items[]
               | {
                   name: .metadata.name,
+                  addresses: .status.addresses,
                   taints: (.spec.taints // []),
                   conditions: [
                     .status.conditions[]
@@ -532,6 +567,16 @@ jobs:
                 || true
             done
             kubectl get persistentvolume,persistentvolumeclaim -A -o wide || true
+            kubectl get storageclass -o json | jq -r '
+              .items[]
+              | {
+                  name: .metadata.name,
+                  provisioner: .provisioner,
+                  allowVolumeExpansion: (.allowVolumeExpansion // false),
+                  reclaimPolicy: .reclaimPolicy,
+                  volumeBindingMode: .volumeBindingMode
+                }
+            '
             kubectl get persistentvolume -o json | jq -r '
               .items[]
               | {
@@ -733,3 +778,11 @@ jobs:
 
           kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
             python - < scripts/cluster_smoke.py
+
+      - name: Upload rendered UI audit
+        if: ${{ always() && inputs.mode == 'audit-ui' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream2pretrain-ui-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/ui-audit
+          if-no-files-found: error
