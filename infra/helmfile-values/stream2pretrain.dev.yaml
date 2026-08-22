@@ -93,7 +93,12 @@ ui:
     aliases:
       - stream2pretrain.theclusterflux.com
     ingressClassName: traefik
-    clusterIssuer: dhbw-acme
+    clusterIssuer: ""
+    acmeIssuer:
+      enabled: true
+      name: letsencrypt-public
+      server: https://acme-v02.api.letsencrypt.org/directory
+      email: ""
     tlsSecret: stream2pretrain-ui-tls
 
 # DNS-based egress policies are not implementable by standard Kubernetes
