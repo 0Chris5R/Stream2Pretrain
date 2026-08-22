@@ -381,6 +381,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     from bytewax.dataflow import Dataflow
 
     tracer = common.init_tracer("s2p-fetcher", cfg)
+    log = common.get_logger("s2p.fetcher")
     state = build_state(cfg)
     flow = Dataflow("s2p-fetcher")
     # ``beginning`` ensures a fresh deploy or offset reset replays from the
@@ -404,6 +405,12 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 silver = process_bronze_payload(state, payload, metrics=PROCESSOR_METRICS)
             except Exception as exc:
                 span.record_exception(exc)
+                log.warning(
+                    "fetcher record failed",
+                    error=str(exc),
+                    exception_type=type(exc).__name__,
+                    exc_info=True,
+                )
                 return None
             if silver is None:
                 return None
