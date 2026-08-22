@@ -158,9 +158,14 @@ jobs:
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=${{ matrix.image == 'processor' && 'min' || 'max' }},scope=${{ matrix.image }}
+          tags: |
+            ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
+            ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:build-cache
+          # The mutable cache tag points at the same content-addressed layers as
+          # the immutable commit tag. Inline metadata makes those registry
+          # layers reusable without uploading a second multi-GB GHA cache.
+          cache-from: type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:build-cache
+          cache-to: type=inline
 
   deploy:
     name: Deploy application release
