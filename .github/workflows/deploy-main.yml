@@ -344,17 +344,12 @@ jobs:
                   - sh
                   - -ec
                   - |
-                    echo 'Largest top-level filesystems (KiB):'
-                    du -x -k -d 1 /host 2>/dev/null | sort -n | tail -n 30
-                    echo 'k3s data directories (KiB):'
-                    du -x -k -d 2 /host/var/lib/rancher/k3s 2>/dev/null \
-                      | sort -n | tail -n 80
-                    echo 'Local-path volumes (KiB):'
-                    du -x -k -s /host/var/lib/rancher/k3s/storage/* 2>/dev/null \
-                      | sort -n | tail -n 80
-                    echo 'Log directories (KiB):'
-                    du -x -k -d 2 /host/var/log 2>/dev/null \
-                      | sort -n | tail -n 80
+                    volume=/host/var/lib/rancher/k3s/storage/pvc-731446d1-c621-4aeb-8b1e-f4e4d92535cb_minio_minio-data
+                    echo 'MinIO top-level directories (KiB):'
+                    du -x -k -d 1 "$volume" 2>/dev/null | sort -n
+                    echo 'MinIO system directories (KiB):'
+                    du -x -k -d 2 "$volume/.minio.sys" 2>/dev/null \
+                      | sort -n | tail -n 100
                 resources:
                   requests:
                     cpu: 10m
@@ -380,7 +375,7 @@ jobs:
           EOF
             if ! kubectl -n kube-system wait \
               --for=jsonpath='{.status.phase}'=Succeeded \
-              "pod/$inspector" --timeout=180s; then
+              "pod/$inspector" --timeout=600s; then
               kubectl -n kube-system describe pod "$inspector" || true
               kubectl -n kube-system logs "$inspector" || true
               kubectl -n kube-system delete pod "$inspector" \
