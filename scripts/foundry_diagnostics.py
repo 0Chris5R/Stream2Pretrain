@@ -1,0 +1,78 @@
+"""Print a compact, read-only diagnosis of the durable post-training store."""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+
+def _json(value: bytes | str) -> dict[str, Any]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise TypeError("foundry JSON record must be an object")
+    return parsed
+
+
+def main() -> None:
+    state_dir = Path(os.environ.get("S2P_FOUNDRY_STATE_DIR", "/var/lib/s2p/foundry"))
+    database = state_dir / "control.sqlite3"
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+
+    jobs = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT job_id,paper_id,doc_id,state,reason,received_at,updated_at
+            FROM jobs ORDER BY updated_at DESC LIMIT 100
+            """
+        ).fetchall()
+    ]
+    artifacts = []
+    for row in connection.execute(
+        "SELECT artifact_json FROM artifacts ORDER BY created_at DESC LIMIT 500"
+    ).fetchall():
+        artifact = _json(row["artifact_json"])
+        validation = artifact.get("validation")
+        artifacts.append(
+            {
+                key: artifact.get(key)
+                for key in (
+                    "artifact_id",
+                    "job_id",
+                    "task_id",
+                    "family",
+                    "kind",
+                    "pool",
+                    "dataset_split",
+                    "status",
+                    "created_at",
+                )
+            }
+            | {"validation": validation}
+        )
+
+    queue = {
+        str(row["state"]): int(row["count"])
+        for row in connection.execute(
+            "SELECT state,COUNT(*) AS count FROM candidate_queue GROUP BY state"
+        ).fetchall()
+    }
+    artifact_counts = Counter(f"{artifact['kind']}:{artifact['status']}" for artifact in artifacts)
+    payload = {
+        "database_bytes": database.stat().st_size,
+        "job_counts": dict(Counter(str(job["state"]) for job in jobs)),
+        "artifact_counts": dict(sorted(artifact_counts.items())),
+        "candidate_queue": queue,
+        "jobs": jobs,
+        "artifacts": artifacts,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
