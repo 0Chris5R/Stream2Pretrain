@@ -197,3 +197,37 @@ async def test_run_loop_falls_back_when_token_is_rejected(
     assert await evt_module.run_loop(_cfg(tmp_path), max_iterations=1) == 0
     assert authenticated_requests == 1
     assert anonymous_requests == 1
+
+
+def test_loads_chart_owned_org_filter(tmp_path: Path) -> None:
+    path = tmp_path / "github.json"
+    path.write_text(
+        json.dumps({"events": {"ai_org_filter": ["MistralAI", "AllenAI"]}}),
+        encoding="utf-8",
+    )
+    assert evt_module._load_ai_org_filter(str(path)) == frozenset({"mistralai", "allenai"})
+
+
+@pytest.mark.asyncio
+async def test_configured_org_extends_repository_filter() -> None:
+    fake_producer = FakeProducer()
+    fake_minio = FakeMinio()
+    await fake_producer.start()
+    await fake_minio.start()
+    event = {
+        "id": "configured-1",
+        "type": "ReleaseEvent",
+        "repo": {"name": "mistralai/new-model"},
+        "payload": {
+            "release": {"html_url": "https://github.com/mistralai/new-model/releases/tag/v1"}
+        },
+    }
+    emitted = await evt_module._process_events(
+        [event],
+        producer=fake_producer,  # type: ignore[arg-type]
+        minio=fake_minio,  # type: ignore[arg-type]
+        cfg=_cfg(Path(".")),
+        seen=set(),
+        ai_org_filter=frozenset({"mistralai"}),
+    )
+    assert emitted == 1

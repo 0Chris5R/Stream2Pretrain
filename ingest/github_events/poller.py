@@ -16,11 +16,13 @@ Behaviour:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import signal
 from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -83,11 +85,13 @@ async def _process_events(
     minio: MinioWriter,
     cfg: IngestConfig,
     seen: set[str],
+    ai_org_filter: frozenset[str] = frozenset(),
 ) -> int:
     emitted = 0
     for evt in events:
         repo = (evt.get("repo") or {}).get("name")
-        if not repo or not is_relevant_repo(repo):
+        owner = repo.split("/", 1)[0].lower() if isinstance(repo, str) and "/" in repo else ""
+        if not repo or (not is_relevant_repo(repo) and owner not in ai_org_filter):
             continue
         url = _event_url(evt)
         if not url:
@@ -149,7 +153,12 @@ def _trace_id() -> str:
     return secrets.token_hex(16)
 
 
-async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> int:
+async def run_loop(
+    cfg: IngestConfig,
+    *,
+    max_iterations: int | None = None,
+    ai_org_filter: frozenset[str] = frozenset(),
+) -> int:
     """Main loop. Returns total emitted records when stopped."""
     state_root = (
         "/var/lib/s2p-state/github_events" if not cfg.is_dev else "./.s2p-state/github_events"
@@ -225,6 +234,7 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
                         minio=minio,
                         cfg=cfg,
                         seen=seen,
+                        ai_org_filter=ai_org_filter,
                     )
                     total_emitted += emitted
                     log.info(
@@ -282,13 +292,28 @@ async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
         await asyncio.wait_for(stop.wait(), timeout=max(0.1, seconds))
 
 
+def _load_ai_org_filter(config_path: str | None) -> frozenset[str]:
+    """Load the chart-owned organization filter instead of silently ignoring it."""
+    if not config_path:
+        return frozenset()
+    payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    events = payload.get("events", {}) if isinstance(payload, dict) else {}
+    raw = events.get("ai_org_filter", []) if isinstance(events, dict) else []
+    if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
+        raise ValueError("events.ai_org_filter must be a list of strings")
+    return frozenset(value.lower() for value in raw)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Poll GitHub's public event stream")
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args()
     cfg = load_config()
     configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     init_tracer("ingest.github_events", cfg)
     log.info("github_events.start")
     start_probe_server()
-    total = asyncio.run(run_loop(cfg))
+    total = asyncio.run(run_loop(cfg, ai_org_filter=_load_ai_org_filter(args.config)))
     log.info("github_events.exit", total_emitted=total)
 
 
