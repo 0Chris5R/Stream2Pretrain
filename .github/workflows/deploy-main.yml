@@ -159,14 +159,15 @@ jobs:
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
-            ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:build-cache
-          # The mutable cache tag points at the same content-addressed layers as
-          # the immutable commit tag. Inline metadata makes those registry
-          # layers reusable without uploading a second multi-GB GHA cache.
-          cache-from: type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:build-cache
-          cache-to: type=inline
+          tags: ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
+          # A registry cache in max mode retains intermediate builder stages.
+          # This matters for the processor's locked ML environment, which is
+          # copied into the runtime image but is outside its final ancestry.
+          # The old inline tag remains a one-time migration source.
+          cache-from: |
+            type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:buildcache
+            type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:build-cache
+          cache-to: type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:buildcache,mode=max,oci-mediatypes=true,image-manifest=true
 
       - name: Smoke-test Python runtime imports
         # Ingest images use relocated console entrypoints and need this guard.

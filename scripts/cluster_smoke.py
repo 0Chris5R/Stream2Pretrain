@@ -199,7 +199,7 @@ def main() -> None:
     trainable = (
         decision.get("risk_tier") == 1
         and decision.get("route")
-        in {"broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
+        in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
         and not decision.get("reject_reasons")
         and not decision.get("pii_flags")
         and not decision.get("contaminated_with")

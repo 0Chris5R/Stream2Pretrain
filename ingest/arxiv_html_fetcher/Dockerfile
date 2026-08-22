@@ -22,9 +22,9 @@ COPY schemas /src/schemas
 # uv validates every declared workspace member before resolving even when the
 # command installs only this fetcher. The full Python source tree is under 4 MB
 # and keeps the container build consistent with the root workspace metadata.
-COPY ingest /src/ingest
-COPY processor /src/processor
-COPY tests /src/tests
+COPY ingest/__init__.py /src/ingest/__init__.py
+COPY ingest/common /src/ingest/common
+COPY ingest/arxiv_html_fetcher /src/ingest/arxiv_html_fetcher
 
 RUN uv pip install --system --no-cache \
         -e . \
