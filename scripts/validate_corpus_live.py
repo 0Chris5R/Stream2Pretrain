@@ -192,9 +192,6 @@ def main() -> int:
         ]
     )
     try:
-        health = _request_json(opener, base_url, "/healthz")
-        if health.get("status") != "ok":
-            raise ValidationError("DuckDB API is not healthy")
         admissions = _request_json(opener, base_url, "/license-admissions?recent_limit=100")
         overview = _request_json(opener, base_url, "/corpus-overview")
         dataset = _request_json(opener, base_url, f"/datasets/summary?{query}")

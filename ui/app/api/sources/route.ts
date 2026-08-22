@@ -18,7 +18,8 @@ export const dynamic = 'force-dynamic';
 
 const SourceListSchema = z.array(SourceFeedStatusSchema);
 const SourceActivitySchema = z.object({
-  by_source_24h: z.array(
+  window_hours: z.literal(24),
+  sources: z.array(
     z.object({
       source_feed: z.string(),
       documents: z.number().int().nonnegative(),
@@ -31,13 +32,13 @@ const SourceActivitySchema = z.object({
 
 async function fetchSourceActivity(): Promise<Map<string, number>> {
   try {
-    const response = await fetch(`${UPSTREAM.duckdb}/license-admissions?recent_limit=1`, {
+    const response = await fetch(`${UPSTREAM.duckdb}/source-activity?window_hours=24`, {
       cache: 'no-store',
     });
     if (!response.ok) return new Map();
     const parsed = SourceActivitySchema.safeParse(await response.json());
     if (!parsed.success) return new Map();
-    return new Map(parsed.data.by_source_24h.map((row) => [row.source_feed, row.documents]));
+    return new Map(parsed.data.sources.map((row) => [row.source_feed, row.documents]));
   } catch {
     return new Map();
   }

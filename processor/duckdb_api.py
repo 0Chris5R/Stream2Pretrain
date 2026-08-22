@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
@@ -314,7 +315,19 @@ class DuckDBQueryService:
             [max(1, min(recent_limit, 100))],
             relation=self._license_admissions,
         )
-        by_source_24h = self._rows(
+        counts = {str(row["status"]): int(row["count"]) for row in totals}
+        return {
+            "admitted": counts.get("admitted", 0),
+            "quarantined": counts.get("quarantined", 0),
+            "by_license": by_license,
+            "recent": recent,
+        }
+
+    def source_activity(self, *, window_hours: int = 24) -> dict[str, Any]:
+        """Return one efficient durable observation count per source."""
+        bounded_hours = max(1, min(window_hours, 24 * 7))
+        cutoff = datetime.now(UTC) - timedelta(hours=bounded_hours)
+        sources = self._rows(
             f"""
             SELECT
               source_feed,
@@ -323,21 +336,14 @@ class DuckDBQueryService:
               CAST(COUNT(*) FILTER (WHERE status = 'quarantined') AS BIGINT) AS quarantined,
               CAST(MAX(observed_at) AS VARCHAR) AS last_observed_at
             FROM {self._license_admissions}
-            WHERE observed_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+            WHERE observed_at >= CAST(? AS TIMESTAMP)
             GROUP BY source_feed
             ORDER BY source_feed
             """,
-            [],
+            [cutoff.isoformat()],
             relation=self._license_admissions,
         )
-        counts = {str(row["status"]): int(row["count"]) for row in totals}
-        return {
-            "admitted": counts.get("admitted", 0),
-            "quarantined": counts.get("quarantined", 0),
-            "by_license": by_license,
-            "by_source_24h": by_source_24h,
-            "recent": recent,
-        }
+        return {"window_hours": bounded_hours, "sources": sources}
 
     def documents(
         self,
@@ -1185,6 +1191,19 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
+    async def source_activity(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(
+                await run_query(
+                    service.source_activity,
+                    window_hours=int(request.query.get("window_hours", "24")),
+                )
+            )
+        except (TypeError, ValueError):
+            return web.json_response({"detail": "invalid window_hours"}, status=400)
+        except Exception as exc:
+            return web.json_response({"detail": str(exc)}, status=503)
+
     async def documents(request: web.Request) -> web.Response:
         try:
             return web.json_response(
@@ -1352,6 +1371,7 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
     app.router.add_get("/curation-summary", curation_summary)
     app.router.add_get("/corpus-overview", corpus_overview)
     app.router.add_get("/license-admissions", license_admissions)
+    app.router.add_get("/source-activity", source_activity)
     app.router.add_get("/documents", documents)
     app.router.add_get("/document-facets", document_facets)
     app.router.add_get("/documents/{doc_id}", document)
