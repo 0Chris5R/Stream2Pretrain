@@ -98,6 +98,28 @@ async def test_list_records_follows_resumption_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_pages_can_resume_from_a_durable_token() -> None:
+    seen_params: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, text=OAI_PAGE_2, headers={"content-type": "application/xml"})
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        oai = OAIClient("https://oai.example.org/oai", client, sleep_between_requests=0.0)
+        pages = [page async for page in oai.list_pages(resumption_token="token1")]
+    finally:
+        await client.aclose()
+
+    assert seen_params == [{"verb": "ListRecords", "resumptionToken": "token1"}]
+    assert [[record.identifier for record in page.records] for page in pages] == [
+        ["oai:arXiv.org:2026.002"]
+    ]
+    assert pages[0].resumption_token is None
+
+
+@pytest.mark.asyncio
 async def test_list_records_raises_on_oai_error() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=OAI_ERROR, headers={"content-type": "application/xml"})

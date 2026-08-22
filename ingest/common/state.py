@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 class FeedStateStore:
@@ -26,12 +27,22 @@ class FeedStateStore:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def _path_for(self, feed_name: str) -> Path:
-        # Keep file names POSIX-safe.
+        # Percent-encode separators and Windows-reserved characters while
+        # preserving readable feed names. Source state is also exercised by
+        # the local Windows profile, where keys such as ``openreview:venue``
+        # cannot be used as file names.
+        safe = quote(feed_name, safe="._-")
+        return self._root / f"{safe}.json"
+
+    def _legacy_path_for(self, feed_name: str) -> Path:
         safe = feed_name.replace("/", "_").replace(" ", "_")
         return self._root / f"{safe}.json"
 
     def get(self, feed_name: str) -> dict[str, Any]:
         p = self._path_for(feed_name)
+        legacy = self._legacy_path_for(feed_name)
+        if not p.exists() and legacy != p and legacy.exists():
+            p = legacy
         if not p.exists():
             return {}
         try:

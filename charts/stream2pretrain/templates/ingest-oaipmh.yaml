@@ -1,6 +1,7 @@
 {{- if or .Values.sources.arxiv.enabled .Values.mixtureController.enabled }}
 {{- $component := "ingest-oaipmh" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $stateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -43,14 +44,16 @@ spec:
                 {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
                 - name: S2P_COMPONENT
                   value: {{ $component | quote }}
-                - name: S2P_OAI_CHECKPOINT_PATH
-                  value: /var/lib/s2p/oai-checkpoint.json
+                - name: S2P_STATE_ROOT
+                  value: /var/lib/s2p-state
+                - name: S2P_OAI_MAX_PAGES_PER_RUN
+                  value: {{ .Values.ingest.oaipmh.maxPagesPerRun | quote }}
               volumeMounts:
                 - name: feeds
                   mountPath: /etc/s2p/feeds
                   readOnly: true
                 - name: state
-                  mountPath: /var/lib/s2p
+                  mountPath: /var/lib/s2p-state
                 - name: tmp
                   mountPath: /tmp
               resources:
@@ -60,7 +63,8 @@ spec:
               configMap:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: state
-              emptyDir: {}
+              persistentVolumeClaim:
+                claimName: {{ $stateClaim | quote }}
             - name: tmp
               emptyDir: {}
 {{- end }}

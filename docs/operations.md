@@ -35,12 +35,24 @@ current legacy release until the immutable-selector and curator StatefulSet
 migration in `docs/infrastructure-reimplementation.md` is approved. Loki,
 Tempo, and Alloy are not in the measured baseline.
 
-## 2. Scale the curator
+## 2. Scale the processor
 
-The measured DHBW baseline keeps KEDA disabled. Do not select replica counts or
-lag thresholds from examples. Run the target-cluster procedure in
-`docs/capacity-benchmark.md`, record the results, then update
-`keda.curate`, `keda.fetcher`, and `keda.iceberg` in the DHBW values file.
+The measured DHBW baseline keeps KEDA disabled. Bytewax's Kafka source does
+not commit Redpanda consumer-group offsets; it snapshots offsets and operator
+state into the stage's recovery database. Consequently Redpanda reports the
+core processor groups as `Dead` with zero lag, and a Kafka-lag ScaledObject is
+not a valid autoscaling signal for fetcher, curator, or Iceberg writer.
+
+Each core stage therefore runs as one stable, single-writer execution with a
+durable recovery PVC. To scale one, first increase the topic partition count,
+then benchmark a coordinated Bytewax execution with the same number of
+recovery partitions/workers. Do not add independent replicas: a rebalance can
+move a Kafka partition away from the PVC containing its latest offset.
+
+KEDA remains appropriate for independently committing ingest consumers such
+as the arXiv HTML and GitHub tarball fetchers. Run the target-cluster procedure
+in `docs/capacity-benchmark.md` and record its evidence before enabling those
+scalers.
 
 ```bash
 uv run python scripts/capacity_probe.py
@@ -49,7 +61,8 @@ uv run python scripts/capacity_probe.py
 
 ## 3. Debug a stuck stage
 
-Symptom: KEDA replica count climbs to the cap; lag keeps growing.
+Symptom: an ingest consumer's KEDA replica count climbs to the cap, or a core
+processor's throughput counters stop advancing.
 
 ```bash
 # 3.1 Identify the bottleneck.
@@ -66,30 +79,30 @@ kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate | r
 # Then jump to Tempo using the trace_id field on the log line.
 ```
 
-If a Bytewax operator panics: check `kubectl -n stream2pretrain describe pod
-curator-<n>` for the exit code, then `processor/curate.py` for the
-named operator that owned that key. Recovery is automatic from the RocksDB
-checkpoint; if checkpoints are corrupt, drop the PVC and let Bytewax replay
-from the last committed Redpanda offset.
+If a Bytewax operator panics: check `kubectl -n stream2pretrain describe pod`
+for the exit code, then the named operator in the processor module. Recovery
+is automatic from the stage's SQLite recovery checkpoint. Bytewax deliberately
+has no last committed Redpanda offset to fall back to, so deleting a checkpoint
+is a destructive replay/cutover decision, not a routine restart step.
 
 ## 4. Restart from checkpoint
 
-The curator persists Bytewax operator state on a PVC and Kafka offsets in
-the consumer group `s2p-curator`. Recovery is automatic; the only manual
-case is **deliberate replay** (e.g. for a contamination bisect).
+The fetcher, curator, and Iceberg writer persist Bytewax operator state and
+source offsets on PVCs. Recovery is automatic. The only manual case is a
+**deliberate replay** (for example a contamination bisect).
 
 ```bash
 # 4.1 Stop the curator.
 kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=0
 
-# 4.2 Reset the consumer-group offsets to a known epoch.
-kubectl -n redpanda exec -it redpanda-0 -c redpanda -- \
-    rpk group seek s2p-curator --to-timestamp 2026-06-15T00:00:00Z \
-        --topics raw.fetched,docs.normalized
+# 4.2 Back up the checkpoint PVC and record the intended replay offset.
+# Bytewax does not use `rpk group seek`; set S2P_KAFKA_START_OFFSET for the
+# cold-start release after the checkpoint is removed.
 
 # 4.3 Destructive cold start, only after a snapshot and explicit approval.
-kubectl -n stream2pretrain delete pvc bytewax-state-curator
-# (the StatefulSet will recreate the PVC.)
+kubectl -n stream2pretrain delete pvc \
+    checkpoint-stream2pretrain-processor-curate-0
+# (The StatefulSet recreates the PVC; the configured start offset is used.)
 
 # 4.4 Bring the curator back.
 kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=1

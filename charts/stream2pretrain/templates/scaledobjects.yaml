@@ -1,7 +1,13 @@
-{{- if .Values.keda.enabled }}
+{{- /*
+Bytewax's KafkaSource intentionally stores offsets in its recovery database
+and does not commit broker consumer-group offsets. Kafka-lag KEDA triggers for
+the fetcher, curator, or Iceberg writer would therefore read dead/zero-lag
+groups and could rebalance partitions away from the PVC that owns their
+checkpoint. Only the independently committing ingest consumers render
+ScaledObjects; this template supplies their optional Redpanda authentication.
+*/ -}}
+{{- if and .Values.keda.enabled .Values.keda.auth.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
-{{- $kedaAuthEnabled := .Values.keda.auth.enabled -}}
-{{- if $kedaAuthEnabled }}
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:
@@ -23,119 +29,4 @@ spec:
     - parameter: password
       name: {{ .Values.keda.triggerAuthSecret | quote }}
       key: password
----
-{{- end }}
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: {{ $fullName }}-fetcher
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" "processor-fetcher") | nindent 4 }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: {{ $fullName }}-processor-fetcher
-  pollingInterval: {{ .Values.keda.pollingInterval }}
-  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
-  minReplicaCount: {{ .Values.keda.fetcher.minReplicas }}
-  maxReplicaCount: {{ .Values.keda.fetcher.maxReplicas }}
-  triggers:
-    - type: kafka
-      metadata:
-        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
-        consumerGroup: s2p-fetcher
-        topic: {{ .Values.redpanda.topics.rawFetched | quote }}
-        lagThreshold: {{ .Values.keda.fetcher.lagThreshold | quote }}
-        offsetResetPolicy: latest
-        {{- if not $kedaAuthEnabled }}
-        sasl: ""
-        tls: "disable"
-        {{- end }}
-      {{- if $kedaAuthEnabled }}
-      authenticationRef:
-        name: {{ $fullName }}-redpanda
-      {{- end }}
----
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: {{ $fullName }}-curate
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" "processor-curate") | nindent 4 }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: StatefulSet
-    name: {{ $fullName }}-processor-curate
-  pollingInterval: {{ .Values.keda.pollingInterval }}
-  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
-  minReplicaCount: {{ .Values.keda.curate.minReplicas }}
-  maxReplicaCount: {{ .Values.keda.curate.maxReplicas }}
-  triggers:
-    - type: kafka
-      metadata:
-        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
-        consumerGroup: s2p-curate
-        topic: {{ .Values.redpanda.topics.docsNormalized | quote }}
-        lagThreshold: {{ .Values.keda.curate.lagThreshold | quote }}
-        offsetResetPolicy: latest
-        {{- if not $kedaAuthEnabled }}
-        sasl: ""
-        tls: "disable"
-        {{- end }}
-      {{- if $kedaAuthEnabled }}
-      authenticationRef:
-        name: {{ $fullName }}-redpanda
-      {{- end }}
----
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: {{ $fullName }}-iceberg
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" "processor-iceberg-writer") | nindent 4 }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: {{ $fullName }}-processor-iceberg-writer
-  pollingInterval: {{ .Values.keda.pollingInterval }}
-  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
-  minReplicaCount: {{ .Values.keda.iceberg.minReplicas }}
-  maxReplicaCount: {{ .Values.keda.iceberg.maxReplicas }}
-  triggers:
-    - type: kafka
-      metadata:
-        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
-        consumerGroup: s2p-iceberg-writer
-        topic: {{ .Values.redpanda.topics.curationDecisions | quote }}
-        lagThreshold: {{ .Values.keda.iceberg.lagThreshold | quote }}
-        offsetResetPolicy: latest
-        {{- if not $kedaAuthEnabled }}
-        sasl: ""
-        tls: "disable"
-        {{- end }}
-      {{- if $kedaAuthEnabled }}
-      authenticationRef:
-        name: {{ $fullName }}-redpanda
-      {{- end }}
-    - type: kafka
-      metadata:
-        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
-        consumerGroup: s2p-iceberg-writer-licenses
-        topic: {{ .Values.redpanda.topics.licenseAdmissions | quote }}
-        lagThreshold: {{ .Values.keda.iceberg.lagThreshold | quote }}
-        offsetResetPolicy: latest
-        {{- if not $kedaAuthEnabled }}
-        sasl: ""
-        tls: "disable"
-        {{- end }}
-      {{- if $kedaAuthEnabled }}
-      authenticationRef:
-        name: {{ $fullName }}-redpanda
-      {{- end }}
 {{- end }}

@@ -1,5 +1,25 @@
 {{- $component := "processor-fetcher" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $checkpoint := .Values.processor.fetcher.checkpoint }}
+{{- $checkpointClaim := default (printf "%s-checkpoint" $name) $checkpoint.existingClaim }}
+{{- if not $checkpoint.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $checkpointClaim }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $checkpoint.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $checkpoint.size | quote }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,11 +32,10 @@ spec:
   selector:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  # The recovery SQLite files are single-writer state. Recreate guarantees an
+  # old and a new Pod never mount and mutate the checkpoint concurrently.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate
   template:
     metadata:
       labels:
@@ -44,9 +63,7 @@ spec:
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
             - name: S2P_STATE_DIR
-              value: /tmp/s2p-state
-            - name: S2P_FETCHER_CONCURRENCY
-              value: {{ .Values.processor.fetcher.concurrency | quote }}
+              value: /var/lib/s2p/checkpoint
             - name: S2P_CONSUMER_GROUP
               value: s2p-fetcher
           livenessProbe:
@@ -62,9 +79,14 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: checkpoint
+              mountPath: /var/lib/s2p/checkpoint
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: checkpoint
+          persistentVolumeClaim:
+            claimName: {{ $checkpointClaim | quote }}
 ---
 apiVersion: v1
 kind: Service

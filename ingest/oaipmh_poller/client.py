@@ -60,6 +60,14 @@ class OAIRecord:
         return None
 
 
+@dataclass(slots=True)
+class OAIPage:
+    """One fully fetched OAI-PMH page and its continuation token."""
+
+    records: list[OAIRecord]
+    resumption_token: str | None
+
+
 class OAIError(Exception):
     """Raised on an OAI-PMH ``<error>`` response."""
 
@@ -92,15 +100,43 @@ class OAIClient:
         max_records: int | None = None,
     ) -> AsyncIterator[OAIRecord]:
         """Iterate every record in a window, transparently following resumption tokens."""
-        params: dict[str, Any] = {"verb": "ListRecords", "metadataPrefix": metadata_prefix}
-        if set_spec:
-            params["set"] = set_spec
-        if from_:
-            params["from"] = from_
-        if until:
-            params["until"] = until
-
         emitted = 0
+        async for page in self.list_pages(
+            metadata_prefix=metadata_prefix,
+            set_spec=set_spec,
+            from_=from_,
+            until=until,
+        ):
+            for record in page.records:
+                yield record
+                emitted += 1
+                if max_records is not None and emitted >= max_records:
+                    return
+
+    async def list_pages(
+        self,
+        *,
+        metadata_prefix: str = "arXiv",
+        set_spec: str | None = None,
+        from_: str | None = None,
+        until: str | None = None,
+        resumption_token: str | None = None,
+    ) -> AsyncIterator[OAIPage]:
+        """Yield whole pages so callers can durably checkpoint continuation tokens."""
+        if resumption_token:
+            params: dict[str, Any] = {
+                "verb": "ListRecords",
+                "resumptionToken": resumption_token,
+            }
+        else:
+            params = {"verb": "ListRecords", "metadataPrefix": metadata_prefix}
+            if set_spec:
+                params["set"] = set_spec
+            if from_:
+                params["from"] = from_
+            if until:
+                params["until"] = until
+
         while True:
             xml_bytes = await self._request(params)
             root = ET.fromstring(xml_bytes)
@@ -108,18 +144,21 @@ class OAIClient:
 
             list_records = root.find(f"{{{OAI_NS}}}ListRecords")
             if list_records is None:
+                # ``noRecordsMatch`` is a successful empty window. Yielding an
+                # empty terminal page lets the poller advance its durable date
+                # cursor instead of requesting the same empty window forever.
+                yield OAIPage(records=[], resumption_token=None)
                 return
-            for rec_el in list_records.findall(f"{{{OAI_NS}}}record"):
-                record = self._parse_record(rec_el)
-                yield record
-                emitted += 1
-                if max_records is not None and emitted >= max_records:
-                    return
 
             token_el = list_records.find(f"{{{OAI_NS}}}resumptionToken")
-            if token_el is None or not (token_el.text or "").strip():
+            next_token = (token_el.text or "").strip() if token_el is not None else ""
+            records = [
+                self._parse_record(rec_el) for rec_el in list_records.findall(f"{{{OAI_NS}}}record")
+            ]
+            yield OAIPage(records=records, resumption_token=next_token or None)
+            if not next_token:
                 return
-            params = {"verb": "ListRecords", "resumptionToken": token_el.text.strip()}
+            params = {"verb": "ListRecords", "resumptionToken": next_token}
 
     async def _request(self, params: dict[str, Any]) -> bytes:
         await asyncio.sleep(self._sleep)

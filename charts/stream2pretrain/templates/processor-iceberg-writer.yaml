@@ -2,6 +2,26 @@
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
 {{- $signingMount := "/var/run/secrets/stream2pretrain/decon-signing" }}
+{{- $checkpoint := .Values.processor.iceberg.checkpoint }}
+{{- $checkpointClaim := default (printf "%s-checkpoint" $name) $checkpoint.existingClaim }}
+{{- if not $checkpoint.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $checkpointClaim }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $checkpoint.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $checkpoint.size | quote }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,7 +62,7 @@ spec:
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
             - name: S2P_STATE_DIR
-              value: /tmp/s2p-state
+              value: /var/lib/s2p/checkpoint
             - name: S2P_FLUSH_INTERVAL_SECONDS
               value: {{ .Values.processor.iceberg.flushIntervalSeconds | quote }}
             - name: S2P_FLUSH_RECORDS
@@ -72,6 +92,8 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: checkpoint
+              mountPath: /var/lib/s2p/checkpoint
             - name: decon-signing
               mountPath: {{ $signingMount | quote }}
               readOnly: true
@@ -81,6 +103,9 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: checkpoint
+          persistentVolumeClaim:
+            claimName: {{ $checkpointClaim | quote }}
         - name: decon-signing
           secret:
             secretName: {{ .Values.processor.deconGate.signingKeySecret | quote }}

@@ -1,6 +1,7 @@
 {{- if .Values.sources.huggingface.enabled }}
 {{- $component := "ingest-hf-models" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $stateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,6 +47,8 @@ spec:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
+            - name: S2P_STATE_ROOT
+              value: /var/lib/s2p-state
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -58,6 +61,8 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: state
+              mountPath: /var/lib/s2p-state
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
@@ -74,6 +79,9 @@ spec:
             name: {{ include "stream2pretrain.fullname" . }}-feeds
         - name: tmp
           emptyDir: {}
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ $stateClaim | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -94,6 +102,7 @@ spec:
 ---
 {{- $papers := "ingest-hf-daily-papers" }}
 {{- $papersName := printf "%s-%s" (include "stream2pretrain.fullname" .) $papers }}
+{{- $papersStateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -137,17 +146,22 @@ spec:
                 {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
                 - name: S2P_COMPONENT
                   value: {{ $papers | quote }}
+                - name: S2P_STATE_ROOT
+                  value: /var/lib/s2p-state
                 - name: HF_TOKEN
                   valueFrom:
                     secretKeyRef:
                       name: {{ .Values.sources.huggingface.dailyPapers.tokenSecret | quote }}
                       key: {{ .Values.sources.huggingface.dailyPapers.tokenSecretKey | quote }}
+                      optional: true
               volumeMounts:
                 - name: feeds
                   mountPath: /etc/s2p/feeds
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                - name: state
+                  mountPath: /var/lib/s2p-state
               resources:
                 {{- toYaml .Values.ingest.hf.resources | nindent 16 }}
           volumes:
@@ -156,4 +170,7 @@ spec:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: tmp
               emptyDir: {}
+            - name: state
+              persistentVolumeClaim:
+                claimName: {{ $papersStateClaim | quote }}
 {{- end }}

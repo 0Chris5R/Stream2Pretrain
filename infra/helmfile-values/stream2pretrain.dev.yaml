@@ -90,6 +90,8 @@ ui:
   ingress:
     enabled: true
     host: stream2pretrain-app.s241221-at-student-dhbw-mannheim-de.users.dhbw.site
+    aliases:
+      - stream2pretrain.theclusterflux.com
     ingressClassName: traefik
     tlsSecret: ""
 
@@ -119,6 +121,10 @@ sources:
     enabled: false
 
 ingest:
+  # One arXiv OAI page per two-hour poll is a measured-course-cluster
+  # backpressure boundary; the durable token resumes the same window later.
+  oaipmh:
+    maxPagesPerRun: 1
   arxivHtmlFetcher:
     tag: "0.2.0-619290f"
     maxRecordsPerLoop: 0

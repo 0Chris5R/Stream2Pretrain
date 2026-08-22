@@ -1613,6 +1613,9 @@ def test_oracle_artifact_tree_hash_is_stable_and_symlinks_are_rejected(
     first = tree_hash(artifact)
     second = tree_hash(artifact)
     assert first == second
-    (artifact / "link").symlink_to(artifact / "result.json")
+    try:
+        (artifact / "link").symlink_to(artifact / "result.json")
+    except OSError as exc:
+        pytest.skip(f"host does not permit symlink creation: {exc}")
     with pytest.raises(ValueError, match="symlink"):
         tree_hash(artifact)

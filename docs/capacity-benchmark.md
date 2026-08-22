@@ -106,6 +106,13 @@ until the target report includes:
 
 Only update topic partition defaults after those four values are recorded.
 
+For the Bytewax fetcher, curator, and Iceberg writer, measure throughput from
+the `s2p_*_total` Prometheus counters and the durable checkpoint frontier.
+`rpk group describe` is intentionally not a lag source for these stages,
+because Bytewax stores offsets in its recovery database rather than committing
+them to the broker. Partition count, Bytewax worker count, recovery partition
+count, and CPU allocation must be changed and validated together.
+
 ## MinIO Throughput Decision
 
 The capacity report discovers MinIO pods but does not invent throughput. Run a
