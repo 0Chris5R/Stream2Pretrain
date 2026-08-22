@@ -21,7 +21,9 @@ ARG S2P_BAKE_MODELS
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/src/.venv \
+    PATH="/src/.venv/bin:${PATH}"
 
 # Build deps for rensa (Rust), plyvel (LevelDB), kenlm (C++), onnxruntime wheels.
 RUN apt-get update \
@@ -36,27 +38,42 @@ RUN apt-get update \
         pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir uv==0.4.27
+RUN pip install --no-cache-dir uv==0.8.17
 
 WORKDIR /src
-COPY pyproject.toml /src/pyproject.toml
-COPY README.md /src/README.md
-COPY docs /src/docs
-COPY schemas /src/schemas
-COPY ingest /src/ingest
-COPY processor /src/processor
-COPY tests /src/tests
 
-RUN uv pip install --system --no-cache \
-        --extra-index-url https://download.pytorch.org/whl/cpu \
-        --index-strategy unsafe-best-match \
-        ./schemas/.. \
-        "./processor[${S2P_INSTALL_EXTRA}]" \
-    || (uv pip install --system --no-cache \
-            --extra-index-url https://download.pytorch.org/whl/cpu \
-            --index-strategy unsafe-best-match \
-            -e . \
-            -e "./processor[${S2P_INSTALL_EXTRA}]")
+# Keep the large, locked ML dependency environment independent of application
+# source. A normal processor edit then rebuilds only the small workspace wheels
+# instead of reinstalling and re-exporting the entire runtime dependency graph.
+COPY pyproject.toml uv.lock README.md /src/
+COPY ingest/common/pyproject.toml /src/ingest/common/pyproject.toml
+COPY ingest/rss_poller/pyproject.toml /src/ingest/rss_poller/pyproject.toml
+COPY ingest/sitemap_poller/pyproject.toml /src/ingest/sitemap_poller/pyproject.toml
+COPY ingest/github_events/pyproject.toml /src/ingest/github_events/pyproject.toml
+COPY ingest/github_releases/pyproject.toml /src/ingest/github_releases/pyproject.toml
+COPY ingest/hf_poller/pyproject.toml /src/ingest/hf_poller/pyproject.toml
+COPY ingest/oaipmh_poller/pyproject.toml /src/ingest/oaipmh_poller/pyproject.toml
+COPY ingest/arxiv_html_fetcher/pyproject.toml /src/ingest/arxiv_html_fetcher/pyproject.toml
+COPY ingest/github_release_tarball_fetcher/pyproject.toml /src/ingest/github_release_tarball_fetcher/pyproject.toml
+COPY ingest/openreview_poller/pyproject.toml /src/ingest/openreview_poller/pyproject.toml
+COPY processor/pyproject.toml /src/processor/pyproject.toml
+COPY tests/pyproject.toml /src/tests/pyproject.toml
+
+RUN uv sync \
+        --frozen \
+        --package stream2pretrain-processor \
+        --extra "${S2P_INSTALL_EXTRA}" \
+        --no-dev \
+        --no-install-workspace
+
+COPY . /src
+
+RUN uv sync \
+        --locked \
+        --package stream2pretrain-processor \
+        --extra "${S2P_INSTALL_EXTRA}" \
+        --no-dev \
+        --no-editable
 
 # Docling's standard CPU pipeline needs layout, TableFormer, and formula
 # artifacts. Download them with the exact runtime version and keep the model
@@ -165,6 +182,7 @@ FROM python:${PYTHON_VERSION}-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
+    PATH="/src/.venv/bin:${PATH}" \
     S2P_MODELS_DIR=/opt/models \
     TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
     S2P_STATE_DIR=/var/lib/s2p
@@ -184,19 +202,8 @@ RUN groupadd --system --gid 65532 nonroot \
  && mkdir -p ${S2P_STATE_DIR} \
  && chown -R nonroot:nonroot ${S2P_STATE_DIR}
 
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin/s2p-fetcher          /usr/local/bin/s2p-fetcher
-COPY --from=builder /usr/local/bin/s2p-curate           /usr/local/bin/s2p-curate
-COPY --from=builder /usr/local/bin/s2p-iceberg-writer   /usr/local/bin/s2p-iceberg-writer
-COPY --from=builder /usr/local/bin/s2p-iceberg-maintenance /usr/local/bin/s2p-iceberg-maintenance
-COPY --from=builder /usr/local/bin/s2p-decon-api        /usr/local/bin/s2p-decon-api
-COPY --from=builder /usr/local/bin/s2p-duckdb-api       /usr/local/bin/s2p-duckdb-api
-COPY --from=builder /usr/local/bin/s2p-mixture-controller /usr/local/bin/s2p-mixture-controller
-COPY --from=builder /usr/local/bin/s2p-foundry          /usr/local/bin/s2p-foundry
-COPY --from=builder /usr/local/bin/s2p-foundry-api      /usr/local/bin/s2p-foundry-api
-COPY --from=builder /usr/local/bin/s2p-foundry-export-replay /usr/local/bin/s2p-foundry-export-replay
-COPY --from=builder /usr/local/bin/s2p-foundry-build-oracle /usr/local/bin/s2p-foundry-build-oracle
-COPY --from=builder /src                                /app
+COPY --from=builder /src/.venv                         /src/.venv
+COPY .                                                  /app
 COPY --from=models  /opt/models                         /opt/models
 COPY --from=builder /opt/models/docling                 /opt/models/docling
 

@@ -594,6 +594,11 @@ jobs:
               )
               echo "::endgroup::"
             done
+            echo "::group::Durable post-training diagnosis"
+            kubectl -n stream2pretrain exec -i \
+              statefulset/stream2pretrain-foundry -c api -- python - \
+              < scripts/foundry_diagnostics.py || true
+            echo "::endgroup::"
             echo "::endgroup::"
             exit 0
           fi
