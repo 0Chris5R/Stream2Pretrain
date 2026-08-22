@@ -369,8 +369,14 @@ jobs:
             echo "::group::Bounded live foundry validation"
             kubectl -n stream2pretrain rollout status \
               statefulset/stream2pretrain-foundry --timeout=180s
+            # The headless Service publishes not-ready addresses so the worker
+            # and API sidecars can discover each other during startup. Wait on
+            # the concrete Pod before asking port-forward to select a target.
+            kubectl -n stream2pretrain wait \
+              --for=condition=Ready \
+              pod/stream2pretrain-foundry-0 --timeout=180s
             kubectl -n stream2pretrain port-forward \
-              service/stream2pretrain-foundry 18092:8092 \
+              pod/stream2pretrain-foundry-0 18092:8092 \
               >"$RUNNER_TEMP/foundry-port-forward.log" 2>&1 &
             foundry_port_forward_pid=$!
             for _ in $(seq 1 30); do
