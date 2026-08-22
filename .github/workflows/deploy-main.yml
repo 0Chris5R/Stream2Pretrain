@@ -29,6 +29,7 @@ env:
 jobs:
   validate:
     name: Validate repository
+    if: inputs.mode != 'diagnose'
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -82,6 +83,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.image }}
+    if: inputs.mode != 'diagnose'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -158,6 +160,10 @@ jobs:
 
   deploy:
     name: Deploy application release
+    if: >-
+      always() &&
+      (inputs.mode == 'diagnose' ||
+      (needs.validate.result == 'success' && needs.build.result == 'success'))
     needs:
       - validate
       - build
@@ -315,6 +321,40 @@ jobs:
 
           if [[ "$DEPLOY_MODE" == "diagnose" ]]; then
             echo "::group::Read-only cluster diagnostics"
+            kubectl get nodes -o json | jq -r '
+              .items[]
+              | {
+                  name: .metadata.name,
+                  taints: (.spec.taints // []),
+                  conditions: [
+                    .status.conditions[]
+                    | select(
+                        .type == "Ready"
+                        or .type == "DiskPressure"
+                        or .type == "MemoryPressure"
+                        or .type == "PIDPressure"
+                      )
+                    | {type, status, reason, message, lastTransitionTime}
+                  ],
+                  capacity: .status.capacity,
+                  allocatable: .status.allocatable
+                }
+            '
+            kubectl top nodes || true
+            kubectl get persistentvolume,persistentvolumeclaim -A -o wide || true
+            kubectl get pods -A -o json | jq -r '
+              [.items[] | {
+                node: (.spec.nodeName // "unscheduled"),
+                phase: .status.phase
+              }]
+              | group_by([.node, .phase])
+              | map({
+                  node: .[0].node,
+                  phase: .[0].phase,
+                  count: length
+                })
+            '
+
             for namespace in minio polaris traefik stream2pretrain; do
               echo "::group::Namespace: $namespace"
               kubectl -n "$namespace" get \
@@ -329,7 +369,15 @@ jobs:
                 kubectl -n "$namespace" logs "$pod" \
                   --all-containers --prefix --tail=160 || true
                 echo "::endgroup::"
-              done < <(kubectl -n "$namespace" get pods -o name 2>/dev/null || true)
+              done < <(
+                kubectl -n "$namespace" get pods -o json 2>/dev/null \
+                  | jq -r '
+                      .items[]
+                      | select(.status.phase != "Succeeded")
+                      | .metadata.name
+                    ' \
+                  || true
+              )
               echo "::endgroup::"
             done
             echo "::endgroup::"
