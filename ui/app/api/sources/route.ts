@@ -17,6 +17,31 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const SourceListSchema = z.array(SourceFeedStatusSchema);
+const SourceActivitySchema = z.object({
+  by_source_24h: z.array(
+    z.object({
+      source_feed: z.string(),
+      documents: z.number().int().nonnegative(),
+      admitted: z.number().int().nonnegative(),
+      quarantined: z.number().int().nonnegative(),
+      last_observed_at: z.string().nullable(),
+    }),
+  ),
+});
+
+async function fetchSourceActivity(): Promise<Map<string, number>> {
+  try {
+    const response = await fetch(`${UPSTREAM.duckdb}/license-admissions?recent_limit=1`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) return new Map();
+    const parsed = SourceActivitySchema.safeParse(await response.json());
+    if (!parsed.success) return new Map();
+    return new Map(parsed.data.by_source_24h.map((row) => [row.source_feed, row.documents]));
+  } catch {
+    return new Map();
+  }
+}
 
 export async function GET(): Promise<NextResponse> {
   try {
@@ -30,7 +55,13 @@ export async function GET(): Promise<NextResponse> {
     if (!parsed.success) {
       return NextResponse.json(upstreamError('sources_shape_invalid'), { status: 502 });
     }
-    return NextResponse.json(parsed.data);
+    const activity = await fetchSourceActivity();
+    return NextResponse.json(
+      parsed.data.map((source) => ({
+        ...source,
+        documents_24h: activity.get(source.name) ?? source.documents_24h,
+      })),
+    );
   } catch (err) {
     console.warn('sources GET upstream failed', (err as Error).message);
     return NextResponse.json(upstreamError('sources_api_unreachable'), { status: 502 });

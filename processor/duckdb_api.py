@@ -314,11 +314,28 @@ class DuckDBQueryService:
             [max(1, min(recent_limit, 100))],
             relation=self._license_admissions,
         )
+        by_source_24h = self._rows(
+            f"""
+            SELECT
+              source_feed,
+              CAST(COUNT(*) AS BIGINT) AS documents,
+              CAST(COUNT(*) FILTER (WHERE status = 'admitted') AS BIGINT) AS admitted,
+              CAST(COUNT(*) FILTER (WHERE status = 'quarantined') AS BIGINT) AS quarantined,
+              CAST(MAX(observed_at) AS VARCHAR) AS last_observed_at
+            FROM {self._license_admissions}
+            WHERE observed_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+            GROUP BY source_feed
+            ORDER BY source_feed
+            """,
+            [],
+            relation=self._license_admissions,
+        )
         counts = {str(row["status"]): int(row["count"]) for row in totals}
         return {
             "admitted": counts.get("admitted", 0),
             "quarantined": counts.get("quarantined", 0),
             "by_license": by_license,
+            "by_source_24h": by_source_24h,
             "recent": recent,
         }
 

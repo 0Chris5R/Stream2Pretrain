@@ -132,7 +132,7 @@ export default function SourcesPage() {
                 <TableHead>Protocol</TableHead>
                 <TableHead>Policy</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead className="text-right">New documents</TableHead>
+                <TableHead className="text-right">Observed (24h)</TableHead>
                 <TableHead>Last poll</TableHead>
                 <TableHead className="w-[190px] text-right">Actions</TableHead>
               </TableRow>
