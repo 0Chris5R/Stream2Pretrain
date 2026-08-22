@@ -168,7 +168,10 @@ jobs:
           cache-to: type=inline
 
       - name: Smoke-test Python runtime imports
-        if: matrix.image != 'ui'
+        # Ingest images use relocated console entrypoints and need this guard.
+        # The processor image is multi-GB and its import path is already
+        # exercised by cluster_smoke.py; pulling it again would dominate CI.
+        if: startsWith(matrix.image, 'ingest-')
         shell: bash
         run: |
           set -euo pipefail

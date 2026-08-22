@@ -32,8 +32,10 @@ metadata:
     external-dns.alpha.kubernetes.io/hostname: {{ .Values.ui.ingress.host | quote }}
     {{- if .Values.ui.ingress.acmeIssuer.enabled }}
     cert-manager.io/issuer: {{ .Values.ui.ingress.acmeIssuer.name | quote }}
-    {{- else with .Values.ui.ingress.clusterIssuer }}
+    {{- else }}
+    {{- with .Values.ui.ingress.clusterIssuer }}
     cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
     {{- end }}
     meta.helm.sh/release-name: {{ .Release.Name | quote }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
