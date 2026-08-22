@@ -18,6 +18,22 @@ LOCAL_PACKAGE_PATHS = {
 }
 
 
+def test_processor_ci_image_uses_an_immutable_dependency_base() -> None:
+    full = (ROOT / "processor" / "Dockerfile").read_text(encoding="utf-8")
+    app = (ROOT / "processor" / "Dockerfile.app").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+
+    assert "AS runtime-base" in full
+    assert "FROM runtime-base AS runtime" in full
+    assert "ARG PROCESSOR_BASE_IMAGE=" in app
+    assert "FROM ${PROCESSOR_BASE_IMAGE} AS runtime" in app
+    assert "uv sync" not in app
+    assert "apt-get" not in app
+    assert "target: runtime-base" in workflow
+    assert "dockerfile: processor/Dockerfile.app" in workflow
+    assert "type=gha,scope=${{ matrix.image }}" in workflow
+
+
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)
 def test_ingest_dockerfile_declares_an_isolated_local_install(package_dir: Path) -> None:
     metadata = tomllib.loads((package_dir / "pyproject.toml").read_text(encoding="utf-8"))

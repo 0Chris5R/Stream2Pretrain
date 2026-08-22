@@ -166,9 +166,9 @@ RUN python -c "import json; json.dump({ \
       open('/opt/models/revisions.json', 'w'), sort_keys=True)"
 
 # ---------------------------------------------------------------------------
-# Stage 3: runtime
+# Stage 3: immutable runtime dependency base
 # ---------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim AS runtime
+FROM python:${PYTHON_VERSION}-slim AS runtime-base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -194,6 +194,18 @@ RUN groupadd --system --gid 65532 nonroot \
  && chown -R nonroot:nonroot ${S2P_STATE_DIR}
 
 COPY --from=builder /src/.venv                         /src/.venv
+COPY --from=models  /opt/models                         /opt/models
+COPY --from=builder /opt/models/docling                 /opt/models/docling
+
+# ---------------------------------------------------------------------------
+# Stage 4: application source
+#
+# CI also builds runtime-base as an immutable, lockfile-keyed image and uses
+# processor/Dockerfile.app for ordinary source revisions. Keeping this final
+# stage here preserves a self-contained Dockerfile for local development.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS runtime
+
 COPY schemas                                            /app/schemas
 COPY ingest/__init__.py                                 /app/ingest/__init__.py
 COPY ingest/common                                      /app/ingest/common
@@ -205,8 +217,6 @@ COPY processor                                          /app/processor
 # The foundry records the reviewed provider-terms document path in its policy
 # audit. Keep only that required documentation subtree in the runtime image.
 COPY docs/provider-terms                                /app/docs/provider-terms
-COPY --from=models  /opt/models                         /opt/models
-COPY --from=builder /opt/models/docling                 /opt/models/docling
 COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entrypoint
 
 RUN for command in \
