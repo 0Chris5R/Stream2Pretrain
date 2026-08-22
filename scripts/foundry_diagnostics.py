@@ -79,12 +79,33 @@ def main() -> None:
                 "response": _json(row["response_json"]),
             }
         )
+    stream_checkpoints = []
+    for row in connection.execute(
+        """
+        SELECT job_id,call_key,attempt,partial_text,updated_at
+        FROM stream_checkpoints
+        ORDER BY updated_at DESC LIMIT 20
+        """
+    ).fetchall():
+        partial = bytes(row["partial_text"]).decode("utf-8", errors="replace")
+        stream_checkpoints.append(
+            {
+                "job_id": str(row["job_id"]),
+                "call_key": str(row["call_key"]),
+                "attempt": int(row["attempt"]),
+                "partial_characters": len(partial),
+                "starts_with": partial[:400],
+                "ends_with": partial[-400:],
+                "updated_at": str(row["updated_at"]),
+            }
+        )
     artifact_counts = Counter(f"{artifact['kind']}:{artifact['status']}" for artifact in artifacts)
     payload = {
         "database_bytes": database.stat().st_size,
         "job_counts": dict(Counter(str(job["state"]) for job in jobs)),
         "artifact_counts": dict(sorted(artifact_counts.items())),
         "candidate_queue": queue,
+        "stream_checkpoints": stream_checkpoints,
         "verifier_attempts": verifier_attempts,
         "jobs": jobs,
         "artifacts": artifacts,
