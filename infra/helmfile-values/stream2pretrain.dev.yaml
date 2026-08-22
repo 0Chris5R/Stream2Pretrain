@@ -144,3 +144,8 @@ ingest:
 
 openreviewPoller:
   enabled: true
+  live:
+    state:
+      # Reuse the already-bound cursor volume; a standalone WaitForFirstConsumer
+      # PVC cannot bind until the first six-hour CronJob and would block Helm.
+      existingClaim: stream2pretrain-ingest-state
