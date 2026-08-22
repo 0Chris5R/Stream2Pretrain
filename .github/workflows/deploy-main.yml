@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, diagnose, audit UI, validate foundry, inspect storage, or recover storage
+        description: Deploy, diagnose, audit UI, validate sources/foundry, inspect storage, or recover storage
         required: true
         default: deploy
         type: choice
@@ -15,6 +15,7 @@ on:
           - deploy
           - diagnose
           - audit-ui
+          - validate-sources
           - validate-foundry
           - inspect-storage
           - recover-storage
@@ -396,6 +397,110 @@ jobs:
             kubectl -n stream2pretrain exec -i \
               statefulset/stream2pretrain-foundry -c api -- python - \
               < scripts/foundry_diagnostics.py
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          if [[ "$DEPLOY_MODE" == "validate-sources" ]]; then
+            echo "::group::Bounded live source validation"
+            kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
+            source_count="$(
+              kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io \
+                -o name | wc -l
+            )"
+            if [[ "$source_count" -lt 10 ]]; then
+              echo "Expected all 10 Phase-1 SourceFeeds, found $source_count" >&2
+              exit 1
+            fi
+            kubectl -n stream2pretrain rollout status \
+              deployment/stream2pretrain-ingest-github-events --timeout=180s
+            kubectl -n stream2pretrain rollout status \
+              deployment/stream2pretrain-ingest-github-tarball-fetcher --timeout=180s
+            kubectl -n stream2pretrain rollout status \
+              deployment/stream2pretrain-ingest-hf-models --timeout=180s
+            kubectl -n stream2pretrain rollout status \
+              deployment/stream2pretrain-ingest-arxiv-html --timeout=180s
+
+            cronjobs=(
+              stream2pretrain-ingest-github-releases
+              stream2pretrain-ingest-hf-daily-papers
+              stream2pretrain-ingest-openreview-live
+              stream2pretrain-iceberg-maintenance
+            )
+            while read -r cronjob; do
+              [[ -n "$cronjob" ]] || continue
+              cronjobs+=("${cronjob#cronjob.batch/}")
+            done < <(
+              kubectl -n stream2pretrain get cronjob \
+                -l stream2pretrain.io/source-feed \
+                -o name
+            )
+
+            validation_jobs=()
+            for cronjob in "${cronjobs[@]}"; do
+              if ! kubectl -n stream2pretrain get "cronjob/$cronjob" >/dev/null 2>&1; then
+                echo "Required source CronJob is missing: $cronjob" >&2
+                exit 1
+              fi
+              suffix="${GITHUB_RUN_ID: -8}${GITHUB_RUN_ATTEMPT}"
+              base="${cronjob#stream2pretrain-}"
+              job="s2p-val-${base:0:42}-${suffix}"
+              kubectl -n stream2pretrain delete "job/$job" --ignore-not-found --wait=true
+              kubectl -n stream2pretrain create job "$job" --from="cronjob/$cronjob"
+              validation_jobs+=("$job")
+            done
+
+            deadline=$((SECONDS + 1800))
+            while (( SECONDS < deadline )); do
+              pending=0
+              for job in "${validation_jobs[@]}"; do
+                succeeded="$(
+                  kubectl -n stream2pretrain get "job/$job" \
+                    -o jsonpath='{.status.succeeded}' 2>/dev/null || true
+                )"
+                failed="$(
+                  kubectl -n stream2pretrain get "job/$job" \
+                    -o jsonpath='{.status.failed}' 2>/dev/null || true
+                )"
+                if [[ "$succeeded" == "1" ]]; then
+                  continue
+                fi
+                if [[ -n "$failed" && "$failed" != "0" ]]; then
+                  kubectl -n stream2pretrain logs "job/$job" --all-containers --prefix || true
+                  echo "Source validation job failed: $job" >&2
+                  exit 1
+                fi
+                pending=$((pending + 1))
+              done
+              (( pending == 0 )) && break
+              sleep 10
+            done
+
+            for job in "${validation_jobs[@]}"; do
+              if [[ "$(kubectl -n stream2pretrain get "job/$job" -o jsonpath='{.status.succeeded}')" != "1" ]]; then
+                kubectl -n stream2pretrain describe "job/$job" || true
+                kubectl -n stream2pretrain logs "job/$job" --all-containers --prefix || true
+                echo "Source validation timed out: $job" >&2
+                exit 1
+              fi
+              kubectl -n stream2pretrain logs "job/$job" --all-containers --prefix
+            done
+
+            hf_logs="$(
+              kubectl -n stream2pretrain logs \
+                deployment/stream2pretrain-ingest-hf-models --tail=240
+            )"
+            printf '%s\n' "$hf_logs"
+            grep -Eq 'hf_poller.pass_done.*models=[1-9][0-9]*' <<<"$hf_logs" || {
+              echo "HF model source completed but admitted no licensed model" >&2
+              exit 1
+            }
+            kubectl -n stream2pretrain logs \
+              deployment/stream2pretrain-ingest-github-events --tail=240
+            kubectl -n stream2pretrain logs \
+              deployment/stream2pretrain-ingest-github-tarball-fetcher --tail=240
+            kubectl -n stream2pretrain logs \
+              deployment/stream2pretrain-ingest-arxiv-html --tail=240
             echo "::endgroup::"
             exit 0
           fi
@@ -872,6 +977,26 @@ jobs:
           while read -r workload; do
             kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
           done < <(kubectl -n stream2pretrain get deployment,statefulset -o name)
+
+          # SourceFeed CRs are durable runtime configuration, not Helm-owned
+          # templates. Reconcile the complete Phase-1 catalogue on every
+          # deployment so a rebuilt namespace cannot silently lose sources.
+          NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
+          for _ in $(seq 1 60); do
+            source_schedules="$(
+              kubectl -n stream2pretrain get cronjob \
+                -l stream2pretrain.io/source-feed \
+                -o name | wc -l
+            )"
+            [[ "$source_schedules" -ge 10 ]] && break
+            sleep 2
+          done
+          if [[ "$source_schedules" -lt 10 ]]; then
+            kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
+            kubectl -n stream2pretrain get cronjob -o wide || true
+            echo "The controller did not materialize all Phase-1 source schedules" >&2
+            exit 1
+          fi
 
           kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
             python - < scripts/cluster_smoke.py

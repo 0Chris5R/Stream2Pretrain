@@ -34,11 +34,9 @@ import asyncio
 import json
 import re
 import secrets
-import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +47,12 @@ from ingest.arxiv_html_fetcher.extractor import (
     ARXIV_PIPELINE,
     ExtractedDocument,
     extract_arxiv_html,
+)
+from ingest.common.arxiv_license import (
+    fetch_arxiv_license as fetch_arxiv_license,
+)
+from ingest.common.arxiv_license import (
+    fetch_arxiv_license_with_source,
 )
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
@@ -67,8 +71,6 @@ log = get_logger(__name__)
 ARXIV_HTML_BASE = "https://arxiv.org/html"
 AR5IV_HTML_BASE = "https://ar5iv.labs.arxiv.org/html"
 ARXIV_PDF_BASE = "https://arxiv.org/pdf"
-ARXIV_ABS_BASE = "https://arxiv.org/abs"
-ARXIV_API_QUERY = "https://export.arxiv.org/api/query"
 
 # arXiv asks for max 4 req/s plus a 1 s sleep between requests. We honour
 # both via the token bucket (rate=4/s, burst=4) and an explicit
@@ -159,110 +161,6 @@ def _parse_last_modified(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
-
-
-async def fetch_arxiv_license(
-    arxiv_id: str,
-    client: httpx.AsyncClient,
-    *,
-    bucket: TokenBucket,
-    min_sleep_s: float = _DEFAULT_MIN_SLEEP_S,
-) -> str | None:
-    """Read item-level rights from arXiv metadata before body fetch."""
-    value, _ = await fetch_arxiv_license_with_source(
-        arxiv_id,
-        client,
-        bucket=bucket,
-        min_sleep_s=min_sleep_s,
-    )
-    return value
-
-
-class _AbsLicenseParser(HTMLParser):
-    """Extract only the rights link from an arXiv abstract page."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._license_depth = 0
-        self.value: str | None = None
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        classes = set((attributes.get("class") or "").split())
-        if tag == "div" and "abs-license" in classes:
-            self._license_depth = 1
-            return
-        if self._license_depth:
-            self._license_depth += 1
-            if tag == "a" and attributes.get("href"):
-                self.value = attributes["href"]
-
-    def handle_endtag(self, tag: str) -> None:
-        if self._license_depth:
-            self._license_depth -= 1
-
-
-def _license_from_abs_html(payload: bytes) -> str | None:
-    parser = _AbsLicenseParser()
-    parser.feed(payload.decode("utf-8", errors="replace"))
-    return parser.value
-
-
-async def fetch_arxiv_license_with_source(
-    arxiv_id: str,
-    client: httpx.AsyncClient,
-    *,
-    bucket: TokenBucket,
-    min_sleep_s: float = _DEFAULT_MIN_SLEEP_S,
-) -> tuple[str | None, str]:
-    """Return arXiv rights plus exact metadata provenance before body fetch."""
-    await bucket.acquire()
-    if min_sleep_s > 0:
-        await asyncio.sleep(min_sleep_s)
-    root: ET.Element | None = None
-    try:
-        response = await client.get(
-            ARXIV_API_QUERY,
-            params={"id_list": arxiv_id, "start": "0", "max_results": "1"},
-        )
-    except httpx.HTTPError as exc:
-        log.warning("arxiv_html.license_metadata_failed", arxiv_id=arxiv_id, err=str(exc))
-    else:
-        if response.status_code == 200:
-            try:
-                root = ET.fromstring(response.content)
-            except ET.ParseError:
-                log.warning("arxiv_html.license_metadata_invalid", arxiv_id=arxiv_id)
-        else:
-            log.warning(
-                "arxiv_html.license_metadata_status",
-                arxiv_id=arxiv_id,
-                status=response.status_code,
-            )
-    node = root.find(".//{http://arxiv.org/schemas/atom}license") if root is not None else None
-    if node is not None and node.text and node.text.strip():
-        return node.text.strip(), "arxiv_api"
-
-    if root is None:
-        log.warning(
-            "arxiv_html.license_metadata_fallback",
-            arxiv_id=arxiv_id,
-        )
-
-    # The public Atom response does not consistently include arxiv:license.
-    # The abstract page exposes the same item-level metadata without fetching
-    # or processing the paper body, so admission remains fail-closed and early.
-    await bucket.acquire()
-    if min_sleep_s > 0:
-        await asyncio.sleep(min_sleep_s)
-    try:
-        abs_response = await client.get(f"{ARXIV_ABS_BASE}/{arxiv_id}")
-        abs_response.raise_for_status()
-    except httpx.HTTPError as exc:
-        log.warning("arxiv_html.license_abs_failed", arxiv_id=arxiv_id, err=str(exc))
-        return None, "unknown"
-    value = _license_from_abs_html(abs_response.content)
-    return (value, "html_meta") if value else (None, "unknown")
 
 
 async def fetch_one(
@@ -520,7 +418,8 @@ async def stream_ids_from_topic(
     cfg: IngestConfig,
     *,
     topic: str,
-    consumer_group: str = "s2p-arxiv-html-fetcher",
+    consumer_group: str = "s2p-arxiv-html-fetcher-v2",
+    auto_offset_reset: str = "latest",
     sources_filter: Iterable[str] | None = None,
     max_records: int | None = None,
     commit_callback: Callable[[Any], None] | None = None,
@@ -547,7 +446,7 @@ async def stream_ids_from_topic(
         bootstrap_servers=cfg.redpanda_brokers,
         group_id=consumer_group,
         enable_auto_commit=False,
-        auto_offset_reset="earliest",
+        auto_offset_reset=auto_offset_reset,
         client_id=consumer_group,
     )
     await consumer.start()
@@ -814,6 +713,17 @@ def _build_argparser() -> argparse.ArgumentParser:
         default="docs.normalized",
         help="Stream-mode subscription topic.",
     )
+    p.add_argument(
+        "--consumer-group",
+        default="s2p-arxiv-html-fetcher-v2",
+        help="Kafka consumer group for the live enrichment stream.",
+    )
+    p.add_argument(
+        "--auto-offset-reset",
+        choices=("earliest", "latest"),
+        default="latest",
+        help="Initial offset for a new consumer group; explicit backfills use --ids-file.",
+    )
     return p
 
 
@@ -868,6 +778,8 @@ async def _run_stream(args: argparse.Namespace, cfg: IngestConfig) -> int:
     async for candidate in stream_ids_from_topic(
         cfg,
         topic=args.stream_topic,
+        consumer_group=args.consumer_group,
+        auto_offset_reset=args.auto_offset_reset,
         max_records=args.max_records,
         commit_callback=_capture_consumer,
     ):

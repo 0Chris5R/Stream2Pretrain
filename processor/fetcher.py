@@ -117,6 +117,48 @@ def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
     return body
 
 
+def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
+    """Project JSON metadata/review payloads into deterministic plain text."""
+    try:
+        value = orjson.loads(payload)
+    except orjson.JSONDecodeError:
+        text = payload.decode("utf-8", errors="replace").strip()
+        return text, None
+
+    title: str | None = None
+    if isinstance(value, dict):
+        for key in ("title", "name", "id", "modelId"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                title = candidate.strip()
+                break
+        paper = value.get("paper")
+        if title is None and isinstance(paper, dict):
+            candidate = paper.get("title") or paper.get("id")
+            if isinstance(candidate, str) and candidate.strip():
+                title = candidate.strip()
+
+    strings: list[str] = []
+
+    def _collect(item: object) -> None:
+        if isinstance(item, str):
+            cleaned = item.strip()
+            if cleaned and not cleaned.startswith(("http://", "https://")):
+                strings.append(cleaned)
+            return
+        if isinstance(item, dict):
+            for child in item.values():
+                _collect(child)
+            return
+        if isinstance(item, list):
+            for child in item:
+                _collect(child)
+
+    _collect(value)
+    text = "\n".join(dict.fromkeys(strings)).strip()
+    return text, title
+
+
 def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> SilverRecord | None:
     """Turn one (BronzeRecord + raw bytes) into a SilverRecord."""
     scientific_result: ScientificProcessingResult | None = None
@@ -130,7 +172,13 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
     included_section_count = 0
     excluded_section_count = 0
     excluded_sections: list[str] = []
-    if bronze.source_format == "code":
+    if bronze.source_format in {"metadata", "review"}:
+        text, title = _structured_payload_text(raw_html)
+        model_text = text
+        source_metadata_text = title or ""
+        extracted_with = bronze.extraction_pipeline
+        extraction_pipeline = bronze.extraction_pipeline
+    elif bronze.source_format == "code":
         text = raw_html.decode("utf-8", errors="replace").strip()
         title = str(bronze.url).rsplit("/", 1)[-1] or None
         model_text = text

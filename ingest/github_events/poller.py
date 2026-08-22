@@ -1,6 +1,7 @@
 """GitHub Events long-running poller.
 
-Endpoint: ``GET /events`` (https://docs.github.com/en/rest/activity/events).
+Endpoint: ``GET /events`` or round-robin ``GET /orgs/{org}/events`` for the
+configured AI organizations.
 
 Behaviour:
 
@@ -166,7 +167,21 @@ async def run_loop(
     state = FeedStateStore(state_root)
     feed_state = state.get(SOURCE_FEED)
     seen: set[str] = set(feed_state.get("seen_doc_ids", []))
-    last_etag = feed_state.get("etag")
+    legacy_etag = feed_state.get("etag")
+    raw_etags = feed_state.get("etags", {})
+    etags: dict[str, str] = (
+        {str(key): str(value) for key, value in raw_etags.items()}
+        if isinstance(raw_etags, dict)
+        else {}
+    )
+    targets = (
+        [f"https://api.github.com/orgs/{org}/events" for org in sorted(ai_org_filter)]
+        if ai_org_filter
+        else [GITHUB_EVENTS_URL]
+    )
+    if legacy_etag and GITHUB_EVENTS_URL not in etags:
+        etags[GITHUB_EVENTS_URL] = str(legacy_etag)
+    target_index = int(feed_state.get("target_index", 0)) % len(targets)
 
     anonymous_headers = build_headers(
         cfg,
@@ -205,11 +220,12 @@ async def run_loop(
         client = authenticated_client if cfg.github_token else anonymous_client
         using_authenticated_client = bool(cfg.github_token)
         while not stop.is_set():
+            target_url = targets[target_index]
             req_headers: dict[str, str] = {}
-            if last_etag:
-                req_headers["If-None-Match"] = last_etag
+            if etags.get(target_url):
+                req_headers["If-None-Match"] = etags[target_url]
             try:
-                resp = await client.get(GITHUB_EVENTS_URL, headers=req_headers)
+                resp = await client.get(target_url, headers=req_headers)
             except httpx.HTTPError as exc:
                 log.warning("github_events.transport_error", err=str(exc))
                 INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="error")
@@ -222,7 +238,8 @@ async def run_loop(
                 INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="not_modified")
             elif resp.status_code == 200:
                 INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="success")
-                last_etag = resp.headers.get("etag", last_etag)
+                if resp.headers.get("etag"):
+                    etags[target_url] = resp.headers["etag"]
                 try:
                     events = resp.json()
                 except ValueError:
@@ -241,6 +258,7 @@ async def run_loop(
                         "github_events.batch",
                         events=len(events),
                         emitted=emitted,
+                        target=target_url,
                         rate_limit_remaining=resp.headers.get("x-ratelimit-remaining"),
                     )
             elif resp.status_code == 401 and using_authenticated_client:
@@ -276,10 +294,12 @@ async def run_loop(
             state.put(
                 SOURCE_FEED,
                 {
-                    "etag": last_etag,
+                    "etags": etags,
                     "seen_doc_ids": sorted(seen),
+                    "target_index": (target_index + 1) % len(targets),
                 },
             )
+            target_index = (target_index + 1) % len(targets)
             iteration += 1
             if max_iterations is not None and iteration >= max_iterations:
                 break

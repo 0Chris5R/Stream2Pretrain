@@ -231,3 +231,51 @@ async def test_configured_org_extends_repository_filter() -> None:
         ai_org_filter=frozenset({"mistralai"}),
     )
     assert emitted == 1
+
+
+@pytest.mark.asyncio
+async def test_run_loop_polls_configured_org_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_producer = FakeProducer()
+    fake_minio = FakeMinio()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/orgs/mistralai/events"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "configured-1",
+                    "type": "ReleaseEvent",
+                    "repo": {"name": "mistralai/new-model"},
+                    "payload": {
+                        "release": {
+                            "html_url": "https://github.com/mistralai/new-model/releases/tag/v1"
+                        }
+                    },
+                }
+            ],
+            headers={"x-poll-interval": "0"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(evt_module, "BronzeProducer", lambda *a, **kw: fake_producer)
+    monkeypatch.setattr(evt_module, "MinioWriter", lambda *a, **kw: fake_minio)
+    monkeypatch.setattr(
+        evt_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(
+            transport=transport,
+            headers=kw.get("headers", {}),
+        ),
+    )
+
+    total = await evt_module.run_loop(
+        _cfg(tmp_path),
+        max_iterations=1,
+        ai_org_filter=frozenset({"mistralai"}),
+    )
+
+    assert total == 1

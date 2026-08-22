@@ -4,8 +4,8 @@ Two endpoints:
 
 - ``GET /api/models?sort=lastModified&direction=-1&limit=100`` - new/updated
   models. Dedup by ``(id, lastModified)``.
-- ``GET /api/daily_papers?sort=publishedAt&limit=100`` - bearer-only,
-  community-curated daily papers.
+- ``GET /api/daily_papers?sort=publishedAt&limit=100`` - community-curated
+  daily papers. Authentication is optional.
 
 Politeness: HF Hub anonymous quota is 500 req / 5-min window; with the
 optional ``HF_TOKEN`` it bumps to 1000-2500. We poll once per CronJob run so
@@ -20,16 +20,22 @@ import json
 import os
 from datetime import UTC, datetime
 
+from ingest.common.arxiv_license import fetch_arxiv_license_with_source
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
 from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
-from ingest.common.license_admission import decide_license_admission
+from ingest.common.license_admission import (
+    PERMISSIVE_TRAINING_LICENSES,
+    decide_license_admission,
+    normalize_license,
+)
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.metrics import INGEST_METRICS
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
 from ingest.common.probes import start_probe_server
+from ingest.common.rate_limit import TokenBucket
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 from ingest.common.state import FeedStateStore
 from schemas.bronze import BronzeRecord
@@ -60,13 +66,14 @@ async def _emit_payload(
     minio: MinioWriter,
     extra_meta: dict[str, str] | None = None,
     license_value: str | None = None,
+    license_source: str = "dataset_metadata",
     admission_producer: LicenseAdmissionProducer | None = None,
 ) -> bool:
     admission = decide_license_admission(
         source_url=url,
         source_feed=source_feed,
         license_value=license_value,
-        license_source="dataset_metadata" if license_value else "unknown",
+        license_source=license_source if license_value else "unknown",
     )
     if admission_producer is not None:
         await admission_producer.send(admission.decision)
@@ -106,8 +113,10 @@ async def _emit_payload(
         source_feed=source_feed,
         trace_id=admission.decision.trace_id,
         bytes_size=stored,
+        source_format="metadata",
+        extraction_pipeline="hf-api-json-v1",
         spdx_license=admission.license_id,
-        spdx_license_source="dataset_metadata",
+        spdx_license_source=license_source if license_value else "unknown",  # type: ignore[arg-type]
     )
     await producer.send(record)
     return True
@@ -134,20 +143,51 @@ async def poll_models(
 
     emitted = 0
     async with build_async_client(cfg, headers=headers) as client:
-        params = {"sort": "lastModified", "direction": "-1", "limit": str(limit)}
-        resp = await client.get(f"{HF_API_BASE}{MODELS_ENDPOINT}", params=params)
-        if resp.status_code >= 400:
-            log.warning("hf_models.bad_status", status=resp.status_code)
+        # The unfiltered newest-model page is commonly dominated by unlicensed
+        # uploads and the list response exposes licenses as ``license:*`` tags,
+        # not ``cardData.license``. Query each admitted SPDX tag explicitly,
+        # merge by model id, and retain a bounded newest-first result.
+        per_license_limit = max(
+            1, (limit + len(PERMISSIVE_TRAINING_LICENSES) - 1) // len(PERMISSIVE_TRAINING_LICENSES)
+        )
+        by_model: dict[str, dict[str, object]] = {}
+        successful_requests = 0
+        for license_id in sorted(PERMISSIVE_TRAINING_LICENSES):
+            params = {
+                "sort": "lastModified",
+                "direction": "-1",
+                "limit": str(per_license_limit),
+                "filter": f"license:{license_id.lower()}",
+                "full": "true",
+            }
+            resp = await client.get(f"{HF_API_BASE}{MODELS_ENDPOINT}", params=params)
+            if resp.status_code >= 400:
+                log.warning(
+                    "hf_models.bad_status",
+                    status=resp.status_code,
+                    license=license_id,
+                )
+                continue
+            payload = resp.json()
+            if not isinstance(payload, list):
+                continue
+            successful_requests += 1
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                model_id = item.get("id") or item.get("modelId")
+                if isinstance(model_id, str):
+                    by_model[model_id] = item
+        if not successful_requests:
             INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
             return 0
         INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="success")
-        items = resp.json()
-        if not isinstance(items, list):
-            INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
-            return 0
+        items = sorted(
+            by_model.values(),
+            key=lambda item: str(item.get("lastModified") or ""),
+            reverse=True,
+        )[:limit]
         for item in items:
-            if not isinstance(item, dict):
-                continue
             model_id = item.get("id") or item.get("modelId")
             last_modified = item.get("lastModified")
             if not isinstance(model_id, str) or not isinstance(last_modified, str):
@@ -156,8 +196,7 @@ async def poll_models(
                 continue
             url = f"https://huggingface.co/{model_id}"
             payload = json.dumps(item, sort_keys=True).encode("utf-8")
-            card_data = item.get("cardData") if isinstance(item.get("cardData"), dict) else {}
-            license_value = card_data.get("license") or item.get("license")
+            license_value = _model_license(item)
             try:
                 accepted = await _emit_payload(
                     payload=payload,
@@ -198,16 +237,9 @@ async def poll_daily_papers(
     admission_producer: LicenseAdmissionProducer | None = None,
     limit: int = 100,
 ) -> int:
-    """HF Daily Papers (bearer required)."""
-    if not cfg.hf_token:
-        log.warning("hf_daily_papers.skipped_no_token")
-        INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="skipped")
-        return 0
-    headers = build_headers(
-        cfg,
-        accept="application/json",
-        extra={"Authorization": f"Bearer {cfg.hf_token}"},
-    )
+    """Poll HF Daily Papers and resolve each paper's arXiv license."""
+    extra_headers = {"Authorization": f"Bearer {cfg.hf_token}"} if cfg.hf_token else None
+    headers = build_headers(cfg, accept="application/json", extra=extra_headers)
     state_store = FeedStateStore(
         "/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf"
     )
@@ -215,6 +247,7 @@ async def poll_daily_papers(
     seen_ids: set[str] = set(state.get("seen_ids", []))
 
     emitted = 0
+    license_bucket = TokenBucket(rate=1.0, burst=1)
     async with build_async_client(cfg, headers=headers) as client:
         params = {"sort": "publishedAt", "limit": str(limit)}
         resp = await client.get(f"{HF_API_BASE}{DAILY_PAPERS_ENDPOINT}", params=params)
@@ -238,6 +271,18 @@ async def poll_daily_papers(
                 continue
             url = f"https://huggingface.co/papers/{arxiv_id}"
             payload = json.dumps(item, sort_keys=True).encode("utf-8")
+            license_value = (
+                paper.get("license")
+                if isinstance(paper, dict) and isinstance(paper.get("license"), str)
+                else None
+            )
+            license_source = "dataset_metadata"
+            if normalize_license(license_value) == "unknown":
+                license_value, license_source = await fetch_arxiv_license_with_source(
+                    arxiv_id,
+                    client,
+                    bucket=license_bucket,
+                )
             try:
                 accepted = await _emit_payload(
                     payload=payload,
@@ -248,11 +293,8 @@ async def poll_daily_papers(
                     producer=producer,
                     minio=minio,
                     extra_meta={"hf_paper_id": arxiv_id},
-                    license_value=(
-                        paper.get("license")
-                        if isinstance(paper, dict) and isinstance(paper.get("license"), str)
-                        else None
-                    ),
+                    license_value=license_value,
+                    license_source=license_source,
                     admission_producer=admission_producer,
                 )
             except Exception as exc:
@@ -268,6 +310,22 @@ async def poll_daily_papers(
         seen_ids = set(list(seen_ids)[-2500:])
     state_store.put(SOURCE_FEED_PAPERS, {"seen_ids": sorted(seen_ids)})
     return emitted
+
+
+def _model_license(item: dict[str, object]) -> str | None:
+    """Read the license from every shape returned by the Hub list API."""
+    card_data = item.get("cardData")
+    if isinstance(card_data, dict) and isinstance(card_data.get("license"), str):
+        return normalize_license(card_data["license"])
+    direct = item.get("license")
+    if isinstance(direct, str):
+        return normalize_license(direct)
+    tags = item.get("tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, str) and tag.lower().startswith("license:"):
+                return normalize_license(tag.split(":", 1)[1])
+    return None
 
 
 async def run_pass(cfg: IngestConfig, *, mode: str = "all") -> tuple[int, int]:

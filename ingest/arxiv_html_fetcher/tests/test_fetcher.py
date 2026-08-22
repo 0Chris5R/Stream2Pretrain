@@ -109,6 +109,8 @@ async def test_stream_reuses_one_consumer_and_commits_each_handled_batch(
     monkeypatch.setattr(fetcher_module, "run_for_ids", run_batch)
     args = SimpleNamespace(
         stream_topic="docs.normalized",
+        consumer_group="s2p-arxiv-html-fetcher-v2",
+        auto_offset_reset="latest",
         max_records=None,
         feed_name="arxiv-html-fetcher",
         license_default="per-record",
@@ -142,6 +144,8 @@ async def test_stream_commits_a_fully_quarantined_batch(
     monkeypatch.setattr(fetcher_module, "run_for_ids", quarantine)
     args = SimpleNamespace(
         stream_topic="docs.normalized",
+        consumer_group="s2p-arxiv-html-fetcher-v2",
+        auto_offset_reset="latest",
         max_records=None,
         feed_name="arxiv-html-fetcher",
         license_default="per-record",
@@ -257,11 +261,15 @@ def test_canonical_arxiv_url_picks_mirror() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_arxiv_license_reads_atom_rights() -> None:
+async def test_fetch_arxiv_license_reads_abstract_rights() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "export.arxiv.org"
+        assert request.url.host == "arxiv.org"
         return httpx.Response(
-            200, text=_atom_license("http://creativecommons.org/licenses/by/4.0/")
+            200,
+            text=(
+                '<div class="abs-license"><a '
+                'href="http://creativecommons.org/licenses/by/4.0/">view license</a></div>'
+            ),
         )
 
     client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
@@ -279,20 +287,16 @@ async def test_fetch_arxiv_license_reads_atom_rights() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_arxiv_license_falls_back_to_abs_metadata() -> None:
+async def test_fetch_arxiv_license_falls_back_to_atom_metadata() -> None:
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
-        if request.url.host == "export.arxiv.org":
-            return httpx.Response(200, text="<feed xmlns='http://www.w3.org/2005/Atom'/>")
         if request.url.host == "arxiv.org" and request.url.path == "/abs/2112.10074":
+            return httpx.Response(200, text="<html><body>no rights link</body></html>")
+        if request.url.host == "export.arxiv.org":
             return httpx.Response(
-                200,
-                text=(
-                    '<div class="abs-license"><a '
-                    'href="http://creativecommons.org/licenses/by/4.0/">view license</a></div>'
-                ),
+                200, text=_atom_license("http://creativecommons.org/licenses/by/4.0/")
             )
         raise AssertionError(f"unexpected URL {request.url}")
 
@@ -308,10 +312,10 @@ async def test_fetch_arxiv_license_falls_back_to_abs_metadata() -> None:
         await client.aclose()
 
     assert value == "http://creativecommons.org/licenses/by/4.0/"
-    assert source == "html_meta"
+    assert source == "arxiv_api"
     assert calls == [
-        "https://export.arxiv.org/api/query?id_list=2112.10074&start=0&max_results=1",
         "https://arxiv.org/abs/2112.10074",
+        "https://export.arxiv.org/api/query?id_list=2112.10074&start=0&max_results=1",
     ]
 
 
@@ -606,8 +610,11 @@ async def test_backfill_preflights_license_before_fulltext() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
-        if request.url.host == "export.arxiv.org":
-            return httpx.Response(200, text=_atom_license("CC-BY-4.0"))
+        if request.url.host == "arxiv.org" and "/abs/" in request.url.path:
+            return httpx.Response(
+                200,
+                text=('<div class="abs-license"><a href="CC-BY-4.0">view license</a></div>'),
+            )
         if request.url.host == "arxiv.org" and "/html/" in request.url.path:
             return httpx.Response(200, text=ARXIV_HTML_SAMPLE)
         raise AssertionError(f"unexpected URL {request.url}")
@@ -630,9 +637,9 @@ async def test_backfill_preflights_license_before_fulltext() -> None:
     )
 
     assert emitted == 1
-    assert calls[0].startswith("https://export.arxiv.org/api/query")
+    assert calls[0] == "https://arxiv.org/abs/2401.12345"
     assert "/html/2401.12345" in calls[1]
-    assert admissions.records[0].license_source == "arxiv_api"
+    assert admissions.records[0].license_source == "html_meta"
     assert admissions.records[0].status == "admitted"
 
 
@@ -644,7 +651,11 @@ async def test_disallowed_backfill_license_never_fetches_body() -> None:
         calls.append(str(request.url))
         return httpx.Response(
             200,
-            text=_atom_license("https://creativecommons.org/licenses/by-nc-nd/4.0/"),
+            text=(
+                '<div class="abs-license"><a '
+                'href="https://creativecommons.org/licenses/by-nc-nd/4.0/">'
+                "view license</a></div>"
+            ),
         )
 
     minio = _FakeMinio()
@@ -666,7 +677,7 @@ async def test_disallowed_backfill_license_never_fetches_body() -> None:
 
     assert emitted == 0
     assert len(calls) == 1
-    assert calls[0].startswith("https://export.arxiv.org/api/query")
+    assert calls[0] == "https://arxiv.org/abs/2401.12345"
     assert admissions.records[0].status == "quarantined"
     assert not producer.records
     assert not minio.objects
