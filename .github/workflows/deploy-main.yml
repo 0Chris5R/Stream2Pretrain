@@ -353,6 +353,28 @@ jobs:
                 || true
             done
             kubectl get persistentvolume,persistentvolumeclaim -A -o wide || true
+            kubectl get persistentvolume -o json | jq -r '
+              .items[]
+              | {
+                  volume: .metadata.name,
+                  claim: (
+                    (.spec.claimRef.namespace // "")
+                    + "/"
+                    + (.spec.claimRef.name // "")
+                  ),
+                  capacity: .spec.capacity.storage,
+                  localPath: .spec.local.path,
+                  nodeAffinity: .spec.nodeAffinity
+                }
+            '
+            for node in $(kubectl get nodes -o name); do
+              node="${node#node/}"
+              echo "::group::Volume metrics: $node"
+              kubectl get --raw "/api/v1/nodes/${node}/proxy/metrics" \
+                | grep -E '^kubelet_volume_stats_(used|available|capacity)_bytes' \
+                || true
+              echo "::endgroup::"
+            done
             kubectl get pods -A --field-selector spec.nodeName=stream2pretrain-worker-2 \
               -o wide || true
             kubectl get pods -A -o json | jq -r '
