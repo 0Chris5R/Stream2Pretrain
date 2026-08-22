@@ -17,7 +17,7 @@ interface RootLayoutProps {
 export default function RootLayout({ children }: RootLayoutProps) {
   return (
     <html lang="en">
-      <body className="min-h-screen overflow-x-hidden bg-background text-foreground">
+      <body className="min-h-screen overflow-x-hidden bg-background font-sans text-foreground">
         <Providers>
           <TopNav />
           <main className="container py-8">{children}</main>
