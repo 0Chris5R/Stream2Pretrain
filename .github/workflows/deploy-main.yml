@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, diagnose, audit UI, inspect storage, or recover orphaned Iceberg metadata
+        description: Deploy, diagnose, audit UI, validate foundry, inspect storage, or recover storage
         required: true
         default: deploy
         type: choice
@@ -15,6 +15,7 @@ on:
           - deploy
           - diagnose
           - audit-ui
+          - validate-foundry
           - inspect-storage
           - recover-storage
 
@@ -235,6 +236,7 @@ jobs:
 
           vpn_log="$RUNNER_TEMP/openconnect.log"
           ui_port_forward_pid=""
+          foundry_port_forward_pid=""
           vpn_args=(
             --protocol=anyconnect
             --user="$CISCO_VPN_USERNAME"
@@ -255,6 +257,9 @@ jobs:
           cleanup() {
             if [[ -n "$ui_port_forward_pid" ]]; then
               kill "$ui_port_forward_pid" 2>/dev/null || true
+            fi
+            if [[ -n "$foundry_port_forward_pid" ]]; then
+              kill "$foundry_port_forward_pid" 2>/dev/null || true
             fi
             sudo -n kill "$vpn_pid" 2>/dev/null || true
             sudo -n pkill -TERM -x openconnect 2>/dev/null || true
@@ -351,6 +356,84 @@ jobs:
             NODE_PATH="$RUNNER_TEMP/browser-runtime/node_modules" \
               CHROME_BIN="$(command -v google-chrome)" \
               node scripts/browser_audit.cjs http://127.0.0.1:18080 "$audit_dir"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          if [[ "$DEPLOY_MODE" == "validate-foundry" ]]; then
+            echo "::group::Bounded live foundry validation"
+            kubectl -n stream2pretrain rollout status \
+              statefulset/stream2pretrain-foundry --timeout=180s
+            kubectl -n stream2pretrain port-forward \
+              service/stream2pretrain-foundry 18092:8092 \
+              >"$RUNNER_TEMP/foundry-port-forward.log" 2>&1 &
+            foundry_port_forward_pid=$!
+            for _ in $(seq 1 30); do
+              curl --fail --silent http://127.0.0.1:18092/healthz >/dev/null && break
+              if ! kill -0 "$foundry_port_forward_pid" 2>/dev/null; then
+                cat "$RUNNER_TEMP/foundry-port-forward.log" >&2
+                exit 1
+              fi
+              sleep 1
+            done
+            curl --fail --silent --show-error http://127.0.0.1:18092/healthz
+
+            control_token="$(
+              kubectl -n stream2pretrain get secret \
+                stream2pretrain-foundry-providers \
+                -o jsonpath='{.data.controlToken}' | base64 --decode
+            )"
+            request="$(
+              curl --fail --silent --show-error \
+                -H "Authorization: Bearer ${control_token}" \
+                -H 'Content-Type: application/json' \
+                --data '{"max_candidates":1}' \
+                http://127.0.0.1:18092/api/foundry/runs/manual
+            )"
+            unset control_token
+            printf '%s\n' "$request" | jq '{created,run}'
+            if [[ "$(printf '%s' "$request" | jq -r '.created')" != "true" \
+              || "$(printf '%s' "$request" | jq -r '.run.max_candidates')" -ne 1 ]]; then
+              echo "Refusing to validate through an existing or unbounded manual run." >&2
+              exit 1
+            fi
+            run_id="$(printf '%s' "$request" | jq -er '.run.run_id')"
+
+            terminal=false
+            state=""
+            run=""
+            for _ in $(seq 1 180); do
+              dashboard="$(
+                curl --fail --silent --show-error \
+                  http://127.0.0.1:18092/api/foundry/dashboard
+              )"
+              run="$(
+                printf '%s' "$dashboard" \
+                  | jq -cer --arg run_id "$run_id" \
+                    '.manual_runs[] | select(.run_id == $run_id)'
+              )"
+              state="$(printf '%s' "$run" | jq -r '.state')"
+              if [[ "$state" == "completed" \
+                || "$state" == "quota_exhausted" \
+                || "$state" == "failed" ]]; then
+                terminal=true
+                break
+              fi
+              sleep 5
+            done
+            printf '%s\n' "$run" | jq .
+            if [[ "$terminal" != true ]]; then
+              echo "Bounded foundry validation did not reach a terminal state." >&2
+              exit 1
+            fi
+            if [[ "$state" != "completed" \
+              || "$(printf '%s' "$run" | jq -r '.processed_count')" -ne 1 ]]; then
+              echo "Bounded foundry validation did not process exactly one candidate." >&2
+              exit 1
+            fi
+            kubectl -n stream2pretrain exec -i \
+              statefulset/stream2pretrain-foundry -c api -- python - \
+              < scripts/foundry_diagnostics.py
             echo "::endgroup::"
             exit 0
           fi
