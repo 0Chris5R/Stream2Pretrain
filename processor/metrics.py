@@ -53,6 +53,12 @@ class ProcessorMetrics:
             ["namespace", "reason"],
             registry=self.registry,
         )
+        self._processor_failures = Counter(
+            "s2p_processor_failures_total",
+            "Records that failed processing or bounded transport validation.",
+            ["namespace", "stage", "reason"],
+            registry=self.registry,
+        )
         self._processor_routed = Counter(
             "s2p_processor_routed_total",
             "Documents assigned to each final corpus route.",
@@ -127,6 +133,10 @@ class ProcessorMetrics:
     def record_route(self, *, route: str) -> None:
         with self._lock:
             self._processor_routed.labels(self._namespace, route).inc()
+
+    def record_failure(self, *, stage: str, reason: str) -> None:
+        with self._lock:
+            self._processor_failures.labels(self._namespace, stage, reason).inc()
 
     def record_decon_scan(self, *, benchmarks: Iterable[str]) -> None:
         hits = list(benchmarks)

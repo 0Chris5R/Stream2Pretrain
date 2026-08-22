@@ -72,6 +72,8 @@ spec:
               value: "67108864"
             - name: S2P_WAYBACK_LOOKUP_ENABLED
               value: "0"
+            - name: S2P_DOCLING_ENABLED
+              value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30

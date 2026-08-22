@@ -389,6 +389,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     with_wayback = os.environ.get("S2P_WAYBACK_LOOKUP_ENABLED", "0") == "1"
     state = build_state(cfg, with_wayback=with_wayback)
     flow = Dataflow("s2p-fetcher")
+    payload_max_bytes = common.kafka_payload_max_bytes()
     # ``beginning`` ensures a fresh deploy or offset reset replays from the
     # topic's retention window (at-least-once). Override via env if a debug
     # run needs to skip backlog: ``S2P_KAFKA_START_OFFSET=end``.
@@ -407,9 +408,10 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
             if payload is None:
                 return None
             try:
-                silver = process_bronze_payload(state, payload, metrics=PROCESSOR_METRICS)
+                silver = process_bronze_payload(state, payload)
             except Exception as exc:
                 span.record_exception(exc)
+                PROCESSOR_METRICS.record_failure(stage="normalize", reason=type(exc).__name__)
                 log.warning(
                     "fetcher record failed",
                     error=str(exc),
@@ -419,11 +421,23 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 return None
             if silver is None:
                 return None
+            encoded = common.silver_dumps(silver)
+            if len(encoded) > payload_max_bytes:
+                PROCESSOR_METRICS.record_failure(stage="normalize", reason="payload_too_large")
+                log.warning(
+                    "normalized payload exceeds bounded Kafka record size",
+                    doc_id=silver.doc_id,
+                    payload_bytes=len(encoded),
+                    payload_max_bytes=payload_max_bytes,
+                    source_feed=silver.source_feed,
+                )
+                return None
+            PROCESSOR_METRICS.record_normalized(source_feed=silver.source_feed)
             span.set_attribute("doc_id", silver.doc_id)
             span.set_attribute("lang", silver.lang)
             return KafkaSinkMessage(
                 key=silver.doc_id.encode("utf-8"),
-                value=common.silver_dumps(silver),
+                value=encoded,
                 headers=[("trace_id", silver.trace_id.encode("ascii"))],
             )
 
