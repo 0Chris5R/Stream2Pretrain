@@ -654,7 +654,9 @@ ui:
     enabled: true
     host: stream2pretrain.local
     ingressClassName: traefik
-    # Empty uses Traefik's platform-managed default wildcard certificate.
+    # Empty omits the Ingress TLS stanza so a TLS-enabled Traefik entrypoint
+    # uses its platform-managed default wildcard certificate. Rendering a TLS
+    # item without a secret makes Traefik infer <ingress-name>-tls instead.
     tlsSecret: ""
   env:
     duckdbCacheSeconds: 30
