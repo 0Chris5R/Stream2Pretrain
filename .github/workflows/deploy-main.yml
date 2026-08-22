@@ -30,7 +30,6 @@ permissions:
 env:
   HELM_VERSION: v3.15.4
   HELMFILE_VERSION: v1.7.3
-  PUBLIC_SITE_HOST: stream2pretrain.theclusterflux.com
 
 jobs:
   validate:
@@ -95,44 +94,6 @@ jobs:
             echo "Rendered Kafka message limit is not an integer string: $message_limits" >&2
             exit 1
           fi
-          uv run python - "$rendered_chart" <<'PY'
-          import pathlib
-          import sys
-
-          import yaml
-
-          resources = list(yaml.safe_load_all(pathlib.Path(sys.argv[1]).read_text()))
-          alias_certificate = next(
-              (
-                  resource
-                  for resource in resources
-                  if resource
-                  and resource.get("kind") == "Certificate"
-                  and resource.get("metadata", {}).get("name")
-                  == "stream2pretrain-ui-alias-tls"
-              ),
-              None,
-          )
-          if alias_certificate is None:
-              raise SystemExit("The public alias Certificate was not rendered")
-          ingress = next(
-              resource
-              for resource in resources
-              if resource
-              and resource.get("kind") == "Ingress"
-              and resource.get("metadata", {}).get("name") == "stream2pretrain-ui"
-          )
-          annotations = ingress.get("metadata", {}).get("annotations", {})
-          conflicting = {
-              "cert-manager.io/issuer",
-              "cert-manager.io/cluster-issuer",
-          }.intersection(annotations)
-          if conflicting:
-              raise SystemExit(
-                  "Ingress must not delegate explicitly managed TLS to ingress-shim: "
-                  + ", ".join(sorted(conflicting))
-              )
-          PY
           helmfile \
             --helm-binary "$(command -v helm)" \
             --file helmfile.yaml \
@@ -1112,21 +1073,6 @@ jobs:
             echo "GHCR_PULL_TOKEN is empty. The published images must be public."
           fi
 
-          # This profile uses the platform Traefik wildcard certificate. Remove
-          # the exact application-local certificate left by earlier issuer
-          # experiments so it cannot keep reconciliation in a failed state.
-          if kubectl -n stream2pretrain get certificate stream2pretrain-ui-tls \
-             >/dev/null 2>&1; then
-            kubectl -n stream2pretrain delete certificate stream2pretrain-ui-tls
-            kubectl -n stream2pretrain delete certificaterequest \
-              -l cert-manager.io/certificate-name=stream2pretrain-ui-tls \
-              --ignore-not-found
-          fi
-          kubectl -n stream2pretrain annotate ingress stream2pretrain-ui \
-            kubectl.kubernetes.io/last-applied-configuration- \
-            cert-manager.io/issuer- \
-            cert-manager.io/cluster-issuer- || true
-
           # A single-replica StatefulSet cannot replace a crash-looping Pod
           # during a wait-based Helm upgrade: the unhealthy old Pod keeps the
           # rollout blocked until Helm times out. If Foundry is already down,
@@ -1196,57 +1142,6 @@ jobs:
 
           kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
             python - < scripts/cluster_smoke.py
-
-          # External DNS is owned outside this cluster. Validate it only after
-          # the release, durable source catalogue, and internal smoke test have
-          # completed so an origin mismatch cannot leave the data plane only
-          # partially reconciled.
-          public_tls_secret="$(
-            kubectl -n stream2pretrain get ingress stream2pretrain-ui -o json \
-              | jq -r --arg host "$PUBLIC_SITE_HOST" '
-                  .spec.tls[]?
-                  | select(.hosts | index($host))
-                  | .secretName
-                ' \
-              | head -n 1
-          )"
-          if [[ -z "$public_tls_secret" ]]; then
-            echo "The public hostname has no dedicated TLS certificate mapping" >&2
-            report_deploy_failure
-            exit 1
-          fi
-          public_http_status="$(
-            curl --silent --show-error --max-time 15 \
-              --output "$RUNNER_TEMP/public-health-http.txt" \
-              --write-out '%{http_code}' \
-              "http://$PUBLIC_SITE_HOST/api/health" || true
-          )"
-          if [[ "$public_http_status" != "200" ]]; then
-            echo "The public hostname is not routing HTTP to this Ingress (status: $public_http_status)." >&2
-            cat "$RUNNER_TEMP/public-health-http.txt" >&2 || true
-            report_deploy_failure
-            exit 1
-          fi
-          if ! kubectl -n stream2pretrain wait \
-            --for=condition=Ready "certificate/$public_tls_secret" --timeout=300s; then
-            report_deploy_failure
-            exit 1
-          fi
-          public_ready=false
-          for _ in $(seq 1 30); do
-            if curl --fail --silent --show-error --max-time 15 \
-              "https://$PUBLIC_SITE_HOST/api/health" >/dev/null; then
-              public_ready=true
-              break
-            fi
-            sleep 2
-          done
-          if [[ "$public_ready" != true ]]; then
-            echo "The public website did not become healthy over HTTPS" >&2
-            report_deploy_failure
-            exit 1
-          fi
-
 
       - name: Upload rendered UI audit
         if: ${{ always() && inputs.mode == 'audit-ui' }}

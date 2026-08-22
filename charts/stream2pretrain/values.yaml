@@ -687,28 +687,8 @@ ui:
   ingress:
     enabled: true
     host: stream2pretrain.local
-    # Optional CDN/custom hostnames that terminate at the same Traefik route.
-    # Their edge certificate/DNS remains owned by that external provider.
-    aliases: []
     ingressClassName: traefik
-    # Optional cert-manager ClusterIssuer. Required when aliases are not
-    # covered by the platform's default wildcard certificate.
-    clusterIssuer: ""
-    # Namespace-scoped public ACME issuer for a custom hostname outside the
-    # platform DNS zone. HTTP-01 keeps ownership and renewal in Kubernetes.
-    acmeIssuer:
-      enabled: false
-      name: letsencrypt-public
-      server: https://acme-v02.api.letsencrypt.org/directory
-      email: ""
-    # Empty omits the Ingress TLS stanza so a TLS-enabled Traefik entrypoint
-    # uses its platform-managed default wildcard certificate. Rendering a TLS
-    # item without a secret makes Traefik infer <ingress-name>-tls instead.
     tlsSecret: ""
-    # Optional dedicated certificate for aliases. This lets the canonical
-    # platform hostname continue using its wildcard certificate while
-    # cert-manager owns and renews a public custom-domain certificate.
-    aliasTlsSecret: ""
   env:
     duckdbCacheSeconds: 30
 
