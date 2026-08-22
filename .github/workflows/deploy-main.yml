@@ -341,7 +341,20 @@ jobs:
                 }
             '
             kubectl top nodes || true
+            for node in $(kubectl get nodes -o name); do
+              node="${node#node/}"
+              kubectl get --raw "/api/v1/nodes/${node}/proxy/stats/summary" \
+                | jq '{
+                    node: .node.nodeName,
+                    rootFs: .node.fs,
+                    imageFs: .node.runtime.imageFs,
+                    containerFs: .node.runtime.containerFs
+                  }' \
+                || true
+            done
             kubectl get persistentvolume,persistentvolumeclaim -A -o wide || true
+            kubectl get pods -A --field-selector spec.nodeName=stream2pretrain-worker-2 \
+              -o wide || true
             kubectl get pods -A -o json | jq -r '
               [.items[] | {
                 node: (.spec.nodeName // "unscheduled"),
