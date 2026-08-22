@@ -350,6 +350,15 @@ jobs:
                     echo 'MinIO system directories (KiB):'
                     du -x -k -d 2 "$volume/.minio.sys" 2>/dev/null \
                       | sort -n | tail -n 100
+                    gold="$volume/s2p-gold"
+                    echo 'Gold directory breakdown (KiB):'
+                    du -x -k -d 5 "$gold" 2>/dev/null \
+                      | sort -n | tail -n 100
+                    echo 'Gold file count:'
+                    find "$gold" -xdev -type f | wc -l
+                    echo 'Gold file extensions:'
+                    find "$gold" -xdev -type f \
+                      | sed 's/.*\.//' | sort | uniq -c | sort -n
                 resources:
                   requests:
                     cpu: 10m
