@@ -25,10 +25,10 @@ spec:
                 name: {{ $name }}
                 port:
                   number: 80
+  {{ with .Values.ui.ingress.tlsSecret }}
   tls:
     - hosts:
-        - {{ .Values.ui.ingress.host | quote }}
-      {{- with .Values.ui.ingress.tlsSecret }}
-      secretName: {{ .Values.ui.ingress.tlsSecret | quote }}
-      {{- end }}
+        - {{ $.Values.ui.ingress.host | quote }}
+      secretName: {{ . | quote }}
+  {{ end }}
 {{- end }}
