@@ -220,9 +220,7 @@ class LicenseAdmissionWriter:
                 "license_source": [decision.license_source for decision in decisions],
                 "reason": [decision.reason for decision in decisions],
                 "trace_id": [decision.trace_id for decision in decisions],
-                "content_fetch_started": [
-                    decision.content_fetch_started for decision in decisions
-                ],
+                "content_fetch_started": [decision.content_fetch_started for decision in decisions],
             },
             schema=schema,
         )

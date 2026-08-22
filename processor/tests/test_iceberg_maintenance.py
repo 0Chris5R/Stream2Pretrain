@@ -22,9 +22,7 @@ def test_cleanup_candidates_exclude_current_and_recent_metadata() -> None:
         older_than=now - timedelta(hours=24),
     )
 
-    assert [item.key for item in candidates] == [
-        "warehouse/gold/t/metadata/00001-a.metadata.json"
-    ]
+    assert [item.key for item in candidates] == ["warehouse/gold/t/metadata/00001-a.metadata.json"]
 
 
 def test_s3_location_rejects_non_object_storage_paths() -> None:

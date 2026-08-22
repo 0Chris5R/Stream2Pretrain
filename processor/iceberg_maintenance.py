@@ -13,6 +13,7 @@ import json
 import os
 import re
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -126,10 +127,8 @@ def _latest_metadata_location(
 
 def _table_names(catalog: Any, namespace: str) -> list[str]:
     names = set(_DEFAULT_TABLES)
-    try:
+    with suppress(Exception):
         names.update(identifier[-1] for identifier in catalog.list_tables((namespace,)))
-    except Exception:
-        pass
     return sorted(names)
 
 
@@ -262,6 +261,8 @@ def main() -> None:
     args = _parser().parse_args()
     if args.snapshot_retention_hours < 1 or args.metadata_minimum_age_hours < 1:
         raise SystemExit("retention and minimum age values must be at least one hour")
+    if args.register_missing and not args.apply:
+        raise SystemExit("--register-missing changes the catalog and requires --apply")
     cfg = common.load_config()
     catalog = load_runtime_catalog(cfg)
     s3 = boto3.client(
