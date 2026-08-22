@@ -276,11 +276,13 @@
       "properties": {
         "arxivHtmlFetcher": {
           "type": "object",
-          "required": ["image", "replicas", "scaling", "resources"],
+          "required": ["image", "replicas", "consumerGroup", "autoOffsetReset", "scaling", "resources"],
           "properties": {
             "image": {"type": "string", "minLength": 1},
             "tag": {"type": "string"},
             "replicas": {"type": "integer", "minimum": 0},
+            "consumerGroup": {"type": "string", "minLength": 1},
+            "autoOffsetReset": {"type": "string", "enum": ["earliest", "latest"]},
             "maxRecordsPerLoop": {"type": "integer", "minimum": 0},
             "scaling": {
               "type": "object",

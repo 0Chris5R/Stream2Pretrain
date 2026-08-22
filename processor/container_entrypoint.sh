@@ -22,6 +22,7 @@ case "$command_name" in
     ;;
 esac
 
-# The command name occupies sys.argv[0], preserving every caller argument for
-# the module's normal argparse or Bytewax entrypoint.
-exec python -c "from ${module} import main; main()" "$command_name" "$@"
+# ``python -c`` already supplies ``-c`` as sys.argv[0].  Pass only the
+# container arguments so argparse-based commands see exactly what Kubernetes
+# put in ``args`` (for example, ``--apply`` for Iceberg maintenance).
+exec python -c "from ${module} import main; main()" "$@"

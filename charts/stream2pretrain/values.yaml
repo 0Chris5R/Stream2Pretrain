@@ -319,6 +319,10 @@ ingest:
   arxivHtmlFetcher:
     image: stream2pretrain/ingest-arxiv-html
     replicas: 1
+    # v2 begins at the live head. Historical paper ids are handled by the
+    # explicit, bounded backfill CronJob instead of blocking fresh enrichment.
+    consumerGroup: s2p-arxiv-html-fetcher-v2
+    autoOffsetReset: latest
     # Bound how many ids one Deployment loop drains before yielding back
     # to KEDA. Empty / 0 means unlimited. Useful for testing on small
     # clusters; production should leave this 0.

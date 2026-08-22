@@ -58,6 +58,10 @@ spec:
             - {{ .Values.sources.arxiv.htmlFetcher.licenseDefault | quote }}
             - --stream-topic
             - {{ .Values.redpanda.topics.docsNormalized | quote }}
+            - --consumer-group
+            - {{ $hf.consumerGroup | quote }}
+            - --auto-offset-reset
+            - {{ $hf.autoOffsetReset | quote }}
             {{- if $hf.maxRecordsPerLoop }}
             - --max-records
             - {{ $hf.maxRecordsPerLoop | quote }}
@@ -100,10 +104,10 @@ spec:
         # cannot filter to a subset of source_feed values; the in-pod
         # consumer drops non-arxiv records before fetching.
         bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
-        consumerGroup: s2p-arxiv-html-fetcher
+        consumerGroup: {{ $hf.consumerGroup | quote }}
         topic: {{ .Values.redpanda.topics.docsNormalized | quote }}
         lagThreshold: {{ default 200 $hf.scaling.lagThreshold | quote }}
-        offsetResetPolicy: latest
+        offsetResetPolicy: {{ $hf.autoOffsetReset | quote }}
         {{- if not $kedaAuthEnabled }}
         sasl: ""
         tls: "disable"

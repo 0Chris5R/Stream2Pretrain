@@ -81,18 +81,33 @@ async def test_poll_models_emits_two(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_poll_daily_papers_skipped_without_token(
+async def test_poll_daily_papers_uses_public_api_without_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
     fake_producer = FakeProducer()
     fake_minio = FakeMinio()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json=_papers_payload())
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        hf_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
+    )
     emitted = await hf_module.poll_daily_papers(
         _cfg(token=None),
         producer=fake_producer,
         minio=fake_minio,  # type: ignore[arg-type]
     )
-    assert emitted == 0
+    assert emitted == 2
+
+
+def test_model_license_reads_hub_license_tag() -> None:
+    assert hf_module._model_license({"tags": ["pytorch", "license:apache-2.0"]}) == ("Apache-2.0")
 
 
 @pytest.mark.asyncio

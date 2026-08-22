@@ -100,6 +100,31 @@ def test_normalize_code_bronze_decodes_plain_text(bronze_record: BronzeRecord) -
     assert "def fit_model" in silver.text
 
 
+def test_normalize_structured_metadata_extracts_human_text(bronze_record: BronzeRecord) -> None:
+    state = _state(_FakeS3(b""))
+    metadata_bronze = bronze_record.model_copy(
+        update={
+            "source_format": "metadata",
+            "extraction_pipeline": "hf-api-json-v1",
+            "spdx_license": "Apache-2.0",
+            "spdx_license_source": "dataset_metadata",
+        }
+    )
+    payload = (
+        b'{"id":"org/model","title":"Research model",'
+        b'"description":"A model trained for scientific retrieval",'
+        b'"url":"https://example.invalid/model"}'
+    )
+
+    silver = normalize(state, metadata_bronze, payload)
+
+    assert silver is not None
+    assert silver.title == "Research model"
+    assert "scientific retrieval" in silver.text
+    assert "https://example.invalid" not in silver.text
+    assert silver.extracted_with == "hf-api-json-v1"
+
+
 def test_normalize_returns_none_on_empty_html(bronze_record: BronzeRecord) -> None:
     state = _state(_FakeS3(b""))
     assert normalize(state, bronze_record, b"") is None
