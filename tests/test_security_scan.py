@@ -82,10 +82,13 @@ def test_scan_paths_flags_supported_text_files(tmp_path: Path) -> None:
 def test_should_scan_accepts_dockerfile_and_helmfile(tmp_path: Path) -> None:
     root = tmp_path
     dockerfile = root / "processor" / "Dockerfile"
+    app_dockerfile = root / "processor" / "Dockerfile.app"
     helmfile = root / "helmfile.yaml"
     dockerfile.parent.mkdir()
     dockerfile.touch()
+    app_dockerfile.touch()
     helmfile.touch()
 
     assert should_scan(dockerfile, root)
+    assert should_scan(app_dockerfile, root)
     assert should_scan(helmfile, root)

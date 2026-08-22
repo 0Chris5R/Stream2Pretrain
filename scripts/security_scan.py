@@ -102,7 +102,7 @@ def should_scan(path: Path, root: Path) -> bool:
         return False
     if any(part in SKIP_PARTS for part in rel.parts):
         return False
-    if path.name in {"Dockerfile", "helmfile.yaml"}:
+    if path.name == "helmfile.yaml" or path.name.startswith("Dockerfile"):
         return True
     return path.suffix in TEXT_SUFFIXES
 

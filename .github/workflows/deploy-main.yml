@@ -139,9 +139,94 @@ jobs:
             --environment dev \
             lint
 
+  processor-base:
+    name: Resolve processor dependency base
+    if: inputs.mode == '' || inputs.mode == 'deploy'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable base image
+        id: base
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          base_key="$(
+            {
+              sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
+              printf '%s\n' '--- dependency manifests ---'
+              find . -name pyproject.toml -not -path './.git/*' -print0 \
+                | sort -z \
+                | xargs -0 sha256sum
+              sha256sum uv.lock
+            } | sha256sum | cut -c1-24
+          )"
+          image="ghcr.io/${owner}/stream2pretrain/processor-base:${base_key}"
+          echo "registry=ghcr.io/${owner}" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing immutable processor base $image"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Building new immutable processor base $image"
+          fi
+
+      - name: Build and publish dependency base
+        if: steps.base.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: processor/Dockerfile
+          target: runtime-base
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.base.outputs.image }}
+          cache-from: |
+            type=gha,scope=processor-base
+            type=registry,ref=${{ steps.base.outputs.registry }}/stream2pretrain/processor:buildcache
+          cache-to: type=gha,scope=processor-base,mode=max
+
+      - name: Pin dependency base by digest
+        id: pin
+        shell: bash
+        env:
+          BASE_IMAGE: ${{ steps.base.outputs.image }}
+        run: |
+          set -euo pipefail
+          digest="sha256:$(
+            docker buildx imagetools inspect "$BASE_IMAGE" --raw \
+              | sha256sum | cut -d ' ' -f1
+          )"
+          [[ "$digest" == sha256:* ]] || {
+            echo "Could not resolve the processor base digest" >&2
+            exit 1
+          }
+          echo "image=${BASE_IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "Pinned processor base ${BASE_IMAGE}@${digest}"
+
   build:
     name: Build ${{ matrix.image }}
     if: inputs.mode == '' || inputs.mode == 'deploy'
+    needs:
+      - processor-base
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -179,7 +264,7 @@ jobs:
             dockerfile: ingest/openreview_poller/Dockerfile
           - image: processor
             context: .
-            dockerfile: processor/Dockerfile
+            dockerfile: processor/Dockerfile.app
           - image: ui
             context: ui
             dockerfile: Dockerfile
@@ -213,14 +298,16 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
-          # A registry cache in max mode retains intermediate builder stages.
-          # This matters for the processor's locked ML environment, which is
-          # copied into the runtime image but is outside its final ancestry.
-          # The old inline tag remains a one-time migration source.
+          build-args: |
+            PROCESSOR_BASE_IMAGE=${{ needs.processor-base.outputs.image }}
+          # GHCR can garbage-collect blobs referenced only by a mutable
+          # BuildKit cache manifest. GitHub's cache backend keeps ordinary
+          # component layers; the processor's large dependencies live in the
+          # immutable base image resolved above.
           cache-from: |
+            type=gha,scope=${{ matrix.image }}
             type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:buildcache
-            type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:build-cache
-          cache-to: type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:buildcache,mode=max,oci-mediatypes=true,image-manifest=true
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
       - name: Smoke-test Python runtime imports
         # Ingest images use relocated console entrypoints and need this guard.
@@ -1083,6 +1170,33 @@ jobs:
             kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
           done < <(kubectl -n stream2pretrain get deployment,statefulset -o name)
 
+          # SourceFeed CRs are durable runtime configuration, not Helm-owned
+          # templates. Reconcile the complete Phase-1 catalogue on every
+          # deployment so a rebuilt namespace cannot silently lose sources.
+          NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
+          for _ in $(seq 1 60); do
+            source_schedules="$(
+              kubectl -n stream2pretrain get cronjob \
+                -l stream2pretrain.io/source-feed \
+                -o name | wc -l
+            )"
+            [[ "$source_schedules" -ge 10 ]] && break
+            sleep 2
+          done
+          if [[ "$source_schedules" -lt 10 ]]; then
+            kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
+            kubectl -n stream2pretrain get cronjob -o wide || true
+            echo "The controller did not materialize all Phase-1 source schedules" >&2
+            exit 1
+          fi
+
+          kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+            python - < scripts/cluster_smoke.py
+
+          # External DNS is owned outside this cluster. Validate it only after
+          # the release, durable source catalogue, and internal smoke test have
+          # completed so an origin mismatch cannot leave the data plane only
+          # partially reconciled.
           public_tls_secret="$(
             kubectl -n stream2pretrain get ingress stream2pretrain-ui -o json \
               | jq -r --arg host "$PUBLIC_SITE_HOST" '
@@ -1128,29 +1242,6 @@ jobs:
             report_deploy_failure
             exit 1
           fi
-
-          # SourceFeed CRs are durable runtime configuration, not Helm-owned
-          # templates. Reconcile the complete Phase-1 catalogue on every
-          # deployment so a rebuilt namespace cannot silently lose sources.
-          NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
-          for _ in $(seq 1 60); do
-            source_schedules="$(
-              kubectl -n stream2pretrain get cronjob \
-                -l stream2pretrain.io/source-feed \
-                -o name | wc -l
-            )"
-            [[ "$source_schedules" -ge 10 ]] && break
-            sleep 2
-          done
-          if [[ "$source_schedules" -lt 10 ]]; then
-            kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
-            kubectl -n stream2pretrain get cronjob -o wide || true
-            echo "The controller did not materialize all Phase-1 source schedules" >&2
-            exit 1
-          fi
-
-          kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
-            python - < scripts/cluster_smoke.py
 
 
       - name: Upload rendered UI audit
