@@ -182,7 +182,7 @@ class _LicenseAdmissionsConnection:
                     False,
                 )
             ]
-        elif "INTERVAL '24 hours'" in sql:
+        elif "GROUP BY source_feed" in sql:
             self.description = [
                 ("source_feed",),
                 ("documents",),
@@ -202,11 +202,13 @@ class _LicenseAdmissionsConnection:
 def test_license_admissions_exposes_durable_24h_source_activity() -> None:
     service = DuckDBQueryService(_LicenseAdmissionsConnection())
 
-    result = service.license_admissions(recent_limit=5)
+    admissions = service.license_admissions(recent_limit=5)
+    activity = service.source_activity(window_hours=24)
 
-    assert result["admitted"] == 4
-    assert result["quarantined"] == 6
-    assert result["by_source_24h"] == [
+    assert admissions["admitted"] == 4
+    assert admissions["quarantined"] == 6
+    assert activity["window_hours"] == 24
+    assert activity["sources"] == [
         {
             "source_feed": "rss-arxiv-cs-ai",
             "documents": 3,
@@ -215,8 +217,18 @@ def test_license_admissions_exposes_durable_24h_source_activity() -> None:
             "last_observed_at": "2026-08-22 12:00:00",
         }
     ]
-    activity_sql = next(sql for sql, _ in service._conn.calls if "INTERVAL '24 hours'" in sql)
+    activity_sql, activity_params = next(
+        (sql, params) for sql, params in service._conn.calls if "GROUP BY source_feed" in sql
+    )
     assert "FROM license_admissions" in activity_sql
+    assert len(activity_params) == 1
+
+
+def test_source_activity_bounds_requested_window() -> None:
+    service = DuckDBQueryService(_LicenseAdmissionsConnection())
+
+    assert service.source_activity(window_hours=0)["window_hours"] == 1
+    assert service.source_activity(window_hours=10_000)["window_hours"] == 168
 
 
 def test_safe_query_rejects_writes_and_multiple_statements() -> None:
