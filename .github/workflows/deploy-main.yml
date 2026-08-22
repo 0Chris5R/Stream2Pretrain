@@ -836,14 +836,11 @@ jobs:
             echo "GHCR_PULL_TOKEN is empty. The published images must be public."
           fi
 
-          # Remove only the exact UI certificate when it belongs to a retired
-          # issuer. Ingress-shim can then reconcile the same secret with the
-          # namespace-scoped public issuer rendered by the chart.
-          stale_ui_issuer="$(
-            kubectl -n stream2pretrain get certificate stream2pretrain-ui-tls \
-              -o jsonpath='{.spec.issuerRef.name}' 2>/dev/null || true
-          )"
-          if [[ -n "$stale_ui_issuer" && "$stale_ui_issuer" != "letsencrypt-public" ]]; then
+          # This profile uses the platform Traefik wildcard certificate. Remove
+          # the exact application-local certificate left by earlier issuer
+          # experiments so it cannot keep reconciliation in a failed state.
+          if kubectl -n stream2pretrain get certificate stream2pretrain-ui-tls \
+             >/dev/null 2>&1; then
             kubectl -n stream2pretrain delete certificate stream2pretrain-ui-tls
             kubectl -n stream2pretrain delete certificaterequest \
               -l cert-manager.io/certificate-name=stream2pretrain-ui-tls \
@@ -869,17 +866,6 @@ jobs:
             exit 1
           fi
 
-          if kubectl -n stream2pretrain get issuer letsencrypt-public >/dev/null 2>&1; then
-            kubectl -n stream2pretrain wait \
-              --for=condition=Ready issuer/letsencrypt-public --timeout=180s
-            if ! kubectl -n stream2pretrain wait \
-              --for=condition=Ready certificate/stream2pretrain-ui-tls --timeout=300s; then
-              kubectl -n stream2pretrain get \
-                issuer,certificate,certificaterequest,order,challenge -o wide || true
-              exit 1
-            fi
-          fi
-
           kubectl -n stream2pretrain annotate scaledobject --all \
             autoscaling.keda.sh/paused- || true
 
@@ -890,20 +876,6 @@ jobs:
           kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
             python - < scripts/cluster_smoke.py
 
-          public_health="https://stream2pretrain.theclusterflux.com/api/health"
-          public_ready=false
-          for _ in $(seq 1 30); do
-            if curl --fail --silent --show-error "$public_health" >/dev/null; then
-              public_ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [[ "$public_ready" != true ]]; then
-            curl --include --silent --show-error "$public_health" || true
-            echo "Public UI health endpoint did not become ready." >&2
-            exit 1
-          fi
 
       - name: Upload rendered UI audit
         if: ${{ always() && inputs.mode == 'audit-ui' }}
