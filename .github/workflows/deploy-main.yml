@@ -95,6 +95,44 @@ jobs:
             echo "Rendered Kafka message limit is not an integer string: $message_limits" >&2
             exit 1
           fi
+          uv run python - "$rendered_chart" <<'PY'
+          import pathlib
+          import sys
+
+          import yaml
+
+          resources = list(yaml.safe_load_all(pathlib.Path(sys.argv[1]).read_text()))
+          alias_certificate = next(
+              (
+                  resource
+                  for resource in resources
+                  if resource
+                  and resource.get("kind") == "Certificate"
+                  and resource.get("metadata", {}).get("name")
+                  == "stream2pretrain-ui-alias-tls"
+              ),
+              None,
+          )
+          if alias_certificate is None:
+              raise SystemExit("The public alias Certificate was not rendered")
+          ingress = next(
+              resource
+              for resource in resources
+              if resource
+              and resource.get("kind") == "Ingress"
+              and resource.get("metadata", {}).get("name") == "stream2pretrain-ui"
+          )
+          annotations = ingress.get("metadata", {}).get("annotations", {})
+          conflicting = {
+              "cert-manager.io/issuer",
+              "cert-manager.io/cluster-issuer",
+          }.intersection(annotations)
+          if conflicting:
+              raise SystemExit(
+                  "Ingress must not delegate explicitly managed TLS to ingress-shim: "
+                  + ", ".join(sorted(conflicting))
+              )
+          PY
           helmfile \
             --helm-binary "$(command -v helm)" \
             --file helmfile.yaml \
@@ -990,7 +1028,9 @@ jobs:
               --ignore-not-found
           fi
           kubectl -n stream2pretrain annotate ingress stream2pretrain-ui \
-            kubectl.kubernetes.io/last-applied-configuration- || true
+            kubectl.kubernetes.io/last-applied-configuration- \
+            cert-manager.io/issuer- \
+            cert-manager.io/cluster-issuer- || true
 
           # A single-replica StatefulSet cannot replace a crash-looping Pod
           # during a wait-based Helm upgrade: the unhealthy old Pod keeps the

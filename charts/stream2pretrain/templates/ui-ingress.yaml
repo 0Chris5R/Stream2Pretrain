@@ -22,6 +22,25 @@ spec:
           ingress:
             ingressClassName: {{ .Values.ui.ingress.ingressClassName | quote }}
 ---
+{{- if and .Values.ui.ingress.aliasTlsSecret .Values.ui.ingress.aliases }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.ui.ingress.aliasTlsSecret | quote }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  secretName: {{ .Values.ui.ingress.aliasTlsSecret | quote }}
+  issuerRef:
+    name: {{ .Values.ui.ingress.acmeIssuer.name | quote }}
+    kind: Issuer
+  dnsNames:
+    {{- range .Values.ui.ingress.aliases }}
+    - {{ . | quote }}
+    {{- end }}
+---
+{{- end }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -30,9 +49,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   annotations:
     external-dns.alpha.kubernetes.io/hostname: {{ .Values.ui.ingress.host | quote }}
-    {{- if .Values.ui.ingress.acmeIssuer.enabled }}
-    cert-manager.io/issuer: {{ .Values.ui.ingress.acmeIssuer.name | quote }}
-    {{- else }}
+    {{- if not .Values.ui.ingress.acmeIssuer.enabled }}
     {{- with .Values.ui.ingress.clusterIssuer }}
     cert-manager.io/cluster-issuer: {{ . | quote }}
     {{- end }}
