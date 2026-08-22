@@ -122,6 +122,7 @@ class _MemoryTable:
     def __init__(self) -> None:
         self.rows = 0
         self.tables: list[object] = []
+        self.properties: dict[str, str] = {}
 
     def append(self, table: object) -> None:
         self.rows += int(table.num_rows)
@@ -129,6 +130,21 @@ class _MemoryTable:
 
     def current_snapshot(self) -> _Snapshot:
         return _Snapshot()
+
+    def transaction(self) -> object:
+        table = self
+
+        class _Transaction:
+            def __enter__(self) -> _Transaction:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def set_properties(self, **properties: str) -> None:
+                table.properties.update(properties)
+
+        return _Transaction()
 
     def scan(self, *, selected_fields: tuple[str, ...]) -> object:
         import pyarrow as pa
@@ -171,7 +187,7 @@ class _AdmissionCatalog:
         return self.table
 
 
-def test_license_admission_writer_commits_once_per_decision() -> None:
+def test_license_admission_writer_batches_and_deduplicates_decisions() -> None:
     catalog = _AdmissionCatalog()
     writer = LicenseAdmissionWriter(catalog)  # type: ignore[arg-type]
     decision = LicenseAdmissionDecision(
@@ -187,9 +203,17 @@ def test_license_admission_writer_commits_once_per_decision() -> None:
         trace_id="0" * 32,
     )
 
-    assert writer.add(decision) is True
-    assert writer.add(decision) is False
-    assert catalog.table.rows == 1
+    second = decision.model_copy(
+        update={
+            "decision_id": "sha256:" + "c" * 64,
+            "doc_id": "sha256:" + "d" * 64,
+        }
+    )
+
+    assert writer.add_batch([decision, second, decision]) == 2
+    assert writer.add_batch([decision, second]) == 0
+    assert catalog.table.rows == 2
+    assert len(catalog.table.tables) == 1
 
 
 def test_writer_persists_rejected_decision_without_adding_it_to_gold() -> None:

@@ -188,6 +188,7 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin/s2p-fetcher          /usr/local/bin/s2p-fetcher
 COPY --from=builder /usr/local/bin/s2p-curate           /usr/local/bin/s2p-curate
 COPY --from=builder /usr/local/bin/s2p-iceberg-writer   /usr/local/bin/s2p-iceberg-writer
+COPY --from=builder /usr/local/bin/s2p-iceberg-maintenance /usr/local/bin/s2p-iceberg-maintenance
 COPY --from=builder /usr/local/bin/s2p-decon-api        /usr/local/bin/s2p-decon-api
 COPY --from=builder /usr/local/bin/s2p-duckdb-api       /usr/local/bin/s2p-duckdb-api
 COPY --from=builder /usr/local/bin/s2p-mixture-controller /usr/local/bin/s2p-mixture-controller

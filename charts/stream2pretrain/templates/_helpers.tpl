@@ -192,6 +192,14 @@ Iceberg + observability).
   value: {{ .Values.iceberg.decisionsTable | quote }}
 - name: S2P_ICEBERG_LICENSE_ADMISSIONS_TABLE
   value: {{ .Values.iceberg.licenseAdmissionsTable | quote }}
+- name: S2P_ICEBERG_SNAPSHOT_RETENTION_HOURS
+  value: {{ .Values.processor.iceberg.maintenance.snapshotRetentionHours | quote }}
+- name: S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP
+  value: {{ .Values.processor.iceberg.maintenance.minSnapshotsToKeep | quote }}
+- name: S2P_ICEBERG_METADATA_VERSIONS
+  value: {{ .Values.processor.iceberg.maintenance.metadataVersions | quote }}
+- name: S2P_ICEBERG_ORPHAN_MINIMUM_AGE_HOURS
+  value: {{ .Values.processor.iceberg.maintenance.orphanMinimumAgeHours | quote }}
 - name: S2P_ICEBERG_ACCESS_DELEGATION
   value: {{ .Values.iceberg.accessDelegation | quote }}
 - name: POLARIS_URI

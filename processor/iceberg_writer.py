@@ -1,15 +1,11 @@
 """Iceberg writer: ``curation.decisions`` -> audit and clean Iceberg tables.
 
 Loads / creates the gold table via the Polaris REST catalog (pyiceberg
-``RestCatalog``), buffers incoming :class:`GoldRecord` rows into PyArrow
-tables, and commits them as Iceberg micro-batches. Each commit attaches
-snapshot properties:
-
-- ``watermark``               - max ``valid_from`` in the batch
-- ``policy_revision``         - git SHA of the policy bundle
-- ``scoring_version``         - the scoring recipe identifier
-- ``classifier_revision``     - the exact source-appropriate quality revision
-- ``decon_attestation_uri``   - s3 URI of the signed attestation
+``RestCatalog``), collects incoming records into bounded time/size batches,
+and commits those batches as Iceberg snapshots. Per-record provenance stays in
+the table rows and the signed snapshot attestation stays in its dedicated
+MinIO bucket. This avoids an additional metadata-only Iceberg commit for every
+data commit.
 
 The Bytewax sink wraps :class:`IcebergWriter` so the same class can be
 exercised by unit tests without spinning up a Bytewax dataflow.
@@ -33,7 +29,7 @@ import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -56,7 +52,52 @@ DEFAULT_GOLD_NAMESPACE: str = "gold"
 DEFAULT_GOLD_TABLE: str = "curated"
 DECON_TABLE: str = "decon_attestations"
 DEFAULT_BATCH_SIZE: int = 256
+DEFAULT_FLUSH_INTERVAL_SECONDS: int = 60
+DEFAULT_METADATA_VERSIONS: int = 20
+DEFAULT_SNAPSHOT_RETENTION_HOURS: int = 168
+DEFAULT_MIN_SNAPSHOTS_TO_KEEP: int = 10
 DecisionKey = tuple[str, str, str, str]
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return value
+
+
+def _maintenance_properties() -> dict[str, str]:
+    return {
+        "write.metadata.delete-after-commit.enabled": "true",
+        "write.metadata.previous-versions-max": str(
+            _positive_int_env("S2P_ICEBERG_METADATA_VERSIONS", DEFAULT_METADATA_VERSIONS)
+        ),
+        "history.expire.max-snapshot-age-ms": str(
+            _positive_int_env(
+                "S2P_ICEBERG_SNAPSHOT_RETENTION_HOURS",
+                DEFAULT_SNAPSHOT_RETENTION_HOURS,
+            )
+            * 60
+            * 60
+            * 1000
+        ),
+        "history.expire.min-snapshots-to-keep": str(
+            _positive_int_env(
+                "S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP",
+                DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
+            )
+        ),
+    }
+
+
+def _ensure_maintenance_properties(table: Table) -> None:
+    current = getattr(table, "properties", {})
+    desired = _maintenance_properties()
+    changed = {key: value for key, value in desired.items() if current.get(key) != value}
+    if not changed:
+        return
+    with table.transaction() as txn:
+        txn.set_properties(**changed)
 
 
 def _is_missing_catalog_table(exc: Exception) -> bool:
@@ -66,21 +107,36 @@ def _is_missing_catalog_table(exc: Exception) -> bool:
 
 
 class LicenseAdmissionWriter:
-    """Immediately append pre-fetch licence decisions to an Iceberg ledger."""
+    """Append deduplicated pre-fetch licence decisions in Iceberg batches."""
 
     def __init__(self, catalog: Catalog) -> None:
         self._catalog = catalog
         self._known_ids: set[str] | None = None
 
     def add(self, decision: LicenseAdmissionDecision) -> bool:
+        """Compatibility wrapper for callers that submit one decision."""
+        return self.add_batch([decision]) == 1
+
+    def add_batch(self, decisions: list[LicenseAdmissionDecision]) -> int:
+        """Append one data file and snapshot for all new decisions in the batch."""
+        if not decisions:
+            return 0
         table = self._ensure_table()
+        _ensure_maintenance_properties(table)
         if self._known_ids is None:
             self._known_ids = self._load_ids(table)
-        if decision.decision_id in self._known_ids:
-            return False
-        table.append(self._to_arrow(decision))
-        self._known_ids.add(decision.decision_id)
-        return True
+        pending: list[LicenseAdmissionDecision] = []
+        pending_ids: set[str] = set()
+        for decision in decisions:
+            if decision.decision_id in self._known_ids or decision.decision_id in pending_ids:
+                continue
+            pending.append(decision)
+            pending_ids.add(decision.decision_id)
+        if not pending:
+            return 0
+        table.append(self._to_arrow(pending))
+        self._known_ids.update(pending_ids)
+        return len(pending)
 
     def _load_ids(self, table: Table) -> set[str]:
         return {
@@ -126,10 +182,15 @@ class LicenseAdmissionWriter:
             PartitionField(6, 1001, IdentityTransform(), "status"),
             PartitionField(5, 1002, MonthTransform(), "observed_month"),
         )
-        return self._catalog.create_table(identifier, schema=schema, partition_spec=spec)
+        return self._catalog.create_table(
+            identifier,
+            schema=schema,
+            partition_spec=spec,
+            properties=_maintenance_properties(),
+        )
 
     @staticmethod
-    def _to_arrow(decision: LicenseAdmissionDecision) -> pa.Table:
+    def _to_arrow(decisions: list[LicenseAdmissionDecision]) -> pa.Table:
         import pyarrow as pa
 
         schema = pa.schema(
@@ -149,17 +210,19 @@ class LicenseAdmissionWriter:
         )
         return pa.Table.from_pydict(
             {
-                "decision_id": [decision.decision_id],
-                "doc_id": [decision.doc_id],
-                "source_feed": [decision.source_feed],
-                "source_url": [str(decision.source_url)],
-                "observed_at": [decision.observed_at],
-                "status": [decision.status],
-                "license_id": [decision.license_id],
-                "license_source": [decision.license_source],
-                "reason": [decision.reason],
-                "trace_id": [decision.trace_id],
-                "content_fetch_started": [decision.content_fetch_started],
+                "decision_id": [decision.decision_id for decision in decisions],
+                "doc_id": [decision.doc_id for decision in decisions],
+                "source_feed": [decision.source_feed for decision in decisions],
+                "source_url": [str(decision.source_url) for decision in decisions],
+                "observed_at": [decision.observed_at for decision in decisions],
+                "status": [decision.status for decision in decisions],
+                "license_id": [decision.license_id for decision in decisions],
+                "license_source": [decision.license_source for decision in decisions],
+                "reason": [decision.reason for decision in decisions],
+                "trace_id": [decision.trace_id for decision in decisions],
+                "content_fetch_started": [
+                    decision.content_fetch_started for decision in decisions
+                ],
             },
             schema=schema,
         )
@@ -281,7 +344,7 @@ class IcebergWriter:
             policy_revision=os.environ.get("S2P_POLICY_REVISION", "git:dev"),
             attestation_writer=sink,
             metrics=metrics,
-            batch_size=int(os.environ.get("S2P_FLUSH_RECORDS", DEFAULT_BATCH_SIZE)),
+            batch_size=_positive_int_env("S2P_FLUSH_RECORDS", DEFAULT_BATCH_SIZE),
         )
 
     def add(self, record: GoldRecord) -> WriterStats | None:
@@ -311,8 +374,11 @@ class IcebergWriter:
         watermark = self._buffer.watermark
         accepted_rows = [row for row in rows if _is_trainable_gold(row)]
         decisions_table = self._ensure_decisions_table()
+        _ensure_maintenance_properties(decisions_table)
         decision_rows = self._uncommitted_rows("decisions", decisions_table, rows)
         gold_table = self._ensure_table() if accepted_rows else None
+        if gold_table is not None:
+            _ensure_maintenance_properties(gold_table)
         gold_rows = (
             self._uncommitted_rows("gold", gold_table, accepted_rows)
             if gold_table is not None
@@ -634,6 +700,7 @@ class IcebergWriter:
             properties={
                 "format-version": "2",
                 "write.format.default": "parquet",
+                **_maintenance_properties(),
             },
         )
 
@@ -836,16 +903,12 @@ class IcebergWriter:
         attestation: DeconAttestation,
         attest_uri: str | None,
     ) -> None:
-        """Annotate the just-committed snapshot with our metadata.
+        """Add summary metadata when the runtime supports snapshot updates.
 
-        Snapshot summary is the right place for per-snapshot facts (so a
-        time-travel query can read them back); table properties are
-        per-table and would be overwritten on every commit. We try the
-        snapshot-summary path first via pyiceberg's ``update_snapshot``
-        API and fall back to a side-table-style table property keyed by
-        ``snapshot_id`` so historical attestation pointers remain
-        retrievable even when the running pyiceberg version does not
-        expose snapshot summaries directly.
+        The signed attestation object is the durable historical record. Never
+        emulate snapshot summaries with one accumulating table property per
+        snapshot: that makes every metadata JSON file grow with the full
+        history and caused quadratic object-storage growth in the live cluster.
         """
         per_snapshot = {
             f"stream2pretrain.snapshot.{snapshot_id}.policy_revision": self._policy_revision,
@@ -864,17 +927,8 @@ class IcebergWriter:
             per_snapshot[f"stream2pretrain.snapshot.{snapshot_id}.decon_attestation_uri"] = (
                 attest_uri
             )
-        # Pointer to the latest snapshot's metadata, for cheap "current" reads.
-        latest = {
-            "stream2pretrain.latest_snapshot_id": str(snapshot_id),
-            "stream2pretrain.latest_attestation_signature": attestation.signature,
-            "stream2pretrain.latest_attestation_set_version": (attestation.benchmark_set_version),
-        }
-        if attest_uri:
-            latest["stream2pretrain.latest_decon_attestation_uri"] = attest_uri
-        # Best-effort: prefer the snapshot summary API when available so the
-        # snapshot itself carries its attestation. Otherwise persist into
-        # table properties using a snapshot-id-prefixed key namespace.
+        # Best-effort only. PyIceberg versions without a snapshot-summary
+        # update API keep the facts in rows plus the signed attestation object.
         try:
             update = getattr(table, "update_snapshot", None)
             if callable(update):
@@ -885,13 +939,8 @@ class IcebergWriter:
                             setter(k.split(".", 2)[-1], v)
                         return
         except Exception:
-            # Fall through to the property-based fallback below.
-            pass
-        try:
-            with table.transaction() as txn:
-                txn.set_properties(**per_snapshot, **latest)
-        except Exception:
-            # Annotation is best-effort; the actual commit already succeeded.
+            # Annotation is best-effort; the data and attestation commits have
+            # already succeeded.
             pass
 
 
@@ -1038,6 +1087,13 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     from processor.iceberg_catalog import load_runtime_catalog
 
     admission_writer = LicenseAdmissionWriter(load_runtime_catalog(cfg))
+    flush_records = _positive_int_env("S2P_FLUSH_RECORDS", DEFAULT_BATCH_SIZE)
+    flush_interval = timedelta(
+        seconds=_positive_int_env(
+            "S2P_FLUSH_INTERVAL_SECONDS",
+            DEFAULT_FLUSH_INTERVAL_SECONDS,
+        )
+    )
     flow = Dataflow("s2p-iceberg-writer")
     # ``beginning`` keeps the writer at-least-once across restarts (the
     # consumer group offset advances from there). See processor/curate.py.
@@ -1050,25 +1106,47 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     )
     inp = op.input("docs_curated", flow, source)
 
-    def _ingest(msg: object) -> None:
-        with tracer.start_as_current_span("iceberg.append") as span:
-            payload = getattr(msg, "value", None)
-            if payload is None:
-                return
-            try:
-                gold = common.gold_loads(payload)
-            except Exception as exc:
+    def _decode_gold(msg: object) -> GoldRecord | None:
+        payload = getattr(msg, "value", None)
+        if payload is None:
+            return None
+        try:
+            return common.gold_loads(payload)
+        except Exception as exc:
+            with tracer.start_as_current_span("iceberg.decode") as span:
                 span.record_exception(exc)
-                return
-            stats = writer.add(gold)
-            if stats:
-                span.set_attribute("rows_committed", stats.rows_committed)
-                span.set_attribute(
-                    "snapshot_id",
-                    stats.snapshot_id if stats.snapshot_id is not None else -1,
-                )
+            return None
 
-    op.inspect("iceberg_write", inp, lambda _step, msg: _ingest(msg))
+    def _ingest(batch: tuple[str, list[GoldRecord]]) -> None:
+        with tracer.start_as_current_span("iceberg.append") as span:
+            _key, rows = batch
+            stats = None
+            for row in rows:
+                result = writer.add(row)
+                if result is not None:
+                    stats = result
+            tail = writer.flush()
+            if tail.decisions_committed or tail.rows_committed:
+                stats = tail
+            if stats is None:
+                return
+            span.set_attribute("batch_records", len(rows))
+            span.set_attribute("rows_committed", stats.rows_committed)
+            span.set_attribute("decisions_committed", stats.decisions_committed)
+            span.set_attribute(
+                "snapshot_id",
+                stats.snapshot_id if stats.snapshot_id is not None else -1,
+            )
+
+    decoded = op.filter_map("decode_curated", inp, _decode_gold)
+    keyed = op.key_on("key_curated", decoded, lambda _record: "iceberg")
+    batches = op.collect(
+        "batch_curated",
+        keyed,
+        timeout=flush_interval,
+        max_size=flush_records,
+    )
+    op.inspect("iceberg_write", batches, lambda _step, batch: _ingest(batch))
 
     admission_source = KafkaSource(
         brokers=cfg.redpanda_brokers.split(","),
@@ -1078,15 +1156,18 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     )
     admission_inp = op.input("license_admissions", flow, admission_source)
 
-    def _ingest_admission(msg: object) -> None:
+    def _decode_admission(msg: object) -> LicenseAdmissionDecision:
+        payload = getattr(msg, "value", None)
+        if payload is None:
+            raise ValueError("license admission message has no payload")
+        return LicenseAdmissionDecision.model_validate_json(payload)
+
+    def _ingest_admission(batch: tuple[str, list[LicenseAdmissionDecision]]) -> None:
         with tracer.start_as_current_span("iceberg.license_admission") as span:
-            payload = getattr(msg, "value", None)
-            if payload is None:
-                return
             try:
-                decision = LicenseAdmissionDecision.model_validate_json(payload)
-                committed = admission_writer.add(decision)
-                span.set_attribute("status", decision.status)
+                _key, decisions = batch
+                committed = admission_writer.add_batch(decisions)
+                span.set_attribute("batch_records", len(decisions))
                 span.set_attribute("committed", committed)
             except Exception as exc:
                 span.record_exception(exc)
@@ -1094,10 +1175,22 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 # reach the durable ledger. Bytewax must retry it.
                 raise
 
+    decoded_admissions = op.map("decode_license_admissions", admission_inp, _decode_admission)
+    keyed_admissions = op.key_on(
+        "key_license_admissions",
+        decoded_admissions,
+        lambda _decision: "iceberg",
+    )
+    admission_batches = op.collect(
+        "batch_license_admissions",
+        keyed_admissions,
+        timeout=flush_interval,
+        max_size=flush_records,
+    )
     op.inspect(
         "iceberg_license_admission_write",
-        admission_inp,
-        lambda _step, msg: _ingest_admission(msg),
+        admission_batches,
+        lambda _step, batch: _ingest_admission(batch),
     )
     return flow
 

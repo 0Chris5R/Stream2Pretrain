@@ -71,7 +71,6 @@ processor:
       bootstrap: false
   iceberg:
     replicas: 1
-    flushRecords: 1
   duckdbApi:
     replicas: 1
   deconGate:

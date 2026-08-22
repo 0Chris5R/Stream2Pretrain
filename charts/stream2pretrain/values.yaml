@@ -494,6 +494,16 @@ processor:
       limits: {cpu: 1, memory: 1Gi}
     flushIntervalSeconds: 60
     flushRecords: 5000
+    maintenance:
+      enabled: true
+      schedule: "17 * * * *"
+      snapshotRetentionHours: 168
+      minSnapshotsToKeep: 10
+      metadataVersions: 20
+      orphanMinimumAgeHours: 24
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits: {cpu: 1, memory: 1Gi}
   duckdbApi:
     image: stream2pretrain/processor-duckdb-api
     replicas: 1
