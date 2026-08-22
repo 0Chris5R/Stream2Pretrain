@@ -1,47 +1,6 @@
 {{- if .Values.ui.ingress.enabled }}
 {{- $component := "ui" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
-{{- if .Values.ui.ingress.acmeIssuer.enabled }}
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: {{ .Values.ui.ingress.acmeIssuer.name | quote }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-spec:
-  acme:
-    {{- with .Values.ui.ingress.acmeIssuer.email }}
-    email: {{ . | quote }}
-    {{- end }}
-    server: {{ .Values.ui.ingress.acmeIssuer.server | quote }}
-    privateKeySecretRef:
-      name: {{ printf "%s-account-key" .Values.ui.ingress.acmeIssuer.name | quote }}
-    solvers:
-      - http01:
-          ingress:
-            ingressClassName: {{ .Values.ui.ingress.ingressClassName | quote }}
----
-{{- if and .Values.ui.ingress.aliasTlsSecret .Values.ui.ingress.aliases }}
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: {{ .Values.ui.ingress.aliasTlsSecret | quote }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-spec:
-  secretName: {{ .Values.ui.ingress.aliasTlsSecret | quote }}
-  issuerRef:
-    name: {{ .Values.ui.ingress.acmeIssuer.name | quote }}
-    kind: Issuer
-  dnsNames:
-    {{- range .Values.ui.ingress.aliases }}
-    - {{ . | quote }}
-    {{- end }}
----
-{{- end }}
-{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -49,11 +8,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   annotations:
     external-dns.alpha.kubernetes.io/hostname: {{ .Values.ui.ingress.host | quote }}
-    {{- if not .Values.ui.ingress.acmeIssuer.enabled }}
-    {{- with .Values.ui.ingress.clusterIssuer }}
-    cert-manager.io/cluster-issuer: {{ . | quote }}
-    {{- end }}
-    {{- end }}
     meta.helm.sh/release-name: {{ .Release.Name | quote }}
     meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
   labels:
@@ -71,33 +25,10 @@ spec:
                 name: {{ $name }}
                 port:
                   number: 80
-    {{- range .Values.ui.ingress.aliases }}
-    - host: {{ . | quote }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ $name }}
-                port:
-                  number: 80
-    {{- end }}
-  {{- if or .Values.ui.ingress.tlsSecret .Values.ui.ingress.aliasTlsSecret }}
+  {{ with .Values.ui.ingress.tlsSecret }}
   tls:
-    {{- with .Values.ui.ingress.tlsSecret }}
     - hosts:
         - {{ $.Values.ui.ingress.host | quote }}
       secretName: {{ . | quote }}
-    {{- end }}
-    {{- with .Values.ui.ingress.aliasTlsSecret }}
-    {{- if $.Values.ui.ingress.aliases }}
-    - hosts:
-        {{- range $.Values.ui.ingress.aliases }}
-        - {{ . | quote }}
-        {{- end }}
-      secretName: {{ . | quote }}
-    {{- end }}
-    {{- end }}
-  {{- end }}
+  {{ end }}
 {{- end }}
