@@ -86,8 +86,6 @@ class VerifierCompiler:
             call_key=f"verifier_critic:{task.task_id}",
         )
         critique = VerifierCritique.model_validate(critique_data)
-        if critique.false_positive_risks or critique.false_negative_risks:
-            critique = critique.model_copy(update={"accepted": False})
         traces = [compiler_trace, critic_trace]
         if not critique.accepted:
             repair_data, repair_trace = self.control.call(
@@ -117,7 +115,7 @@ class VerifierCompiler:
             )
             traces.append(recheck_trace)
             recheck = VerifierCritique.model_validate(recheck_data)
-            if not recheck.accepted or recheck.false_positive_risks or recheck.false_negative_risks:
+            if not recheck.accepted:
                 raise ValueError("independent verifier critic rejected the bounded repair")
         return spec, traces
 
@@ -132,29 +130,84 @@ def normalize_spec(
     span_ids = {span.span_id for span in bundle.stable_spans}
     expected_values = task.hidden_targets.expected_values
     expected_value_ids = set(expected_values)
+    method_order = [
+        [edge.source, edge.target]
+        for edge in task.hidden_targets.required_relations
+        if edge.relation == "precedes"
+    ]
     predicates: list[VerifierPredicate] = []
     for raw_predicate in spec.predicates:
         predicate = raw_predicate
-        if predicate.type == "evidence_membership":
-            configured = predicate.config.get("allowed_spans", [])
-            allowed_spans = predicate.allowed_spans or (
-                [str(value) for value in configured] if isinstance(configured, list) else []
-            )
+        if predicate.type in {
+            "nonempty_report",
+            "manifest_required",
+            "report_manifest_consistency",
+        }:
+            # These predicates address the answer contract itself. Providers
+            # commonly label that contract as target="report", but no graph
+            # node lookup is involved, so canonicalize the unused target fields
+            # before validating graph references.
+            predicate = predicate.model_copy(update={"target": None, "targets": []})
+        elif predicate.type in {"required_nodes", "required_dependency_nodes"}:
+            if not task.hidden_targets.required_nodes:
+                continue
             predicate = predicate.model_copy(
                 update={
-                    "allowed_spans": allowed_spans
-                    or list(task.public_context_policy.included_spans)
+                    "target": None,
+                    "targets": list(task.hidden_targets.required_nodes),
+                }
+            )
+        elif predicate.type == "forbidden_nodes":
+            if not task.hidden_targets.forbidden_nodes:
+                continue
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": list(task.hidden_targets.forbidden_nodes),
+                }
+            )
+        elif predicate.type == "evidence_membership":
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": [],
+                    "allowed_spans": sorted(task.public_context_policy.included_spans),
                 }
             )
         elif predicate.type == "evidence_coverage":
             config = dict(predicate.config)
-            if not config.get("accepted_sets"):
+            if task.hidden_targets.accepted_evidence_sets:
+                config["accepted_sets"] = task.hidden_targets.accepted_evidence_sets
+            elif not config.get("accepted_sets"):
                 required_spans = config.get("required_spans")
                 if isinstance(required_spans, list) and required_spans:
                     config["accepted_sets"] = [[str(value) for value in required_spans]]
-                elif task.hidden_targets.accepted_evidence_sets:
-                    config["accepted_sets"] = task.hidden_targets.accepted_evidence_sets
-            predicate = predicate.model_copy(update={"config": config})
+            predicate = predicate.model_copy(
+                update={"target": None, "targets": [], "config": config}
+            )
+        elif predicate.type == "required_relations":
+            if not task.hidden_targets.required_relations:
+                continue
+            predicate = predicate.model_copy(update={"target": None, "targets": []})
+        elif predicate.type == "method_partial_order":
+            if not method_order:
+                continue
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": [],
+                    "config": {"precedes": method_order},
+                }
+            )
+        elif predicate.type == "required_qualifications":
+            if not task.hidden_targets.required_qualifications:
+                continue
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": list(task.hidden_targets.required_qualifications),
+                }
+            )
         elif predicate.type == "numeric_tolerance" and predicate.target in expected_values:
             expected = expected_values[str(predicate.target)]
             if not isinstance(expected, (int, float)) or isinstance(expected, bool):
@@ -179,6 +232,8 @@ def normalize_spec(
                     config={"constraints": {"required_values": {predicate.target: expected}}},
                 )
         elif predicate.type == "fault_identification":
+            if not task.hidden_targets.required_faults:
+                continue
             config = dict(predicate.config)
             forbidden = config.get("forbidden", config.get("forbidden_faults"))
             config["forbidden"] = (
@@ -188,10 +243,13 @@ def normalize_spec(
             )
             predicate = predicate.model_copy(
                 update={
-                    "targets": predicate.targets or task.hidden_targets.required_faults,
+                    "target": None,
+                    "targets": list(task.hidden_targets.required_faults),
                     "config": config,
                 }
             )
+        elif predicate.type == "configuration_constraints":
+            predicate = predicate.model_copy(update={"target": None, "targets": []})
 
         unknown_targets = set(predicate.targets) - node_ids - span_ids - expected_value_ids
         if (
@@ -270,11 +328,6 @@ def normalize_spec(
             weight=0.0,
             required=True,
         )
-        method_order = [
-            [edge.source, edge.target]
-            for edge in task.hidden_targets.required_relations
-            if edge.relation == "precedes"
-        ]
         if method_order:
             baseline["method_partial_order"] = VerifierPredicate(
                 id="hard:method_partial_order",
@@ -650,8 +703,10 @@ def _critic_system() -> str:
     return f"""Independently inspect a deterministic scientific VerifierSpec for false positives,
 false negatives, equivalent correct answers, missing hard gates, reward hacks, circular target use,
 and brittle ordering or tolerance checks. Return strict JSON with accepted, findings,
-false_positive_risks, false_negative_risks, repair_instructions. The response must validate exactly
-against REQUIRED_JSON_SCHEMA.
+false_positive_risks, false_negative_risks, repair_instructions. Set accepted=false only when a
+listed risk is release-blocking and requires a repair; accepted=true may retain explicitly
+documented residual risks that do not invalidate the deterministic verifier. The response must
+validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
 

@@ -43,7 +43,7 @@ from processor.foundry.tasking import (
 from processor.foundry.tools import PaperRuntime, ToolError
 from processor.foundry.util import sha256
 from processor.foundry.validation import run_acceptance_suite, suite_passes
-from processor.foundry.verifier import evaluate, normalize_spec
+from processor.foundry.verifier import VerifierCompiler, evaluate, normalize_spec
 from processor.sign import AttestationSigner, verify_signature
 from schemas.foundry import (
     AnswerManifest,
@@ -407,12 +407,15 @@ def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> 
                 VerifierPredicate(
                     id="evidence",
                     type="evidence_membership",
+                    target="manifest.evidence",
+                    targets=["section-1.span1"],
                     weight=0.25,
                     config={"allowed_spans": ["section-1.span1"]},
                 ),
                 VerifierPredicate(
                     id="coverage",
                     type="evidence_coverage",
+                    target="manifest.evidence",
                     weight=0.25,
                     config={"required_spans": ["section-1.span1"]},
                 ),
@@ -431,6 +434,13 @@ def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> 
                     tolerance=0.01,
                     weight=0.25,
                 ),
+                VerifierPredicate(
+                    id="report",
+                    type="nonempty_report",
+                    target="report",
+                    targets=["report"],
+                    weight=0,
+                ),
             ],
             determinism_seed=1,
         ),
@@ -440,9 +450,50 @@ def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> 
     )
     by_id = {predicate.id: predicate for predicate in normalized.predicates}
     assert by_id["evidence"].allowed_spans == ["section-1.span1"]
+    assert by_id["evidence"].target is None
+    assert by_id["evidence"].targets == []
     assert by_id["coverage"].config["accepted_sets"] == [["section-1.span1"]]
+    assert by_id["coverage"].target is None
     assert by_id["symbolic"].expected == "x + 1"
     assert by_id["numeric"].expected == 1.5
+    assert by_id["report"].target is None
+    assert by_id["report"].targets == []
+
+
+def test_verifier_critic_can_accept_with_documented_residual_risks() -> None:
+    class RepairControl:
+        def __init__(self) -> None:
+            self.responses = [
+                _spec().model_dump(mode="json"),
+                {
+                    "accepted": False,
+                    "findings": ["repair is required"],
+                    "false_positive_risks": ["blocking risk"],
+                    "false_negative_risks": [],
+                    "repair_instructions": ["repair the verifier"],
+                },
+                _spec().model_dump(mode="json"),
+                {
+                    "accepted": True,
+                    "findings": ["the repair is safe"],
+                    "false_positive_risks": ["documented residual risk"],
+                    "false_negative_risks": ["documented residual risk"],
+                    "repair_instructions": [],
+                },
+            ]
+
+        def call(self, **_: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            return self.responses.pop(0), _trace()
+
+    verifier, traces = VerifierCompiler(RepairControl()).compile(  # type: ignore[arg-type]
+        job_id="job:1",
+        bundle=_bundle(),
+        graph=_graph(),
+        task=_task(),
+    )
+
+    assert verifier.task_id == _task().task_id
+    assert len(traces) == 4
 
 
 def test_pyiceberg_schema_names_supports_current_and_legacy_shapes() -> None:
