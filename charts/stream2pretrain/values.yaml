@@ -475,8 +475,11 @@ processor:
     # workers/partitions as one measured Bytewax execution, not via HPA/KEDA.
     replicas: 1
     resources:
-      requests: {cpu: 200m, memory: 512Mi}
-      limits: {cpu: 1, memory: 1Gi}
+      # The extraction process owns the language detector plus Bytewax recovery
+      # state. The former 1Gi limit was observed OOM-killing the process during
+      # initialization; retain headroom while real peak RSS is measured.
+      requests: {cpu: 200m, memory: 1Gi}
+      limits: {cpu: 1, memory: 2Gi}
     checkpoint:
       existingClaim: ""
       storageClass: ""

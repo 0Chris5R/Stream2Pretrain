@@ -1203,6 +1203,6 @@ def main() -> None:
         decisions_topic=cfg.decisions_topic,
         license_admissions_topic=cfg.license_admissions_topic,
     )
-    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
+    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     common.run_bytewax_flow(flow, cfg, "iceberg-writer")
