@@ -25,11 +25,11 @@ COPY ingest/__init__.py /src/ingest/__init__.py
 COPY ingest/common /src/ingest/common
 COPY ingest/rss_poller /src/ingest/rss_poller
 
-RUN uv pip install --system --no-cache \
+RUN uv pip install --system --no-cache --no-config --no-sources \
         ./schemas/.. \
         ./ingest/common \
         ./ingest/rss_poller \
-    || (uv pip install --system --no-cache \
+    || (uv pip install --system --no-cache --no-config --no-sources \
             -e . \
             -e ./ingest/common \
             -e ./ingest/rss_poller)

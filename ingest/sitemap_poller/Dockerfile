@@ -13,7 +13,7 @@ COPY schemas /src/schemas
 COPY ingest/__init__.py /src/ingest/__init__.py
 COPY ingest/common /src/ingest/common
 COPY ingest/sitemap_poller /src/ingest/sitemap_poller
-RUN uv pip install --system --no-cache \
+RUN uv pip install --system --no-cache --no-config --no-sources \
         -e . \
         -e ./ingest/common \
         -e ./ingest/sitemap_poller

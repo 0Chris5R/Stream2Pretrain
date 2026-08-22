@@ -15,7 +15,7 @@ COPY schemas /src/schemas
 COPY ingest/__init__.py /src/ingest/__init__.py
 COPY ingest/common /src/ingest/common
 COPY ingest/openreview_poller /src/ingest/openreview_poller
-RUN uv pip install --system --no-cache \
+RUN uv pip install --system --no-cache --no-config --no-sources \
         -e . \
         -e ./ingest/common \
         -e ./ingest/openreview_poller
