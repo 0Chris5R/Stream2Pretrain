@@ -661,6 +661,27 @@ jobs:
             kubectl -n stream2pretrain get ingress stream2pretrain-ui -o yaml || true
             kubectl get clusterissuer -o wide || true
             kubectl get certificate,certificaterequest,challenge -A -o wide || true
+            echo "::group::Redpanda topic and consumer-group state"
+            kubectl -n redpanda get pod,statefulset -o wide || true
+            for topic in \
+              raw.fetched \
+              docs.normalized \
+              docs.curated \
+              curation.decisions \
+              license.admissions; do
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk topic describe "$topic" -p || true
+            done
+            for group in \
+              s2p-fetcher \
+              s2p-curate \
+              s2p-iceberg-writer \
+              s2p-iceberg-writer-licenses \
+              s2p-arxiv-html-fetcher; do
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group describe "$group" || true
+            done
+            echo "::endgroup::"
 
             for namespace in minio polaris traefik stream2pretrain; do
               echo "::group::Namespace: $namespace"
