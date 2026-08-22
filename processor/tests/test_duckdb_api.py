@@ -141,6 +141,84 @@ def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
     }
 
 
+class _LicenseAdmissionsConnection:
+    def __init__(self) -> None:
+        self.description: list[tuple[str]] = []
+        self.rows: list[tuple[object, ...]] = []
+        self.calls: list[tuple[str, list[object]]] = []
+
+    def execute(self, sql: str, params: list[object]) -> _LicenseAdmissionsConnection:
+        self.calls.append((sql, params))
+        if "GROUP BY status" in sql:
+            self.description = [("status",), ("count",)]
+            self.rows = [("admitted", 4), ("quarantined", 6)]
+        elif "GROUP BY license_id, status" in sql:
+            self.description = [("license_id",), ("status",), ("count",)]
+            self.rows = [("CC-BY-4.0", "admitted", 4), ("unknown", "quarantined", 6)]
+        elif "ORDER BY observed_at DESC" in sql:
+            self.description = [
+                ("decision_id",),
+                ("doc_id",),
+                ("source_feed",),
+                ("source_url",),
+                ("observed_at",),
+                ("status",),
+                ("license_id",),
+                ("license_source",),
+                ("reason",),
+                ("content_fetch_started",),
+            ]
+            self.rows = [
+                (
+                    "decision-1",
+                    "doc-1",
+                    "rss-arxiv-cs-ai",
+                    "https://example.test/1",
+                    "2026-08-22 12:00:00",
+                    "admitted",
+                    "CC-BY-4.0",
+                    "rss_entry",
+                    "allowed",
+                    False,
+                )
+            ]
+        elif "INTERVAL '24 hours'" in sql:
+            self.description = [
+                ("source_feed",),
+                ("documents",),
+                ("admitted",),
+                ("quarantined",),
+                ("last_observed_at",),
+            ]
+            self.rows = [("rss-arxiv-cs-ai", 3, 2, 1, "2026-08-22 12:00:00")]
+        else:
+            raise AssertionError(f"unexpected SQL: {sql}")
+        return self
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self.rows
+
+
+def test_license_admissions_exposes_durable_24h_source_activity() -> None:
+    service = DuckDBQueryService(_LicenseAdmissionsConnection())
+
+    result = service.license_admissions(recent_limit=5)
+
+    assert result["admitted"] == 4
+    assert result["quarantined"] == 6
+    assert result["by_source_24h"] == [
+        {
+            "source_feed": "rss-arxiv-cs-ai",
+            "documents": 3,
+            "admitted": 2,
+            "quarantined": 1,
+            "last_observed_at": "2026-08-22 12:00:00",
+        }
+    ]
+    activity_sql = next(sql for sql, _ in service._conn.calls if "INTERVAL '24 hours'" in sql)
+    assert "FROM license_admissions" in activity_sql
+
+
 def test_safe_query_rejects_writes_and_multiple_statements() -> None:
     service = DuckDBQueryService(_FakeConnection())
 
