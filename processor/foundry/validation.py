@@ -218,6 +218,11 @@ def _mutations(
                         ],
                         "faults": [value for value in manifest.faults if value != node_id],
                         "equations": [value for value in manifest.equations if value.id != node_id],
+                        "relations": [
+                            value
+                            for value in manifest.relations
+                            if value.source != node_id and value.target != node_id
+                        ],
                     }
                 )
             }

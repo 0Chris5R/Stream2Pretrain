@@ -151,10 +151,6 @@ def _trace_id() -> str:
 
 async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> int:
     """Main loop. Returns total emitted records when stopped."""
-    if not cfg.github_token:
-        raise RuntimeError(
-            "GITHUB_TOKEN is required: anonymous /events is rate-limited to 60 req/h"
-        )
     state_root = (
         "/var/lib/s2p-state/github_events" if not cfg.is_dev else "./.s2p-state/github_events"
     )
@@ -163,14 +159,14 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
     seen: set[str] = set(feed_state.get("seen_doc_ids", []))
     last_etag = feed_state.get("etag")
 
-    headers = build_headers(
+    anonymous_headers = build_headers(
         cfg,
         accept="application/vnd.github+json",
-        extra={
-            "Authorization": f"Bearer {cfg.github_token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        extra={"X-GitHub-Api-Version": "2022-11-28"},
     )
+    authenticated_headers = dict(anonymous_headers)
+    if cfg.github_token:
+        authenticated_headers["Authorization"] = f"Bearer {cfg.github_token}"
 
     stop = asyncio.Event()
 
@@ -185,7 +181,8 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
     iteration = 0
     total_emitted = 0
     async with (
-        build_async_client(cfg, headers=headers) as client,
+        build_async_client(cfg, headers=authenticated_headers) as authenticated_client,
+        build_async_client(cfg, headers=anonymous_headers) as anonymous_client,
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-events"
         ) as producer,
@@ -196,6 +193,8 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
             bucket=cfg.minio_bronze_bucket,
         ) as minio,
     ):
+        client = authenticated_client if cfg.github_token else anonymous_client
+        using_authenticated_client = bool(cfg.github_token)
         while not stop.is_set():
             req_headers: dict[str, str] = {}
             if last_etag:
@@ -234,6 +233,18 @@ async def run_loop(cfg: IngestConfig, *, max_iterations: int | None = None) -> i
                         emitted=emitted,
                         rate_limit_remaining=resp.headers.get("x-ratelimit-remaining"),
                     )
+            elif resp.status_code == 401 and using_authenticated_client:
+                # Public events remain available without credentials. A stale
+                # optional token must reduce the rate budget, not disable the
+                # source indefinitely.
+                log.warning("github_events.authentication_rejected_falling_back")
+                INGEST_METRICS.record_feed_poll(
+                    source_feed=SOURCE_FEED,
+                    outcome="authentication_rejected",
+                )
+                client = anonymous_client
+                using_authenticated_client = False
+                continue
             elif resp.status_code in {403, 429}:
                 # Secondary rate limit. Honour Retry-After if present, else back off.
                 retry_after = float(resp.headers.get("retry-after", "60"))

@@ -63,7 +63,7 @@ def load_config() -> IngestConfig:
     """Load the ingest configuration from the process environment.
 
     Defaults follow ``.env.example``. ``GITHUB_TOKEN`` and ``HF_TOKEN`` are
-    optional; the GitHub events poller will refuse to run without one.
+    optional; GitHub sources use the lower anonymous rate budget without one.
     """
     return IngestConfig(
         env=_env("S2P_ENV", "dev"),

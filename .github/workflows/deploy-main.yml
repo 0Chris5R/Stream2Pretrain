@@ -643,8 +643,24 @@ jobs:
                   node: .[0].node,
                   phase: .[0].phase,
                   count: length
-                })
+              })
             '
+            kubectl get pods -A -o json | jq -r '
+              .items[]
+              | .metadata as $metadata
+              | .status.containerStatuses[]?
+              | select(.restartCount > 0 or .lastState.terminated != null)
+              | {
+                  namespace: $metadata.namespace,
+                  pod: $metadata.name,
+                  container: .name,
+                  restarts: .restartCount,
+                  lastTermination: .lastState.terminated
+                }
+            '
+            kubectl -n stream2pretrain get ingress stream2pretrain-ui -o yaml || true
+            kubectl get clusterissuer -o wide || true
+            kubectl get certificate,certificaterequest,challenge -A -o wide || true
 
             for namespace in minio polaris traefik stream2pretrain; do
               echo "::group::Namespace: $namespace"
@@ -659,6 +675,8 @@ jobs:
                 echo "::group::Recent logs: $namespace/$pod"
                 kubectl -n "$namespace" logs "$pod" \
                   --all-containers --prefix --tail=160 || true
+                kubectl -n "$namespace" logs "$pod" \
+                  --all-containers --previous --prefix --tail=160 || true
                 echo "::endgroup::"
               done < <(
                 kubectl -n "$namespace" get pods -o json 2>/dev/null \
