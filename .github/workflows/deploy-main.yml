@@ -375,79 +375,11 @@ jobs:
             kubectl -n stream2pretrain wait \
               --for=condition=Ready \
               pod/stream2pretrain-foundry-0 --timeout=180s
-            # `kubectl port-forward` connects to loopback inside the Pod, but
-            # this IPv6-only cluster binds the API to the Pod's `::` address.
-            # The API-server Service proxy reaches that IPv6 endpoint directly.
-            foundry_api="http://127.0.0.1:18092/api/v1/namespaces/stream2pretrain/services/http:stream2pretrain-foundry:8092/proxy"
-            kubectl proxy \
-              --address=127.0.0.1 \
-              --accept-hosts='^127\.0\.0\.1$' \
-              --port=18092 \
-              >"$RUNNER_TEMP/foundry-port-forward.log" 2>&1 &
-            foundry_port_forward_pid=$!
-            for _ in $(seq 1 30); do
-              curl --fail --silent "${foundry_api}/healthz" >/dev/null && break
-              if ! kill -0 "$foundry_port_forward_pid" 2>/dev/null; then
-                cat "$RUNNER_TEMP/foundry-port-forward.log" >&2
-                exit 1
-              fi
-              sleep 1
-            done
-            curl --fail --silent --show-error "${foundry_api}/healthz"
-
-            control_token="$(
-              kubectl -n stream2pretrain get secret \
-                stream2pretrain-foundry-providers \
-                -o jsonpath='{.data.controlToken}' | base64 --decode
-            )"
-            request="$(
-              curl --fail --silent --show-error \
-                -H "Authorization: Bearer ${control_token}" \
-                -H 'Content-Type: application/json' \
-                --data '{"max_candidates":1}' \
-                "${foundry_api}/api/foundry/runs/manual"
-            )"
-            unset control_token
-            printf '%s\n' "$request" | jq '{created,run}'
-            if [[ "$(printf '%s' "$request" | jq -r '.created')" != "true" \
-              || "$(printf '%s' "$request" | jq -r '.run.max_candidates')" -ne 1 ]]; then
-              echo "Refusing to validate through an existing or unbounded manual run." >&2
-              exit 1
-            fi
-            run_id="$(printf '%s' "$request" | jq -er '.run.run_id')"
-
-            terminal=false
-            state=""
-            run=""
-            for _ in $(seq 1 180); do
-              dashboard="$(
-                curl --fail --silent --show-error \
-                  "${foundry_api}/api/foundry/dashboard"
-              )"
-              run="$(
-                printf '%s' "$dashboard" \
-                  | jq -cer --arg run_id "$run_id" \
-                    '.manual_runs[] | select(.run_id == $run_id)'
-              )"
-              state="$(printf '%s' "$run" | jq -r '.state')"
-              if [[ "$state" == "completed" \
-                || "$state" == "quota_exhausted" \
-                || "$state" == "failed" ]]; then
-                terminal=true
-                break
-              fi
-              sleep 5
-            done
-            printf '%s\n' "$run" | jq .
-            if [[ "$terminal" != true ]]; then
-              echo "Bounded foundry validation did not reach a terminal state." >&2
-              exit 1
-            fi
-            if [[ "$state" != "completed" \
-              || "$(printf '%s' "$run" | jq -r '.processed_count')" -ne 1 ]]; then
-              echo "Bounded foundry validation did not process exactly one candidate." >&2
-              exit 1
-            fi
+            # Run inside the API sidecar so the Foundry bearer token is never
+            # consumed by the Kubernetes API server or printed by the runner.
+            kubectl -n stream2pretrain exec -i \
+              statefulset/stream2pretrain-foundry -c api -- python - \
+              < scripts/validate_foundry_live.py
             kubectl -n stream2pretrain exec -i \
               statefulset/stream2pretrain-foundry -c api -- python - \
               < scripts/foundry_diagnostics.py
