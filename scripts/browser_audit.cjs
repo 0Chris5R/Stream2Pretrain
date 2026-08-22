@@ -18,6 +18,24 @@ const routes = [
   "/mixture",
   "/as-of",
 ];
+const now = new Date();
+const thirtyDaysAgo = new Date(now);
+thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+const apiProbes = [
+  "/api/health",
+  "/api/dashboard",
+  "/api/activity?window=5m",
+  "/api/documents?limit=5&include_fixtures=true",
+  "/api/documents/facets?include_fixtures=true",
+  "/api/sources",
+  "/api/decon?limit=5",
+  "/api/decon/coverage",
+  `/api/datasets/summary?date_from=${encodeURIComponent(thirtyDaysAgo.toISOString())}&date_to=${encodeURIComponent(now.toISOString())}&route=pretrain&route=posttrain_candidate&include_structured=true`,
+  `/api/as-of?ts=${encodeURIComponent(now.toISOString())}`,
+  "/api/foundry/dashboard",
+  "/api/foundry/artifacts?limit=5",
+  "/api/foundry/activity?window=5m",
+];
 
 function slug(route) {
   return route === "/" ? "root" : route.slice(1).replaceAll("/", "-");
@@ -107,11 +125,45 @@ async function main() {
     await page.close();
   }
 
+  const probes = [];
+  for (const probe of apiProbes) {
+    try {
+      const response = await context.request.get(`${baseUrl}${probe}`, { timeout: 30_000 });
+      const contentType = response.headers()["content-type"] || "";
+      const body = await response.text();
+      let validJson = false;
+      if (contentType.includes("application/json")) {
+        try {
+          JSON.parse(body);
+          validJson = true;
+        } catch {
+          validJson = false;
+        }
+      }
+      probes.push({
+        path: probe,
+        status: response.status(),
+        contentType,
+        validJson,
+        bodyExcerpt: body.slice(0, 1_000),
+      });
+    } catch (error) {
+      probes.push({
+        path: probe,
+        status: 0,
+        contentType: "",
+        validJson: false,
+        error: String(error),
+      });
+    }
+  }
+
   await browser.close();
   const report = {
     auditedAt: new Date().toISOString(),
     baseUrl,
     routes: results,
+    apiProbes: probes,
   };
   fs.writeFileSync(path.join(outputDir, "report.json"), JSON.stringify(report, null, 2));
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -121,8 +173,9 @@ async function main() {
       result.navigationError ||
       result.navigationStatus >= 400 ||
       result.failureMarkers.length ||
-      result.pageErrors.length,
-  );
+      result.pageErrors.length ||
+      result.responses.some((response) => response.status >= 400),
+  ) || probes.some((probe) => probe.status < 200 || probe.status >= 300 || !probe.validJson);
   if (broken) process.exitCode = 1;
 }
 
