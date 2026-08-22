@@ -76,6 +76,7 @@ ARXIV_API_QUERY = "https://export.arxiv.org/api/query"
 _DEFAULT_RPS = 4.0
 _DEFAULT_BURST = 4
 _DEFAULT_MIN_SLEEP_S = 1.0
+_STREAM_BATCH_SIZE = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -614,6 +615,7 @@ async def run_for_ids(
     producer_override: BronzeProducer | None = None,
     admission_producer_override: LicenseAdmissionProducer | None = None,
     minio_override: MinioWriter | None = None,
+    raise_on_fetch_error: bool = False,
 ) -> int:
     """Fetch every arXiv id in ``ids`` and emit Bronze records. Returns count."""
     headers = build_headers(cfg, accept="text/html, application/xhtml+xml;q=0.9")
@@ -723,6 +725,8 @@ async def run_for_ids(
                         arxiv_id=arxiv_id,
                         err=str(exc),
                     )
+                    if raise_on_fetch_error:
+                        raise
                     continue
 
                 payload = (
@@ -831,59 +835,48 @@ async def _async_main(args: argparse.Namespace) -> int:
         return emitted
 
     log.info("arxiv_html.stream.start", topic=args.stream_topic)
+    total = await _run_stream(args, cfg)
+    log.info("arxiv_html.stream.done", emitted=total)
+    return total
 
-    # The stream-mode loop holds a single AIOKafkaConsumer across all
-    # batches; commits are only performed after run_for_ids() has actually
-    # written the BronzeRecord, giving at-least-once semantics. The
-    # consumer reference is captured via the commit_callback hook.
+
+async def _run_stream(args: argparse.Namespace, cfg: IngestConfig) -> int:
+    """Drain one long-lived Kafka consumer in durable, bounded batches."""
     consumer_ref: dict[str, Any] = {}
 
     def _capture_consumer(c: Any) -> None:
         consumer_ref["consumer"] = c
 
-    async def _id_generator() -> AsyncIterator[ArxivCandidate]:
-        async for candidate in stream_ids_from_topic(
-            cfg,
-            topic=args.stream_topic,
-            max_records=args.max_records,
-            commit_callback=_capture_consumer,
-        ):
-            yield candidate
-
-    async def _drain() -> int:
-        ids: list[ArxivCandidate] = []
-        async for candidate in _id_generator():
-            ids.append(candidate)
-            if len(ids) >= 32:
-                break
-        if not ids:
-            return 0
+    async def _drain(ids: list[ArxivCandidate]) -> int:
         emitted = await run_for_ids(
             ids,
             cfg,
             feed_name=args.feed_name,
             license_default=args.license_default,
+            raise_on_fetch_error=True,
         )
-        # Only commit once the bronze records have been emitted. Highest-
-        # offset commit semantics cover any filtered/skipped messages
-        # consumed in between.
+        # A zero-emission batch can still be fully handled when every paper
+        # was durably written to the licence-admission ledger. Commit after
+        # successful batch handling, not only after an admitted paper.
         consumer = consumer_ref.get("consumer")
-        if consumer is not None and emitted > 0:
-            try:
-                await consumer.commit()
-            except Exception as exc:
-                log.warning("arxiv_html.commit_failed", err=str(exc))
+        if consumer is not None:
+            await consumer.commit()
         return emitted
 
     total = 0
-    while True:
-        emitted = await _drain()
-        total += emitted
-        if emitted == 0:
-            break
-        if args.max_records is not None and total >= args.max_records:
-            break
-    log.info("arxiv_html.stream.done", emitted=total)
+    batch: list[ArxivCandidate] = []
+    async for candidate in stream_ids_from_topic(
+        cfg,
+        topic=args.stream_topic,
+        max_records=args.max_records,
+        commit_callback=_capture_consumer,
+    ):
+        batch.append(candidate)
+        if len(batch) >= _STREAM_BATCH_SIZE:
+            total += await _drain(batch)
+            batch = []
+    if batch:
+        total += await _drain(batch)
     return total
 
 

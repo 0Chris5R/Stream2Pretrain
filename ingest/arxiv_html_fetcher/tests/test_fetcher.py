@@ -16,12 +16,15 @@ dependency.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
+from ingest.arxiv_html_fetcher import fetcher as fetcher_module
 from ingest.arxiv_html_fetcher.fetcher import (
+    ArxivCandidate,
     FetchOutcome,
     _is_arxiv_source_feed,
     build_metadata_stub,
@@ -76,6 +79,76 @@ def test_stream_source_filter_matches_deployed_feed_names() -> None:
     assert _is_arxiv_source_feed("arxiv-oai-cs", None)
     assert not _is_arxiv_source_feed("hf-daily-papers", None)
     assert _is_arxiv_source_feed("custom-arxiv", ("custom-arxiv",))
+
+
+@pytest.mark.asyncio
+async def test_stream_reuses_one_consumer_and_commits_each_handled_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Consumer:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    consumer = Consumer()
+    batches: list[int] = []
+
+    async def candidates(*_args: Any, **kwargs: Any) -> Any:
+        kwargs["commit_callback"](consumer)
+        for index in range(33):
+            yield ArxivCandidate(arxiv_id=f"2401.{index:05d}")
+
+    async def run_batch(ids: list[ArxivCandidate], *_args: Any, **kwargs: Any) -> int:
+        assert kwargs["raise_on_fetch_error"] is True
+        batches.append(len(ids))
+        return len(ids)
+
+    monkeypatch.setattr(fetcher_module, "stream_ids_from_topic", candidates)
+    monkeypatch.setattr(fetcher_module, "run_for_ids", run_batch)
+    args = SimpleNamespace(
+        stream_topic="docs.normalized",
+        max_records=None,
+        feed_name="arxiv-html-fetcher",
+        license_default="per-record",
+    )
+
+    assert await fetcher_module._run_stream(args, _cfg()) == 33
+    assert batches == [32, 1]
+    assert consumer.commits == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_commits_a_fully_quarantined_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Consumer:
+        commits = 0
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    consumer = Consumer()
+
+    async def candidates(*_args: Any, **kwargs: Any) -> Any:
+        kwargs["commit_callback"](consumer)
+        yield ArxivCandidate(arxiv_id="2401.00001")
+
+    async def quarantine(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(fetcher_module, "stream_ids_from_topic", candidates)
+    monkeypatch.setattr(fetcher_module, "run_for_ids", quarantine)
+    args = SimpleNamespace(
+        stream_topic="docs.normalized",
+        max_records=None,
+        feed_name="arxiv-html-fetcher",
+        license_default="per-record",
+    )
+
+    assert await fetcher_module._run_stream(args, _cfg()) == 0
+    assert consumer.commits == 1
 
 
 def _atom_license(value: str) -> str:
