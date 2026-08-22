@@ -16,9 +16,9 @@ WORKDIR /src
 COPY pyproject.toml /src/pyproject.toml
 COPY README.md /src/README.md
 COPY schemas /src/schemas
-COPY ingest /src/ingest
-COPY processor /src/processor
-COPY tests /src/tests
+COPY ingest/__init__.py /src/ingest/__init__.py
+COPY ingest/common /src/ingest/common
+COPY ingest/oaipmh_poller /src/ingest/oaipmh_poller
 
 RUN uv pip install --system --no-cache \
         -e . \
