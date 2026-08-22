@@ -270,6 +270,14 @@ sources:
 # Ingest components
 # -----------------------------------------------------------------------------
 ingest:
+  # Small durable cursor store shared by single-replica pollers. Payloads stay
+  # in object storage; this PVC only contains ETags, seen ids, and OAI
+  # resumption tokens. For multi-site production, replace it with an external
+  # transactional cursor store instead of scaling this RWO volume.
+  state:
+    existingClaim: ""
+    storageClass: ""
+    size: 1Gi
   rss:
     image: stream2pretrain/ingest-rss
     replicas: 1
@@ -279,6 +287,10 @@ ingest:
   oaipmh:
     image: stream2pretrain/ingest-oaipmh
     replicas: 1
+    # Finish and checkpoint at most this many complete OAI pages per CronJob.
+    # This bounds ingress to downstream capacity without skipping the rest of
+    # an OAI window; the next run resumes from the persisted token.
+    maxPagesPerRun: 4
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 512Mi}
@@ -454,11 +466,17 @@ openreviewPoller:
 processor:
   fetcher:
     image: stream2pretrain/processor-fetcher
-    replicas: 2
+    # Bytewax persists offsets locally rather than committing Kafka consumer
+    # group offsets. Keep one pod attached to one durable checkpoint. Scale
+    # workers/partitions as one measured Bytewax execution, not via HPA/KEDA.
+    replicas: 1
     resources:
       requests: {cpu: 200m, memory: 512Mi}
       limits: {cpu: 1, memory: 1Gi}
-    concurrency: 32
+    checkpoint:
+      existingClaim: ""
+      storageClass: ""
+      size: 2Gi
   curate:
     image: stream2pretrain/processor-curate
     replicas: 1
@@ -494,6 +512,10 @@ processor:
       limits: {cpu: 1, memory: 1Gi}
     flushIntervalSeconds: 60
     flushRecords: 5000
+    checkpoint:
+      existingClaim: ""
+      storageClass: ""
+      size: 2Gi
     maintenance:
       enabled: true
       schedule: "17 * * * *"
@@ -653,6 +675,9 @@ ui:
   ingress:
     enabled: true
     host: stream2pretrain.local
+    # Optional CDN/custom hostnames that terminate at the same Traefik route.
+    # Their edge certificate/DNS remains owned by that external provider.
+    aliases: []
     ingressClassName: traefik
     # Empty omits the Ingress TLS stanza so a TLS-enabled Traefik entrypoint
     # uses its platform-managed default wildcard certificate. Rendering a TLS
@@ -665,26 +690,15 @@ ui:
 # KEDA scaling
 # -----------------------------------------------------------------------------
 keda:
-  # Enable only after lag and replica limits are measured on the target cluster.
+  # Scales independently committing ingest consumers only. Core Bytewax
+  # processors use local durable recovery and must be scaled as a coordinated
+  # execution after partition/capacity measurement; broker group lag is not a
+  # valid signal for those stages.
   enabled: false
   pollingInterval: 15
   cooldownPeriod: 60
   prometheus:
     serverAddress: http://kps-prometheus.monitoring.svc:9090
-  fetcher:
-    minReplicas: 1
-    # Conservative course-cluster default. Raise only after capacity_probe.py.
-    maxReplicas: 2
-    lagThreshold: 1000
-  curate:
-    minReplicas: 1
-    # One strict CPU curator already owns both quality models and mmap'd KenLM.
-    maxReplicas: 1
-    lagThreshold: 500
-  iceberg:
-    minReplicas: 1
-    maxReplicas: 1
-    lagThreshold: 2000
   triggerAuthSecret: stream2pretrain-keda-redpanda
   # Set ``auth.enabled: true`` only when the Redpanda profile actually has
   # SASL/TLS turned on and the secret named by ``triggerAuthSecret`` exists

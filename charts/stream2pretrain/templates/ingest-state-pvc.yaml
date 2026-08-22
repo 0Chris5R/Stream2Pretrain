@@ -1,0 +1,18 @@
+{{- $state := .Values.ingest.state -}}
+{{- if not $state.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-ingest-state" (include "stream2pretrain.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" "ingest-state") | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $state.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $state.size | quote }}
+{{- end }}

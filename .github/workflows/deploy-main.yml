@@ -840,6 +840,24 @@ jobs:
             exit 1
           fi
 
+          # Remove the exact pre-migration certificate objects only when they
+          # still reference the retired issuer. The chart now uses Traefik's
+          # platform wildcard TLSStore, so leaving these objects would only
+          # keep cert-manager and Traefik in a failing reconciliation loop.
+          stale_ui_issuer="$(
+            kubectl -n stream2pretrain get certificate stream2pretrain-ui-tls \
+              -o jsonpath='{.spec.issuerRef.name}' 2>/dev/null || true
+          )"
+          if [[ "$stale_ui_issuer" == "letsencrypt-prod" ]] && \
+             ! kubectl get clusterissuer letsencrypt-prod >/dev/null 2>&1; then
+            kubectl -n stream2pretrain delete certificate stream2pretrain-ui-tls
+            kubectl -n stream2pretrain delete certificaterequest \
+              -l cert-manager.io/certificate-name=stream2pretrain-ui-tls \
+              --ignore-not-found
+          fi
+          kubectl -n stream2pretrain annotate ingress stream2pretrain-ui \
+            kubectl.kubernetes.io/last-applied-configuration- || true
+
           kubectl -n stream2pretrain annotate scaledobject --all \
             autoscaling.keda.sh/paused- || true
 

@@ -25,6 +25,18 @@ spec:
                 name: {{ $name }}
                 port:
                   number: 80
+    {{- range .Values.ui.ingress.aliases }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port:
+                  number: 80
+    {{- end }}
   {{ with .Values.ui.ingress.tlsSecret }}
   tls:
     - hosts:

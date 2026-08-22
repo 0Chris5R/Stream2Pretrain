@@ -1,6 +1,7 @@
 {{- if or .Values.sources.arxiv.enabled .Values.mixtureController.enabled }}
 {{- $component := "ingest-rss" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $stateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -47,12 +48,16 @@ spec:
                   value: {{ $component | quote }}
                 - name: S2P_FEED_CONFIG
                   value: /etc/s2p/feeds/arxiv.json
+                - name: S2P_STATE_ROOT
+                  value: /var/lib/s2p-state
               volumeMounts:
                 - name: feeds
                   mountPath: /etc/s2p/feeds
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                - name: state
+                  mountPath: /var/lib/s2p-state
               resources:
                 {{- toYaml .Values.ingest.rss.resources | nindent 16 }}
           volumes:
@@ -61,10 +66,14 @@ spec:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: tmp
               emptyDir: {}
+            - name: state
+              persistentVolumeClaim:
+                claimName: {{ $stateClaim | quote }}
 {{- end }}
 {{- if .Values.sources.blogs.enabled }}
 ---
 {{- $blogName := printf "%s-ingest-blogs" (include "stream2pretrain.fullname" .) }}
+{{- $blogStateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -107,12 +116,16 @@ spec:
                   value: ingest-blogs
                 - name: S2P_FEED_CONFIG
                   value: /etc/s2p/feeds/blogs.json
+                - name: S2P_STATE_ROOT
+                  value: /var/lib/s2p-state
               volumeMounts:
                 - name: feeds
                   mountPath: /etc/s2p/feeds
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                - name: state
+                  mountPath: /var/lib/s2p-state
               resources:
                 {{- toYaml .Values.ingest.rss.resources | nindent 16 }}
           volumes:
@@ -121,4 +134,7 @@ spec:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: tmp
               emptyDir: {}
+            - name: state
+              persistentVolumeClaim:
+                claimName: {{ $blogStateClaim | quote }}
 {{- end }}

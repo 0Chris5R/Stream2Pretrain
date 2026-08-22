@@ -38,3 +38,20 @@ def test_dev_state_root_override(tmp_path: Path, monkeypatch) -> None:
     store.put("feed", {"cursor": "x"})
 
     assert (tmp_path / "state" / "hf" / "feed.json").exists()
+
+
+def test_state_keys_are_portable_file_names(tmp_path: Path) -> None:
+    store = FeedStateStore(tmp_path)
+    store.put("openreview:ICLR.cc:2026", {"cursor": "abc"})
+
+    assert store.get("openreview:ICLR.cc:2026") == {"cursor": "abc"}
+    assert [path.name for path in tmp_path.iterdir()] == ["openreview%3AICLR.cc%3A2026.json"]
+
+
+def test_legacy_state_file_is_read_during_filename_migration(tmp_path: Path) -> None:
+    legacy = tmp_path / "github-releases_huggingface_transformers.json"
+    legacy.write_text('{"etag": "old"}', encoding="utf-8")
+
+    store = FeedStateStore(tmp_path)
+
+    assert store.get("github-releases/huggingface_transformers") == {"etag": "old"}
