@@ -5,9 +5,11 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+import threading
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -44,6 +46,7 @@ from processor.foundry.tools import PaperRuntime, ToolError
 from processor.foundry.util import sha256
 from processor.foundry.validation import run_acceptance_suite, suite_passes
 from processor.foundry.verifier import VerifierCompiler, evaluate, normalize_spec
+from processor.foundry.worker import WorkerRuntime
 from processor.sign import AttestationSigner, verify_signature
 from schemas.foundry import (
     AnswerManifest,
@@ -403,6 +406,7 @@ def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> 
             verifier_id="compiler-output",
             task_id=task.task_id,
             version=1,
+            determinism_seed=1,
             predicates=[
                 VerifierPredicate(
                     id="evidence",
@@ -442,7 +446,6 @@ def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> 
                     weight=0,
                 ),
             ],
-            determinism_seed=1,
         ),
         task,
         _bundle(),
@@ -1090,6 +1093,34 @@ def test_manual_run_rejects_nonpositive_bound(tmp_path: Path) -> None:
         store.request_manual_run(max_candidates=0)
 
 
+def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
+    runtime = object.__new__(WorkerRuntime)
+    runtime.config = SimpleNamespace(queue_poll_seconds=0)
+    runtime._drain_stop = threading.Event()
+    calls: list[str] = []
+    manual = {
+        "run_id": "manual-1",
+        "cutoff_at": FIXED_TIME.isoformat(),
+        "max_candidates": 1,
+        "processed_count": 0,
+    }
+    claims = iter([manual, None])
+    runtime.store = SimpleNamespace(
+        claim_manual_run=lambda: next(claims),
+        finish_daily_run=lambda *_args, **_kwargs: calls.append("daily-finished"),
+    )
+    runtime._run_manual_snapshot = lambda _run, _log: calls.append("manual")
+    runtime._drain_one = lambda **_kwargs: calls.append("daily") or {"status": "queue_empty"}
+
+    runtime._run_daily_snapshot(
+        FIXED_TIME.date(),
+        {"cutoff_at": FIXED_TIME.isoformat()},
+        SimpleNamespace(),
+    )
+
+    assert calls == ["manual", "daily", "daily-finished"]
+
+
 def test_repeated_model_snapshot_clears_transient_drift(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     first = ProviderModelSnapshot(
@@ -1286,6 +1317,87 @@ def test_acceptance_suite_and_signed_package_are_reproducible() -> None:
         assert mutation is not None and mutation.read().strip()
         assert taskset is not None and b"class PaperFoundryTools" in taskset.read()
         assert "paper_environment/hidden/verifier.py" in names
+
+
+def test_relation_only_required_nodes_produce_effective_mutations() -> None:
+    bundle = _bundle()
+    edge = EvidenceEdge(source="claim:1", relation="depends_on", target="method:1")
+    graph = PaperEvidenceGraph(
+        graph_id="graph:relation-only",
+        paper_id=bundle.paper_id,
+        nodes=[
+            *_graph().nodes,
+            EvidenceNode(
+                id="method:1",
+                type="method_step",
+                canonical_text="The method supports the claim.",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[edge],
+    )
+    task = _task().model_copy(
+        update={
+            "hidden_targets": HiddenTargets(
+                required_nodes=["claim:1", "method:1"],
+                required_relations=[edge],
+                accepted_evidence_sets=[["section-1.span1"]],
+            )
+        }
+    )
+    answer = _answer().model_copy(
+        update={
+            "answer_manifest": AnswerManifest(
+                evidence=["section-1.span1"],
+                relations=[edge],
+            )
+        }
+    )
+    spec = normalize_spec(
+        VerifierSpec(
+            verifier_id="relation-only",
+            task_id=task.task_id,
+            version=1,
+            determinism_seed=1,
+            predicates=[
+                VerifierPredicate(
+                    id="nodes",
+                    type="required_nodes",
+                    targets=["claim:1", "method:1"],
+                    weight=0.5,
+                ),
+                VerifierPredicate(
+                    id="relations",
+                    type="required_relations",
+                    weight=0.5,
+                ),
+            ],
+        ),
+        task,
+        bundle,
+        graph,
+    )
+    report, _validated, cases = run_acceptance_suite(
+        task=task,
+        spec=spec,
+        bundle=bundle,
+        graph=graph,
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:relation-only",
+                task_id=task.task_id,
+                provider_trace_id="trace:relation-only",
+                answer=answer,
+                accepted=False,
+                reward=0.0,
+            )
+        ],
+    )
+
+    assert report.mutation_total == 4
+    assert report.mutation_killed == report.mutation_total
+    assert len(cases["mutations"]) == report.mutation_total
+    assert suite_passes(report)
 
 
 def test_artifact_inspector_returns_the_exact_packaged_dataset(tmp_path: Path) -> None:

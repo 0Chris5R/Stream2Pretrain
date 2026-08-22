@@ -133,12 +133,67 @@ def test_event_url_extraction() -> None:
     assert evt_module._event_url(evt2) == "https://github.com/o/r"
 
 
-def test_run_loop_requires_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import asyncio
+@pytest.mark.asyncio
+async def test_run_loop_uses_anonymous_api_without_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import dataclasses
 
+    monkeypatch.chdir(tmp_path)
     cfg = _cfg(tmp_path)
     cfg2 = dataclasses.replace(cfg, github_token=None)
+    fake_producer = FakeProducer()
+    fake_minio = FakeMinio()
 
-    with pytest.raises(RuntimeError, match="GITHUB_TOKEN"):
-        asyncio.run(evt_module.run_loop(cfg2, max_iterations=1))
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json=[], headers={"x-poll-interval": "0"})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(evt_module, "BronzeProducer", lambda *a, **kw: fake_producer)
+    monkeypatch.setattr(evt_module, "MinioWriter", lambda *a, **kw: fake_minio)
+    monkeypatch.setattr(
+        evt_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(
+            transport=transport,
+            headers=kw.get("headers", {}),
+        ),
+    )
+
+    assert await evt_module.run_loop(cfg2, max_iterations=1) == 0
+
+
+@pytest.mark.asyncio
+async def test_run_loop_falls_back_when_token_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_producer = FakeProducer()
+    fake_minio = FakeMinio()
+    authenticated_requests = 0
+    anonymous_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal authenticated_requests, anonymous_requests
+        if "authorization" in request.headers:
+            authenticated_requests += 1
+            return httpx.Response(401)
+        anonymous_requests += 1
+        return httpx.Response(200, json=[], headers={"x-poll-interval": "0"})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(evt_module, "BronzeProducer", lambda *a, **kw: fake_producer)
+    monkeypatch.setattr(evt_module, "MinioWriter", lambda *a, **kw: fake_minio)
+    monkeypatch.setattr(
+        evt_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(
+            transport=transport,
+            headers=kw.get("headers", {}),
+        ),
+    )
+
+    assert await evt_module.run_loop(_cfg(tmp_path), max_iterations=1) == 0
+    assert authenticated_requests == 1
+    assert anonymous_requests == 1

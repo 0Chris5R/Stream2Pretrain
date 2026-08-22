@@ -52,10 +52,17 @@ def _request_json(
 
 def validate_created_run(response: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     run = response.get("run")
-    if response.get("created") is not True or not isinstance(run, dict):
-        raise ValidationError("Refusing to validate through an existing manual run")
+    created = response.get("created")
+    if created not in {True, False} or not isinstance(run, dict):
+        raise ValidationError("Foundry did not return a manual run")
     if run.get("max_candidates") != 1:
         raise ValidationError("Refusing to validate an unbounded manual run")
+    if created is False and (
+        run.get("state") not in {"pending", "running"}
+        or run.get("candidate_count") != 1
+        or run.get("processed_count") != 0
+    ):
+        raise ValidationError("Refusing to resume an incompatible manual run")
     run_id = run.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         raise ValidationError("The bounded manual run has no run_id")
@@ -96,9 +103,15 @@ def main() -> int:
             payload={"max_candidates": 1},
         )
         run_id, created_run = validate_created_run(response)
-        print(json.dumps({"created": True, "run": created_run}, sort_keys=True))
+        print(
+            json.dumps(
+                {"created": response["created"], "run": created_run},
+                sort_keys=True,
+            )
+        )
 
-        deadline = time.monotonic() + 900
+        timeout_seconds = int(os.environ.get("S2P_FOUNDRY_VALIDATION_TIMEOUT_SECONDS", "2700"))
+        deadline = time.monotonic() + timeout_seconds
         terminal_run: dict[str, Any] | None = None
         while time.monotonic() < deadline:
             dashboard = _request_json(opener, base_url, "/api/foundry/dashboard")

@@ -280,9 +280,7 @@ class WorkerRuntime:
 
         log = structlog.get_logger(component="foundry-queue")
         while not self._drain_stop.wait(self.config.queue_poll_seconds):
-            manual = self.store.claim_manual_run()
-            if manual is not None:
-                self._run_manual_snapshot(manual, log)
+            if self._run_pending_manual(log):
                 continue
             now = datetime.now(UTC)
             if now.hour < self.config.daily_run_hour_utc:
@@ -293,54 +291,71 @@ class WorkerRuntime:
                 continue
             if run["state"] in {"completed", "quota_exhausted"}:
                 continue
-            cutoff_at = datetime.fromisoformat(str(run["cutoff_at"]))
-            while not self._drain_stop.is_set():
-                try:
-                    result = self._drain_one(
-                        run_day=run_day,
-                        cutoff_at=cutoff_at,
-                    )
-                except ProviderBudgetExhaustedError as exc:
+            self._run_daily_snapshot(run_day, run, log)
+
+    def _run_pending_manual(self, log: Any) -> bool:
+        """Run an active control-plane snapshot at the next safe paper boundary."""
+        manual = self.store.claim_manual_run()
+        if manual is None:
+            return False
+        self._run_manual_snapshot(manual, log)
+        return True
+
+    def _run_daily_snapshot(self, run_day: date, run: dict[str, Any], log: Any) -> None:
+        cutoff_at = datetime.fromisoformat(str(run["cutoff_at"]))
+        while not self._drain_stop.is_set():
+            # Provider calls are not interrupted, but a bounded manual run must
+            # not wait behind the rest of a potentially large daily snapshot.
+            if self._run_pending_manual(log):
+                if self._drain_stop.wait(self.config.queue_poll_seconds):
+                    return
+                continue
+            try:
+                result = self._drain_one(
+                    run_day=run_day,
+                    cutoff_at=cutoff_at,
+                )
+            except ProviderBudgetExhaustedError as exc:
+                self.store.finish_daily_run(
+                    run_day,
+                    state="quota_exhausted",
+                    reason=str(exc),
+                )
+                log.info(
+                    "foundry_daily_provider_budget_exhausted",
+                    run_date=run_day.isoformat(),
+                    provider=exc.provider,
+                )
+                return
+            except QuotaExceededError as exc:
+                if exc.window == "day":
                     self.store.finish_daily_run(
                         run_day,
                         state="quota_exhausted",
                         reason=str(exc),
                     )
                     log.info(
-                        "foundry_daily_provider_budget_exhausted",
+                        "foundry_daily_quota_exhausted",
                         run_date=run_day.isoformat(),
-                        provider=exc.provider,
+                        reason=str(exc),
                     )
-                    break
-                except QuotaExceededError as exc:
-                    if exc.window == "day":
-                        self.store.finish_daily_run(
-                            run_day,
-                            state="quota_exhausted",
-                            reason=str(exc),
-                        )
-                        log.info(
-                            "foundry_daily_quota_exhausted",
-                            run_date=run_day.isoformat(),
-                            reason=str(exc),
-                        )
-                    else:
-                        log.info(
-                            "foundry_minute_quota_wait",
-                            run_date=run_day.isoformat(),
-                            reason=str(exc),
-                        )
-                    break
-                except Exception as exc:
-                    log.warning("foundry_queue_retry_pending", reason=str(exc))
-                    break
-                if result.get("status") == "queue_empty":
-                    self.store.finish_daily_run(
-                        run_day,
-                        state="completed",
-                        reason="ranked snapshot exhausted",
+                else:
+                    log.info(
+                        "foundry_minute_quota_wait",
+                        run_date=run_day.isoformat(),
+                        reason=str(exc),
                     )
-                    break
+                return
+            except Exception as exc:
+                log.warning("foundry_queue_retry_pending", reason=str(exc))
+                return
+            if result.get("status") == "queue_empty":
+                self.store.finish_daily_run(
+                    run_day,
+                    state="completed",
+                    reason="ranked snapshot exhausted",
+                )
+                return
 
     def _run_manual_snapshot(self, run: dict[str, Any], log: Any) -> None:
         run_id = str(run["run_id"])
