@@ -30,6 +30,7 @@ permissions:
 env:
   HELM_VERSION: v3.15.4
   HELMFILE_VERSION: v1.7.3
+  PUBLIC_SITE_HOST: stream2pretrain.theclusterflux.com
 
 jobs:
   validate:
@@ -80,6 +81,20 @@ jobs:
           helm lint charts/stream2pretrain \
             -f charts/stream2pretrain/values-dev.yaml \
             -f infra/helmfile-values/stream2pretrain.dev.yaml
+          rendered_chart="$RUNNER_TEMP/stream2pretrain-rendered.yaml"
+          helm template stream2pretrain charts/stream2pretrain \
+            --namespace stream2pretrain \
+            -f charts/stream2pretrain/values-dev.yaml \
+            -f infra/helmfile-values/stream2pretrain.dev.yaml \
+            > "$rendered_chart"
+          message_limits="$(
+            awk '/- name: S2P_KAFKA_MESSAGE_MAX_BYTES/ {getline; print $2}' \
+              "$rendered_chart" | sort -u
+          )"
+          if [[ "$message_limits" != '"2097152"' ]]; then
+            echo "Rendered Kafka message limit is not an integer string: $message_limits" >&2
+            exit 1
+          fi
           helmfile \
             --helm-binary "$(command -v helm)" \
             --file helmfile.yaml \
@@ -861,6 +876,9 @@ jobs:
             kubectl -n stream2pretrain get \
               deployment,statefulset,pod,service,ingress,endpoints,endpointslice \
               -o wide || true
+            kubectl -n stream2pretrain get \
+              issuer,certificate,certificaterequest,order,challenge \
+              -o wide || true
             kubectl -n stream2pretrain get events \
               --sort-by=.metadata.creationTimestamp | tail -n 160 || true
 
@@ -997,6 +1015,40 @@ jobs:
           while read -r workload; do
             kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
           done < <(kubectl -n stream2pretrain get deployment,statefulset -o name)
+
+          public_tls_secret="$(
+            kubectl -n stream2pretrain get ingress stream2pretrain-ui -o json \
+              | jq -r --arg host "$PUBLIC_SITE_HOST" '
+                  .spec.tls[]?
+                  | select(.hosts | index($host))
+                  | .secretName
+                ' \
+              | head -n 1
+          )"
+          if [[ -z "$public_tls_secret" ]]; then
+            echo "The public hostname has no dedicated TLS certificate mapping" >&2
+            report_deploy_failure
+            exit 1
+          fi
+          if ! kubectl -n stream2pretrain wait \
+            --for=condition=Ready "certificate/$public_tls_secret" --timeout=300s; then
+            report_deploy_failure
+            exit 1
+          fi
+          public_ready=false
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error --max-time 15 \
+              "https://$PUBLIC_SITE_HOST/api/health" >/dev/null; then
+              public_ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$public_ready" != true ]]; then
+            echo "The public website did not become healthy over HTTPS" >&2
+            report_deploy_failure
+            exit 1
+          fi
 
           # SourceFeed CRs are durable runtime configuration, not Helm-owned
           # templates. Reconcile the complete Phase-1 catalogue on every

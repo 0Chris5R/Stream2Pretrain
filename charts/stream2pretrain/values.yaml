@@ -705,6 +705,10 @@ ui:
     # uses its platform-managed default wildcard certificate. Rendering a TLS
     # item without a secret makes Traefik infer <ingress-name>-tls instead.
     tlsSecret: ""
+    # Optional dedicated certificate for aliases. This lets the canonical
+    # platform hostname continue using its wildcard certificate while
+    # cert-manager owns and renews a public custom-domain certificate.
+    aliasTlsSecret: ""
   env:
     duckdbCacheSeconds: 30
 

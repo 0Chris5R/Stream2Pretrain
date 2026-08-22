@@ -90,11 +90,12 @@ ui:
   ingress:
     enabled: true
     host: stream2pretrain-app.s241221-at-student-dhbw-mannheim-de.users.dhbw.site
-    aliases: []
+    aliases:
+      - stream2pretrain.theclusterflux.com
     ingressClassName: traefik
     clusterIssuer: ""
     acmeIssuer:
-      enabled: false
+      enabled: true
       name: letsencrypt-public
       server: https://acme-v02.api.letsencrypt.org/directory
       email: ""
@@ -102,6 +103,7 @@ ui:
     # hostname. The external Cloudflare alias must route to this origin before
     # a custom-domain certificate can be solved here.
     tlsSecret: ""
+    aliasTlsSecret: stream2pretrain-ui-alias-tls
 
 # DNS-based egress policies are not implementable by standard Kubernetes
 # NetworkPolicy. Keep policies disabled until concrete cluster CIDRs are
