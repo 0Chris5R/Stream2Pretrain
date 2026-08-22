@@ -74,8 +74,8 @@ class FoundryConfig:
     replay_fixture: str | None = None
     max_retries: int = 2
     timeout_seconds: float = 180.0
-    policy_version: str = "posttrain-policy-v2"
-    prompt_version: str = "paper-foundry-prompts-v2"
+    policy_version: str = "posttrain-policy-v3"
+    prompt_version: str = "paper-foundry-prompts-v3"
 
     @classmethod
     def from_env(cls) -> FoundryConfig:
