@@ -992,6 +992,29 @@ jobs:
           kubectl -n stream2pretrain annotate ingress stream2pretrain-ui \
             kubectl.kubernetes.io/last-applied-configuration- || true
 
+          # A single-replica StatefulSet cannot replace a crash-looping Pod
+          # during a wait-based Helm upgrade: the unhealthy old Pod keeps the
+          # rollout blocked until Helm times out. If Foundry is already down,
+          # remove only its Pod before the upgrade. Scaling the controller to
+          # zero preserves its PVC; Helm immediately restores the declared
+          # replica count using the new image and configuration.
+          foundry_ready="$(
+            kubectl -n stream2pretrain get pod stream2pretrain-foundry-0 \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' \
+              2>/dev/null || true
+          )"
+          if kubectl -n stream2pretrain get statefulset stream2pretrain-foundry \
+               >/dev/null 2>&1 \
+             && [[ "$foundry_ready" != "True" ]]; then
+            echo "Replacing unhealthy Foundry Pod while preserving its PVC."
+            kubectl -n stream2pretrain scale \
+              statefulset/stream2pretrain-foundry --replicas=0
+            kubectl -n stream2pretrain wait --for=delete \
+              pod/stream2pretrain-foundry-0 --timeout=180s \
+              || ! kubectl -n stream2pretrain get pod stream2pretrain-foundry-0 \
+                >/dev/null 2>&1
+          fi
+
           if ! helmfile \
             --helm-binary "$(command -v helm)" \
             --file helmfile.yaml \
