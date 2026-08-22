@@ -93,7 +93,8 @@ ui:
     aliases:
       - stream2pretrain.theclusterflux.com
     ingressClassName: traefik
-    tlsSecret: ""
+    clusterIssuer: dhbw-acme
+    tlsSecret: stream2pretrain-ui-tls
 
 # DNS-based egress policies are not implementable by standard Kubernetes
 # NetworkPolicy. Keep policies disabled until concrete cluster CIDRs are
@@ -106,8 +107,9 @@ gatekeeper:
   # application constraint in a separate phase after the baseline works.
   enabled: false
 
-# These images are not present in the current node image set. Enable each only
-# after its image is distributed and its smoke test passes.
+# CI publishes every source image to GHCR before Helm deploys this override.
+# Aggregate SourceFeed templates remain suspended where the controller owns the
+# schedules; independent source workers stay enabled and keep durable cursors.
 sources:
   arxiv:
     # The SourceFeed controller owns the per-feed RSS and OAI-PMH schedules.
@@ -129,9 +131,9 @@ ingest:
     tag: "0.2.0-619290f"
     maxRecordsPerLoop: 0
   hf:
-    replicas: 0
+    replicas: 1
   githubTarballFetcher:
-    enabled: false
+    enabled: true
 
 openreviewPoller:
-  enabled: false
+  enabled: true

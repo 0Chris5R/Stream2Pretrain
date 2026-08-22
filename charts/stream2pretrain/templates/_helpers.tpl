@@ -142,8 +142,6 @@ Iceberg + observability).
   value: {{ .Values.profile | quote }}
 - name: LOG_LEVEL
   value: "INFO"
-- name: S2P_STATE_ROOT
-  value: "/tmp/s2p-state"
 - name: REDPANDA_BROKERS
   value: {{ .Values.redpanda.bootstrapServers | quote }}
 - name: REDPANDA_SCHEMA_REGISTRY

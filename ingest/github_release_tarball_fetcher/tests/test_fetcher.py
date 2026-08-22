@@ -20,6 +20,8 @@ from ingest.github_release_tarball_fetcher.fetcher import (
     TarballMetrics,
     code_object_key,
     code_s3_uri,
+    fetch_repo_license,
+    fetch_tarball,
     parse_release_url,
     process_release,
 )
@@ -106,6 +108,34 @@ def test_default_allowed_licenses_contains_apache_and_mit() -> None:
     assert "MIT" in DEFAULT_ALLOWED_LICENSES
     # GPL is intentionally excluded.
     assert "GPL-3.0" not in DEFAULT_ALLOWED_LICENSES
+
+
+@pytest.mark.asyncio
+async def test_github_requests_fall_back_anonymously_after_stale_token() -> None:
+    ref = ReleaseRef("huggingface", "transformers", "v5.0.0")
+
+    def authenticated_handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "Bad credentials"})
+
+    def anonymous_handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/repos/huggingface/transformers"):
+            return httpx.Response(200, json={"license": {"spdx_id": "Apache-2.0"}})
+        if "/tarball/" in str(request.url):
+            return httpx.Response(200, content=b"public-tarball")
+        return httpx.Response(404)
+
+    authenticated = httpx.AsyncClient(transport=httpx.MockTransport(authenticated_handler))
+    anonymous = httpx.AsyncClient(transport=httpx.MockTransport(anonymous_handler))
+    try:
+        assert (
+            await fetch_repo_license(authenticated, ref, anonymous_client=anonymous) == "Apache-2.0"
+        )
+        assert (
+            await fetch_tarball(authenticated, ref, anonymous_client=anonymous) == b"public-tarball"
+        )
+    finally:
+        await authenticated.aclose()
+        await anonymous.aclose()
 
 
 @pytest.mark.asyncio

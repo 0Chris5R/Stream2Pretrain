@@ -32,6 +32,7 @@ import re
 import secrets
 import threading
 from collections.abc import Iterable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -201,7 +202,33 @@ def code_s3_uri(*, bucket: str, owner: str, repo: str, ref: str, path: str) -> s
     return f"s3://{bucket}/{code_object_key(owner=owner, repo=repo, ref=ref, path=path)}"
 
 
-async def fetch_repo_license(client: httpx.AsyncClient, ref: ReleaseRef) -> str | None:
+async def _get_with_anonymous_fallback(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    anonymous_client: httpx.AsyncClient | None = None,
+) -> httpx.Response:
+    """GET once with configured auth, then retry a rejected token anonymously.
+
+    GitHub returns 401 when an installed token has expired or been revoked. Public
+    repository metadata and tarballs remain available without credentials, so a
+    stale optional secret must reduce the rate budget rather than stop ingestion.
+    """
+    response = await client.get(url, headers=headers)
+    if response.status_code == 401 and anonymous_client is not None:
+        log.warning("tarball.auth_rejected_falling_back_anonymous", url=url)
+        await response.aclose()
+        return await anonymous_client.get(url, headers=headers)
+    return response
+
+
+async def fetch_repo_license(
+    client: httpx.AsyncClient,
+    ref: ReleaseRef,
+    *,
+    anonymous_client: httpx.AsyncClient | None = None,
+) -> str | None:
     """Return the SPDX id reported by the GitHub License API.
 
     Uses ``GET /repos/{owner}/{repo}`` (cheap, single request). ``None`` if
@@ -209,7 +236,12 @@ async def fetch_repo_license(client: httpx.AsyncClient, ref: ReleaseRef) -> str 
     """
     url = f"https://api.github.com/repos/{ref.owner}/{ref.repo}"
     try:
-        resp = await client.get(url, headers={"Accept": "application/vnd.github+json"})
+        resp = await _get_with_anonymous_fallback(
+            client,
+            url,
+            headers={"Accept": "application/vnd.github+json"},
+            anonymous_client=anonymous_client,
+        )
     except httpx.HTTPError as exc:
         log.warning("tarball.license_fetch_failed", repo=ref.full_name, err=str(exc))
         return None
@@ -226,12 +258,19 @@ async def fetch_repo_license(client: httpx.AsyncClient, ref: ReleaseRef) -> str 
     return spdx
 
 
-async def fetch_tarball(client: httpx.AsyncClient, ref: ReleaseRef) -> bytes | None:
+async def fetch_tarball(
+    client: httpx.AsyncClient,
+    ref: ReleaseRef,
+    *,
+    anonymous_client: httpx.AsyncClient | None = None,
+) -> bytes | None:
     """Download the release tarball; ``None`` on non-200."""
     try:
-        resp = await client.get(
+        resp = await _get_with_anonymous_fallback(
+            client,
             ref.tarball_url,
             headers={"Accept": "application/vnd.github+json"},
+            anonymous_client=anonymous_client,
         )
     except httpx.HTTPError as exc:
         log.warning("tarball.fetch_failed", repo=ref.full_name, tag=ref.tag, err=str(exc))
@@ -257,6 +296,7 @@ async def process_release(
     cfg: IngestConfig,
     fetcher_cfg: FetcherConfig,
     client: httpx.AsyncClient,
+    anonymous_client: httpx.AsyncClient | None = None,
     minio: MinioWriter,
     producer: BronzeProducerProtocol,
     bucket: TokenBucket,
@@ -271,7 +311,7 @@ async def process_release(
     the current UTC time is used as a safe fallback.
     """
     await bucket.acquire()
-    spdx = await fetch_repo_license(client, ref)
+    spdx = await fetch_repo_license(client, ref, anonymous_client=anonymous_client)
     admission = decide_license_admission(
         source_url=f"https://github.com/{ref.owner}/{ref.repo}/releases/tag/{ref.tag}",
         source_feed=SOURCE_FEED,
@@ -291,7 +331,7 @@ async def process_release(
         return 0
 
     await bucket.acquire()
-    tar_bytes = await fetch_tarball(client, ref)
+    tar_bytes = await fetch_tarball(client, ref, anonymous_client=anonymous_client)
     if tar_bytes is None:
         return 0
 
@@ -510,6 +550,7 @@ async def _consume_loop(
     *,
     consumer: AIOKafkaConsumer,
     client: httpx.AsyncClient,
+    anonymous_client: httpx.AsyncClient | None = None,
     producer: BronzeProducerProtocol,
     minio: MinioWriter,
     bucket: TokenBucket,
@@ -572,6 +613,7 @@ async def _consume_loop(
                 cfg=cfg,
                 fetcher_cfg=fetcher_cfg,
                 client=client,
+                anonymous_client=anonymous_client,
                 minio=minio,
                 producer=producer,
                 bucket=bucket,
@@ -632,26 +674,38 @@ async def run(
     stop_event = asyncio.Event()
     await consumer.start()
     try:
-        async with (
-            build_async_client(cfg, headers=headers) as client,
-            BronzeRecordProducer(cfg.redpanda_brokers, topic=cfg.raw_topic) as producer,
-            LicenseAdmissionProducer(
-                cfg.redpanda_brokers,
-                topic=cfg.license_admissions_topic,
-                client_id="s2p-gh-tarball-license-admission",
-            ) as admission_producer,
-            MinioWriter(
-                cfg.minio_endpoint,
-                cfg.minio_access_key,
-                cfg.minio_secret_key,
-                bucket=cfg.minio_bronze_bucket,
-            ) as minio,
-        ):
+        async with AsyncExitStack() as stack:
+            client = await stack.enter_async_context(build_async_client(cfg, headers=headers))
+            anonymous_client = None
+            if cfg.github_token:
+                anonymous_headers = build_headers(cfg, accept="application/vnd.github+json")
+                anonymous_client = await stack.enter_async_context(
+                    build_async_client(cfg, headers=anonymous_headers)
+                )
+            producer = await stack.enter_async_context(
+                BronzeRecordProducer(cfg.redpanda_brokers, topic=cfg.raw_topic)
+            )
+            admission_producer = await stack.enter_async_context(
+                LicenseAdmissionProducer(
+                    cfg.redpanda_brokers,
+                    topic=cfg.license_admissions_topic,
+                    client_id="s2p-gh-tarball-license-admission",
+                )
+            )
+            minio = await stack.enter_async_context(
+                MinioWriter(
+                    cfg.minio_endpoint,
+                    cfg.minio_access_key,
+                    cfg.minio_secret_key,
+                    bucket=cfg.minio_bronze_bucket,
+                )
+            )
             return await _consume_loop(
                 cfg,
                 fetcher_cfg,
                 consumer=consumer,
                 client=client,
+                anonymous_client=anonymous_client,
                 producer=producer,
                 minio=minio,
                 bucket=bucket,

@@ -40,6 +40,8 @@ spec:
             - models
             - --config
             - /etc/s2p/feeds/hf.json
+            - --poll-interval-seconds
+            - {{ .Values.sources.huggingface.models.pollIntervalSeconds | quote }}
           ports:
             - name: metrics
               containerPort: 9090
