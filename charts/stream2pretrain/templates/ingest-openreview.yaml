@@ -2,6 +2,7 @@
 {{- $component := "ingest-openreview-live" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $statePvc := default (printf "%s-%s-state" (include "stream2pretrain.fullname" .) $component) .Values.openreviewPoller.live.state.existingClaim }}
+{{- if not .Values.openreviewPoller.live.state.existingClaim }}
 ---
 # Cursor PVC: live.py persists ``seen_note_ids`` to FeedStateStore at
 # /var/lib/s2p-state/openreview_poller. An emptyDir would defeat
@@ -24,6 +25,7 @@ spec:
   resources:
     requests:
       storage: {{ .Values.openreviewPoller.live.state.size | quote }}
+{{- end }}
 ---
 apiVersion: batch/v1
 kind: CronJob
