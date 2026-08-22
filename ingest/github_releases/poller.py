@@ -14,8 +14,11 @@ Anonymous Atom requests are not subject to the GitHub REST 60 req/h floor
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -195,11 +198,30 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
     return total
 
 
+def _load_configured_repos(config_path: str | None) -> list[str]:
+    """Return the Helm-configured release set, falling back for local use."""
+    if not config_path:
+        return sorted(CURATED_REPOS)
+    payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    releases = payload.get("releases", {}) if isinstance(payload, dict) else {}
+    raw = releases.get("repos", []) if isinstance(releases, dict) else []
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or not all(isinstance(value, str) and value.count("/") == 1 for value in raw)
+    ):
+        raise ValueError("releases.repos must be a non-empty owner/repository string list")
+    return sorted(set(raw))
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Poll curated GitHub release feeds")
+    parser.add_argument("--config", default=None)
+    args = parser.parse_args()
     cfg = load_config()
     configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     init_tracer("ingest.github_releases", cfg)
-    repos = sorted(CURATED_REPOS)
+    repos = _load_configured_repos(args.config)
     log.info("github_releases.start", repos=len(repos))
     total = asyncio.run(run_pass(cfg, repos))
     log.info("github_releases.done", emitted=total)

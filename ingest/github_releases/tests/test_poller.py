@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -12,7 +13,7 @@ from ingest.common.http_client import build_async_client
 from ingest.common.rate_limit import TokenBucket
 from ingest.common.state import FeedStateStore
 from ingest.common.tests.conftest import FakeMinio, FakeProducer  # type: ignore[attr-defined]
-from ingest.github_releases.poller import poll_repo
+from ingest.github_releases.poller import _load_configured_repos, poll_repo
 
 ATOM_BODY = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -44,6 +45,28 @@ def _cfg() -> IngestConfig:
         http_timeout_seconds=2.0,
         http_max_retries=0,
     )
+
+
+def test_loads_complete_chart_owned_repository_set(tmp_path: Path) -> None:
+    path = tmp_path / "github.json"
+    path.write_text(
+        json.dumps(
+            {
+                "releases": {
+                    "repos": [
+                        "microsoft/onnxruntime",
+                        "pytorch/torchtitan",
+                        "microsoft/onnxruntime",
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _load_configured_repos(str(path)) == [
+        "microsoft/onnxruntime",
+        "pytorch/torchtitan",
+    ]
 
 
 @pytest.mark.asyncio
