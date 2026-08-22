@@ -24,12 +24,11 @@ from botocore.config import Config
 
 from processor import common
 from processor.iceberg_catalog import load_runtime_catalog
-from processor.iceberg_writer import (
-    DEFAULT_SNAPSHOT_RETENTION_HOURS,
-    _ensure_maintenance_properties,
-)
 
 _METADATA_FILE_RE = re.compile(r"(?:^|/)(\d+)-[^/]+\.metadata\.json$")
+DEFAULT_SNAPSHOT_RETENTION_HOURS = 168
+DEFAULT_METADATA_VERSIONS = 20
+DEFAULT_MIN_SNAPSHOTS_TO_KEEP = 10
 _DEFAULT_TABLES = (
     "curated",
     "curation_decisions",
@@ -46,6 +45,40 @@ class ObjectInfo:
     key: str
     size: int
     last_modified: datetime
+
+
+def _maintenance_properties() -> dict[str, str]:
+    retention_hours = int(
+        os.environ.get(
+            "S2P_ICEBERG_SNAPSHOT_RETENTION_HOURS",
+            DEFAULT_SNAPSHOT_RETENTION_HOURS,
+        )
+    )
+    metadata_versions = int(
+        os.environ.get("S2P_ICEBERG_METADATA_VERSIONS", DEFAULT_METADATA_VERSIONS)
+    )
+    minimum_snapshots = int(
+        os.environ.get("S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP", DEFAULT_MIN_SNAPSHOTS_TO_KEEP)
+    )
+    if min(retention_hours, metadata_versions, minimum_snapshots) < 1:
+        raise ValueError("Iceberg maintenance limits must be at least 1")
+    return {
+        "write.metadata.delete-after-commit.enabled": "true",
+        "write.metadata.previous-versions-max": str(metadata_versions),
+        "history.expire.max-snapshot-age-ms": str(retention_hours * 60 * 60 * 1000),
+        "history.expire.min-snapshots-to-keep": str(minimum_snapshots),
+    }
+
+
+def _ensure_maintenance_properties(table: Any) -> None:
+    current = getattr(table, "properties", {})
+    changed = {
+        key: value for key, value in _maintenance_properties().items() if current.get(key) != value
+    }
+    if not changed:
+        return
+    with table.transaction() as txn:
+        txn.set_properties(**changed)
 
 
 def _s3_location(value: str) -> tuple[str, str]:

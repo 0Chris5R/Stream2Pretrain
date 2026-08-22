@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy the release or collect read-only cluster diagnostics
+        description: Deploy, diagnose, inspect storage, or recover orphaned Iceberg metadata
         required: true
         default: deploy
         type: choice
@@ -15,6 +15,7 @@ on:
           - deploy
           - diagnose
           - inspect-storage
+          - recover-storage
 
 concurrency:
   group: stream2pretrain-production
@@ -320,6 +321,107 @@ jobs:
 
           kubectl --request-timeout=20s get nodes
 
+          if [[ "$DEPLOY_MODE" == "recover-storage" ]]; then
+            echo "::group::Pause storage writers"
+            kubectl -n stream2pretrain annotate scaledobject --all \
+              autoscaling.keda.sh/paused=true --overwrite || true
+            kubectl -n stream2pretrain scale \
+              deployment/stream2pretrain-processor-iceberg-writer \
+              --replicas=0
+            while read -r cronjob; do
+              [[ -n "$cronjob" ]] || continue
+              kubectl -n stream2pretrain patch "$cronjob" \
+                --type=merge -p '{"spec":{"suspend":true}}'
+            done < <(kubectl -n stream2pretrain get cronjob -o name)
+            echo "::endgroup::"
+
+            echo "::group::Start MinIO for API-level recovery"
+            kubectl -n minio patch deployment/minio --type=merge -p '
+              {"spec":{"template":{"spec":{
+                "priorityClassName":"system-node-critical",
+                "tolerations":[{
+                  "key":"node.kubernetes.io/disk-pressure",
+                  "operator":"Exists",
+                  "effect":"NoSchedule"
+                }]
+              }}}}'
+            kubectl -n minio rollout status deployment/minio --timeout=180s
+            minio_ready=false
+            for _ in $(seq 1 60); do
+              ready_addresses="$(
+                kubectl -n minio get endpointslice \
+                  -l kubernetes.io/service-name=minio -o json \
+                  | jq '[
+                      .items[].endpoints[]?
+                      | select(.conditions.ready != false)
+                      | .addresses[]?
+                    ] | length'
+              )"
+              if [[ "$ready_addresses" -gt 0 ]]; then
+                minio_ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [[ "$minio_ready" != true ]]; then
+              kubectl -n minio get deployment,pod,endpointslice -o wide
+              exit 1
+            fi
+            kubectl -n polaris rollout status deployment/polaris --timeout=180s
+            kubectl -n stream2pretrain rollout status \
+              deployment/stream2pretrain-duckdb --timeout=180s
+            echo "::endgroup::"
+
+            echo "::group::Restore the Polaris catalog and plan cleanup"
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- python - \
+              < scripts/bootstrap_polaris.py
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- python - \
+              < processor/iceberg_maintenance.py
+            echo "::endgroup::"
+
+            echo "::group::Apply bounded Iceberg cleanup"
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- \
+              python - --apply --register-missing \
+              < processor/iceberg_maintenance.py
+            echo "::endgroup::"
+
+            echo "::group::Wait for node pressure to clear"
+            for _ in $(seq 1 60); do
+              pressure="$(kubectl get node stream2pretrain-worker-2 \
+                -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}')"
+              [[ "$pressure" == "False" ]] && break
+              sleep 5
+            done
+            pressure="$(kubectl get node stream2pretrain-worker-2 \
+              -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}')"
+            if [[ "$pressure" != "False" ]]; then
+              kubectl describe node stream2pretrain-worker-2
+              exit 1
+            fi
+            kubectl get --raw \
+              /api/v1/nodes/stream2pretrain-worker-2/proxy/stats/summary \
+              | jq '{node: .node.nodeName, rootFs: .node.fs}'
+            echo "::endgroup::"
+
+            echo "::group::Remove recovery scheduling override"
+            kubectl -n minio patch deployment/minio --type=json -p '[
+              {"op":"remove","path":"/spec/template/spec/priorityClassName"},
+              {"op":"remove","path":"/spec/template/spec/tolerations"}
+            ]'
+            kubectl -n minio rollout status deployment/minio --timeout=180s
+            while read -r cronjob; do
+              [[ -n "$cronjob" ]] || continue
+              kubectl -n stream2pretrain patch "$cronjob" \
+                --type=merge -p '{"spec":{"suspend":false}}'
+            done < <(kubectl -n stream2pretrain get cronjob -o name)
+            echo "The writer remains paused until a normal deployment installs the fixed image."
+            echo "::endgroup::"
+            exit 0
+          fi
+
           if [[ "$DEPLOY_MODE" == "inspect-storage" ]]; then
             inspector=stream2pretrain-storage-inspector
             kubectl -n kube-system delete pod "$inspector" \
@@ -616,6 +718,9 @@ jobs:
             report_deploy_failure
             exit 1
           fi
+
+          kubectl -n stream2pretrain annotate scaledobject --all \
+            autoscaling.keda.sh/paused- || true
 
           while read -r workload; do
             kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
