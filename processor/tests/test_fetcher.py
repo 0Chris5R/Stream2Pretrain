@@ -32,8 +32,8 @@ class _FakeS3:
             def __init__(self, payload: bytes) -> None:
                 self._p = payload
 
-            def read(self) -> bytes:
-                return self._p
+            def read(self, amount: int | None = None) -> bytes:
+                return self._p if amount is None else self._p[:amount]
 
         headers = {"Body": _Body(self._payload)}
         if self._gzip:
@@ -58,6 +58,27 @@ def test_fetch_raw_bytes_decompresses_gzip(bronze_record: BronzeRecord) -> None:
     raw = fetch_raw_bytes(state, bronze_record)
     assert b"hello world" in raw
     assert s3.calls and s3.calls[0][0] == "bronze"
+
+
+def test_fetch_raw_bytes_rejects_oversized_stored_object(
+    bronze_record: BronzeRecord, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("S2P_MAX_RAW_OBJECT_BYTES", "16")
+    s3 = _FakeS3(b"x" * 64, gzip_encoded=False)
+    state = _state(s3)
+
+    assert fetch_raw_bytes(state, bronze_record) == b""
+
+
+def test_fetch_raw_bytes_rejects_oversized_gzip_expansion(
+    bronze_record: BronzeRecord, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("S2P_MAX_RAW_OBJECT_BYTES", "1024")
+    monkeypatch.setenv("S2P_MAX_EXPANDED_OBJECT_BYTES", "32")
+    s3 = _FakeS3(b"x" * 128)
+    state = _state(s3)
+
+    assert fetch_raw_bytes(state, bronze_record) == b""
 
 
 def test_normalize_returns_silver(bronze_record: BronzeRecord) -> None:

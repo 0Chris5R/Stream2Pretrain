@@ -18,6 +18,7 @@ last RocksDB checkpoint replays identical SilverRecords.
 from __future__ import annotations
 
 import gzip
+import io
 import os
 from dataclasses import dataclass
 from typing import Any, cast
@@ -104,17 +105,30 @@ def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
     bucket, _, key = rest.partition("/")
     if not bucket or not key:
         return b""
+    max_object_bytes = int(os.environ.get("S2P_MAX_RAW_OBJECT_BYTES", str(64 * 1024 * 1024)))
+    max_expanded_bytes = int(os.environ.get("S2P_MAX_EXPANDED_OBJECT_BYTES", str(64 * 1024 * 1024)))
+    if max_object_bytes <= 0 or max_expanded_bytes <= 0:
+        raise ValueError("raw object byte limits must be positive")
+    if bronze.bytes_size is not None and bronze.bytes_size > max_object_bytes:
+        return b""
     try:
         resp = state.s3.get_object(Bucket=bucket, Key=key)
-        body = cast(bytes, resp["Body"].read())
+        content_length = resp.get("ContentLength")
+        if isinstance(content_length, int) and content_length > max_object_bytes:
+            return b""
+        body = cast(bytes, resp["Body"].read(max_object_bytes + 1))
     except (BotoCoreError, ClientError):
+        return b""
+    if len(body) > max_object_bytes:
         return b""
     if uri.endswith(".gz") or resp.get("ContentEncoding") == "gzip":
         try:
-            return gzip.decompress(body)
-        except Exception:
+            with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
+                expanded = compressed.read(max_expanded_bytes + 1)
+            return expanded if len(expanded) <= max_expanded_bytes else b""
+        except (EOFError, OSError):
             return body
-    return body
+    return body if len(body) <= max_expanded_bytes else b""
 
 
 def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
@@ -418,8 +432,11 @@ def main() -> None:
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.fetcher")
     log.info("starting fetcher dataflow", brokers=cfg.redpanda_brokers, topic=cfg.raw_topic)
-    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     flow = build_dataflow(cfg)
+    # Do not publish readiness until heavyweight model and recovery-state
+    # initialization has succeeded. Otherwise Kubernetes can declare a rollout
+    # healthy in the short interval before an initialization OOM kills it.
+    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     common.run_bytewax_flow(flow, cfg, "fetcher")
 
 
