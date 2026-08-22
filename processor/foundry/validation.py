@@ -205,8 +205,22 @@ def _mutations(
     task: TaskSpec,
     spec: VerifierSpec,
 ) -> Iterable[FoundryAnswer]:
+    valid_wire = canonical_json(valid)
+    for mutation in _mutation_candidates(valid, task, spec):
+        # Compiler output and unusual manifests can otherwise create a no-op
+        # "mutation". Such a case measures nothing and can make a sound
+        # verifier look mutation-incomplete.
+        if canonical_json(mutation) != valid_wire:
+            yield mutation
+
+
+def _mutation_candidates(
+    valid: FoundryAnswer,
+    task: TaskSpec,
+    spec: VerifierSpec,
+) -> Iterable[FoundryAnswer]:
     manifest = valid.answer_manifest
-    required = set(task.hidden_targets.required_nodes)
+    required = sorted(set(task.hidden_targets.required_nodes))
     for node_id in required:
         yield valid.model_copy(
             update={
@@ -218,16 +232,22 @@ def _mutations(
                         ],
                         "faults": [value for value in manifest.faults if value != node_id],
                         "equations": [value for value in manifest.equations if value.id != node_id],
+                        "numeric_results": [
+                            value for value in manifest.numeric_results if value.id != node_id
+                        ],
                         "relations": [
                             value
                             for value in manifest.relations
                             if value.source != node_id and value.target != node_id
                         ],
+                        "qualifications": [
+                            value for value in manifest.qualifications if value != node_id
+                        ],
                     }
                 )
             }
         )
-    for fault_id in task.hidden_targets.required_faults:
+    for fault_id in sorted(set(task.hidden_targets.required_faults)):
         yield valid.model_copy(
             update={
                 "answer_manifest": manifest.model_copy(

@@ -1400,6 +1400,85 @@ def test_relation_only_required_nodes_produce_effective_mutations() -> None:
     assert suite_passes(report)
 
 
+def test_required_node_mutations_remove_every_structured_commitment() -> None:
+    bundle = _bundle()
+    graph = PaperEvidenceGraph(
+        graph_id="graph:structured-commitments",
+        paper_id=bundle.paper_id,
+        nodes=[
+            *_graph().nodes,
+            EvidenceNode(
+                id="qualification:1",
+                type="claim",
+                canonical_text="The result requires a qualification.",
+                supporting_spans=["section-1.span1"],
+            ),
+            EvidenceNode(
+                id="numeric:1",
+                type="metric",
+                canonical_text="The measured result is one.",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[],
+    )
+    task = _task().model_copy(
+        update={
+            "hidden_targets": HiddenTargets(
+                required_nodes=["qualification:1", "numeric:1"],
+            )
+        }
+    )
+    answer = _answer().model_copy(
+        update={
+            "answer_manifest": AnswerManifest(
+                qualifications=["qualification:1"],
+                numeric_results=[NumericResult(id="numeric:1", value=1.0)],
+            )
+        }
+    )
+    spec = normalize_spec(
+        VerifierSpec(
+            verifier_id="structured-commitments",
+            task_id=task.task_id,
+            version=1,
+            determinism_seed=1,
+            predicates=[
+                VerifierPredicate(
+                    id="nodes",
+                    type="required_nodes",
+                    targets=task.hidden_targets.required_nodes,
+                    weight=1.0,
+                )
+            ],
+        ),
+        task,
+        bundle,
+        graph,
+    )
+    report, _validated, cases = run_acceptance_suite(
+        task=task,
+        spec=spec,
+        bundle=bundle,
+        graph=graph,
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:structured-commitments",
+                task_id=task.task_id,
+                provider_trace_id="trace:structured-commitments",
+                answer=answer,
+                accepted=False,
+                reward=0.0,
+            )
+        ],
+    )
+
+    assert report.mutation_total == 2
+    assert report.mutation_killed == 2
+    assert len(cases["mutations"]) == 2
+    assert report.positive_pass
+
+
 def test_artifact_inspector_returns_the_exact_packaged_dataset(tmp_path: Path) -> None:
     bundle = _bundle()
     task = _task()
