@@ -29,6 +29,8 @@ runtime = [
     # Local SourceFeed execution imports the shared MinIO/Kafka writers.
     # Keep this explicit so processor-only installs are complete as well.
     "stream2pretrain-ingest-common",
+    # The in-cluster SourceFeed API invokes the RSS module directly.
+    "feedparser>=6.0.11",
     "bytewax>=0.21",
     "confluent-kafka>=2.5",
     "cramjam>=2.11",
