@@ -14,8 +14,10 @@ the budget is comfortable.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 
 from ingest.common.config import IngestConfig, load_config
@@ -268,7 +270,15 @@ async def poll_daily_papers(
     return emitted
 
 
-async def run_pass(cfg: IngestConfig) -> tuple[int, int]:
+async def run_pass(cfg: IngestConfig, *, mode: str = "all") -> tuple[int, int]:
+    """Run exactly the source selected by the Helm workload.
+
+    The models Deployment is long-lived, while daily papers are a CronJob.
+    Keeping selection here prevents either workload from silently polling the
+    other source (the old CLI accepted ``--mode`` but ignored it).
+    """
+    if mode not in {"all", "models", "daily-papers"}:
+        raise ValueError(f"unsupported Hugging Face poll mode: {mode}")
     async with (
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-hf-poller"
@@ -285,22 +295,54 @@ async def run_pass(cfg: IngestConfig) -> tuple[int, int]:
             bucket=cfg.minio_bronze_bucket,
         ) as minio,
     ):
-        models = await poll_models(
-            cfg, producer=producer, minio=minio, admission_producer=admission_producer
-        )
-        papers = await poll_daily_papers(
-            cfg, producer=producer, minio=minio, admission_producer=admission_producer
-        )
+        models = 0
+        papers = 0
+        if mode in {"all", "models"}:
+            models = await poll_models(
+                cfg, producer=producer, minio=minio, admission_producer=admission_producer
+            )
+        if mode in {"all", "daily-papers"}:
+            papers = await poll_daily_papers(
+                cfg, producer=producer, minio=minio, admission_producer=admission_producer
+            )
         return models, papers
 
 
+async def run_models_forever(cfg: IngestConfig, *, poll_interval_seconds: int) -> None:
+    """Continuously poll model metadata without turning success into CrashLoopBackOff."""
+    interval = max(60, poll_interval_seconds)
+    while True:
+        try:
+            models, _ = await run_pass(cfg, mode="models")
+            log.info("hf_poller.pass_done", mode="models", models=models)
+        except Exception as exc:
+            # A transient upstream/Kafka/MinIO failure must not terminate a
+            # continuously supervised Deployment. The next bounded pass retries.
+            log.exception("hf_poller.pass_failed", mode="models", err=str(exc))
+        await asyncio.sleep(interval)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Poll Hugging Face metadata")
+    parser.add_argument("--mode", choices=("all", "models", "daily-papers"), default="all")
+    # Retained for chart/CLI compatibility; feed configuration is supplied by
+    # validated Helm values and IngestConfig environment variables today.
+    parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--poll-interval-seconds",
+        type=int,
+        default=int(os.environ.get("S2P_HF_POLL_INTERVAL_SECONDS", "600")),
+    )
+    args = parser.parse_args()
     cfg = load_config()
     configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     init_tracer("ingest.hf_poller", cfg)
-    log.info("hf_poller.start")
+    log.info("hf_poller.start", mode=args.mode)
     start_probe_server()
-    models, papers = asyncio.run(run_pass(cfg))
+    if args.mode == "models":
+        asyncio.run(run_models_forever(cfg, poll_interval_seconds=args.poll_interval_seconds))
+        return
+    models, papers = asyncio.run(run_pass(cfg, mode=args.mode))
     log.info("hf_poller.done", models=models, papers=papers)
 
 

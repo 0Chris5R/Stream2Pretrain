@@ -121,3 +121,37 @@ async def test_poll_daily_papers_emits(monkeypatch: pytest.MonkeyPatch, tmp_path
         minio=fake_minio,  # type: ignore[arg-type]
     )
     assert emitted == 2
+
+
+@pytest.mark.asyncio
+async def test_models_deployment_repeats_only_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    passes: list[str] = []
+    sleeps: list[float] = []
+
+    async def fake_run_pass(_: IngestConfig, *, mode: str = "all") -> tuple[int, int]:
+        passes.append(mode)
+        return 1, 0
+
+    class StopLoopError(Exception):
+        pass
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 2:
+            raise StopLoopError
+
+    monkeypatch.setattr(hf_module, "run_pass", fake_run_pass)
+    monkeypatch.setattr(hf_module.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(StopLoopError):
+        await hf_module.run_models_forever(_cfg(), poll_interval_seconds=5)
+
+    # Intervals shorter than one minute are clamped to a polite upstream rate.
+    assert passes == ["models", "models"]
+    assert sleeps == [60, 60]
+
+
+@pytest.mark.asyncio
+async def test_run_pass_rejects_unknown_mode_before_opening_dependencies() -> None:
+    with pytest.raises(ValueError, match="unsupported Hugging Face poll mode"):
+        await hf_module.run_pass(_cfg(), mode="paperz")

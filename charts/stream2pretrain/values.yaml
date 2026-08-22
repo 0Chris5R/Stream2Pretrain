@@ -679,6 +679,9 @@ ui:
     # Their edge certificate/DNS remains owned by that external provider.
     aliases: []
     ingressClassName: traefik
+    # Optional cert-manager ClusterIssuer. Required when aliases are not
+    # covered by the platform's default wildcard certificate.
+    clusterIssuer: ""
     # Empty omits the Ingress TLS stanza so a TLS-enabled Traefik entrypoint
     # uses its platform-managed default wildcard certificate. Rendering a TLS
     # item without a secret makes Traefik infer <ingress-name>-tls instead.

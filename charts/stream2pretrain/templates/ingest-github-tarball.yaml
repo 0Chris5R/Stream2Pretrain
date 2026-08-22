@@ -50,6 +50,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.sources.github.releases.tokenSecret | quote }}
                   key: {{ .Values.sources.github.releases.tokenSecretKey | quote }}
+                  optional: true
             - name: S2P_TARBALL_ALLOWED_EXTENSIONS
               value: {{ join "," .Values.ingest.githubTarballFetcher.allowedExtensions | quote }}
             - name: S2P_TARBALL_MAX_FILE_SIZE_BYTES
