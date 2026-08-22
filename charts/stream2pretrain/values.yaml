@@ -682,6 +682,13 @@ ui:
     # Optional cert-manager ClusterIssuer. Required when aliases are not
     # covered by the platform's default wildcard certificate.
     clusterIssuer: ""
+    # Namespace-scoped public ACME issuer for a custom hostname outside the
+    # platform DNS zone. HTTP-01 keeps ownership and renewal in Kubernetes.
+    acmeIssuer:
+      enabled: false
+      name: letsencrypt-public
+      server: https://acme-v02.api.letsencrypt.org/directory
+      email: ""
     # Empty omits the Ingress TLS stanza so a TLS-enabled Traefik entrypoint
     # uses its platform-managed default wildcard certificate. Rendering a TLS
     # item without a secret makes Traefik infer <ingress-name>-tls instead.

@@ -34,6 +34,7 @@ RUN groupadd --system --gid 65532 nonroot \
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/s2p-oaipmh-poller /usr/local/bin/s2p-oaipmh-poller
 COPY --from=builder /src /app
+ENV PYTHONPATH=/app
 WORKDIR /app
 USER nonroot
 ENTRYPOINT ["s2p-oaipmh-poller"]
