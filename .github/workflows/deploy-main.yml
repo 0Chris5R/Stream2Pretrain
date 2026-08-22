@@ -160,7 +160,7 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=${{ matrix.image == 'processor' && 'min' || 'max' }},scope=${{ matrix.image }}
 
   deploy:
     name: Deploy application release
