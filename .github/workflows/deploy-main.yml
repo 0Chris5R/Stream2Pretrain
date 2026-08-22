@@ -5,6 +5,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Deploy the release or collect read-only cluster diagnostics
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - diagnose
 
 concurrency:
   group: stream2pretrain-production
@@ -73,7 +82,6 @@ jobs:
 
   build:
     name: Build ${{ matrix.image }}
-    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -150,7 +158,9 @@ jobs:
 
   deploy:
     name: Deploy application release
-    needs: build
+    needs:
+      - validate
+      - build
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -164,6 +174,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -302,6 +313,29 @@ jobs:
 
           kubectl --request-timeout=20s get nodes
 
+          if [[ "$DEPLOY_MODE" == "diagnose" ]]; then
+            echo "::group::Read-only cluster diagnostics"
+            for namespace in minio polaris traefik stream2pretrain; do
+              echo "::group::Namespace: $namespace"
+              kubectl -n "$namespace" get \
+                deployment,statefulset,pod,service,ingress,endpoints,endpointslice,pvc \
+                -o wide || true
+              kubectl -n "$namespace" get events \
+                --sort-by=.metadata.creationTimestamp | tail -n 160 || true
+
+              while read -r pod; do
+                [[ -n "$pod" ]] || continue
+                echo "::group::Recent logs: $namespace/$pod"
+                kubectl -n "$namespace" logs "$pod" \
+                  --all-containers --prefix --tail=160 || true
+                echo "::endgroup::"
+              done < <(kubectl -n "$namespace" get pods -o name 2>/dev/null || true)
+              echo "::endgroup::"
+            done
+            echo "::endgroup::"
+            exit 0
+          fi
+
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           registry="ghcr.io/${owner}"
 
@@ -309,9 +343,21 @@ jobs:
 
           report_deploy_failure() {
             echo "::group::Kubernetes deployment diagnostics"
-            kubectl -n stream2pretrain get deployment,statefulset,pod -o wide || true
+            kubectl -n stream2pretrain get \
+              deployment,statefulset,pod,service,ingress,endpoints,endpointslice \
+              -o wide || true
             kubectl -n stream2pretrain get events \
               --sort-by=.metadata.creationTimestamp | tail -n 160 || true
+
+            for namespace in minio polaris traefik; do
+              echo "::group::Dependency namespace: $namespace"
+              kubectl -n "$namespace" get \
+                deployment,statefulset,pod,service,endpoints,endpointslice,pvc \
+                -o wide || true
+              kubectl -n "$namespace" get events \
+                --sort-by=.metadata.creationTimestamp | tail -n 80 || true
+              echo "::endgroup::"
+            done
 
             while read -r pod; do
               [[ -n "$pod" ]] || continue
@@ -345,6 +391,21 @@ jobs:
             )
             echo "::endgroup::"
           }
+
+          minio_ready_addresses="$(
+            kubectl -n minio get endpointslice \
+              -l kubernetes.io/service-name=minio -o json \
+              | jq '[
+                  .items[].endpoints[]?
+                  | select(.conditions.ready != false)
+                  | .addresses[]?
+                ] | length'
+          )"
+          if [[ "$minio_ready_addresses" -eq 0 ]]; then
+            echo "MinIO has no Ready service endpoints; refusing to roll application workloads." >&2
+            report_deploy_failure
+            exit 1
+          fi
 
           helm_overrides=(
             --set "image.registry=${registry}"
