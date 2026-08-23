@@ -1496,10 +1496,11 @@ jobs:
                 '
           )"
           if [[ -n "$unschedulable_pods" ]]; then
-            echo "The existing release has unschedulable Pods:" >&2
+            echo "Existing unschedulable Pods will be reconciled by this release:" >&2
             printf '%s\n' "$unschedulable_pods" >&2
-            report_deploy_failure
-            exit 1
+            # Do not reject a repair release because the previous Pod template
+            # is unschedulable. Node health and free-space checks below prevent
+            # unsafe expansion; Helm's bounded wait verifies the replacement.
           fi
 
           worker_nodes="$(
