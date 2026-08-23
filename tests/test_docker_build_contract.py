@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -63,6 +65,7 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert "processor-base-embedding" in workflow
     assert "processor-base-kenlm" in workflow
     assert "processor-base-fetcher" in workflow
+    assert "extra: fetcher-service" in workflow
     assert "processor-quality-model" in workflow
     assert "processor-embedding-model" in workflow
     assert "processor-kenlm-model" in workflow
@@ -90,6 +93,40 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert "from docling.document_converter import DocumentConverter" in dockerfile
     assert "hasattr(torch.ops.torchvision, 'nms')" in dockerfile
     assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 2
+
+
+def test_fetcher_image_has_an_isolated_application_and_dependency_profile() -> None:
+    processor_project = (ROOT / "processor" / "pyproject.toml").read_text(encoding="utf-8")
+    fetcher_app = (ROOT / "processor" / "Dockerfile.fetcher.app").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+
+    assert "fetcher-service = [" in processor_project
+    assert '"docling==2.114.0"' in processor_project
+    assert "processor/Dockerfile.fetcher.app" in workflow
+    assert "processor-fetcher-model\n            context: .\n            dockerfile: processor/Dockerfile.fetcher.app" in workflow
+    assert "from processor.fetcher import main" in fetcher_app
+    assert "processor/curate.py" not in fetcher_app
+    assert "processor/iceberg_writer.py" not in fetcher_app
+
+
+def test_ingest_common_facade_does_not_eagerly_import_poller_dependencies() -> None:
+    facade = (ROOT / "ingest" / "common" / "__init__.py").read_text(encoding="utf-8")
+
+    assert "def __getattr__" in facade
+    assert "from ingest.common.kafka_producer import BronzeProducer" not in facade
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import ingest.common.license_admission; "
+            "assert 'ingest.common.kafka_producer' not in sys.modules; "
+            "assert 'kubernetes' not in sys.modules",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 def test_curator_startup_probe_guards_slow_model_initialization() -> None:
