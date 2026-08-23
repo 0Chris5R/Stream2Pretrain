@@ -215,6 +215,7 @@ def _maintain_table(
     register_missing: bool,
     snapshot_cutoff: datetime,
     metadata_cutoff: datetime,
+    register_only: bool = False,
 ) -> dict[str, Any]:
     table, error = _load_or_register_table(
         catalog,
@@ -226,6 +227,13 @@ def _maintain_table(
     )
     if table is None:
         return {"table": f"{namespace}.{table_name}", "status": "missing", "reason": error}
+
+    if register_only:
+        return {
+            "table": f"{namespace}.{table_name}",
+            "status": "reconciled",
+            "current_metadata": str(table.metadata_location),
+        }
 
     snapshots_before = len(table.metadata.snapshots)
     if apply:
@@ -271,6 +279,11 @@ def _parser() -> argparse.ArgumentParser:
         help="register the latest on-disk metadata when the catalog lost a table",
     )
     parser.add_argument(
+        "--register-only",
+        action="store_true",
+        help="restore missing catalog entries without expiring snapshots or deleting metadata",
+    )
+    parser.add_argument(
         "--snapshot-retention-hours",
         type=int,
         default=int(
@@ -296,6 +309,8 @@ def main() -> None:
         raise SystemExit("retention and minimum age values must be at least one hour")
     if args.register_missing and not args.apply:
         raise SystemExit("--register-missing changes the catalog and requires --apply")
+    if args.register_only and not args.register_missing:
+        raise SystemExit("--register-only requires --register-missing")
     cfg = common.load_config()
     catalog = load_runtime_catalog(cfg)
     s3 = boto3.client(
@@ -321,6 +336,7 @@ def main() -> None:
             bucket=bucket,
             apply=bool(args.apply),
             register_missing=bool(args.register_missing),
+            register_only=bool(args.register_only),
             snapshot_cutoff=now - timedelta(hours=args.snapshot_retention_hours),
             metadata_cutoff=now - timedelta(hours=args.metadata_minimum_age_hours),
         )
@@ -330,6 +346,7 @@ def main() -> None:
         json.dumps(
             {
                 "mode": "apply" if args.apply else "dry-run",
+                "register_only": bool(args.register_only),
                 "snapshot_retention_hours": args.snapshot_retention_hours,
                 "metadata_minimum_age_hours": args.metadata_minimum_age_hours,
                 "tables": results,

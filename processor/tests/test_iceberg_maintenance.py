@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
-from processor.iceberg_maintenance import ObjectInfo, _cleanup_candidates, _s3_location
+from processor import iceberg_maintenance
+from processor.iceberg_maintenance import (
+    ObjectInfo,
+    _cleanup_candidates,
+    _maintain_table,
+    _s3_location,
+)
 
 
 def test_cleanup_candidates_exclude_current_and_recent_metadata() -> None:
@@ -30,3 +37,31 @@ def test_s3_location_rejects_non_object_storage_paths() -> None:
         "gold",
         "warehouse/gold/curated",
     )
+
+
+def test_register_only_never_runs_snapshot_or_metadata_cleanup(monkeypatch) -> None:
+    table = SimpleNamespace(metadata_location="s3://gold/warehouse/gold/curated/metadata/v1.json")
+    monkeypatch.setattr(
+        iceberg_maintenance,
+        "_load_or_register_table",
+        lambda *args, **kwargs: (table, None),
+    )
+
+    result = _maintain_table(
+        object(),
+        object(),
+        namespace="gold",
+        table_name="curated",
+        bucket="gold",
+        apply=True,
+        register_missing=True,
+        register_only=True,
+        snapshot_cutoff=datetime(2026, 8, 22, tzinfo=UTC),
+        metadata_cutoff=datetime(2026, 8, 22, tzinfo=UTC),
+    )
+
+    assert result == {
+        "table": "gold.curated",
+        "status": "reconciled",
+        "current_metadata": table.metadata_location,
+    }
