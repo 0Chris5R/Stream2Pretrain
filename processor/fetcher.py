@@ -34,6 +34,8 @@ import boto3
 import orjson
 from botocore.exceptions import BotoCoreError, ClientError
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer, TopicPartition
+from defusedxml import ElementTree as DefusedElementTree
+from defusedxml.common import DefusedXmlException
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
@@ -150,12 +152,28 @@ def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
 
 
 def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
-    """Project JSON metadata/review payloads into deterministic plain text."""
+    """Project JSON or XML metadata/review payloads into deterministic plain text."""
     try:
         value = orjson.loads(payload)
     except orjson.JSONDecodeError:
-        text = payload.decode("utf-8", errors="replace").strip()
-        return text, None
+        try:
+            root = DefusedElementTree.fromstring(payload)
+        except (DefusedElementTree.ParseError, DefusedXmlException, ValueError):
+            text = payload.decode("utf-8", errors="replace").strip()
+            return text, None
+
+        title: str | None = None
+        strings: list[str] = []
+        for element in root.iter():
+            local_name = str(element.tag).rsplit("}", 1)[-1].lower()
+            value = " ".join(part.strip() for part in element.itertext() if part.strip())
+            if not value:
+                continue
+            if title is None and local_name == "title":
+                title = value
+            if len(element) == 0 and not value.startswith(("http://", "https://")):
+                strings.append(value)
+        return "\n".join(dict.fromkeys(strings)).strip(), title
 
     title: str | None = None
     if isinstance(value, dict):
