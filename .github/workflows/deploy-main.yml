@@ -776,19 +776,37 @@ jobs:
           kubectl --request-timeout=20s get nodes
 
           if [[ "$DEPLOY_MODE" == "repair-monitoring" ]]; then
-            helmfile \
+            monitoring_diagnostics() {
+              kubectl -n monitoring get deployment,statefulset,pod,service,endpoints \
+                -o wide >&2 || true
+              kubectl -n monitoring get events \
+                --sort-by=.metadata.creationTimestamp >&2 || true
+              kubectl -n monitoring describe pod/prometheus-kps-prometheus-0 >&2 || true
+              kubectl -n monitoring logs prometheus-kps-prometheus-0 \
+                -c prometheus --tail=200 >&2 || true
+              kubectl -n monitoring logs prometheus-kps-prometheus-0 \
+                -c prometheus --previous --tail=200 >&2 || true
+              kubectl top pods -A --containers >&2 || true
+            }
+            if ! helmfile \
               --helm-binary "$(command -v helm)" \
               --file helmfile.yaml \
               --environment dev \
               --selector name=kube-prometheus-stack \
               apply \
               --reset-values \
-              --wait \
+              --wait=false \
               --timeout 600 \
-              --suppress-secrets
-            kubectl -n monitoring wait \
+              --suppress-secrets; then
+              monitoring_diagnostics
+              exit 1
+            fi
+            if ! kubectl -n monitoring wait \
               --for=condition=Ready pod/prometheus-kps-prometheus-0 \
-              --timeout=600s
+              --timeout=600s; then
+              monitoring_diagnostics
+              exit 1
+            fi
             kubectl -n monitoring port-forward \
               service/kps-prometheus 19090:9090 \
               >"$RUNNER_TEMP/prometheus-port-forward.log" 2>&1 &
@@ -804,9 +822,7 @@ jobs:
               fi
               sleep 2
             done
-            kubectl -n monitoring get pod/prometheus-kps-prometheus-0 -o wide
-            kubectl -n monitoring logs prometheus-kps-prometheus-0 \
-              -c prometheus --tail=160 || true
+            monitoring_diagnostics
             exit 1
           fi
 
