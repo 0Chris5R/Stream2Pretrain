@@ -53,6 +53,7 @@ RejectReason = Literal[
     "decontamination_hit",
     "validity_interval_invalid",
     "minhash_backend_mismatch",
+    "insufficient_body",
     "insufficient_scientific_body",
 ]
 

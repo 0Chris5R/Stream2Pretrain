@@ -50,6 +50,13 @@ from processor.scientific import ScientificProcessingResult, ScientificProcessor
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
+_SCIENTIFIC_SOURCE_MARKERS = (
+    "arxiv",
+    "openreview",
+    "pes2o",
+    "redpajama-arxiv",
+)
+
 
 @dataclass(slots=True)
 class FetcherState:
@@ -184,6 +191,20 @@ def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
     return text, title
 
 
+def uses_scientific_extraction(bronze: BronzeRecord) -> bool:
+    """Return whether an HTML record belongs to a scientific-document source.
+
+    General blogs and crawled web pages must stay on Resiliparse/FineWeb. The
+    presence of an HTML wire format alone does not make a page a paper.
+    """
+    if bronze.source_format in {"pdf", "latex"}:
+        return True
+    if bronze.source_format != "html":
+        return False
+    identity = f"{bronze.source_feed} {bronze.extraction_pipeline}".lower()
+    return any(marker in identity for marker in _SCIENTIFIC_SOURCE_MARKERS)
+
+
 def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> SilverRecord | None:
     """Turn one (BronzeRecord + raw bytes) into a SilverRecord."""
     scientific_result: ScientificProcessingResult | None = None
@@ -249,7 +270,7 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         equation_count = len(scientific_result.document.equations)
         citation_count = len(scientific_result.document.citations)
         extraction_warnings = list(scientific_result.document.warnings)
-    elif bronze.source_format == "html" and state.scientific is not None:
+    elif uses_scientific_extraction(bronze) and state.scientific is not None:
         scientific_result = state.scientific.process(
             doc_id=bronze.doc_id,
             source_url=str(bronze.url),

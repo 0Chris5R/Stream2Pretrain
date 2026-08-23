@@ -9,8 +9,9 @@ End-to-end source-aware curation. The dataflow:
    stub values; curation owns the real signals.
 5. Recomputes the MinHash signature (cheap, ~us/doc) and tests the
    :class:`LSHBloomIndex` near-dup index.
-6. Runs FinePDFs Edu v2 for scientific text, FineWeb-Edu for web text, or the
-   versioned code-quality policy for source files.
+6. Dispatches by source family: FinePDFs Edu v2 for papers, FineWeb-Edu for
+   rendered web pages, and versioned transparent rules for code, peer reviews,
+   and structured API/OAI metadata.
 7. Runs the PII regex pack plus Presidio.
 8. Runs the Decon-Gate (n-gram Bloom + E5-small-v2 embedding sketch).
 9. Emits a trainable :class:`GoldRecord` on ``docs.curated``.
@@ -28,7 +29,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
@@ -46,6 +47,10 @@ from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiScanner
 from processor.operators.quality import QualityClassifier
+from processor.operators.source_quality import (
+    MetadataQualityPolicy,
+    PeerReviewQualityPolicy,
+)
 from processor.probes import start_probe_server
 from processor.scientific_policy import (
     RouteDecision,
@@ -76,6 +81,8 @@ class CurateState:
     finepdfs_quality: QualityClassifier
     fineweb_quality: QualityClassifier
     code_quality: CodeQualityPolicy
+    metadata_quality: MetadataQualityPolicy
+    review_quality: PeerReviewQualityPolicy
     pii: PiiScanner
     decon: DeconGate
     tokenizer: Tokenizer
@@ -140,6 +147,8 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         finepdfs_quality=finepdfs_quality,
         fineweb_quality=fineweb_quality,
         code_quality=CodeQualityPolicy(),
+        metadata_quality=MetadataQualityPolicy(),
+        review_quality=PeerReviewQualityPolicy(),
         pii=pii,
         decon=decon,
         tokenizer=Tokenizer(allow_fallback=not require_real_models),
@@ -157,6 +166,8 @@ def _decision_cache_key(state: CurateState, payload: bytes) -> str:
             state.scoring_version,
             state.finepdfs_quality.revision,
             state.fineweb_quality.revision,
+            state.metadata_quality.revision,
+            state.review_quality.revision,
             state.kenlm.scorer,
             state.pii.revision,
             state.decon.benchmark_set_version,
@@ -193,15 +204,21 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             word_count=len((silver.model_text or silver.text).split()),
         )
     ]
-    is_scientific = _uses_scientific_quality_profile(silver)
-    is_code = silver.source_format == "code"
-    primary_quality = (
-        state.code_quality
-        if is_code
-        else state.finepdfs_quality
-        if is_scientific
-        else state.fineweb_quality
-    )
+    quality_profile = _quality_profile(silver)
+    is_scientific = quality_profile == "scientific"
+    is_code = quality_profile == "code"
+    is_metadata = quality_profile == "metadata"
+    is_web = quality_profile == "web"
+    if is_code:
+        primary_quality = state.code_quality
+    elif is_scientific:
+        primary_quality = state.finepdfs_quality
+    elif quality_profile == "review":
+        primary_quality = state.review_quality
+    elif is_metadata:
+        primary_quality = state.metadata_quality
+    else:
+        primary_quality = state.fineweb_quality
     comparison_quality = state.fineweb_quality if is_scientific else None
     max_scored_segments = max(1, int(os.environ.get("S2P_MAX_SCORED_SEGMENTS", "10")))
     sampled_ids = {
@@ -252,7 +269,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             comparison_result = (
                 comparison_quality.score(segment.text) if comparison_quality is not None else None
             )
-            perplexity_result = None if is_code else state.kenlm.score(segment.text)
+            perplexity_result = None if is_code or is_metadata else state.kenlm.score(segment.text)
             edu_score = quality_result.edu_score
             quality_classifier_revision = quality_result.revision
             if is_scientific:
@@ -263,7 +280,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
                 comparison_classifier_revision = (
                     comparison_result.revision if comparison_result is not None else None
                 )
-            elif not is_code:
+            elif is_web:
                 fineweb_edu_score = quality_result.edu_score
             segment_perplexity = (
                 perplexity_result.perplexity if perplexity_result is not None else None
@@ -319,7 +336,9 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             if comparison_quality is not None
             else None
         )
-        perplexity_result = None if is_code else state.kenlm.score(fallback_segment.text)
+        perplexity_result = (
+            None if is_code or is_metadata else state.kenlm.score(fallback_segment.text)
+        )
         segment_scores = [
             score.model_copy(
                 update={
@@ -329,7 +348,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
                         comparison_result.edu_score
                         if comparison_result is not None
                         else None
-                        if is_code
+                        if not is_web
                         else quality_result.edu_score
                     ),
                     "quality_classifier_revision": quality_result.revision,
@@ -357,16 +376,20 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     runtime_excluded.extend(structured_exclusions)
     text = _training_projection(silver, kept_segments, structured_text=structured_text)
     reject: list[RejectReason] = []
-    if len(model_text.split()) < (20 if is_code else 50):
-        reject.append("insufficient_scientific_body")
+    minimum_words = 20 if is_code else 12 if is_metadata else 50
+    if len(model_text.split()) < minimum_words:
+        reject.append("insufficient_scientific_body" if is_scientific else "insufficient_body")
     if removed_body_pii and not kept_segments:
         reject.append("pii_detected")
     if removed_for_c4 and not kept_segments:
         reject.append("c4_nopunc_filter")
 
     gopher_stats = state.gopher.stats(model_text)
-    gopher_pass = True if is_code else state.gopher.passes(model_text)
-    if not gopher_pass and "insufficient_scientific_body" not in reject:
+    gopher_pass = True if is_code or is_metadata else state.gopher.passes(model_text)
+    if not gopher_pass and not {
+        "insufficient_body",
+        "insufficient_scientific_body",
+    }.intersection(reject):
         reject.append("gopher_filter")
     cstats = state.c4.stats(model_text)
     c4_pass = (
@@ -374,7 +397,10 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         and cstats.lorem_ipsum_pass
         and (cstats.curly_brace_pass or is_scientific or is_code)
     )
-    if not c4_pass and "insufficient_scientific_body" not in reject:
+    if not c4_pass and not {
+        "insufficient_body",
+        "insufficient_scientific_body",
+    }.intersection(reject):
         reject.append("c4_nopunc_filter")
 
     edu_score, perplexity, perplexity_bucket = aggregate_segment_scores(segment_scores)
@@ -388,7 +414,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         if measured_buckets
         else 1.0
     )
-    if not is_code and tail_fraction >= 0.75 and perplexity > 2000:
+    if not is_code and not is_metadata and tail_fraction >= 0.75 and perplexity > 2000:
         reject.append("high_perplexity")
 
     retained_view = silver.model_copy(
@@ -638,12 +664,29 @@ def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
 
 def _uses_scientific_quality_profile(silver: SilverRecord) -> bool:
     """Select the PDF-trained classifier only for scientific-source records."""
-    if silver.scientific_artifact_s3_uri:
+    if silver.source_format in {"code", "metadata", "review", "web"}:
+        return False
+    if silver.source_format in {"pdf", "latex"}:
         return True
-    feed = silver.source_feed.lower()
-    return silver.source_format in {"pdf", "latex"} or any(
-        marker in feed for marker in ("arxiv", "openreview", "pes2o")
+    identity = f"{silver.source_feed} {silver.extraction_pipeline}".lower()
+    return silver.source_format == "html" and any(
+        marker in identity for marker in ("arxiv", "openreview", "pes2o", "redpajama-arxiv")
     )
+
+
+def _quality_profile(
+    silver: SilverRecord,
+) -> Literal["code", "metadata", "review", "scientific", "web"]:
+    """Choose a classifier whose training domain matches the source family."""
+    if silver.source_format == "code":
+        return "code"
+    if silver.source_format == "metadata":
+        return "metadata"
+    if silver.source_format == "review":
+        return "review"
+    if _uses_scientific_quality_profile(silver):
+        return "scientific"
+    return "web"
 
 
 def is_trainable_gold(record: GoldRecord) -> bool:

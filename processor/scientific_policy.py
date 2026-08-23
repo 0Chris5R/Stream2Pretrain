@@ -169,7 +169,14 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
 
 def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificScores:
     """Dispatch structural/evidence signals without applying paper assumptions universally."""
-    if silver.source_format in {"pdf", "latex"} or silver.scientific_artifact_s3_uri:
+    identity = f"{silver.source_feed} {silver.extraction_pipeline}".lower()
+    is_scientific = silver.source_format in {"pdf", "latex"} or (
+        silver.source_format == "html"
+        and any(
+            marker in identity for marker in ("arxiv", "openreview", "pes2o", "redpajama-arxiv")
+        )
+    )
+    if is_scientific:
         return scientific_scores(silver, edu_score=quality_score)
     word_count = len((silver.model_text or silver.text).split())
     completeness = min(
@@ -192,13 +199,52 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         )
         tags = ["systems_implementation", "methods_procedures"]
         return ScientificScores(completeness, structural, reasoning, 0.0, tags)
+    if silver.source_format == "review":
+        text = (silver.model_text or silver.text).lower()
+        critique = any(
+            marker in text
+            for marker in (
+                "strength",
+                "weakness",
+                "concern",
+                "limitation",
+                "reproduc",
+            )
+        )
+        reasoning_marker = any(
+            marker in text for marker in ("because", "however", "therefore", "whereas")
+        )
+        reasoning = min(
+            1.0,
+            0.25
+            + 0.20 * float(critique)
+            + 0.15 * float(reasoning_marker)
+            + 0.20 * (quality_score / 5.0)
+            + 0.10 * completeness,
+        )
+        return ScientificScores(
+            completeness,
+            structural,
+            reasoning,
+            0.0,
+            ["peer_review", "critique_and_feedback"],
+        )
+    if silver.source_format == "metadata":
+        reasoning = min(0.25, 0.05 + 0.10 * (quality_score / 5.0) + 0.10 * completeness)
+        return ScientificScores(
+            completeness,
+            structural,
+            reasoning,
+            0.0,
+            ["structured_metadata"],
+        )
     reasoning = min(0.45, 0.10 + 0.15 * (quality_score / 5.0) + 0.20 * completeness)
     return ScientificScores(
         completeness,
         structural,
         reasoning,
         0.0,
-        ["general_scientific"],
+        ["educational_web"],
     )
 
 

@@ -82,11 +82,13 @@ A Python streaming dataflow with the Rust core. The pipeline is wired in
 5. `minhash` - 112-perm signature using Rensa.
 6. `lshbloom` - band-partitioned Bloom near-dup index (RocksDB-checkpointed).
 7. `quality_classifier` - source-aware CPU inference: pinned FinePDFs Edu v2
-   for scientific HTML/PDF, pinned FineWeb-Edu for general web content, and
-   transparent code-quality rules for source files. Scientific segments also
-   retain FineWeb-Edu as a comparison signal during calibration.
-8. `kenlm_perplexity` - mmap'd binary KenLM model for prose segments; code
-   bypasses this prose-specific signal.
+   for scientific HTML/PDF, pinned FineWeb-Edu for rendered web pages, and
+   transparent versioned rules for code, peer reviews, and structured API/OAI
+   metadata. This avoids reporting out-of-domain web/PDF model scores for JSON
+   values or review forms. Scientific segments retain FineWeb-Edu only as a
+   labelled comparison signal during calibration.
+8. `kenlm_perplexity` - mmap'd binary KenLM model for natural-language prose;
+   code and structured metadata bypass this prose-specific signal.
 9. `pii_regex` - email / phone / SSN / credit-card / IP scan.
 10. `decon_gate` - 13-gram Bloom + E5 embedding sketch plus signed attestation API.
 11. `validity_interval_enricher` - populates `[valid_from, valid_to)` from
