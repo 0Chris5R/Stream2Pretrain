@@ -1415,6 +1415,11 @@ jobs:
 
           if [[ "$DEPLOY_MODE" == "diagnose" ]]; then
             echo "::group::Read-only cluster diagnostics"
+            echo "::group::Helm release state"
+            helm list --all --all-namespaces || true
+            helm history stream2pretrain -n stream2pretrain || true
+            helm status stream2pretrain -n stream2pretrain --show-desc || true
+            echo "::endgroup::"
             kubectl get nodes -o json | jq -r '
               .items[]
               | {
