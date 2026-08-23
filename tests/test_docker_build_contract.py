@@ -21,6 +21,7 @@ LOCAL_PACKAGE_PATHS = {
 def test_processor_ci_image_uses_an_immutable_dependency_base() -> None:
     full = (ROOT / "processor" / "Dockerfile").read_text(encoding="utf-8")
     app = (ROOT / "processor" / "Dockerfile.app").read_text(encoding="utf-8")
+    model_app = (ROOT / "processor" / "Dockerfile.model-service.app").read_text(encoding="utf-8")
     entrypoint = (ROOT / "processor" / "container_entrypoint.sh").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 
@@ -30,6 +31,9 @@ def test_processor_ci_image_uses_an_immutable_dependency_base() -> None:
     assert "FROM ${PROCESSOR_BASE_IMAGE} AS runtime" in app
     assert "uv sync" not in app
     assert "apt-get" not in app
+    assert 'ENTRYPOINT ["python", "-m", "processor.model_service"]' in model_app
+    assert "processor/Dockerfile.model-service.app" in workflow
+    assert "S2P_INSTALL_EXTRA=${{ matrix.extra }}" in workflow
     assert "target: runtime-base" in workflow
     assert "dockerfile: processor/Dockerfile.app" in workflow
     assert "type=gha,scope=${{ matrix.image }}" in workflow
