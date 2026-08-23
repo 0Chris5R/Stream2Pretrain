@@ -2122,19 +2122,47 @@ jobs:
                 >/dev/null 2>&1
           fi
 
-          if ! helmfile \
-            --helm-binary "$(command -v helm)" \
-            --file helmfile.yaml \
-            --environment dev \
-            --selector name=stream2pretrain \
-            apply \
-            --reset-values \
-            --wait \
-            --wait-for-jobs \
-            --timeout 600 \
-            --description "github-actions ${GITHUB_SHA}" \
-            --suppress-secrets \
-            "${helm_overrides[@]}"; then
+          # GitHub serialises this workflow, but a teammate can still start a
+          # manual Helm upgrade against the same release. Helm may complete
+          # that competing revision and return `release: already exists` to
+          # this invocation. Retry only this explicit storage/operation race;
+          # every application, hook, readiness, and timeout failure remains
+          # fail-closed on the first attempt.
+          release_applied=false
+          helm_apply_log="$RUNNER_TEMP/stream2pretrain-helm-apply.log"
+          for attempt in 1 2 3; do
+            set +e
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=stream2pretrain \
+              apply \
+              --reset-values \
+              --wait \
+              --wait-for-jobs \
+              --timeout 600 \
+              --description "github-actions ${GITHUB_SHA}" \
+              --suppress-secrets \
+              "${helm_overrides[@]}" \
+              2>&1 | tee "$helm_apply_log"
+            helm_apply_status=${PIPESTATUS[0]}
+            set -e
+            if [[ "$helm_apply_status" -eq 0 ]]; then
+              release_applied=true
+              break
+            fi
+            if ! grep -Eq \
+              'release: already exists|another operation .* is in progress' \
+              "$helm_apply_log"; then
+              break
+            fi
+            echo "Concurrent Helm release mutation detected (attempt $attempt)."
+            helm history stream2pretrain -n stream2pretrain || true
+            helm status stream2pretrain -n stream2pretrain --show-desc || true
+            sleep 15
+          done
+          if [[ "$release_applied" != true ]]; then
             report_deploy_failure
             exit 1
           fi

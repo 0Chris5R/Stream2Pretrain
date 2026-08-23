@@ -163,6 +163,10 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert 'delete "horizontalpodautoscaler/$model"' in workflow
     assert 'scale "deployment/$model" --replicas=1' in workflow
     assert "--field-selector=status.phase=Failed" in workflow
+    assert "release_applied=false" in workflow
+    assert "helm_apply_status=${PIPESTATUS[0]}" in workflow
+    assert "release: already exists|another operation .* is in progress" in workflow
+    assert 'if [[ "$release_applied" != true ]]' in workflow
 
 
 def test_fetcher_uses_matching_official_cpu_vision_wheels() -> None:
