@@ -264,7 +264,13 @@ function CallsChart({
       series={CALL_SERIES}
     >
       {ready ? (
-        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={0}
+          minHeight={0}
+          initialDimension={{ width: 480, height: 176 }}
+        >
           <LineChart data={points} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
             <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-border" />
             <XAxis
@@ -312,7 +318,13 @@ function TokensChart({
       series={TOKEN_SERIES}
     >
       {ready ? (
-        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={0}
+          minHeight={0}
+          initialDimension={{ width: 480, height: 176 }}
+        >
           <AreaChart data={points} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
             <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-border" />
             <XAxis
@@ -364,7 +376,13 @@ function StagesChart({
       series={STAGE_SERIES}
     >
       {ready ? (
-        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={0}
+          minHeight={0}
+          initialDimension={{ width: 480, height: 176 }}
+        >
           <BarChart data={points} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
             <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-border" />
             <XAxis

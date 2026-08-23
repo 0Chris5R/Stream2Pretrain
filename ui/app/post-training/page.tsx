@@ -83,10 +83,6 @@ export default function PostTrainingPage() {
     },
   });
 
-  if (dashboard.error) {
-    return <ErrorBox error={dashboard.error} />;
-  }
-
   const data = dashboard.data;
   const acceptedSft = data?.artifacts['sft_trajectory:accepted'] ?? 0;
   const acceptedRl = data?.artifacts['rl_environment:accepted'] ?? 0;
@@ -101,9 +97,9 @@ export default function PostTrainingPage() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Post-training</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
           <Badge variant="outline">
             Daily · {String(data?.daily_run_hour_utc ?? 0).padStart(2, '0')}:00 UTC
           </Badge>
@@ -111,6 +107,7 @@ export default function PostTrainingPage() {
             size="sm"
             onClick={() => manualRun.mutate()}
             disabled={
+              Boolean(dashboard.error) ||
               manualRun.isPending ||
               data?.manual_runs.some((run) => ['pending', 'running'].includes(run.state))
             }
@@ -119,6 +116,8 @@ export default function PostTrainingPage() {
           </Button>
         </div>
       </div>
+
+      {dashboard.error ? <ErrorBox error={dashboard.error} /> : null}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <Metric label="SFT trajectories" value={formatInt(acceptedSft)} />
@@ -637,9 +636,12 @@ function EmptyPanel({ loading }: { loading: boolean }) {
 }
 
 function ErrorBox({ error }: { error: unknown }) {
+  const message = error instanceof Error ? error.message : 'request_failed';
   return (
     <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-      {(error as Error).message}
+      {message === 'foundry_unavailable'
+        ? 'Post-training service unavailable. Retrying automatically.'
+        : message}
     </div>
   );
 }
