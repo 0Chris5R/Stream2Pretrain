@@ -122,10 +122,10 @@ def main() -> None:
         for index in range(24)
     )
     html = (
-        "<!doctype html><html><head><title>Cluster smoke research paper</title></head>"
-        "<body><article><h1>Cluster smoke research paper</h1><h2>Abstract</h2><p>"
+        "<!doctype html><html><head><title>Cluster smoke research paper.</title></head>"
+        "<body><article><h1>Cluster smoke research paper.</h1><h2>Abstract.</h2><p>"
         + body
-        + "</p><h2>Methods</h2><p>Every stage is checked by document identifier.</p>"
+        + "</p><h2>Methods.</h2><p>Every stage is checked by document identifier.</p>"
         "</article></body></html>"
     ).encode()
     payload = gzip.compress(html)
@@ -207,13 +207,16 @@ def main() -> None:
         and not decision.get("pii_flags")
         and not decision.get("contaminated_with")
     )
-    curated_seen = False
-    if trainable:
-        curated_seen = consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
-        if not curated_seen:
-            raise RuntimeError(f"training-eligible document missing from docs.curated: {doc_id}")
-    else:
+    if not trainable:
         curated_consumer.close()
+        raise RuntimeError(
+            "controlled permissive canary was rejected instead of exercising docs.curated: "
+            f"route={decision.get('route')} risk={decision.get('risk_tier')} "
+            f"reasons={decision.get('reject_reasons')}"
+        )
+    curated_seen = consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
+    if not curated_seen:
+        raise RuntimeError(f"training-eligible document missing from docs.curated: {doc_id}")
 
     print(
         json.dumps(
