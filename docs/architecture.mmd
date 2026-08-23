@@ -18,11 +18,13 @@ flowchart LR
     gh[GitHub events + releases]
     hf[HF Hub poller]
     site[Sitemap poller]
+    tarball[release tarball fetcher]
   end
 
   subgraph BUS [Redpanda]
     direction TB
     raw[(raw.fetched)]
+    releaseJobs[(github.release.jobs)]
     norm[(docs.normalized)]
     cur[(docs.curated)]
     att[(decon.attest)]
@@ -56,6 +58,9 @@ flowchart LR
   rss --> raw
   oai --> raw
   gh --> raw
+  gh --> releaseJobs
+  releaseJobs --> tarball
+  tarball --> raw
   hf --> raw
   site --> raw
 
@@ -79,8 +84,8 @@ flowchart LR
   duckdb --> ui
   att --> ui
 
-  class rss,oai,gh,hf,site edge
-  class raw,norm,cur,att bus
+  class rss,oai,gh,hf,site,tarball edge
+  class raw,releaseJobs,norm,cur,att bus
   class fetch,extract,tags,score,decon,valid,iceberg engine
   class minio,silver,gold,polaris store
   class duckdb,ui serve

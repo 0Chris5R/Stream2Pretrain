@@ -79,6 +79,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     PATH="/src/.venv/bin:${PATH}" \
+    HF_HUB_DISABLE_XET=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
     S2P_MODELS_DIR=/opt/models \
     TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
     S2P_STATE_DIR=/var/lib/s2p
@@ -103,27 +105,27 @@ COPY --from=builder /src/.venv                         /src/.venv
 WORKDIR /opt/models
 
 # Official FinePDFs Edu v2 scientific-quality checkpoint.
-RUN case "${S2P_MODEL_PROFILE}" in curate|all) \
+RUN case "${S2P_MODEL_PROFILE}" in quality|all) \
       python -c "from huggingface_hub import snapshot_download; \
         snapshot_download(repo_id='HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn', \
           revision='${FINEPDFS_EDU_V2_REVISION}', \
           local_dir='/opt/models/finepdfs-edu-v2', \
           allow_patterns=['*.json', '*.txt', '*.safetensors'])"; \
       rm -rf /opt/models/finepdfs-edu-v2/.cache /root/.cache/huggingface ;; \
-    none|fetcher) mkdir -p /opt/models/finepdfs-edu-v2 ;; \
+    none|embedding|kenlm|fetcher) mkdir -p /opt/models/finepdfs-edu-v2 ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
 # Official FineWeb-Edu Safetensors checkpoint. It runs through Transformers on
 # CPU unless a separately verified model.onnx is mounted in this directory.
-RUN case "${S2P_MODEL_PROFILE}" in curate|all) \
+RUN case "${S2P_MODEL_PROFILE}" in quality|all) \
       python -c "from huggingface_hub import snapshot_download; \
         snapshot_download(repo_id='HuggingFaceFW/fineweb-edu-classifier', \
           revision='${FINEWEB_EDU_REVISION}', \
           local_dir='/opt/models/fineweb-edu', \
           allow_patterns=['*.json', '*.txt', '*.safetensors'])"; \
       rm -rf /opt/models/fineweb-edu/.cache /root/.cache/huggingface ;; \
-    none|fetcher) mkdir -p /opt/models/fineweb-edu ;; \
+    none|embedding|kenlm|fetcher) mkdir -p /opt/models/fineweb-edu ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -135,26 +137,26 @@ RUN case "${S2P_MODEL_PROFILE}" in fetcher|all) \
           local_dir='/opt/models/figure-classifier', \
           allow_patterns=['model.onnx', '*.json'])"; \
       rm -rf /opt/models/figure-classifier/.cache /root/.cache/huggingface ;; \
-    none|curate) mkdir -p /opt/models/figure-classifier ;; \
+    none|quality|embedding|kenlm) mkdir -p /opt/models/figure-classifier ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
 # E5-small ONNX embedding model for the Decon-Gate semantic sketch.
-RUN case "${S2P_MODEL_PROFILE}" in curate|all) \
+RUN case "${S2P_MODEL_PROFILE}" in embedding|all) \
       python -c "from huggingface_hub import snapshot_download; \
         snapshot_download(repo_id='intfloat/e5-small-v2', \
           revision='${E5_SMALL_REVISION}', \
           local_dir='/opt/models/e5-small', \
           allow_patterns=['model.onnx', '*.json', '*.txt'])"; \
       rm -rf /opt/models/e5-small/.cache /root/.cache/huggingface ;; \
-    none|fetcher) mkdir -p /opt/models/e5-small ;; \
+    none|quality|kenlm|fetcher) mkdir -p /opt/models/e5-small ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
 # KenLM English Wikipedia binary plus its exact SentencePiece tokenizer. Delete
 # the Hub cache in the same layer so the 4.44 GB binary is stored only once.
 RUN mkdir -p /opt/models/kenlm \
- && case "${S2P_MODEL_PROFILE}" in curate|all) \
+ && case "${S2P_MODEL_PROFILE}" in kenlm|all) \
       python -c "from huggingface_hub import hf_hub_download; import os, shutil; \
         repo='edugp/kenlm'; rev='${KENLM_REVISION}'; \
         binary=hf_hub_download(repo_id=repo, filename='wikipedia/en.arpa.bin', revision=rev, local_dir='/opt/models/kenlm'); \
@@ -164,7 +166,7 @@ RUN mkdir -p /opt/models/kenlm \
         shutil.rmtree('/opt/models/kenlm/.cache', ignore_errors=True); \
         shutil.rmtree('/opt/models/kenlm/wikipedia', ignore_errors=True)"; \
       rm -rf /root/.cache/huggingface /opt/models/kenlm/.cache ;; \
-    none|fetcher) ;; \
+    none|quality|embedding|fetcher) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -174,7 +176,7 @@ RUN mkdir -p /opt/models/tiktoken \
  && case "${S2P_MODEL_PROFILE}" in none|fetcher|all) \
       TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
         python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" ;; \
-    curate) ;; \
+    quality|embedding|kenlm) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -185,7 +187,7 @@ RUN mkdir -p /opt/models/docling \
         docling-tools models download layout tableformer code_formula \
           --output-dir /opt/models/docling; \
       rm -rf /tmp/huggingface ;; \
-    none|curate) ;; \
+    none|quality|embedding|kenlm) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -204,13 +206,15 @@ RUN python -c "import json; json.dump({ \
 # component actually needs.
 RUN case "${S2P_MODEL_PROFILE}" in \
       none) find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q . ;; \
-      curate) \
+      quality) \
         test -s /opt/models/finepdfs-edu-v2/model.safetensors; \
         test -s /opt/models/finepdfs-edu-v2/tokenizer.json; \
         test -s /opt/models/fineweb-edu/model.safetensors; \
-        test -s /opt/models/fineweb-edu/tokenizer.json; \
+        test -s /opt/models/fineweb-edu/tokenizer.json ;; \
+      embedding) \
         test -s /opt/models/e5-small/model.onnx; \
-        test -s /opt/models/e5-small/tokenizer.json; \
+        test -s /opt/models/e5-small/tokenizer.json ;; \
+      kenlm) \
         test -s /opt/models/kenlm/en.arpa.bin; \
         test -s /opt/models/kenlm/en.sp.model ;; \
       fetcher) \

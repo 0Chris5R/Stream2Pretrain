@@ -48,6 +48,7 @@ redpanda:
   topics:
     rawFetched: raw.fetched
     smokeRaw: raw.smoke
+    githubReleaseJobs: github.release.jobs
     docsNormalized: docs.normalized
     docsNormalizedSmoke: docs.normalized.smoke
     docsCurated: docs.curated
@@ -343,9 +344,9 @@ ingest:
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 768Mi}
-  # GitHub release tarball fetcher (v0.2.0). Consumes raw.fetched events
-  # emitted by the github_releases poller and downloads each release's
-  # source tarball, emitting one CodeFileRecord per allow-listed file.
+  # GitHub release tarball fetcher (v0.2.0). Consumes a dedicated job topic
+  # emitted by the github_releases poller and downloads each release's source
+  # tarball, emitting one CodeFileRecord per allow-listed file to raw.fetched.
   githubTarballFetcher:
     enabled: true
     image: stream2pretrain/ingest-github-tarball-fetcher
@@ -397,19 +398,17 @@ ingest:
       - MPL-2.0
       - Unlicense
       - CC0-1.0
-    # Per-pod GitHub REST budget. With burst=4 and rate=1.0 req/s the worst
-    # case is ~3600 req/h per pod, comfortably under the 5000 req/h ceiling
-    # while leaving headroom for the github_releases poller. Lag-driven
-    # KEDA scaling assumes a single consumer group across replicas.
-    requestRatePerSecond: 1.0
-    requestBurst: 4
+    # Four replicas share one GitHub credential. Limiting each to 0.25 req/s
+    # bounds the aggregate steady-state budget at 3600 req/h, leaving headroom
+    # below GitHub's authenticated 5000 req/h core limit for the poller.
+    requestRatePerSecond: 0.25
+    requestBurst: 1
     keda:
-      minReplicas: 0
-      maxReplicas: 1
-      # Prometheus-backed trigger avoids raw.fetched Kafka-lag self-amplification.
-      # Threshold is a count of observed release records currently being processed
-      # by tarball fetcher pods.
-      threshold: "1"
+      # Keep one migration consumer alive for the pre-v0.2 raw.fetched lane;
+      # new work scales to the four partitions of github.release.jobs.
+      minReplicas: 1
+      maxReplicas: 4
+      lagThreshold: 1
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 1Gi}
@@ -544,15 +543,27 @@ processor:
         limits: {cpu: 2, memory: 2Gi}
   modelService:
     enabled: true
-    image: stream2pretrain/processor-curate-model
     replicas: 1
     port: 8094
-    resources:
-      requests: {cpu: 1, memory: 3Gi}
-      limits: {cpu: 3, memory: 5Gi}
-    # The service is stateless and replicas are placed on distinct nodes.
-    # Constrained environments can lower maxReplicas without changing the
-    # curation contract; production clusters scale classifier throughput.
+    # Each real-model family has an independent image and runtime boundary.
+    # This avoids a monolithic multi-GB image/process and lets Kubernetes
+    # schedule or scale the resources each backend actually consumes.
+    profiles:
+      quality:
+        image: stream2pretrain/processor-quality-model
+        resources:
+          requests: {cpu: 1, memory: 2Gi}
+          limits: {cpu: 2, memory: 3Gi}
+      kenlm:
+        image: stream2pretrain/processor-kenlm-model
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 3Gi}
+      embedding:
+        image: stream2pretrain/processor-embedding-model
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits: {cpu: 1, memory: 1Gi}
     autoscaling:
       enabled: true
       minReplicas: 1

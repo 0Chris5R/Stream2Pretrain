@@ -16,7 +16,7 @@ See ``../SOURCES.md`` for the full feed catalogue and rate limits, and
 | ``sitemap_poller/`` | Gzipped sitemap.xml CronJob with index expansion | every 24 h |
 | ``github_events/`` | Long-running Deployment (60 s ``X-Poll-Interval``) | continuous |
 | ``github_releases/`` | Atom feed CronJob across curated AI repos | every 2 h |
-| ``github_release_tarball_fetcher/`` | Per-release source tarball expander, one ``CodeFileRecord`` per allow-listed file | event-driven on ``raw.fetched`` |
+| ``github_release_tarball_fetcher/`` | Per-release source tarball expander, one ``CodeFileRecord`` per allow-listed file | event-driven on ``github.release.jobs`` |
 | ``hf_poller/`` | HF Hub REST CronJob (models + daily_papers) | every 10-15 min / 6 h |
 | ``arxiv_html_fetcher/`` | Native arXiv ``/html/<id>`` fulltext fetcher with ``ar5iv.labs.arxiv.org`` fallback | event-driven on ``docs.normalized`` |
 | ``openreview_poller/`` | OpenReview API v2 venue poll + REVIEWARENA backfill | every 6 h / one-shot |

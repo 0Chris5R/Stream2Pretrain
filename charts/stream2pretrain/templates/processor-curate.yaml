@@ -42,18 +42,23 @@ spec:
               import time
               import urllib.request
 
-              url = "http://{{ printf "%s-processor-model-service" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz"
+              urls = [
+                  "http://{{ printf "%s-processor-model-service-quality" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
+                  "http://{{ printf "%s-processor-model-service-kenlm" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
+                  "http://{{ printf "%s-processor-model-service-embedding" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
+              ]
               deadline = time.monotonic() + 900
-              while True:
-                  try:
-                      with urllib.request.urlopen(url, timeout=3) as response:
-                          if response.status == 200:
-                              break
-                  except Exception:
-                      pass
-                  if time.monotonic() >= deadline:
-                      raise SystemExit("model service did not become ready within 900 seconds")
-                  time.sleep(5)
+              for url in urls:
+                  while True:
+                      try:
+                          with urllib.request.urlopen(url, timeout=3) as response:
+                              if response.status == 200:
+                                  break
+                      except Exception:
+                          pass
+                      if time.monotonic() >= deadline:
+                          raise SystemExit(f"model service did not become ready: {url}")
+                      time.sleep(5)
       {{- else }}
       {{- if .Values.processor.curate.modelBundle.bootstrap }}
       initContainers:
@@ -135,8 +140,12 @@ spec:
             - name: S2P_MODELS_DIR
               value: {{ ternary "/models" "/opt/models" $externalModels | quote }}
             {{- if and .Values.processor.modelService.enabled (not $externalModels) }}
-            - name: S2P_MODEL_SERVICE_URL
-              value: {{ printf "http://%s-processor-model-service:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_QUALITY_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-quality:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_KENLM_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-kenlm:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_EMBEDDING_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-embedding:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             {{- end }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.curate.requireRealModels | quote }}

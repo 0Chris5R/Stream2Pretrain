@@ -46,10 +46,11 @@
         "authSecret": {"type": "string"},
         "topics": {
           "type": "object",
-          "required": ["rawFetched", "smokeRaw", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "curationDecisions", "licenseAdmissions", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
+          "required": ["rawFetched", "smokeRaw", "githubReleaseJobs", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "curationDecisions", "licenseAdmissions", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
           "properties": {
             "rawFetched": {"type": "string"},
             "smokeRaw": {"type": "string"},
+            "githubReleaseJobs": {"type": "string"},
             "docsNormalized": {"type": "string"},
             "docsNormalizedSmoke": {"type": "string"},
             "docsCurated": {"type": "string"},
@@ -346,11 +347,11 @@
             "requestBurst": {"type": "integer", "minimum": 1},
             "keda": {
               "type": "object",
-              "required": ["minReplicas", "maxReplicas", "threshold"],
+              "required": ["minReplicas", "maxReplicas", "lagThreshold"],
               "properties": {
                 "minReplicas": {"type": "integer", "minimum": 0},
                 "maxReplicas": {"type": "integer", "minimum": 1},
-                "threshold": {"type": "string", "minLength": 1}
+                "lagThreshold": {"type": "integer", "minimum": 1}
               }
             },
             "resources": {"type": "object"}

@@ -1,66 +1,69 @@
 {{- if .Values.processor.modelService.enabled }}
-{{- $component := "processor-model-service" }}
-{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $root := . }}
 {{- $curatorComponent := "processor-curate" }}
+{{- range $profile, $service := .Values.processor.modelService.profiles }}
+{{- $component := printf "processor-model-service-%s" $profile }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" $root) $component }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
 spec:
-  {{- if not .Values.processor.modelService.autoscaling.enabled }}
-  replicas: {{ .Values.processor.modelService.replicas }}
+  {{- if not $root.Values.processor.modelService.autoscaling.enabled }}
+  replicas: {{ $root.Values.processor.modelService.replicas }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" $component) | nindent 6 }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      # Required node spreading means no third model Pod fits when both
-      # workers are occupied. Replace in place instead of deadlocking a roll.
+      # Required node spreading can leave no surge capacity on a small cluster.
       maxUnavailable: 1
       maxSurge: 0
   template:
     metadata:
       labels:
-        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" $component) | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
-      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
-      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
-      # The stateful curator is pinned by its local checkpoint. Keep every
-      # large-model replica on a different node and spread replicas so model
-      # memory and image layers never compete with that stateful process.
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" $root }}
+      {{- include "stream2pretrain.imagePullSecrets" $root | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" $root | nindent 6 }}
+      # Keep large models off the stateful curator node and spread replicas of
+      # the same model family. Different families may share a worker node.
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchLabels:
-                  {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $curatorComponent) | nindent 18 }}
+                  {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" $curatorComponent) | nindent 18 }}
               topologyKey: kubernetes.io/hostname
             - labelSelector:
                 matchLabels:
-                  {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 18 }}
+                  {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" $component) | nindent 18 }}
               topologyKey: kubernetes.io/hostname
       terminationGracePeriodSeconds: 60
       containers:
         - name: model-service
-          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.modelService.image "tag" .Values.processor.modelService.tag) | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-curator-model-service"]
-          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          image: {{ include "stream2pretrain.image" (dict "ctx" $root "image" $service.image "tag" $service.tag) | quote }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: ["python", "-m", "processor.model_service"]
+          {{- include "stream2pretrain.containerSecurityContext" $root | nindent 10 }}
           ports:
             - name: http
-              containerPort: {{ .Values.processor.modelService.port }}
+              containerPort: {{ $root.Values.processor.modelService.port }}
           env:
-            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            {{- include "stream2pretrain.commonEnv" $root | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
+            - name: S2P_MODEL_SERVICE_PROFILE
+              value: {{ $profile | quote }}
             - name: S2P_MODEL_SERVICE_PORT
-              value: {{ .Values.processor.modelService.port | quote }}
+              value: {{ $root.Values.processor.modelService.port | quote }}
             - name: S2P_FINEPDFS_EDU_REVISION
               value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
             - name: S2P_FINEWEB_EDU_REVISION
@@ -81,7 +84,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 3
           resources:
-            {{- toYaml .Values.processor.modelService.resources | nindent 12 }}
+            {{- toYaml $service.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -93,33 +96,33 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
 spec:
   type: ClusterIP
   ports:
     - name: http
-      port: {{ .Values.processor.modelService.port }}
+      port: {{ $root.Values.processor.modelService.port }}
       targetPort: http
   selector:
-    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-{{- if .Values.processor.modelService.autoscaling.enabled }}
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
+{{- if $root.Values.processor.modelService.autoscaling.enabled }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: {{ $name }}
-  minReplicas: {{ .Values.processor.modelService.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.processor.modelService.autoscaling.maxReplicas }}
+  minReplicas: {{ $root.Values.processor.modelService.autoscaling.minReplicas }}
+  maxReplicas: {{ $root.Values.processor.modelService.autoscaling.maxReplicas }}
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 300
@@ -129,6 +132,7 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.processor.modelService.autoscaling.targetCPUUtilizationPercentage }}
+          averageUtilization: {{ $root.Values.processor.modelService.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
 {{- end }}
 {{- end }}

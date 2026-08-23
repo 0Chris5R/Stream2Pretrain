@@ -9,7 +9,7 @@ from contextlib import suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import orjson
 
@@ -19,41 +19,51 @@ from processor.operators.kenlm_score import KenLMScorer
 from processor.operators.quality import QualityClassifier
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
+ModelProfile = Literal["quality", "kenlm", "embedding", "all"]
+MODEL_PROFILES: frozenset[str] = frozenset({"quality", "kenlm", "embedding", "all"})
 
 
 class CuratorModelRuntime:
     """Eagerly loaded, strict model bundle shared by HTTP handlers."""
 
-    def __init__(self, models_dir: str | Path) -> None:
+    def __init__(self, models_dir: str | Path, *, profile: ModelProfile = "all") -> None:
         root = Path(models_dir)
-        self.finepdfs = QualityClassifier(
-            root / "finepdfs-edu-v2",
-            revision=os.environ.get("S2P_FINEPDFS_EDU_REVISION"),
-            model_family="finepdfs-edu-v2",
-            allow_fallback=False,
-        )
-        self.fineweb = QualityClassifier(
-            root / "fineweb-edu",
-            revision=os.environ.get("S2P_FINEWEB_EDU_REVISION"),
-            model_family="fineweb-edu",
-            allow_fallback=False,
-        )
-        self.kenlm = KenLMScorer(
-            root / "kenlm" / "en.arpa.bin",
-            root / "kenlm" / "en.sp.model",
-            allow_fallback=False,
-        )
-        self.embedding = _EmbeddingSketch(
-            root / "e5-small",
-            revision=os.environ.get("E5_SMALL_REVISION"),
-            allow_fallback=False,
-        )
+        self.profile = profile
+        self.finepdfs: QualityClassifier | None = None
+        self.fineweb: QualityClassifier | None = None
+        self.kenlm: KenLMScorer | None = None
+        self.embedding: _EmbeddingSketch | None = None
+        if profile in {"quality", "all"}:
+            self.finepdfs = QualityClassifier(
+                root / "finepdfs-edu-v2",
+                revision=os.environ.get("S2P_FINEPDFS_EDU_REVISION"),
+                model_family="finepdfs-edu-v2",
+                allow_fallback=False,
+            )
+            self.fineweb = QualityClassifier(
+                root / "fineweb-edu",
+                revision=os.environ.get("S2P_FINEWEB_EDU_REVISION"),
+                model_family="fineweb-edu",
+                allow_fallback=False,
+            )
+        if profile in {"kenlm", "all"}:
+            self.kenlm = KenLMScorer(
+                root / "kenlm" / "en.arpa.bin",
+                root / "kenlm" / "en.sp.model",
+                allow_fallback=False,
+            )
+        if profile in {"embedding", "all"}:
+            self.embedding = _EmbeddingSketch(
+                root / "e5-small",
+                revision=os.environ.get("E5_SMALL_REVISION"),
+                allow_fallback=False,
+            )
         self.lock = threading.Lock()
 
     def metadata(self) -> dict[str, Any]:
-        return {
-            "ready": True,
-            "quality": {
+        metadata: dict[str, Any] = {"ready": True, "profile": self.profile}
+        if self.finepdfs is not None and self.fineweb is not None:
+            metadata["quality"] = {
                 "finepdfs-edu-v2": {
                     "backend": self.finepdfs.backend,
                     "revision": self.finepdfs.revision,
@@ -62,16 +72,18 @@ class CuratorModelRuntime:
                     "backend": self.fineweb.backend,
                     "revision": self.fineweb.revision,
                 },
-            },
-            "kenlm": {
+            }
+        if self.kenlm is not None:
+            metadata["kenlm"] = {
                 "backend": "kenlm-sentencepiece",
                 "scorer": self.kenlm.scorer,
-            },
-            "embedding": {
+            }
+        if self.embedding is not None:
+            metadata["embedding"] = {
                 "backend": self.embedding.backend,
                 "revision": self.embedding.revision,
-            },
-        }
+            }
+        return metadata
 
 
 class CuratorModelServer(ThreadingHTTPServer):
@@ -116,9 +128,13 @@ class _Handler(BaseHTTPRequestHandler):
                         "finepdfs-edu-v2": self.runtime.finepdfs,
                         "fineweb-edu": self.runtime.fineweb,
                     }
-                    if not isinstance(family, str) or family not in classifiers:
+                    if (
+                        not isinstance(family, str)
+                        or family not in classifiers
+                        or classifiers[family] is None
+                    ):
                         raise ValueError("unsupported model_family")
-                    quality_result = classifiers[family].score(text)
+                    quality_result = classifiers[family].score(text)  # type: ignore[union-attr]
                     self._write(
                         HTTPStatus.OK,
                         {
@@ -128,6 +144,8 @@ class _Handler(BaseHTTPRequestHandler):
                     )
                     return
                 if self.path == "/v1/perplexity":
+                    if self.runtime.kenlm is None:
+                        raise ValueError("perplexity is unavailable in this model profile")
                     perplexity_result = self.runtime.kenlm.score(text)
                     self._write(
                         HTTPStatus.OK,
@@ -139,6 +157,8 @@ class _Handler(BaseHTTPRequestHandler):
                     )
                     return
                 if self.path == "/v1/embed":
+                    if self.runtime.embedding is None:
+                        raise ValueError("embedding is unavailable in this model profile")
                     self._write(
                         HTTPStatus.OK,
                         {"embedding": self.runtime.embedding.embed(text)},
@@ -190,9 +210,13 @@ def main() -> None:
     cfg = common.load_config()
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.model-service")
-    log.info("loading curator model bundle", models_dir=cfg.models_dir)
-    runtime = CuratorModelRuntime(cfg.models_dir)
-    log.info("curator model bundle ready", metadata=runtime.metadata())
+    profile_value = os.environ.get("S2P_MODEL_SERVICE_PROFILE", "all").strip().lower()
+    if profile_value not in MODEL_PROFILES:
+        raise RuntimeError(f"unsupported S2P_MODEL_SERVICE_PROFILE={profile_value!r}")
+    profile = cast(ModelProfile, profile_value)
+    log.info("loading curator model service", models_dir=cfg.models_dir, profile=profile)
+    runtime = CuratorModelRuntime(cfg.models_dir, profile=profile)
+    log.info("curator model service ready", metadata=runtime.metadata())
     serve(runtime, port=int(os.environ.get("S2P_MODEL_SERVICE_PORT", "8094")))
 
 

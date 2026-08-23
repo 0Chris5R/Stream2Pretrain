@@ -5,8 +5,8 @@ writes. The constants are imported across ingest, processor, and decon-gate so
 typos surface at import time, not at runtime in the field.
 
 Partition / replication factors are split between dev and prod profiles.
-The dev profile (1/1) is what the local docker-compose stack and a single-
-broker k3s cluster can actually serve; the prod profile (12/3) is the target
+The dev profile uses single replication with bounded per-topic partition
+counts that a single-broker k3s cluster can serve; the prod profile (12/3) is the target
 for a full 3-broker Redpanda cluster on DHBWCloud (needs-measurement: pick
 the partition count after the Week 5 throughput benchmark).
 """
@@ -20,6 +20,7 @@ from typing import Final
 # k8s manifests, rpk scripts, and OpenTelemetry span attributes.
 RAW_FETCHED: Final[str] = "raw.fetched"
 RAW_SMOKE: Final[str] = "raw.smoke"
+GITHUB_RELEASE_JOBS: Final[str] = "github.release.jobs"
 DOCS_NORMALIZED: Final[str] = "docs.normalized"
 DOCS_NORMALIZED_SMOKE: Final[str] = "docs.normalized.smoke"
 DOCS_CURATED: Final[str] = "docs.curated"
@@ -43,6 +44,7 @@ CODE_SOURCE_FORMAT: Final[str] = "code"
 ALL_TOPICS: Final[tuple[str, ...]] = (
     RAW_FETCHED,
     RAW_SMOKE,
+    GITHUB_RELEASE_JOBS,
     DOCS_NORMALIZED,
     DOCS_NORMALIZED_SMOKE,
     DOCS_CURATED,
@@ -104,6 +106,12 @@ def dev_topic_configs() -> list[TopicConfig]:
             RAW_SMOKE, partitions=1, replication_factor=1, retention_ms=_SMOKE_RETENTION_MS
         ),
         TopicConfig(
+            GITHUB_RELEASE_JOBS,
+            partitions=4,
+            replication_factor=1,
+            retention_ms=_DEV_RETENTION_MS,
+        ),
+        TopicConfig(
             DOCS_NORMALIZED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
@@ -148,6 +156,12 @@ def prod_topic_configs() -> list[TopicConfig]:
         ),
         TopicConfig(
             RAW_SMOKE, partitions=3, replication_factor=3, retention_ms=_SMOKE_RETENTION_MS
+        ),
+        TopicConfig(
+            GITHUB_RELEASE_JOBS,
+            partitions=12,
+            replication_factor=3,
+            retention_ms=_PROD_RETENTION_MS,
         ),
         TopicConfig(
             DOCS_NORMALIZED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS

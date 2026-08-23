@@ -8,12 +8,11 @@ rerunning Docker. New images target `linux/amd64`; every deployed revision
 still uses a traceable commit-SHA tag. The complete application Helm release is
 then applied after a push to `main`.
 
-Processor dependencies are built once into a lockfile-keyed lite base. Two
-additional content-addressed bases contain only the pinned model artifacts
-needed by the fetcher or curator inference service. Ordinary source changes
-reuse those bases, so they do not reinstall Python or redownload multi-GB
-models. Kubernetes pulls the fetcher bundle only on fetcher nodes and the
-curator bundle only on stateless model-service nodes.
+Processor dependencies are built once into a lockfile-keyed lite base.
+Content-addressed bases separately package fetcher, quality, KenLM, and E5
+artifacts. Ordinary source changes reuse those bases, so they do not reinstall
+Python or redownload multi-GB models. Each strict inference family has its own
+image, Pod resources, Service, and HPA instead of one oversized curator image.
 
 The workflow uses OpenConnect in Cisco AnyConnect-compatible mode. It does not
 disable TLS certificate verification. If the VPN server uses a certificate

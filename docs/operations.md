@@ -44,9 +44,9 @@ to the four `raw.fetched` partitions.
 
 The curator commits broker-owned offsets after its decision outputs are
 delivered. Its global near-duplicate index remains on one durable PVC, so
-independent curator replicas are unsafe. Large classifiers are split into the
-stateless `processor-model-service`, which has a CPU HPA and required
-cross-node spreading. A transient model-service outage leaves the current
+independent curator replicas are unsafe. Quality, KenLM, and E5 run as three
+stateless `processor-model-service-*` deployments, each with a CPU HPA and
+required cross-node spreading. A transient model-service outage leaves the current
 Kafka offset uncommitted and replays the document after recovery. Redpanda lag
 is authoritative for capacity planning rather than being hidden in a Bytewax
 recovery database.
@@ -78,7 +78,7 @@ or a stateful processor's throughput counters stop advancing.
 ```bash
 # 3.1 Identify the bottleneck.
 kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate --tail=200 | rg -i 'error|warn'
-kubectl -n stream2pretrain top pod | rg 'processor-curate|processor-model-service'
+kubectl -n stream2pretrain top pod | rg 'processor-curate|processor-model-service-'
 
 # 3.2 Pull a sample from each topic.
 kubectl -n redpanda exec -it redpanda-0 -c redpanda -- \

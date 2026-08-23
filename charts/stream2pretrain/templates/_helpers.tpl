@@ -154,6 +154,8 @@ Iceberg + observability).
   value: {{ .Values.redpanda.topics.rawFetched | quote }}
 - name: S2P_SMOKE_RAW_TOPIC
   value: {{ .Values.redpanda.topics.smokeRaw | quote }}
+- name: S2P_GITHUB_RELEASE_JOBS_TOPIC
+  value: {{ .Values.redpanda.topics.githubReleaseJobs | quote }}
 - name: S2P_NORMALIZED_TOPIC
   value: {{ .Values.redpanda.topics.docsNormalized | quote }}
 - name: S2P_SMOKE_NORMALIZED_TOPIC

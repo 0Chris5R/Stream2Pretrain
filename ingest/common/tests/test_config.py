@@ -14,6 +14,7 @@ def test_load_config_reads_kubernetes_env_contract(monkeypatch) -> None:
     monkeypatch.setenv("MINIO_SECRET_KEY", "secret")
     monkeypatch.setenv("MINIO_BRONZE_BUCKET", "bronze-prod")
     monkeypatch.setenv("S2P_RAW_TOPIC", "raw.prod")
+    monkeypatch.setenv("S2P_GITHUB_RELEASE_JOBS_TOPIC", "github.release.prod")
 
     cfg = load_config()
 
@@ -25,3 +26,4 @@ def test_load_config_reads_kubernetes_env_contract(monkeypatch) -> None:
     assert cfg.minio_secret_key == "secret"
     assert cfg.minio_bronze_bucket == "bronze-prod"
     assert cfg.raw_topic == "raw.prod"
+    assert cfg.github_release_jobs_topic == "github.release.prod"

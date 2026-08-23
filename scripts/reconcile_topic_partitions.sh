@@ -16,16 +16,21 @@ fi
 
 smoke_topic="${S2P_SMOKE_RAW_TOPIC:-raw.smoke}"
 smoke_normalized_topic="${S2P_SMOKE_NORMALIZED_TOPIC:-docs.normalized.smoke}"
-for smoke_lane_topic in "$smoke_topic" "$smoke_normalized_topic"; do
+github_release_jobs_topic="${S2P_GITHUB_RELEASE_JOBS_TOPIC:-github.release.jobs}"
+for managed_topic in "$smoke_topic" "$smoke_normalized_topic" "$github_release_jobs_topic"; do
   if ! kubectl -n redpanda exec statefulset/redpanda -- rpk topic list \
     | awk 'NR > 1 {print $1}' \
-    | grep -qx "$smoke_lane_topic"; then
-    echo "Creating deployment canary topic $smoke_lane_topic"
+    | grep -qx "$managed_topic"; then
+    retention_ms=604800000
+    if [[ "$managed_topic" == "$smoke_topic" || "$managed_topic" == "$smoke_normalized_topic" ]]; then
+      retention_ms=86400000
+    fi
+    echo "Creating managed topic $managed_topic"
     kubectl -n redpanda exec statefulset/redpanda -- \
-      rpk topic create "$smoke_lane_topic" \
+      rpk topic create "$managed_topic" \
         --partitions "$target" \
         --replicas 1 \
-        --topic-config retention.ms=86400000 \
+        --topic-config "retention.ms=$retention_ms" \
         --topic-config cleanup.policy=delete \
         --topic-config "max.message.bytes=$max_message_bytes"
   fi
@@ -34,6 +39,7 @@ done
 topics=(
   raw.fetched
   "$smoke_topic"
+  "$github_release_jobs_topic"
   docs.normalized
   "$smoke_normalized_topic"
   docs.curated

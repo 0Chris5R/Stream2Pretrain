@@ -73,15 +73,23 @@ runtime = [
     # v0.2.0 seed loader: streaming HuggingFace dataset reader.
     "datasets>=2.20",
 ]
-# Stateless curator inference service. Keep this separate from ``runtime`` so
-# its already-large model image does not also contain Docling, PyArrow,
-# Kubernetes clients, Iceberg, OCR, and unrelated worker dependencies.
-model-service = [
-    "onnxruntime>=1.18",
+# Stateless model services are intentionally split so neither CI nor a worker
+# node must materialize every large artifact in one image or process. Keep
+# these separate from ``runtime`` so they omit Docling, PyArrow, Kubernetes
+# clients, Iceberg, OCR, and unrelated worker dependencies.
+quality-service = [
     "transformers>=4.40",
     "tokenizers>=0.19",
     "torch>=2.3,<3",
     "safetensors>=0.4",
+]
+embedding-service = [
+    "onnxruntime>=1.18",
+    "transformers>=4.40",
+    "tokenizers>=0.19",
+]
+kenlm-service = [
+    "huggingface-hub>=0.24",
     "sentencepiece>=0.2",
     "kenlm>=0.2",
 ]

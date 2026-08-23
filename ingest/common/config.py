@@ -52,6 +52,7 @@ class IngestConfig:
     feed_config_path: str | None = None
     request_jitter_max_seconds: float = 0.5
     raw_topic: str = "raw.fetched"
+    github_release_jobs_topic: str = "github.release.jobs"
     license_admissions_topic: str = "license.admissions"
 
     @property
@@ -85,5 +86,6 @@ def load_config() -> IngestConfig:
         http_max_retries=_env_int("S2P_HTTP_MAX_RETRIES", 4),
         feed_config_path=_env_optional("S2P_FEED_CONFIG"),
         raw_topic=_env("S2P_RAW_TOPIC", "raw.fetched"),
+        github_release_jobs_topic=_env("S2P_GITHUB_RELEASE_JOBS_TOPIC", "github.release.jobs"),
         license_admissions_topic=_env("S2P_LICENSE_ADMISSIONS_TOPIC", "license.admissions"),
     )

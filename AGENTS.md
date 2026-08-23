@@ -100,19 +100,14 @@ provide" section. Tracked here for the AI pair.
 
 ## Open TODOs from v0.2.0 adversarial review
 
-- **TODO (v0.3.0): KEDA self-amplification on `ingest-github-tarball-fetcher`.**
-  The worker consumes from `raw.fetched` and also produces `CodeFileRecord`
-  back to `raw.fetched` (the four-topic contract in `schemas/topics.py` is
-  frozen, so a separate `docs.code` topic is rejected by design). Each release
-  that emits hundreds of code records inflates the same KEDA Kafka-lag signal
-  the scaler watches, producing a positive feedback loop. v0.2.0 mitigation:
-  cap `ingest.githubTarballFetcher.keda.maxReplicas` conservatively. Real
-  fix: switch the ScaledObject to a KEDA Prometheus trigger keyed on a
-  custom `s2p_github_releases_unprocessed` metric (count of
-  `source_feed=github-releases` records on `raw.fetched` past the consumer's
-  committed offset). Requires (a) `ingest/github_releases` to export the
-  metric, (b) chart change in `templates/ingest-github-tarball.yaml` to swap
-  the trigger.
+- **Resolved (2026-08-23): KEDA self-amplification on
+  `ingest-github-tarball-fetcher`.** The shared document topics remain stable:
+  extracted code still uses `raw.fetched`. GitHub release metadata is also
+  dispatched to the bounded `github.release.jobs` control topic, and the
+  tarball worker scales from that topic's consumer lag. New raw metadata is
+  marked so the migration subscription does not fetch the same tarball twice.
+  Four partitions bound useful replicas; per-pod request budgets keep the
+  maximum aggregate GitHub REST rate below the shared account limit.
 
 - **TODO (v0.3.0): SeedDocument.extra metadata propagation.**
   Per-component loaders populate `SeedDocument.extra` with `pes2o_version`,

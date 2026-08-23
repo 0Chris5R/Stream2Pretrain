@@ -73,8 +73,10 @@ def test_loads_complete_chart_owned_repository_set(tmp_path: Path) -> None:
 async def test_poll_repo_emits_release(tmp_path: Path) -> None:
     state = FeedStateStore(tmp_path)
     fake_producer = FakeProducer()
+    fake_job_producer = FakeProducer()
     fake_minio = FakeMinio()
     await fake_producer.start()
+    await fake_job_producer.start()
     await fake_minio.start()
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -92,6 +94,7 @@ async def test_poll_repo_emits_release(tmp_path: Path) -> None:
             cfg=_cfg(),
             client=client,
             producer=fake_producer,  # type: ignore[arg-type]
+            job_producer=fake_job_producer,  # type: ignore[arg-type]
             minio=fake_minio,  # type: ignore[arg-type]
             state_store=state,
             bucket=bucket,
@@ -100,6 +103,9 @@ async def test_poll_repo_emits_release(tmp_path: Path) -> None:
         await client.aclose()
     assert emitted == 1
     assert len(fake_producer.sent) == 1
+    assert fake_producer.sent[0]["headers"]["tarball_job_dispatched"] == "true"
+    assert len(fake_job_producer.sent) == 1
+    assert fake_job_producer.sent[0]["headers"] == {"github_repo": "huggingface/transformers"}
 
 
 @pytest.mark.asyncio

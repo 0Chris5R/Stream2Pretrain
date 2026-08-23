@@ -71,14 +71,11 @@ processor:
   modelService:
     enabled: true
     replicas: 1
-    resources:
-      requests: {cpu: 1, memory: 3Gi}
-      limits: {cpu: 3, memory: 5Gi}
     autoscaling:
       enabled: true
       minReplicas: 1
-      # Three 8 GB nodes were measured on 2026-08-23. The stateful curator
-      # occupies one node, leaving one strict model replica per worker.
+      # Three 8 GB nodes were measured on 2026-08-23. Each model family can
+      # place one strict replica per worker, away from the stateful curator.
       maxReplicas: 2
       targetCPUUtilizationPercentage: 80
   iceberg:

@@ -41,7 +41,7 @@ Deployment depending on cadence):
 | `rss-arxiv-cs-*` (4 feeds) | `ingest-rss` Deployment | 2h conditional GET | `raw.fetched` |
 | `oai-arxiv-cs` | `ingest-oaipmh` CronJob | 2h with resumption tokens | `raw.fetched` |
 | `github-events` | `ingest-github-events` Deployment | `X-Poll-Interval` (~60s) | `raw.fetched` |
-| `github-releases` | `ingest-github-releases` Deployment | 2h ETag-conditional | `raw.fetched` |
+| `github-releases` | `ingest-github-releases` Deployment | 2h ETag-conditional | `raw.fetched` + `github.release.jobs` |
 | `hf-models`, `hf-daily-papers` | `ingest-hf` Deployment | 10-15 min | `raw.fetched` |
 | `*-blog` RSS bundle | shares `ingest-rss` workload | 6-24h | `raw.fetched` |
 | Sitemaps | `ingest-sitemap` CronJob | per-feed | `raw.fetched` |
@@ -52,6 +52,11 @@ emits a `BronzeRecord` pointer (defined in `schemas/bronze.py`) onto
 `raw.fetched`. A doc that fetches twice in the same minute deduplicates by
 `doc_id`; the bronze object is overwritten with the latest bytes plus a fresh
 `fetched_at`.
+
+GitHub release metadata is dual-published to the bounded
+`github.release.jobs` control topic. Tarball workers scale on that topic's
+consumer lag and emit extracted code to `raw.fetched`; separating work from
+output prevents an extracted tarball from inflating its own scaling signal.
 
 ### Bus: Redpanda
 
@@ -159,10 +164,12 @@ flowchart LR
     oai[OAI-PMH poller]
     gh[GitHub events / releases]
     hf[HF Hub poller]
+    tarball[release tarball fetcher]
   end
 
   subgraph bus[Redpanda]
     raw[(raw.fetched)]
+    releaseJobs[(github.release.jobs)]
     norm[(docs.normalized)]
     decisions[(curation.decisions)]
     cur[(docs.curated)]
@@ -194,6 +201,9 @@ flowchart LR
   rss --> raw
   oai --> raw
   gh --> raw
+  gh --> releaseJobs
+  releaseJobs --> tarball
+  tarball --> raw
   hf --> raw
   raw --> fetch --> extract --> tags --> score --> decon --> valid
   valid --> decisions --> iceberg
