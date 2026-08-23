@@ -31,7 +31,7 @@ import asyncio
 import json
 import os
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -100,6 +100,7 @@ class LiveStats:
     reviews_emitted: int = 0
     skipped_seen: int = 0
     pdf_failures: int = 0
+    venue_failures: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -226,12 +227,10 @@ def build_openreview_client(
     baseurl: str = OPENREVIEW_BASE_V2,
     token: str | None = None,
 ) -> OpenReviewClientProtocol:
-    """Construct the real openreview-py v2 client.
+    """Construct the real OpenReview v2 client.
 
-    The poller works fine anonymously (the submission notes are public after
-    the venue's release date), but a token unlocks pre-release access for
-    venues that have already opened reviewing. ``OPENREVIEW_TOKEN`` env var is
-    honored.
+    ``OPENREVIEW_TOKEN`` is honored. Callers must treat authorization or
+    challenge failures as a failed pass rather than an empty public listing.
     """
     import openreview
 
@@ -603,11 +602,15 @@ async def run_pass(
                 )
             except Exception as exc:
                 log.warning("openreview.venue_failed", venue=venue.venue_id, err=str(exc))
+                stats.venue_failures.append(venue.venue_id)
                 continue
             stats.venues_polled += 1
             stats.submissions_emitted += submissions
             stats.reviews_emitted += reviews
             stats.skipped_seen += skipped
+    if stats.venue_failures:
+        failed = ", ".join(stats.venue_failures)
+        raise RuntimeError(f"OpenReview venue polling failed: {failed}")
     return stats
 
 

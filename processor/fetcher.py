@@ -197,7 +197,7 @@ def uses_scientific_extraction(bronze: BronzeRecord) -> bool:
     General blogs and crawled web pages must stay on Resiliparse/FineWeb. The
     presence of an HTML wire format alone does not make a page a paper.
     """
-    if bronze.source_format in {"pdf", "latex"}:
+    if bronze.source_format in {"pdf", "latex", "markdown"}:
         return True
     if bronze.source_format != "html":
         return False
@@ -224,7 +224,7 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         source_metadata_text = title or ""
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
-    elif bronze.source_format == "code":
+    elif bronze.source_format in {"code", "latex", "markdown"}:
         text = raw_html.decode("utf-8", errors="replace").strip()
         title = str(bronze.url).rsplit("/", 1)[-1] or None
         model_text = text

@@ -113,6 +113,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Install uv for dependency fingerprinting
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
+          enable-cache: false
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -129,7 +135,25 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          dependency_key="$(
+            uv export \
+              --frozen \
+              --package stream2pretrain-processor \
+              --extra runtime \
+              --no-dev \
+              --no-header \
+              --no-annotate \
+              --no-emit-workspace \
+              | sha256sum | cut -c1-24
+          )"
           base_key="$(
+            {
+              sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
+              printf '%s\n' "resolved-dependencies=$dependency_key"
+            } | sha256sum | cut -c1-24
+          )"
+          image="ghcr.io/${owner}/stream2pretrain/processor-base:${base_key}"
+          legacy_key="$(
             {
               sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
               printf '%s\n' '--- dependency manifests ---'
@@ -139,12 +163,16 @@ jobs:
               sha256sum uv.lock
             } | sha256sum | cut -c1-24
           )"
-          image="ghcr.io/${owner}/stream2pretrain/processor-base:${base_key}"
+          legacy_image="ghcr.io/${owner}/stream2pretrain/processor-base:${legacy_key}"
           echo "registry=ghcr.io/${owner}" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Reusing immutable processor base $image"
+          elif docker buildx imagetools inspect "$legacy_image" >/dev/null 2>&1; then
+            docker buildx imagetools create --tag "$image" "$legacy_image"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Migrated matching legacy processor base $legacy_image to $image"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "Building new immutable processor base $image"
@@ -601,9 +629,12 @@ jobs:
             cronjobs=(
               stream2pretrain-ingest-github-releases
               stream2pretrain-ingest-hf-daily-papers
-              stream2pretrain-ingest-openreview-live
               stream2pretrain-iceberg-maintenance
             )
+            if kubectl -n stream2pretrain get \
+              cronjob/stream2pretrain-ingest-openreview-live >/dev/null 2>&1; then
+              cronjobs+=(stream2pretrain-ingest-openreview-live)
+            fi
             while read -r cronjob; do
               [[ -n "$cronjob" ]] || continue
               cronjobs+=("${cronjob#cronjob.batch/}")

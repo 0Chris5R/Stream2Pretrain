@@ -1,4 +1,5 @@
 {{- if .Values.openreviewPoller.enabled }}
+{{- if .Values.openreviewPoller.live.enabled }}
 {{- $component := "ingest-openreview-live" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $statePvc := default (printf "%s-%s-state" (include "stream2pretrain.fullname" .) $component) .Values.openreviewPoller.live.state.existingClaim }}
@@ -90,6 +91,7 @@ spec:
             {{- end }}
             - name: tmp
               emptyDir: {}
+{{- end }}
 {{- if .Values.openreviewPoller.runBackfill }}
 ---
 {{- $bComponent := "ingest-openreview-backfill" }}
@@ -137,6 +139,10 @@ spec:
             - name: S2P_REVIEWARENA_DATASET
               value: {{ .Values.openreviewPoller.backfill.datasetId | quote }}
             {{- end }}
+            - name: S2P_REVIEWARENA_REVISION
+              value: {{ .Values.openreviewPoller.backfill.revision | quote }}
+            - name: S2P_REVIEWARENA_SPLITS
+              value: {{ join "," .Values.openreviewPoller.backfill.splits | quote }}
             {{- if .Values.openreviewPoller.backfill.maxRows }}
             - name: S2P_BACKFILL_MAX_ROWS
               value: {{ .Values.openreviewPoller.backfill.maxRows | quote }}

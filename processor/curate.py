@@ -671,7 +671,7 @@ def _uses_scientific_quality_profile(silver: SilverRecord) -> bool:
     """Select the PDF-trained classifier only for scientific-source records."""
     if silver.source_format in {"code", "metadata", "review", "web"}:
         return False
-    if silver.source_format in {"pdf", "latex"}:
+    if silver.source_format in {"pdf", "latex", "markdown"}:
         return True
     identity = f"{silver.source_feed} {silver.extraction_pipeline}".lower()
     return silver.source_format == "html" and any(

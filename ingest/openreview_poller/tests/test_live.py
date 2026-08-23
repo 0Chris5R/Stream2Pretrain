@@ -276,3 +276,34 @@ async def test_poll_venue_skips_pdf_failures(
     assert reviews == 0
     assert skipped == 0
     assert fake_producer.sent == []
+
+
+@pytest.mark.asyncio
+async def test_run_pass_fails_closed_when_venue_listing_is_blocked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    class _BlockedOR(_FakeOR):
+        def get_all_notes(self, *, invitation: str, **kwargs: Any) -> list[dict[str, Any]]:
+            raise RuntimeError("Challenge verification required")
+
+    fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
+    fake_minio = FakeMinio()
+    monkeypatch.setattr(live, "BronzeProducer", lambda *a, **kw: fake_producer)
+    monkeypatch.setattr(live, "LicenseAdmissionProducer", lambda *a, **kw: fake_admissions)
+    monkeypatch.setattr(live, "MinioWriter", lambda *a, **kw: fake_minio)
+    monkeypatch.setattr(
+        live,
+        "build_async_client",
+        lambda *a, **kw: httpx.AsyncClient(transport=httpx.MockTransport(_pdf_handler)),
+    )
+
+    with pytest.raises(RuntimeError, match="OpenReview venue polling failed"):
+        await live.run_pass(
+            _cfg(),
+            venues=[live.VenueSpec("ICLR.cc", 2026)],
+            or_client=_BlockedOR(submissions={}),
+            state_dir=str(tmp_path / "state"),
+        )

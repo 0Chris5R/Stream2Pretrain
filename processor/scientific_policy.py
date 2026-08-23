@@ -170,7 +170,7 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
 def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificScores:
     """Dispatch structural/evidence signals without applying paper assumptions universally."""
     identity = f"{silver.source_feed} {silver.extraction_pipeline}".lower()
-    is_scientific = silver.source_format in {"pdf", "latex"} or (
+    is_scientific = silver.source_format in {"pdf", "latex", "markdown"} or (
         silver.source_format == "html"
         and any(
             marker in identity for marker in ("arxiv", "openreview", "pes2o", "redpajama-arxiv")
