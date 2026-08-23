@@ -151,9 +151,7 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         spdx_license=paper_license,
         spdx_license_source=("dataset_metadata" if paper_license else "unknown"),
         license_resolver="redpajama-arxiv-paper-item-field",
-        license_evidence_url=(
-            f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}"
-        ),
+        license_evidence_url=(f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}"),
         license_evidence_revision=f"{DATASET_REVISION}:{nid}",
         license_evidence_scope="item" if paper_license else "unknown",
         extra=extra,

@@ -144,9 +144,7 @@ def test_seed_builtin_reports_only_components_selected_by_the_job() -> None:
         item for item in _BUILTIN_SOURCES if item["name"] == "seed:HuggingFaceFW/fineweb-edu"
     )
 
-    assert _builtin_source_status(pes2o, deployments={}, cronjobs={}, jobs=[job])["spec"][
-        "enabled"
-    ]
+    assert _builtin_source_status(pes2o, deployments={}, cronjobs={}, jobs=[job])["spec"]["enabled"]
     assert not _builtin_source_status(fineweb, deployments={}, cronjobs={}, jobs=[job])["spec"][
         "enabled"
     ]

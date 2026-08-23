@@ -392,9 +392,7 @@ class DuckDBQueryService:
             [cutoff.isoformat()],
             relation=self._license_admissions,
         )
-        by_source: dict[str, dict[str, Any]] = {
-            str(row["source_feed"]): row for row in sources
-        }
+        by_source: dict[str, dict[str, Any]] = {str(row["source_feed"]): row for row in sources}
         for row in sources:
             row["license_distribution"] = []
             row["license_provenance"] = []

@@ -275,9 +275,7 @@ def test_scientific_curly_braces_are_a_visible_nonblocking_signal(
 def test_scientific_lorem_signal_is_diagnostic_not_a_web_filter(cfg: ProcessorConfig) -> None:
     state = build_state(cfg)
     try:
-        text = (
-            "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor. " * 20
-        )
+        text = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor. " * 20
         silver = _silver(text, doc_id="sha256:" + "e" * 64).model_copy(
             update={
                 "scientific_artifact_s3_uri": "s3://silver/scientific/e/document.json",
@@ -444,9 +442,7 @@ def test_review_uses_peer_review_policy_even_for_openreview_feed(
             update={
                 "source_format": "review",
                 "source_feed": "openreview-live",
-                "source_metadata_text": (
-                    "invitation: ICLR.cc/2026/Conference/-/Official_Review"
-                ),
+                "source_metadata_text": ("invitation: ICLR.cc/2026/Conference/-/Official_Review"),
                 # Legacy versions incorrectly created scientific artifacts for
                 # every HTML-like source. Format must still win on replay.
                 "scientific_artifact_s3_uri": "s3://silver/legacy/document.json",
@@ -478,9 +474,7 @@ def test_generic_openreview_comment_is_quarantined_as_insubstantial(
             update={
                 "source_format": "review",
                 "source_feed": "openreview",
-                "source_metadata_text": (
-                    "invitation: ICLR.cc/2026/Conference/-/Public_Comment"
-                ),
+                "source_metadata_text": ("invitation: ICLR.cc/2026/Conference/-/Public_Comment"),
             }
         )
 
@@ -504,9 +498,7 @@ def test_permissive_substantive_review_remains_pretrain_eligible(
             update={
                 "source_format": "review",
                 "source_feed": "openreview",
-                "source_metadata_text": (
-                    "invitation: ICLR.cc/2026/Conference/-/Official_Review"
-                ),
+                "source_metadata_text": ("invitation: ICLR.cc/2026/Conference/-/Official_Review"),
                 "spdx_license": "CC-BY-4.0",
                 "spdx_license_source": "openreview_terms",
                 "training_usage": "pretrain_and_posttrain",

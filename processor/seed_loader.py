@@ -320,7 +320,9 @@ def stream_component(
             # A dry run has no durable admission sink. Existing HF rows can
             # still be inspected because their body already arrived with row
             # metadata, but a deferred archive body must not be fetched.
-            materialized = None if cfg.dry_run and doc.body_loader is not None else doc.materialize_body()
+            materialized = (
+                None if cfg.dry_run and doc.body_loader is not None else doc.materialize_body()
+            )
             if materialized is not None:
                 record = to_silver(
                     materialized,

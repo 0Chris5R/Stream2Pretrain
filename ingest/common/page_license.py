@@ -228,7 +228,9 @@ async def resolve_page_license(
     except httpx.HTTPError:
         head_response = None
     if head_response is not None and head_response.status_code < 400:
-        value = license_from_link_header(head_response.headers.get("link"), base_url=str(head_response.url))
+        value = license_from_link_header(
+            head_response.headers.get("link"), base_url=str(head_response.url)
+        )
         if normalize_license(value) != "unknown":
             return PageLicenseEvidence(
                 raw_license=value,

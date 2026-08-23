@@ -292,9 +292,7 @@ def test_license_admissions_exposes_durable_24h_source_activity() -> None:
             "posttrain_transform_only": 1,
             "quarantined": 1,
             "last_observed_at": "2026-08-22 12:00:00",
-            "license_distribution": [
-                {"license_id": "CC-BY-4.0", "status": "admitted", "count": 2}
-            ],
+            "license_distribution": [{"license_id": "CC-BY-4.0", "status": "admitted", "count": 2}],
             "license_provenance": [{"license_source": "rss_entry", "count": 4}],
         }
     ]

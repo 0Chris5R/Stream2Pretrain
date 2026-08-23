@@ -224,15 +224,9 @@ def main() -> None:
     decision_consumer = tail_consumer(decision_topic)
     curated_consumer = tail_consumer(curated_topic)
     production_consumers = {
-        required_env("S2P_NORMALIZED_TOPIC"): tail_consumer(
-            required_env("S2P_NORMALIZED_TOPIC")
-        ),
-        required_env("S2P_DECISIONS_TOPIC"): tail_consumer(
-            required_env("S2P_DECISIONS_TOPIC")
-        ),
-        required_env("S2P_CURATED_TOPIC"): tail_consumer(
-            required_env("S2P_CURATED_TOPIC")
-        ),
+        required_env("S2P_NORMALIZED_TOPIC"): tail_consumer(required_env("S2P_NORMALIZED_TOPIC")),
+        required_env("S2P_DECISIONS_TOPIC"): tail_consumer(required_env("S2P_DECISIONS_TOPIC")),
+        required_env("S2P_CURATED_TOPIC"): tail_consumer(required_env("S2P_CURATED_TOPIC")),
         required_env("S2P_LICENSE_ADMISSIONS_TOPIC"): tail_consumer(
             required_env("S2P_LICENSE_ADMISSIONS_TOPIC")
         ),
@@ -310,9 +304,7 @@ def main() -> None:
                 f"route={decision.get('route')} risk={decision.get('risk_tier')} "
                 f"reasons={decision.get('reject_reasons')}"
             )
-        curated_seen = (
-            consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
-        )
+        curated_seen = consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
         if not curated_seen:
             for consumer in production_consumers.values():
                 consumer.close()

@@ -378,9 +378,9 @@ async def process_release(
         license_source="github_api" if spdx else "unknown",
         source_format="code",
         resolver="github-license-api-ref",
-        evidence_url=repo_evidence.api_url if repo_evidence is not None else (
-            f"https://api.github.com/repos/{ref.owner}/{ref.repo}/license?ref={ref.tag}"
-        ),
+        evidence_url=repo_evidence.api_url
+        if repo_evidence is not None
+        else (f"https://api.github.com/repos/{ref.owner}/{ref.repo}/license?ref={ref.tag}"),
         evidence_revision=repo_evidence.blob_sha if repo_evidence is not None else None,
         evidence_scope="repository_ref" if spdx else "unknown",
     )
@@ -418,9 +418,7 @@ async def process_release(
         file_url = f"https://github.com/{ref.owner}/{ref.repo}/blob/{ref.tag}/{extracted.path}"
         file_digest = f"sha256:{hashlib.sha256(extracted.data).hexdigest()}"
         source_format = (
-            "web"
-            if extracted.language in {"markdown", "restructuredtext", "text"}
-            else "code"
+            "web" if extracted.language in {"markdown", "restructuredtext", "text"} else "code"
         )
         file_admission = decide_license_admission(
             source_url=file_url,
@@ -428,16 +426,16 @@ async def process_release(
             license_value=file_license,
             license_source=file_source,
             source_format=source_format,
-            resolver=(
-                "spdx-file-header" if header_match is not None else "github-license-api-ref"
-            ),
-            evidence_url=file_url if header_match is not None else (
-                repo_evidence.api_url if repo_evidence is not None else file_url
-            ),
+            resolver=("spdx-file-header" if header_match is not None else "github-license-api-ref"),
+            evidence_url=file_url
+            if header_match is not None
+            else (repo_evidence.api_url if repo_evidence is not None else file_url),
             evidence_revision=(
                 file_digest
                 if header_match is not None
-                else repo_evidence.blob_sha if repo_evidence is not None else None
+                else repo_evidence.blob_sha
+                if repo_evidence is not None
+                else None
             ),
             evidence_scope="file" if header_match is not None else "repository_ref",
         )
@@ -532,9 +530,7 @@ async def _emit_one_file(
         trace_id=_trace_id(),
         bytes_size=len(extracted.data),
         source_format=(
-            "web"
-            if extracted.language in {"markdown", "restructuredtext", "text"}
-            else "code"
+            "web" if extracted.language in {"markdown", "restructuredtext", "text"} else "code"
         ),
         extraction_pipeline=(
             "github-readme-markdown-v1"

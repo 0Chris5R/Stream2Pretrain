@@ -406,9 +406,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             else None
         )
         perplexity_result = (
-            state.kenlm.score(fallback_segment.text)
-            if source_policy.kenlm_mode != "off"
-            else None
+            state.kenlm.score(fallback_segment.text) if source_policy.kenlm_mode != "off" else None
         )
         segment_scores = [
             score.model_copy(
@@ -477,10 +475,14 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         if source_policy.web_heuristic_gate
         else True
     )
-    if source_policy.web_heuristic_gate and not c4_pass and not {
-        "insufficient_body",
-        "insufficient_scientific_body",
-    }.intersection(reject):
+    if (
+        source_policy.web_heuristic_gate
+        and not c4_pass
+        and not {
+            "insufficient_body",
+            "insufficient_scientific_body",
+        }.intersection(reject)
+    ):
         reject.append("c4_nopunc_filter")
 
     edu_score, perplexity, perplexity_bucket = aggregate_segment_scores(segment_scores)

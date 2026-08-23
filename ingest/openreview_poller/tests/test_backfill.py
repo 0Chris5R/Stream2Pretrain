@@ -146,9 +146,7 @@ async def test_run_backfill_streams_rows(monkeypatch: pytest.MonkeyPatch, tmp_pa
     formats = [m["record"].source_format for m in fake_producer.sent]
     assert formats.count("markdown") == 0
     assert formats.count("review") == 2
-    assert {m["record"].training_usage for m in fake_producer.sent} == {
-        "pretrain_and_posttrain"
-    }
+    assert {m["record"].training_usage for m in fake_producer.sent} == {"pretrain_and_posttrain"}
     assert {m["record"].spdx_license for m in fake_producer.sent} == {"CC-BY-4.0"}
     pipelines = [m["record"].extraction_pipeline for m in fake_producer.sent]
     assert backfill.PIPELINE_REVIEW_BACKFILL in pipelines

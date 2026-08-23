@@ -180,8 +180,7 @@ async def test_repo_license_requires_and_retains_immutable_blob_sha() -> None:
                 "sha": "f" * 40,
                 "path": "LICENSE",
                 "html_url": (
-                    "https://github.com/huggingface/transformers/blob/"
-                    f"{'f' * 40}/LICENSE"
+                    f"https://github.com/huggingface/transformers/blob/{'f' * 40}/LICENSE"
                 ),
             },
         )

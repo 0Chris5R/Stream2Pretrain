@@ -184,11 +184,7 @@ def license_for(row: dict[str, Any]) -> tuple[str | None, str]:
         if not isinstance(detected, list):
             continue
         unique = sorted(
-            {
-                value.strip()
-                for value in detected
-                if isinstance(value, str) and value.strip()
-            }
+            {value.strip() for value in detected if isinstance(value, str) and value.strip()}
         )
         # Multiple distinct detectors are ambiguous without an SPDX AND/OR
         # expression in the source row. Fail closed instead of guessing.

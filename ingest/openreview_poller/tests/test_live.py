@@ -197,8 +197,7 @@ async def test_poll_venue_emits_submission_and_reviews(
     # State persisted so the next pass skips the same submission.
     persisted = state_store.get(venue.state_key)
     assert any(
-        value.startswith("paperA:")
-        for value in persisted.get("seen_submission_revisions") or []
+        value.startswith("paperA:") for value in persisted.get("seen_submission_revisions") or []
     )
     assert any(
         value.startswith("reviewA1:") for value in persisted.get("seen_reply_revisions") or []
