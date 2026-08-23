@@ -41,6 +41,28 @@ def access_headers(base_url: str, client_id: str, client_secret: str) -> dict[st
     return {"Authorization": f"Bearer {token}"}
 
 
+def grant_keys(value: object) -> set[tuple[str, tuple[str, ...], str]]:
+    """Normalize the catalog and namespace grant shapes returned by Polaris."""
+    if not isinstance(value, list):
+        return set()
+    keys: set[tuple[str, tuple[str, ...], str]] = set()
+    for grant in value:
+        if not isinstance(grant, dict):
+            continue
+        grant_type = grant.get("type")
+        grant_privilege = grant.get("privilege")
+        raw_namespace = grant.get("namespace", [])
+        if (
+            not isinstance(grant_type, str)
+            or not isinstance(grant_privilege, str)
+            or not isinstance(raw_namespace, list)
+            or not all(isinstance(part, str) for part in raw_namespace)
+        ):
+            continue
+        keys.add((grant_type, tuple(raw_namespace), grant_privilege))
+    return keys
+
+
 def main() -> None:
     catalog = required_env("POLARIS_WAREHOUSE")
     namespace = required_env("ICEBERG_NAMESPACE")
@@ -97,15 +119,11 @@ def main() -> None:
 
     grants_url = f"{roles_url}/{role}/grants"
     current = response_json(requests.get(grants_url, headers=headers, timeout=15)).get("grants", [])
-    existing = {
-        (grant.get("type"), tuple(grant.get("namespace", [])), grant.get("privilege"))
-        for grant in current
-        if isinstance(grant, dict)
-    }
+    existing = grant_keys(current)
     added: list[str] = []
     for privilege in ("CATALOG_MANAGE_ACCESS", "CATALOG_MANAGE_METADATA"):
-        key = ("catalog", (), privilege)
-        if key in existing:
+        catalog_grant_key = ("catalog", (), privilege)
+        if catalog_grant_key in existing:
             continue
         response = requests.put(
             grants_url,
@@ -144,14 +162,10 @@ def main() -> None:
         response.raise_for_status()
 
     current = response_json(requests.get(grants_url, headers=headers, timeout=15)).get("grants", [])
-    existing = {
-        (grant.get("type"), tuple(grant.get("namespace", [])), grant.get("privilege"))
-        for grant in current
-        if isinstance(grant, dict)
-    }
+    existing = grant_keys(current)
     for privilege in ("TABLE_READ_DATA", "TABLE_WRITE_DATA"):
-        key = ("namespace", (namespace,), privilege)
-        if key in existing:
+        namespace_grant_key = ("namespace", (namespace,), privilege)
+        if namespace_grant_key in existing:
             continue
         response = requests.put(
             grants_url,

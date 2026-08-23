@@ -227,8 +227,8 @@ async def poll_models(
 
     # Persist state.
     if len(seen) > 5000:
-        items = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:2500]
-        seen = dict(items)
+        recent_state_items = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:2500]
+        seen = dict(recent_state_items)
     FeedStateStore("/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf").put(
         SOURCE_FEED_MODELS, {"seen": seen}
     )

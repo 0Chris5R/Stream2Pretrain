@@ -515,12 +515,15 @@ def _provider_error_reason(response: httpx.Response) -> str:
         return f"HTTP {response.status_code}"
     if isinstance(payload, dict):
         error = payload.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            return error["message"][:300]
+        if isinstance(error, dict):
+            error_message = error.get("message")
+            if isinstance(error_message, str):
+                return error_message[:300]
         if isinstance(error, str):
             return error[:300]
-        if isinstance(payload.get("message"), str):
-            return payload["message"][:300]
+        message = payload.get("message")
+        if isinstance(message, str):
+            return message[:300]
     return f"HTTP {response.status_code}"
 
 

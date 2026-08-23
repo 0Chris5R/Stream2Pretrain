@@ -559,7 +559,7 @@ async def run_for_ids(
         if owns_producer:
             await producer_cm.start()
         owns_admission_producer = admission_cm is not None and admission_producer_override is None
-        if owns_admission_producer:
+        if admission_cm is not None and admission_producer_override is None:
             await admission_cm.start()
         if owns_minio:
             await minio_cm.start()
