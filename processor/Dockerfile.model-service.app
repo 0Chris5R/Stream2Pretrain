@@ -7,7 +7,14 @@ ARG S2P_MODEL_SERVICE_PROFILE
 ENV S2P_MODEL_SERVICE_PROFILE=${S2P_MODEL_SERVICE_PROFILE}
 
 COPY schemas                    /app/schemas
-COPY processor                  /app/processor
+COPY processor/__init__.py      \
+     processor/common.py        \
+     processor/decon_gate.py    \
+     processor/model_service.py \
+     processor/sign.py          /app/processor/
+COPY processor/operators/__init__.py     \
+     processor/operators/kenlm_score.py  \
+     processor/operators/quality.py      /app/processor/operators/
 
 # This image intentionally lacks unrelated worker dependencies. Import the
 # selected native/model backend so CI proves the minimal environment is

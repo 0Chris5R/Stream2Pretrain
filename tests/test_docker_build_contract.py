@@ -32,6 +32,9 @@ def test_processor_ci_image_uses_an_immutable_dependency_base() -> None:
     assert "uv sync" not in app
     assert "apt-get" not in app
     assert 'ENTRYPOINT ["python", "-m", "processor.model_service"]' in model_app
+    assert "COPY processor                  /app/processor" not in model_app
+    assert "processor/model_service.py" in model_app
+    assert "processor/operators/quality.py" in model_app
     assert "processor/Dockerfile.model-service.app" in workflow
     assert "S2P_INSTALL_EXTRA=${{ matrix.extra }}" in workflow
     assert "target: runtime-base" in workflow
@@ -122,6 +125,40 @@ def test_github_tarball_scaler_uses_a_non_amplifying_job_topic() -> None:
     assert ".Values.redpanda.topics.githubReleaseJobs" in template
     assert "- type: prometheus" not in template
     assert "S2P_GITHUB_RELEASE_JOBS_TOPIC" in helper
+
+
+def test_release_images_are_deployed_by_content_digest() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+    helper = (ROOT / "charts" / "stream2pretrain" / "templates" / "_helpers.tpl").read_text(
+        encoding="utf-8"
+    )
+
+    assert "image-pin:" in workflow
+    assert "needs.image-pin.result == 'success'" in workflow
+    assert "pin_component processor_quality_model processor-quality-model" in workflow
+    assert "processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}" in workflow
+    assert "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}" in workflow
+    assert "minimum_rootfs_available=$((6 * 1024 * 1024 * 1024))" in workflow
+    assert 'contains "@sha256:" .image' in helper
+    assert 'printf "%s/%s" $ctx.Values.image.registry .image' in helper
+
+
+def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+
+    model_input = (
+        "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
+        "ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app "
+        "processor/__init__.py processor/common.py processor/model_service.py"
+    )
+    assert workflow.count(model_input) == 3
+    assert (
+        workflow.count(
+            "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
+            "ingest/*/pyproject.toml schemas processor\n"
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)
