@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 from processor.common import ProcessorConfig
 from processor.mixture_controller.controller import (
-    MixtureController,
     _BUILTIN_SOURCES,
     _builtin_source_status,
     _cron_schedule,
     _source_job_runtime,
     _sourcefeed_status,
+    MixtureController,
 )
 from schemas.sourcefeed import MixtureRecipeSpec
 

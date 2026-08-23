@@ -198,7 +198,7 @@ class DurableProcessingFailureWriter:
     error_revision: str = "processing-failure-v1"
 
     @classmethod
-    def from_config(cls, cfg: ProcessorConfig) -> "DurableProcessingFailureWriter":
+    def from_config(cls, cfg: ProcessorConfig) -> DurableProcessingFailureWriter:
         return cls(
             s3=boto3.client(
                 "s3",

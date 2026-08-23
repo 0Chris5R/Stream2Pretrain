@@ -6,6 +6,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from types import ModuleType
+from typing import ClassVar
 
 import pytest
 
@@ -212,7 +213,7 @@ def test_durable_processing_failure_is_idempotent_and_auditable() -> None:
         partition = 2
         offset = 41
         key = b"sha256:key-fallback"
-        headers: list[tuple[str, bytes]] = []
+        headers: ClassVar[list[tuple[str, bytes]]] = []
         value = b'{"doc_id":"sha256:test","trace_id":"0123456789abcdef0123456789abcdef"}'
 
     s3 = FakeS3()
@@ -244,7 +245,9 @@ def test_durable_processing_failure_recovers_audit_identity_from_message() -> No
         partition = 0
         offset = 9
         key = b"sha256:key-fallback"
-        headers = [("trace_id", b"fedcba9876543210fedcba9876543210")]
+        headers: ClassVar[list[tuple[str, bytes]]] = [
+            ("trace_id", b"fedcba9876543210fedcba9876543210")
+        ]
         value = b"malformed"
 
     s3 = FakeS3()
