@@ -30,6 +30,10 @@ NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
 kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
 ```
 
+The chart-owned RSS, OAI-PMH, and sitemap CronJobs are suspended templates.
+The SourceFeed controller creates the only active CronJob for each CRD. Do not
+unsuspend a template job: doing so would duplicate the per-source schedules.
+
 This sequence is for a clean install. Do not apply the application tier to the
 current legacy release until the immutable-selector and curator StatefulSet
 migration in `docs/infrastructure-reimplementation.md` is approved. Loki,
@@ -37,33 +41,46 @@ Tempo, and Alloy are not in the measured baseline.
 
 ## 2. Scale the processor
 
-The fetcher is stateless across records and commits Redpanda consumer-group
-offsets only after the corresponding `docs.normalized` batch is confirmed
-delivered. The DHBW profile keeps one replica warm and uses KEDA lag scaling up
-to the four `raw.fetched` partitions.
+The fetcher and curator are coordinated Bytewax executions. Each owns source
+progress in a recovery database on its checkpoint PVC. A crash before a
+recovery snapshot replays the keyed output; an extraction, storage, or model
+failure escapes the operator so Bytewax cannot checkpoint past the record.
+The curator recovery boundary also covers its near-duplicate index and
+deterministic decision cache.
 
-The curator commits broker-owned offsets after its decision outputs are
-delivered. Its global near-duplicate index remains on one durable PVC, so
-independent curator replicas are unsafe. Quality, KenLM, and E5 run as three
-stateless `processor-model-service-*` deployments, each with a CPU HPA and
-required cross-node spreading. A transient model-service outage leaves the current
-Kafka offset uncommitted and replays the document after recovery. Redpanda lag
-is authoritative for capacity planning rather than being hidden in a Bytewax
-recovery database.
+Ordinary Kafka-lag KEDA must not independently scale either core execution:
+broker commits are not the authoritative Bytewax progress boundary. A core
+rescale is a coordinated stop, worker-count change, and restart using the
+pre-created recovery partitions. Quality, KenLM, and E5 remain stateless
+`processor-model-service-*` deployments with CPU HPA and cross-node spreading.
 
-KEDA remains appropriate for independently committing ingest consumers such
-as the arXiv HTML and GitHub tarball fetchers. Run the target-cluster procedure
-in `docs/capacity-benchmark.md` and record its evidence before enabling those
-scalers.
+KEDA remains appropriate for independently committing ingest consumers with a
+dedicated input topic, such as the GitHub tarball fetcher. It is disabled for
+the arXiv HTML fetcher because that worker consumes and republishes on the
+shared `raw.fetched` topic, making Kafka lag a self-amplifying signal rather
+than an arXiv backlog. Keep that worker at one replica until a source-specific
+Prometheus backlog metric exists. The live arXiv worker processes and commits
+one discovered paper at a time so a partially filled batch cannot remain idle
+between announcement windows.
 
-The production fetcher consumes only `raw.fetched` and scales on that group's
-lag. A fixed canary worker consumes the short-retention `raw.smoke` traffic
-class with the same image and normalization code, then writes
-`docs.normalized.smoke`. The curator polls that health lane before every
-production record while sharing the real model and dedup state. This standard
-traffic-class isolation keeps a multi-minute PDF or historical replay from
-starving the bounded deployment check; the canary is not production capacity
-and is never included in the KEDA replica count.
+The production fetcher consumes only `raw.fetched`. A separate fixed Bytewax
+canary execution uses its own short-retention `raw.smoke` input,
+`docs.normalized.smoke` output, flow name, and recovery PVC. The release
+workflow also creates an isolated one-record curator canary with an ephemeral
+recovery directory and dedicated `curation.decisions.smoke` and
+`docs.curated.smoke` outputs. Its admission is written only to
+`license.admissions.smoke`, and its temporary Bronze object is deleted on both
+success and failure. The canary tails production topics before injection and
+fails if its exact `doc_id` appears there. Synthetic records therefore cannot
+advance production progress or mutate production state. Any deterministic
+canary-only failure is separated under the state bucket's
+`canary-processing-failures/` prefix instead of the production Gold ledger.
+
+Before each release, `scripts/reconcile_topic_partitions.sh` also reconciles
+the seven-day core and 24-hour smoke retention already declared in
+`schemas/topics.py`, the document-topic partition floor, delete cleanup policy,
+and the maximum Kafka record size. Deployment stops if a required topic has no
+partitions.
 
 ```bash
 uv run python scripts/capacity_probe.py
@@ -72,8 +89,8 @@ uv run python scripts/capacity_probe.py
 
 ## 3. Debug a stuck stage
 
-Symptom: fetcher KEDA replicas climb to the cap without reducing broker lag,
-or a stateful processor's throughput counters stop advancing.
+Symptom: a core processor's throughput counters stop advancing or its Pod
+restarts repeatedly on the same input.
 
 ```bash
 # 3.1 Identify the bottleneck.
@@ -90,27 +107,36 @@ kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate | r
 # Then jump to Tempo using the trace_id field on the log line.
 ```
 
-If the fetcher or curator stalls, inspect `rpk group describe s2p-fetcher` or
-`rpk group describe s2p-curate`, its delivery-failure metric, and Pod restarts.
-Both stages resume from broker commits. The curator PVC owns classifier replay
-decisions and near-duplicate state, so deleting it is still a destructive
-semantic reset rather than a routine restart step.
+If the fetcher, curator, or Iceberg writer stalls, inspect its logs,
+processing-failure metric, Pod restarts, and recovery PVC. Deterministic poison
+records are queryable in the Gold bucket under `processing-failures/`, keyed by
+stage, Kafka topic, partition, offset, and payload hash. Each JSON object
+retains document and trace ids from the payload, message metadata, or a
+deterministic unresolved fallback, plus retry classification, error revision,
+and reason. A failed failure-object write stops the Bytewax execution before
+its next recovery snapshot. Kafka consumer-group lag is useful backlog context
+but is not the recovery checkpoint. Deleting either recovery database can
+replay retained input; deleting the curator PVC also destroys the near-duplicate
+and decision-cache boundary and is not a routine restart step.
 
 ## 4. Restart from checkpoint
 
-The fetcher and curator resume from broker-owned `s2p-fetcher` and `s2p-curate`
-offsets. The deployment workflow monotonically migrates legacy Bytewax source
-offsets before the native consumers start. The curator retains its PVC for the
-global near-duplicate index and deterministic decision cache. The only manual
-case is a **deliberate replay** (for example a contamination bisect).
+The fetcher and curator resume from their Bytewax recovery databases. During
+the one-time native-consumer-to-Bytewax cutover, `startingOffset=stored`
+bridges the last broker commit only when no Bytewax recovery snapshot exists.
+The deployment writes and validates the identity-bound
+`cutovers/native-consumer-to-bytewax-v2/<component>.json` marker on each
+retained state volume. Legacy state without either a matching marker or a
+readable recovery source fails closed, and an identity mismatch is never
+overwritten. After the first Bytewax snapshot, the PVC is authoritative. The
+only manual case is a **deliberate replay** such as a contamination bisect.
 
 ```bash
 # 4.1 Stop the curator.
 kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=0
 
-# 4.2 Back up the checkpoint PVC and record the intended replay offset.
-# Record both the intended `rpk group seek` offset and a snapshot of the
-# matching curator state. Offsets and near-duplicate state form one boundary.
+# 4.2 Back up the checkpoint PVC and record the intended replay boundary.
+# Bytewax source progress and near-duplicate state form one boundary.
 
 # 4.3 Destructive cold start, only after a snapshot and explicit approval.
 kubectl -n stream2pretrain delete pvc \

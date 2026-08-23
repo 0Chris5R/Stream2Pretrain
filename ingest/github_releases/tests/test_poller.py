@@ -102,8 +102,7 @@ async def test_poll_repo_emits_release(tmp_path: Path) -> None:
     finally:
         await client.aclose()
     assert emitted == 1
-    assert len(fake_producer.sent) == 1
-    assert fake_producer.sent[0]["headers"]["tarball_job_dispatched"] == "true"
+    assert len(fake_producer.sent) == 0
     assert len(fake_job_producer.sent) == 1
     assert fake_job_producer.sent[0]["headers"] == {"github_repo": "huggingface/transformers"}
 

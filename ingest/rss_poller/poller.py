@@ -22,6 +22,7 @@ from typing import Any
 import feedparser
 import httpx
 
+from ingest.common.arxiv_license import arxiv_id_from_url, fetch_arxiv_license_with_source
 from ingest.common.bronze_pipeline import fetch_and_publish
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.feeds import (
@@ -31,10 +32,11 @@ from ingest.common.feeds import (
 )
 from ingest.common.http_client import build_async_client
 from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
-from ingest.common.license_admission import effective_license
+from ingest.common.license_admission import normalize_license
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
+from ingest.common.page_license import PageLicenseEvidence, resolve_page_license
 from ingest.common.rate_limit import TokenBucket
 from ingest.common.state import FeedStateStore
 from schemas.sourcefeed import SourceFeedSpec
@@ -134,10 +136,32 @@ async def poll_feed(
     entry_failures: list[str] = []
     for entry in entries:
         url = entry.url
-        license_id, license_source = effective_license(
-            entry.license_value,
-            feed.license_default,
-        )
+        arxiv_id = arxiv_id_from_url(url)
+        if arxiv_id is not None and normalize_license(entry.license_value) == "unknown":
+            resolved, license_source = await fetch_arxiv_license_with_source(
+                arxiv_id,
+                client,
+                bucket=bucket_limit,
+            )
+            evidence = PageLicenseEvidence(
+                raw_license=resolved,
+                license_source=license_source,  # type: ignore[arg-type]
+                resolver=f"arxiv:{license_source}",
+                evidence_url=f"https://arxiv.org/abs/{arxiv_id}",
+                evidence_revision=arxiv_id,
+                evidence_scope=(
+                    "item" if normalize_license(resolved) != "unknown" else "unknown"
+                ),
+            )
+        else:
+            evidence = await resolve_page_license(
+                client,
+                url,
+                item_license=entry.license_value,
+                item_license_source="rss_entry",
+                item_evidence_url=str(feed.endpoint),
+                item_evidence_revision=new_state.get("etag") or new_state.get("last_modified"),
+            )
         await bucket_limit.acquire()
         try:
             rec = await fetch_and_publish(
@@ -149,8 +173,16 @@ async def poll_feed(
                 bucket=bucket,
                 expected_content_type="text/html",
                 seen=seen_in_pass,
-                license_value=license_id,
-                license_source=license_source,
+                license_value=evidence.raw_license,
+                license_source=evidence.license_source,
+                license_resolver=evidence.resolver,
+                license_evidence_url=evidence.evidence_url,
+                license_evidence_revision=evidence.evidence_revision,
+                license_evidence_scope=evidence.evidence_scope,
+                source_format="metadata" if arxiv_id is not None else "html",
+                extraction_pipeline=(
+                    "arxiv-rss-discovery-v1" if arxiv_id is not None else "rss-page-html-v1"
+                ),
                 admission_producer=admission_producer,
             )
         except httpx.HTTPError as exc:
@@ -160,8 +192,10 @@ async def poll_feed(
         if rec is not None:
             emitted += 1
 
-    if entries and len(entry_failures) == len(entries):
-        raise RuntimeError(f"all {len(entries)} entries failed for RSS feed {feed.name}")
+    if entry_failures:
+        raise RuntimeError(
+            f"{len(entry_failures)} of {len(entries)} RSS entries failed for {feed.name}"
+        )
 
     state_store.put(feed.name, new_state)
     return emitted

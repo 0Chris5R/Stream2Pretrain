@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import pytest
 
@@ -13,12 +13,9 @@ from processor.curate import (
     build_state,
     curate_one,
     is_trainable_gold,
-    native_curator_consumer_config,
     process_silver_decision_payload,
     process_silver_payload,
-    run_native_curator,
 )
-from processor.model_client import ModelServiceError
 from processor.operators.kenlm_score import PerplexityResult
 from processor.operators.quality import QualityScore
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
@@ -275,6 +272,40 @@ def test_scientific_curly_braces_are_a_visible_nonblocking_signal(
         state.close()
 
 
+def test_scientific_lorem_signal_is_diagnostic_not_a_web_filter(cfg: ProcessorConfig) -> None:
+    state = build_state(cfg)
+    try:
+        text = (
+            "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor. " * 20
+        )
+        silver = _silver(text, doc_id="sha256:" + "e" * 64).model_copy(
+            update={
+                "scientific_artifact_s3_uri": "s3://silver/scientific/e/document.json",
+                "source_feed": "arxiv-html-fetcher",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "model_text": text,
+                "segments": [
+                    SilverSegment(
+                        segment_id="methods",
+                        title="Methods",
+                        role="methods",
+                        text=text,
+                        word_count=len(text.split()),
+                    )
+                ],
+                "included_section_count": 1,
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert not gold.c4_lorem_ipsum_pass
+        assert "c4_nopunc_filter" not in gold.reject_reasons
+    finally:
+        state.close()
+
+
 def test_structured_evidence_with_email_is_removed_before_final_projection(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
@@ -401,18 +432,21 @@ def test_review_uses_peer_review_policy_even_for_openreview_feed(
 ) -> None:
     state = build_state(cfg)
     try:
-        text = " ".join(
+        text = "\n\n".join(
             [
-                "The method has a clear strength because the evaluation compares robust baselines.",
-                "However, the evidence leaves a reproducibility concern and a limitation.",
-                "I suggest the authors report variance and clarify the dataset split.",
+                "[FIELD summary]\nThe method studies a relevant reproducibility problem.",
+                "[FIELD strengths]\nThe evaluation compares robust baselines.",
+                "[FIELD weaknesses]\nThe evidence leaves a reproducibility limitation.",
+                "[FIELD questions]\nCan the authors report variance and clarify the split?",
             ]
-            * 4
         )
         silver = _silver(text, doc_id="sha256:" + "9" * 64).model_copy(
             update={
                 "source_format": "review",
                 "source_feed": "openreview-live",
+                "source_metadata_text": (
+                    "invitation: ICLR.cc/2026/Conference/-/Official_Review"
+                ),
                 # Legacy versions incorrectly created scientific artifacts for
                 # every HTML-like source. Format must still win on replay.
                 "scientific_artifact_s3_uri": "s3://silver/legacy/document.json",
@@ -421,16 +455,74 @@ def test_review_uses_peer_review_policy_even_for_openreview_feed(
 
         gold = curate_one(state, silver)
 
-        assert gold.classifier_revision == "peer-review-quality-rules-v1"
+        assert gold.classifier_revision == "openreview-schema-completeness-v1"
         assert gold.segment_scores[0].finepdfs_edu_score is None
         assert gold.segment_scores[0].fineweb_edu_score is None
         assert "peer_review" in gold.content_tags
+        assert gold.perplexity_scorer == "not-applicable"
         assert gold.route == "posttrain_candidate"
+        assert gold.eligible_routes == ["pretrain", "posttrain_candidate"]
     finally:
         state.close()
 
 
-def test_metadata_uses_structured_policy_not_web_classifier(cfg: ProcessorConfig) -> None:
+def test_generic_openreview_comment_is_quarantined_as_insubstantial(
+    cfg: ProcessorConfig,
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(
+            "[FIELD comment]\nLooks good",
+            doc_id="sha256:" + "8" * 64,
+        ).model_copy(
+            update={
+                "source_format": "review",
+                "source_feed": "openreview",
+                "source_metadata_text": (
+                    "invitation: ICLR.cc/2026/Conference/-/Public_Comment"
+                ),
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "insubstantial_review" in gold.reject_reasons
+        assert gold.route == "quarantine"
+    finally:
+        state.close()
+
+
+def test_permissive_substantive_review_remains_pretrain_eligible(
+    cfg: ProcessorConfig,
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(
+            "[FIELD summary]\nThe submission presents a clear empirical comparison.",
+            doc_id="sha256:" + "7" * 64,
+        ).model_copy(
+            update={
+                "source_format": "review",
+                "source_feed": "openreview",
+                "source_metadata_text": (
+                    "invitation: ICLR.cc/2026/Conference/-/Official_Review"
+                ),
+                "spdx_license": "CC-BY-4.0",
+                "spdx_license_source": "openreview_terms",
+                "training_usage": "pretrain_and_posttrain",
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "insubstantial_review" not in gold.reject_reasons
+        assert gold.route == "pretrain"
+        assert gold.eligible_routes == ["pretrain"]
+    finally:
+        state.close()
+
+
+def test_metadata_is_discovery_only_and_never_trainable(cfg: ProcessorConfig) -> None:
     state = build_state(cfg)
     try:
         text = (
@@ -443,11 +535,12 @@ def test_metadata_uses_structured_policy_not_web_classifier(cfg: ProcessorConfig
 
         gold = curate_one(state, silver)
 
-        assert gold.classifier_revision == "metadata-quality-rules-v1"
+        assert gold.classifier_revision == "metadata-discovery-only-v1"
         assert gold.segment_scores[0].finepdfs_edu_score is None
         assert gold.segment_scores[0].fineweb_edu_score is None
-        assert "structured_metadata" in gold.content_tags
-        assert "insufficient_body" not in gold.reject_reasons
+        assert "discovery_metadata" in gold.content_tags
+        assert "metadata_only" in gold.reject_reasons
+        assert gold.route == "quarantine"
     finally:
         state.close()
 
@@ -543,226 +636,3 @@ def test_code_license_must_be_permissive_whitelist(
         assert not is_trainable_gold(gold)
     finally:
         state.close()
-
-
-class _NativeMessage:
-    def __init__(self, topic: str) -> None:
-        self._topic = topic
-
-    def error(self) -> None:
-        return None
-
-    def value(self) -> bytes:
-        return b"silver"
-
-    def key(self) -> bytes:
-        return b"document"
-
-    def topic(self) -> str:
-        return self._topic
-
-    def partition(self) -> int:
-        return 1
-
-    def offset(self) -> int:
-        return 7
-
-
-class _NativeConsumer:
-    def __init__(self, config: dict[str, object], message: _NativeMessage | None) -> None:
-        self.config = config
-        self.message = message
-        self.topics: list[str] = []
-        self.commits: list[_NativeMessage] = []
-        self.closed = False
-
-    def subscribe(self, topics: list[str]) -> None:
-        self.topics = topics
-
-    def poll(self, _timeout: float) -> _NativeMessage | None:
-        message, self.message = self.message, None
-        return message
-
-    def commit(self, *, message: _NativeMessage, asynchronous: bool) -> None:
-        assert asynchronous is False
-        self.commits.append(message)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _NativeProducer:
-    def __init__(self, config: dict[str, object], delivery_error: object | None = None) -> None:
-        self.config = config
-        self.delivery_error = delivery_error
-        self.records: list[dict[str, Any]] = []
-
-    def produce(self, topic: str, **kwargs: Any) -> None:
-        self.records.append({"topic": topic, **kwargs})
-        callback = kwargs.get("on_delivery")
-        if callback is not None:
-            callback(self.delivery_error, object())
-
-    def flush(self, _timeout: float) -> int:
-        return 0
-
-
-def test_native_curator_prioritizes_canary_and_commits_after_outputs(
-    cfg: ProcessorConfig,
-    monkeypatch: Any,
-) -> None:
-    consumers: list[_NativeConsumer] = []
-    producer: _NativeProducer | None = None
-
-    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
-        topic = (
-            "docs.normalized.smoke"
-            if config["group.id"] == "s2p-curate-canary"
-            else "docs.normalized"
-        )
-        consumer = _NativeConsumer(config, _NativeMessage(topic))
-        consumers.append(consumer)
-        return consumer
-
-    def producer_factory(config: dict[str, object]) -> _NativeProducer:
-        nonlocal producer
-        producer = _NativeProducer(config)
-        return producer
-
-    monkeypatch.setattr(
-        "processor.curate.process_silver_decision_payload",
-        lambda *_args, **_kwargs: (b"decision", True),
-    )
-    run_native_curator(
-        cfg,
-        state=object(),  # type: ignore[arg-type]
-        consumer_factory=consumer_factory,
-        producer_factory=producer_factory,
-        max_messages=1,
-    )
-
-    production, canary = consumers
-    assert production.topics == ["docs.normalized"]
-    assert canary.topics == ["docs.normalized.smoke"]
-    assert production.commits == []
-    assert canary.commits and canary.commits[0].topic() == "docs.normalized.smoke"
-    assert producer is not None
-    assert [record["topic"] for record in producer.records] == [
-        "curation.decisions",
-        "docs.curated",
-    ]
-    assert all(consumer.closed for consumer in consumers)
-
-
-def test_native_curator_supports_isolated_canary_job(
-    cfg: ProcessorConfig,
-    monkeypatch: Any,
-) -> None:
-    consumers: list[_NativeConsumer] = []
-
-    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
-        consumer = _NativeConsumer(config, _NativeMessage("docs.normalized.smoke"))
-        consumers.append(consumer)
-        return consumer
-
-    monkeypatch.setenv("S2P_CURATOR_INPUT_TOPIC", "docs.normalized.smoke")
-    monkeypatch.setenv("S2P_CURATOR_AUTO_OFFSET_RESET", "latest")
-    monkeypatch.setattr(
-        "processor.curate.process_silver_decision_payload",
-        lambda *_args, **_kwargs: (b"decision", False),
-    )
-
-    run_native_curator(
-        cfg,
-        state=object(),  # type: ignore[arg-type]
-        consumer_factory=consumer_factory,
-        producer_factory=_NativeProducer,
-        max_messages=1,
-    )
-
-    assert len(consumers) == 1
-    assert consumers[0].topics == ["docs.normalized.smoke"]
-    assert consumers[0].config["auto.offset.reset"] == "latest"
-    assert len(consumers[0].commits) == 1
-
-
-def test_native_curator_rejects_invalid_offset_reset(
-    cfg: ProcessorConfig,
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.setenv("S2P_CURATOR_AUTO_OFFSET_RESET", "middle")
-    with pytest.raises(RuntimeError, match="earliest or latest"):
-        native_curator_consumer_config(
-            cfg,
-            group_id="s2p-curate-canary-test",
-            traffic_class="canary",
-        )
-
-
-def test_native_curator_does_not_commit_failed_delivery(
-    cfg: ProcessorConfig,
-    monkeypatch: Any,
-) -> None:
-    consumers: list[_NativeConsumer] = []
-
-    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
-        message = (
-            _NativeMessage("docs.normalized.smoke")
-            if config["group.id"] == "s2p-curate-canary"
-            else None
-        )
-        consumer = _NativeConsumer(config, message)
-        consumers.append(consumer)
-        return consumer
-
-    monkeypatch.setattr(
-        "processor.curate.process_silver_decision_payload",
-        lambda *_args, **_kwargs: (b"decision", False),
-    )
-    with pytest.raises(RuntimeError, match="producer delivery failed"):
-        run_native_curator(
-            cfg,
-            state=object(),  # type: ignore[arg-type]
-            consumer_factory=consumer_factory,
-            producer_factory=lambda config: _NativeProducer(
-                config, delivery_error=RuntimeError("broker rejected record")
-            ),
-            max_messages=1,
-        )
-
-    assert all(consumer.commits == [] for consumer in consumers)
-
-
-def test_native_curator_replays_transient_model_service_failure(
-    cfg: ProcessorConfig,
-    monkeypatch: Any,
-) -> None:
-    consumers: list[_NativeConsumer] = []
-
-    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
-        message = (
-            _NativeMessage("docs.normalized.smoke")
-            if config["group.id"] == "s2p-curate-canary"
-            else None
-        )
-        consumer = _NativeConsumer(config, message)
-        consumers.append(consumer)
-        return consumer
-
-    def fail_inference(*_args: object, **_kwargs: object) -> None:
-        raise ModelServiceError("model service rolling")
-
-    monkeypatch.setattr(
-        "processor.curate.process_silver_decision_payload",
-        fail_inference,
-    )
-    with pytest.raises(ModelServiceError, match="model service rolling"):
-        run_native_curator(
-            cfg,
-            state=object(),  # type: ignore[arg-type]
-            consumer_factory=consumer_factory,
-            producer_factory=_NativeProducer,
-            max_messages=1,
-        )
-
-    assert all(consumer.commits == [] for consumer in consumers)

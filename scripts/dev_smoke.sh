@@ -3,7 +3,7 @@
 #
 # Verifies the laptop dev stack works end-to-end:
 #   1. docker compose up -d (Redpanda + MinIO)
-#   2. seed_topics.sh  (create the four core topics)
+#   2. seed_topics.sh  (create the managed production and smoke topics)
 #   3. probe Redpanda admin API for cluster health
 #   4. probe MinIO health
 #   5. (best-effort) drive a single ``arxiv_html_fetcher`` run against a

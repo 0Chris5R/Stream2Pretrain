@@ -63,6 +63,19 @@ def test_extractor_skips_oversized_files() -> None:
     assert {f.path for f in out} == {"small.py"}
 
 
+def test_extractor_skips_generated_vendor_and_undecodable_files() -> None:
+    payload = _build_tarball(
+        {
+            "src/main.py": b"print('kept')\n",
+            "dist/app.min.js": b"function x(){return 1}",
+            "vendor/copied.py": b"print('vendor')\n",
+            "src/not-utf8.py": b"value = '\xff'\n",
+        }
+    )
+
+    assert {item.path for item in iter_tarball_files(payload)} == {"src/main.py"}
+
+
 def test_extractor_respects_custom_allow_list() -> None:
     payload = _build_tarball(
         {

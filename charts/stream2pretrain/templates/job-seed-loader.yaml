@@ -35,6 +35,7 @@ metadata:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
   annotations:
     stream2pretrain.io/seed-run-id: {{ $runId | quote }}
+    stream2pretrain.io/seed-components: {{ $componentsCsv | quote }}
 spec:
   backoffLimit: 2
   ttlSecondsAfterFinished: 86400
@@ -43,6 +44,7 @@ spec:
     metadata:
       labels:
         {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+        stream2pretrain.io/egress-class: seed
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}

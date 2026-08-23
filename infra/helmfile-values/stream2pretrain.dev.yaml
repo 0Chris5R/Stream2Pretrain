@@ -14,7 +14,9 @@ image:
 redpanda:
   bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
   schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
-  startingOffset: beginning
+  # First Bytewax v2 recovery imports the last broker-owned native offset.
+  # Later restarts use the recovery PVC and ignore this bootstrap value.
+  startingOffset: stored
 
 minio:
   endpoint: http://minio.minio.svc.cluster.local:9000
@@ -46,10 +48,6 @@ observability:
 
 keda:
   enabled: true
-  fetcher:
-    minReplicas: 1
-    maxReplicas: 4
-    lagThreshold: 250
 
 processor:
   fetcher:

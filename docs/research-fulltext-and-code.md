@@ -124,7 +124,7 @@ NeMo Curator does not ship a dedicated SPDX filter; the standard pattern is a `L
 - Pagination: `limit` (typical max 1000) + `offset`; the `openreview.api.OpenReviewClient.get_all_notes` helper paginates internally [parse.bot ICLR Conference Papers API].
 - **Total record counts** are returned as `total` in paginated responses.
 - **PDFs are not delivered through the JSON API.** The note's content carries the PDF URL (HTTPS under `openreview.net/pdf/...`); you must fetch each binary over HTTPS [github.com/pranftw/openreview_scraper, openreview.net/pdf/a0a676530e3922b80db5929dcbda1af9340522e8].
-- Pinned fallback: [ReviewArena on Hugging Face](https://huggingface.co/datasets/anonymousNeurIPS2026submission4281/reviewarena) provides OCR Markdown, structured reviews, rebuttals, and decisions for 51,529 papers across NeurIPS, ICLR, ICML, TMLR, EMNLP, CoRL, and COLM. The adapter pins revision `c2978add17c2099219eaddbc2599974d69d4d09b`, streams its seven real splits, and treats absent per-record content licenses as post-training-transform-only rather than inheriting the dataset wrapper license.
+- Pinned fallback: [ReviewArena on Hugging Face](https://huggingface.co/datasets/anonymousNeurIPS2026submission4281/reviewarena) provides OCR Markdown, structured reviews, rebuttals, and decisions across NeurIPS, ICLR, ICML, TMLR, EMNLP, CoRL, and COLM. The adapter pins revision `c2978add17c2099219eaddbc2599974d69d4d09b`, streams its real splits, and admits the paper and review artifacts independently. A paper without per-item rights quarantines rather than inheriting the dataset wrapper. A substantive public review may use its item licence or the versioned OpenReview public-comment terms.
 
 ### 3.2. ACL Anthology
 

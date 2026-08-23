@@ -29,7 +29,7 @@ spec:
         - name: Interval
           type: integer
           jsonPath: .spec.pollIntervalSeconds
-        - name: License
+        - name: License mode
           type: string
           jsonPath: .spec.licenseDefault
         - name: Enabled
@@ -78,24 +78,11 @@ spec:
                 licenseDefault:
                   type: string
                   description: |
-                    Content licence that applies to every item, or per-record
-                    when the source supplies item-level rights. Dataset wrapper
-                    licences do not qualify. This field is required.
+                    Required per-item licence resolution mode. Source
+                    configuration and dataset wrapper licences never grant
+                    rights to every item in the feed.
                   enum:
-                    - unknown
                     - per-record
-                    - CC-BY-4.0
-                    - CC-BY-SA-4.0
-                    - CC-BY-3.0
-                    - CC-BY-SA-3.0
-                    - CC0-1.0
-                    - Apache-2.0
-                    - MIT
-                    - BSD-2-Clause
-                    - BSD-3-Clause
-                    - MPL-2.0
-                    - ISC
-                    - Unlicense
                 rateLimit:
                   type: object
                   required: [requestsPerSecond, burst]
@@ -126,6 +113,10 @@ spec:
                       type: string
                 egressAllow:
                   type: array
+                  description: |
+                    Expected destination hostnames for policy generation and
+                    audit. Enforcement requires an FQDN-aware CNI because
+                    plain Kubernetes NetworkPolicy cannot match DNS names.
                   items:
                     type: string
                 acceptContentTypes:

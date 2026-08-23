@@ -69,8 +69,8 @@ Six trust boundaries:
 
 | Asset | Threat | Mitigation | Residual |
 |---|---|---|---|
-| Curator | Adversarial document that triggers pathological MinHash / KenLM cost | Per-doc deadline; Bytewax operator timeout drops the doc with `reject_reasons=["timeout"]` | Pathological corpora can still raise tail latency; backpressure is via KEDA. |
-| Redpanda | Topic flood | KEDA scales producers (CronJobs cap) and consumers; quotas in `redpanda` chart | Single-broker dev mode has no replica failover. |
+| Curator | Adversarial document that triggers deterministic parsing or validation failure | The record is written idempotently to `s2p-gold/processing-failures/` before Bytewax may advance; transient or unknown failures stop and replay from recovery | Pathological but valid model inputs can still raise tail latency; core executions remain fixed at one coordinated replica. |
+| Redpanda | Topic flood | Pollers are bounded by their schedules and cursors; KEDA is used only where a dedicated input backlog is a valid signal | Single-broker dev mode has no replica failover. |
 | MinIO | Storage exhaustion | Bucket retention + monthly rotation job | Retention defaults are conservative; `needs-measurement` after Week 5 benchmark. |
 
 ### Elevation of privilege

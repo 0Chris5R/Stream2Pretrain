@@ -1,6 +1,6 @@
 {{- if .Values.observability.serviceMonitor.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
-{{- range $component := list "ingest-github-events" "ingest-github-tarball-fetcher" "ingest-hf-models" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "decon-gate" "mixture-controller" "foundry" }}
+{{- range $component := list "ingest-github-events" "ingest-github-tarball-fetcher" "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "decon-gate" "mixture-controller" "foundry" }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

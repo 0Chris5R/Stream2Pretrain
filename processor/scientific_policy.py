@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Set
 from dataclasses import dataclass
 
+from processor.source_policy import resolve_source_policy
 from schemas.gold import CorpusRoute, SegmentScore
 from schemas.silver import SilverRecord, SilverSegment
 
@@ -169,14 +170,12 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
 
 def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificScores:
     """Dispatch structural/evidence signals without applying paper assumptions universally."""
-    identity = f"{silver.source_feed} {silver.extraction_pipeline}".lower()
-    is_scientific = silver.source_format in {"pdf", "latex", "markdown"} or (
-        silver.source_format == "html"
-        and any(
-            marker in identity for marker in ("arxiv", "openreview", "pes2o", "redpajama-arxiv")
-        )
+    source_policy = resolve_source_policy(
+        source_feed=silver.source_feed,
+        source_format=silver.source_format,
+        extraction_pipeline=silver.extraction_pipeline,
     )
-    if is_scientific:
+    if source_policy.family == "scientific_paper":
         return scientific_scores(silver, edu_score=quality_score)
     word_count = len((silver.model_text or silver.text).split())
     completeness = min(
@@ -187,7 +186,7 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         + 0.10 * float(bool(silver.text.strip())),
     )
     structural = max(0.0, min(5.0, 5.0 * completeness))
-    if silver.source_format == "code":
+    if source_policy.family == "source_code":
         text = silver.model_text or silver.text
         reasoning = min(
             1.0,
@@ -199,29 +198,10 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         )
         tags = ["systems_implementation", "methods_procedures"]
         return ScientificScores(completeness, structural, reasoning, 0.0, tags)
-    if silver.source_format == "review":
-        text = (silver.model_text or silver.text).lower()
-        critique = any(
-            marker in text
-            for marker in (
-                "strength",
-                "weakness",
-                "concern",
-                "limitation",
-                "reproduc",
-            )
-        )
-        reasoning_marker = any(
-            marker in text for marker in ("because", "however", "therefore", "whereas")
-        )
-        reasoning = min(
-            1.0,
-            0.25
-            + 0.20 * float(critique)
-            + 0.15 * float(reasoning_marker)
-            + 0.20 * (quality_score / 5.0)
-            + 0.10 * completeness,
-        )
+    if source_policy.family == "peer_review":
+        # Review eligibility is categorical and based on the source schema in
+        # route_document. Do not infer review quality from sentiment keywords.
+        reasoning = min(1.0, quality_score / 5.0)
         return ScientificScores(
             completeness,
             structural,
@@ -229,14 +209,13 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
             0.0,
             ["peer_review", "critique_and_feedback"],
         )
-    if silver.source_format == "metadata":
-        reasoning = min(0.25, 0.05 + 0.10 * (quality_score / 5.0) + 0.10 * completeness)
+    if not source_policy.training_text:
         return ScientificScores(
             completeness,
             structural,
-            reasoning,
             0.0,
-            ["structured_metadata"],
+            0.0,
+            ["discovery_metadata"],
         )
     reasoning = min(0.45, 0.10 + 0.15 * (quality_score / 5.0) + 0.20 * completeness)
     return ScientificScores(
@@ -256,17 +235,25 @@ def composite_quality_score(
     gopher_pass: bool,
     c4_pass: bool,
     perplexity_bucket: str,
+    language_applicable: bool = True,
+    web_heuristics_applicable: bool = True,
+    perplexity_applicable: bool = True,
 ) -> float:
-    """Explainable 0..5 convenience score built from the visible vector."""
+    """Explainable 0..5 convenience score built only from applicable signals."""
     typicality = {"head": 1.0, "middle": 0.72, "tail": 0.25}.get(perplexity_bucket, 0.0)
     heuristic = (float(gopher_pass) + float(c4_pass)) / 2
-    normalized = (
-        0.35 * (edu_score / 5.0)
-        + 0.25 * (structural_quality_score / 5.0)
-        + 0.15 * lang_score
-        + 0.15 * heuristic
-        + 0.10 * typicality
-    )
+    weighted = [
+        (0.35, edu_score / 5.0),
+        (0.25, structural_quality_score / 5.0),
+    ]
+    if language_applicable:
+        weighted.append((0.15, lang_score))
+    if web_heuristics_applicable:
+        weighted.append((0.15, heuristic))
+    if perplexity_applicable:
+        weighted.append((0.10, typicality))
+    total_weight = sum(weight for weight, _ in weighted)
+    normalized = sum(weight * value for weight, value in weighted) / total_weight
     return max(0.0, min(5.0, 5.0 * normalized))
 
 
@@ -277,18 +264,19 @@ def route_document(
     reasoning_score: float,
 ) -> RouteDecision:
     """Choose one primary route and list every eligible downstream use."""
-    blocking = [reason for reason in reject_reasons if reason != "insufficient_scientific_body"]
+    retryable = {"insufficient_scientific_body", "incomplete_scientific_extraction"}
+    blocking = [reason for reason in reject_reasons if reason not in retryable]
     if blocking:
         return RouteDecision(
             route="quarantine",
             eligible_routes=["quarantine"],
             reasons=[f"blocked by {reason}" for reason in blocking],
         )
-    if "insufficient_scientific_body" in reject_reasons:
+    if retryable.intersection(reject_reasons):
         return RouteDecision(
             route="retry",
             eligible_routes=["retry"],
-            reasons=["insufficient retained scientific body; retry extraction"],
+            reasons=["scientific extraction is incomplete; retry the full artifact"],
         )
     eligible: list[CorpusRoute] = ["pretrain"]
     reasons = ["clean body projection passed privacy, quality, dedup, and decontamination gates"]

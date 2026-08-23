@@ -53,7 +53,7 @@ feeds:
     rate_limit:
       requests_per_second: 1.0
       burst: 2
-    license_default: unknown
+    license_default: per-record
     egress_allow: ["openai.com", "cdn.openai.com"]
 
   - name: rss-deepmind-blog
@@ -63,7 +63,7 @@ feeds:
     rate_limit:
       requests_per_second: 1.0
       burst: 2
-    license_default: unknown
+    license_default: per-record
     egress_allow: ["deepmind.google"]
 
   - name: rss-hf-blog
@@ -73,7 +73,7 @@ feeds:
     rate_limit:
       requests_per_second: 1.0
       burst: 2
-    license_default: unknown
+    license_default: per-record
     egress_allow: ["huggingface.co", "hf.co"]
 
   - name: rss-bair-blog
@@ -83,7 +83,7 @@ feeds:
     rate_limit:
       requests_per_second: 0.5
       burst: 1
-    license_default: unknown
+    license_default: per-record
     egress_allow: ["bair.berkeley.edu"]
 
   - name: rss-eleuther-blog
@@ -93,7 +93,7 @@ feeds:
     rate_limit:
       requests_per_second: 0.5
       burst: 1
-    license_default: unknown
+    license_default: per-record
     egress_allow: ["blog.eleuther.ai"]
 
   - name: oai-arxiv-cs
@@ -113,7 +113,35 @@ feeds:
     rate_limit:
       requests_per_second: 1.0
       burst: 2
-    license_default: unknown
+    license_default: per-record
+    auth:
+      type: bearer
+      secret_name: hf-token
+      secret_key: token
+    egress_allow: ["huggingface.co", "hf.co"]
+
+  - name: hf-datasets
+    protocol: rest-json
+    endpoint: https://huggingface.co/api/datasets
+    poll_interval_seconds: 600
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 2
+    license_default: per-record
+    auth:
+      type: bearer
+      secret_name: hf-token
+      secret_key: token
+    egress_allow: ["huggingface.co", "hf.co"]
+
+  - name: hf-spaces
+    protocol: rest-json
+    endpoint: https://huggingface.co/api/spaces
+    poll_interval_seconds: 600
+    rate_limit:
+      requests_per_second: 1.0
+      burst: 2
+    license_default: per-record
     auth:
       type: bearer
       secret_name: hf-token
@@ -127,7 +155,7 @@ feeds:
     rate_limit:
       requests_per_second: 0.5
       burst: 1
-    license_default: unknown
+    license_default: per-record
     auth:
       type: bearer
       secret_name: hf-token
@@ -142,7 +170,7 @@ feeds:
       requests_per_second: 1.0
       burst: 1
       respect_x_poll_interval: true
-    license_default: unknown
+    license_default: per-record
     auth:
       type: bearer
       secret_name: github-token
@@ -156,5 +184,5 @@ feeds:
     rate_limit:
       requests_per_second: 2.0
       burst: 4
-    license_default: unknown
+    license_default: per-record
     egress_allow: ["github.com", "api.github.com"]

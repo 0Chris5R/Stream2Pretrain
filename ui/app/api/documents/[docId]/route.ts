@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-import { DocumentDetailSchema } from '@/lib/schemas';
+import { DocumentDetailResponseSchema } from '@/lib/schemas';
 import { UPSTREAM, upstreamError } from '@/lib/upstream';
 
 export const runtime = 'nodejs';
@@ -21,7 +21,7 @@ export async function GET(
     if (!response.ok) {
       return NextResponse.json(upstreamError(`document_status_${response.status}`), { status: 502 });
     }
-    const parsed = DocumentDetailSchema.safeParse(await response.json());
+    const parsed = DocumentDetailResponseSchema.safeParse(await response.json());
     if (!parsed.success) {
       return NextResponse.json(upstreamError('document_shape_invalid'), { status: 502 });
     }

@@ -38,6 +38,8 @@ from ingest.common.otel import init_tracer
 from schemas.bronze import BronzeRecord
 
 log = get_logger(__name__)
+OPENREVIEW_TERMS_URL = "https://openreview.net/legal/terms"
+OPENREVIEW_TERMS_REVISION = "retrieved-2026-08-23"
 
 SOURCE_FEED = "openreview-backfill"
 PIPELINE_MARKDOWN_BACKFILL = "reviewarena-ocr-markdown-v1"
@@ -273,6 +275,11 @@ async def _emit_markdown(
         source_feed=SOURCE_FEED,
         license_value=view.paper_license,
         license_source=license_source,
+        source_format="markdown",
+        resolver="reviewarena-paper-item-field",
+        evidence_url=url,
+        evidence_revision=view.note_id,
+        evidence_scope="item" if view.paper_license else "unknown",
     )
     await admission_producer.send(admission.decision)
     if not admission.fetch_allowed:
@@ -333,12 +340,21 @@ async def _emit_review(
     if not view.review_text or not view.note_id:
         return False
     url = f"https://openreview.net/forum?id={view.note_id}"
-    license_source = "dataset_metadata" if view.review_license else "unknown"
+    license_source = "dataset_metadata" if view.review_license else "openreview_terms"
     admission = decide_license_admission(
         source_url=url,
         source_feed=SOURCE_FEED,
-        license_value=view.review_license,
+        license_value=view.review_license or "CC-BY-4.0",
         license_source=license_source,
+        source_format="review",
+        resolver=(
+            "reviewarena-review-item-field"
+            if view.review_license
+            else "openreview-public-comment-terms"
+        ),
+        evidence_url=url if view.review_license else OPENREVIEW_TERMS_URL,
+        evidence_revision=view.note_id if view.review_license else OPENREVIEW_TERMS_REVISION,
+        evidence_scope="item" if view.review_license else "source_terms",
     )
     await admission_producer.send(admission.decision)
     if not admission.fetch_allowed:
@@ -456,6 +472,7 @@ async def run_backfill(
         splits=chosen_splits,
     )
     stats = BackfillStats(dataset_id=resolved)
+    failures: list[str] = []
     async with (
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-openreview-backfill"
@@ -493,6 +510,7 @@ async def run_backfill(
                 except Exception as exc:
                     log.warning("reviewarena.markdown_emit_failed", err=str(exc))
                     stats.skipped += 1
+                    failures.append(f"{split}:{view.note_id}:paper")
                 try:
                     if await _emit_review(
                         view=view,
@@ -505,10 +523,16 @@ async def run_backfill(
                 except Exception as exc:
                     log.warning("reviewarena.review_emit_failed", err=str(exc))
                     stats.skipped += 1
+                    failures.append(f"{split}:{view.note_id}:review")
                 if max_rows is not None and stats.rows_seen >= max_rows:
                     break
             if max_rows is not None and stats.rows_seen >= max_rows:
                 break
+    if failures:
+        raise RuntimeError(
+            f"ReviewArena backfill had {len(failures)} durable-emission failures; "
+            f"first={failures[0]}"
+        )
     return stats
 
 

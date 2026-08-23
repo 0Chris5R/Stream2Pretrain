@@ -49,9 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later work; Prometheus and Grafana remain the only observability stack.
 
 
-- Made licence admission fail closed for every content format. Missing,
-  excluded, and dataset-wrapper-only licences are quarantined before body
-  retrieval and cannot enter pretraining export or post-training generation.
+- Made licence admission purpose-aware and fail closed for every content
+  format. Permissive items may enter both training routes, reviewed NC and
+  arXiv non-exclusive items may enter transform-only post-training, and
+  missing, ND, conflicting, or dataset-wrapper-only rights quarantine before
+  body retrieval.
 - Reimplemented the DHBW deployment as measured `platform`, `catalog`,
   `topics`, and `application` stages with Helm 3 validation and pinned charts.
 - Replaced the missing local Polaris chart with official Apache Polaris 1.7.0

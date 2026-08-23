@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from processor.common import ProcessorConfig
 from processor.mixture_controller.controller import (
     MixtureController,
+    _BUILTIN_SOURCES,
+    _builtin_source_status,
     _cron_schedule,
     _source_job_runtime,
     _sourcefeed_status,
@@ -21,7 +23,7 @@ def test_sourcefeed_status_maps_kubernetes_crd_shape() -> None:
             "endpoint": "https://rss.arxiv.org/rss/cs.CL",
             "pollIntervalSeconds": 7200,
             "rateLimit": {"requestsPerSecond": 1.0, "burst": 4},
-            "licenseDefault": "arxiv-non-exclusive-distribution",
+            "licenseDefault": "per-record",
             "enabled": True,
         },
         "status": {
@@ -94,7 +96,7 @@ def test_sourcefeed_status_uses_observed_job_runtime() -> None:
             "endpoint": "https://bair.berkeley.edu/blog/feed.xml",
             "pollIntervalSeconds": 86400,
             "rateLimit": {"requestsPerSecond": 1.0, "burst": 2},
-            "licenseDefault": "unknown",
+            "licenseDefault": "per-record",
             "enabled": True,
         },
         "status": {"phase": "Active"},
@@ -114,6 +116,40 @@ def test_sourcefeed_status_uses_observed_job_runtime() -> None:
     assert status["last_attempt_at"] == "2026-08-23T10:00:00+00:00"
     assert status["last_success_at"] == "2026-08-22T10:00:00+00:00"
     assert status["last_error"] == "DeadlineExceeded"
+
+
+def test_builtin_inventory_includes_every_seed_component() -> None:
+    names = {str(item["name"]) for item in _BUILTIN_SOURCES}
+
+    assert {
+        "seed:allenai/peS2o",
+        "seed:togethercomputer/RedPajama-Data-1T",
+        "seed:HuggingFaceFW/fineweb-edu",
+        "seed:HuggingFaceTB/stack-edu",
+        "seed:wayback",
+    } <= names
+
+
+def test_seed_builtin_reports_only_components_selected_by_the_job() -> None:
+    job = SimpleNamespace(
+        metadata=SimpleNamespace(
+            labels={"app.kubernetes.io/component": "seed-loader"},
+            annotations={"stream2pretrain.io/seed-components": "pes2o,stack-edu"},
+            creation_timestamp=datetime(2026, 8, 23, 10, tzinfo=UTC),
+        ),
+        status=SimpleNamespace(active=0, succeeded=1, failed=0, completion_time=None),
+    )
+    pes2o = next(item for item in _BUILTIN_SOURCES if item["name"] == "seed:allenai/peS2o")
+    fineweb = next(
+        item for item in _BUILTIN_SOURCES if item["name"] == "seed:HuggingFaceFW/fineweb-edu"
+    )
+
+    assert _builtin_source_status(pes2o, deployments={}, cronjobs={}, jobs=[job])["spec"][
+        "enabled"
+    ]
+    assert not _builtin_source_status(fineweb, deployments={}, cronjobs={}, jobs=[job])["spec"][
+        "enabled"
+    ]
 
 
 def test_mixture_compare_returns_ui_payload(cfg: ProcessorConfig) -> None:

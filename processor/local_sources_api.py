@@ -220,7 +220,6 @@ async def _run_arxiv_rss(
         candidates,
         cfg,
         feed_name=spec.name,
-        license_default=spec.license_default,
     )
     return emitted, [candidate.arxiv_id for candidate in candidates]
 

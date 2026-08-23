@@ -16,9 +16,11 @@ Scientific sources are not scored as one flattened paper.
 1. The extractor removes author and affiliation blocks, acknowledgements,
    declarations, and references from the trainable projection.
 2. Every retained heading-delimited section becomes a `SilverSegment`.
-3. Cheap C4 and PII checks run on every retained section.
-4. FinePDFs Edu v2, FineWeb-Edu comparison, and KenLM run on a bounded sample
-   selected from retained sections only.
+3. PII checks run on every retained section. C4 section isolation runs only on
+   ordinary web prose.
+4. The source-appropriate classifier runs on every retained section.
+   Scientific sections also retain FineWeb-Edu as a labelled comparison.
+   KenLM runs only on ordinary web prose.
 5. The final model text is rebuilt from sections that survived section-level
    safety checks.
 6. Source-authored captions, alt text, structured tables, and display
@@ -27,24 +29,12 @@ Scientific sources are not scored as one flattened paper.
 7. Deduplication, final PII scanning, and benchmark decontamination run on the
    exact final projection that could be exported.
 
-## 2. Role-stratified sampling
+## 2. Section coverage
 
-`S2P_MAX_SCORED_SEGMENTS` sets the bound and defaults to 10.
-
-The sampler reserves at most one longest section from each role family in this
-order:
-
-1. abstract;
-2. introduction or background;
-3. methods;
-4. results or discussion;
-5. conclusion or limitations;
-6. other or appendix.
-
-Unused capacity is filled by the longest remaining sections, with source order
-as the deterministic tie breaker. Returned segments preserve source order.
-The sampled ids and both educational-model results remain in
-`segment_scores_json`.
+Every retained section is scored. Earlier pilots used a role-stratified sample,
+but the deployed policy no longer makes a document decision from only part of
+the exportable training projection. `segment_scores_json` retains the exact
+source-quality results and applicability metadata for each section.
 
 ## 3. Model signals
 
@@ -56,29 +46,43 @@ Scientific HTML, PDF, and LaTeX records use
 score. The implementation follows the model card's 10,000-character and
 2,046-token top/bottom chunk rule and takes the maximum chunk score.
 
-During calibration, the same sampled sections also run
+During calibration, the same scientific sections also run
 `HuggingFaceFW/fineweb-edu-classifier` at revision
 `284663cbb2dabf9bda30d8f8cc49601251ee1631`. This is an A/B measurement, not a
 second headline score. General web/blog content uses FineWeb-Edu as its primary
-educational score.
+educational score and follows the model-card recommendation to retain scores 3
+and above.
 
 Code records do not run either prose classifier. They use
-`code-quality-rules-v1`, a visible 0 to 5 sum of non-trivial length, source
-length, bounded line length, comments/documentation, and syntax/balanced-token
-checks. Generated/vendor/minified paths score zero. This is recorded as a
-rule-based source-quality signal, never labelled FinePDFs or FineWeb-Edu.
+`stack-v2-dolma-code-rules-v2`, a visible 0 to 5 source-quality signal grounded
+in the Stack v2 and Dolma filter families. Binary and undecodable content,
+generated/vendor/minified paths, extreme lines, low alphanumeric density,
+implausible alphabetic-character-per-token ratios, broken syntax signals, and
+credential-like secrets are source-specific blockers.
+
+Hugging Face cards and repository documentation remove front matter and fenced
+code before FineWeb-Edu scoring. The score remains an audit signal because the
+ordinary-web threshold was not calibrated for structured Markdown. OpenReview
+reviews use `openreview-schema-completeness-v1`, which counts represented
+public review-form field families. Rating, confidence, recommendation, and
+decision fields remain audit metadata. Official review/response Invitations or
+recognized substantive form fields qualify a review artifact. Generic public
+comments containing only a `comment` field are rejected without inventing a
+word-count threshold. Discovery metadata has no educational classifier and
+cannot reach Gold.
 
 The document educational score is the word-weighted mean of measured, retained
 sections. Each section weight is `max(1, min(word_count, 512))`.
 
 No threshold taken from either model card is treated as scientifically valid
-for this corpus until the labelled validation set is reviewed.
+for scientific papers, cards, code, or reviews until a source-specific labelled
+validation set is reviewed.
 
 ### 3.2 KenLM typicality
 
 The pinned English Wikipedia `edugp/kenlm` binary uses its paired SentencePiece
-model. Per-section perplexity is aggregated by weighted median with the same
-bounded word weights.
+model. It applies only to ordinary web prose. Per-section perplexity is
+aggregated by weighted median with the same bounded word weights.
 
 Buckets are:
 
@@ -91,8 +95,13 @@ measured retained sections are in the tail and the weighted median is above
 2,000. KenLM measures language-model typicality. It is not a correctness or
 scientific-value score.
 
-KenLM and prose-specific Gopher checks do not gate code records. Code retains
-privacy, license, exact/near-duplicate, validity, and benchmark checks.
+Scientific papers, cards, repository documentation, code, peer reviews, and
+discovery metadata do not receive a KenLM value. Their persisted scorer is
+`not-applicable`, and typicality is removed from the composite instead of
+substituting an artificial value. Gopher and C4 are hard gates only for
+ordinary web prose. Natural-language ID also does not gate source code, whose
+programming language comes from the file extension. Every trainable profile
+retains privacy, licence, exact/near-duplicate, validity, and benchmark checks.
 
 ### 3.3 Language, privacy, deduplication, and decontamination
 
@@ -162,14 +171,15 @@ functions, classes, tests, and code-quality results; its content tags are
 
 ## 5. Composite quality, 0 to 5
 
-The convenience score is:
-
-`5 * (0.35 * educational_quality/5 + 0.25 * scientific_structure/5 + 0.15 *
-language_confidence + 0.15 * heuristic_pass_rate + 0.10 * typicality)`
+The base weights are educational quality 0.35 and source-appropriate structure
+0.25. Natural-language profiles add language confidence 0.15. Ordinary web additionally contributes
+heuristic pass rate 0.15 and KenLM typicality 0.10. The active weights are
+renormalized to sum to one before multiplication by 5.
 
 `heuristic_pass_rate` is the mean of Gopher pass and C4 pass. Typicality maps
-head to 1.0, middle to 0.72, and tail to 0.25. This composite supports sorting
-and dashboards. It is never displayed as FinePDFs, FineWeb-Edu, or KenLM.
+head to 1.0, middle to 0.72, and tail to 0.25. Non-applicable signals contribute
+neither a value nor weight. This composite supports sorting and dashboards. It
+is never displayed as FinePDFs, FineWeb-Edu, or KenLM.
 
 ## 6. Blocking rules and route precedence
 
@@ -187,10 +197,10 @@ Blocking reasons are applied before corpus-use routes:
 read-only compatibility labels for historical snapshots. Current curation
 never creates them.
 
-The current low-quality blocking rule fires only when the primary educational
-score is below 0.75 and scientific structure is below 2.0. It is deliberately
-conjunctive so one weak model signal cannot discard a structurally complete
-paper before calibration.
+The low-quality blocker uses the official FineWeb-Edu score 3 boundary only for
+ordinary web prose. Scientific papers, cards, repository documentation, code,
+and reviews use their source-specific blockers and do not inherit that web
+threshold.
 
 ## 7. Content taxonomy
 
@@ -210,10 +220,12 @@ All tags are currently deterministic and multi-label:
 The UI shows every tag and allows multi-tag filtering. A trained tagger may
 replace this baseline only after a held-out comparison.
 
-## 8. Measured scientific pilot
+## 8. Historical measured scientific pilot
 
-The clean replay used FinePDFs Edu v2 over ten role-stratified, retained
-sections per paper. These are measured outputs, not expected human labels:
+The earlier local replay used FinePDFs Edu v2 over ten role-stratified,
+retained sections per paper and recorded KenLM for comparison. These are
+historical measured outputs, not the current source policy or expected human
+labels:
 
 | Paper | FinePDFs v2 | Structure | Composite | KenLM perplexity | Route |
 |---|---:|---:|---:|---:|---|
@@ -221,10 +233,13 @@ sections per paper. These are measured outputs, not expected human labels:
 | The FineWeb Datasets | 4.385 | 5.000 | 4.595 | 437.8 | reasoning candidate |
 | Dolma | 3.873 | 5.000 | 4.398 | 649.4 | reasoning candidate |
 
-The values explain the original UI issue: FineWeb-Edu's web rubric produced
+The values explained the original UI issue: FineWeb-Edu's web rubric produced
 low values for scientific prose, while FinePDFs v2 produces a useful spread
 without being copied into the composite score. All values describe the clean
 training projection rather than authors, acknowledgements, or references.
+The current policy scores every retained scientific section and disables
+KenLM for scientific text, so a new cloud validation report must not compare
+its resulting composite directly with this historical table.
 
 The pinned v1/v2 comparison in
 `validation/finepdfs-v1-v2-pilot.json` ran both checkpoints on the same 30

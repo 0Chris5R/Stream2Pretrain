@@ -78,9 +78,11 @@ ARXIV_PDF_BASE = "https://arxiv.org/pdf"
 _DEFAULT_RPS = 4.0
 _DEFAULT_BURST = 4
 _DEFAULT_MIN_SLEEP_S = 1.0
-_STREAM_BATCH_SIZE = 32
-
-
+# arXiv discovery is sparse and bursty outside the weekday announcement
+# window. A partially filled batch on a long-lived consumer would otherwise
+# wait forever. Process one complete paper at a time and commit only after its
+# admission/body/output path has finished.
+_STREAM_BATCH_SIZE = 1
 @dataclass(frozen=True, slots=True)
 class ArxivCandidate:
     arxiv_id: str
@@ -326,7 +328,8 @@ def make_bronze_record(
     outcome: FetchOutcome,
     feed_name: str,
     bucket: str,
-    license_default: str | None,
+    admitted_license: str,
+    admitted_license_source: str,
     training_usage: str = "pretrain_and_posttrain",
     bytes_size: int,
 ) -> tuple[BronzeRecord, str, str]:
@@ -337,22 +340,20 @@ def make_bronze_record(
     """
     if outcome.status == 200 and outcome.extracted is not None:
         extracted = outcome.extracted
-        spdx = extracted.spdx_license or license_default
-        spdx_source = "html_meta" if extracted.spdx_license else "manual_override"
-        if spdx is None:
-            spdx_source = "unknown"
+        spdx = extracted.spdx_license or admitted_license
+        spdx_source = "html_meta" if extracted.spdx_license else admitted_license_source
         source_format = "html"
         ext = "html.gz"
         content_type = "text/html"
     elif outcome.status == 200 and outcome.source_format == "pdf" and outcome.html:
-        spdx = license_default
-        spdx_source = "manual_override" if license_default else "unknown"
+        spdx = admitted_license
+        spdx_source = admitted_license_source
         source_format = "pdf"
         ext = "pdf.gz"
         content_type = "application/pdf"
     else:
-        spdx = license_default
-        spdx_source = "manual_override" if license_default else "unknown"
+        spdx = admitted_license
+        spdx_source = admitted_license_source
         source_format = "metadata"
         ext = "stub.json.gz"
         content_type = "application/json"
@@ -426,7 +427,7 @@ async def stream_ids_from_topic(
     max_records: int | None = None,
     commit_callback: Callable[[Any], None] | None = None,
 ) -> AsyncIterator[ArxivCandidate]:
-    """Yield arXiv ids from a ``docs.normalized`` Kafka subscription.
+    """Yield arXiv ids from discovery envelopes on ``raw.fetched``.
 
     Offsets are NOT committed inside this generator: doing so would mean
     a pod kill between commit and successful emit/persist permanently
@@ -484,13 +485,15 @@ def _is_arxiv_source_feed(source: str, sources_filter: Iterable[str] | None) -> 
     """Match current SourceFeed names while retaining the older aliases."""
     if sources_filter is not None:
         return source in set(sources_filter)
-    return source in {"oai-arxiv-cs", "arxiv-oai-cs", "arxiv-rss-cs"} or source.startswith(
-        "rss-arxiv-cs-"
+    return (
+        source in {"oai-arxiv-cs", "arxiv-oai-cs", "arxiv-rss-cs", "hf-daily-papers"}
+        or source.startswith("rss-arxiv-cs-")
     )
 
 
 _ARXIV_URL_RE = re.compile(
-    r"^https?://arxiv\.org/(?:abs|pdf|html)/([a-z\-]+/\d{7}(?:v\d+)?|\d{4}\.\d{4,6}(?:v\d+)?)",
+    r"^https?://(?:arxiv\.org/(?:abs|pdf|html)|huggingface\.co/papers)/"
+    r"([a-z\-]+/\d{7}(?:v\d+)?|\d{4}\.\d{4,6}(?:v\d+)?)",
     re.IGNORECASE,
 )
 
@@ -508,7 +511,6 @@ async def run_for_ids(
     cfg: IngestConfig,
     *,
     feed_name: str,
-    license_default: str | None,
     rate_per_second: float = _DEFAULT_RPS,
     burst: int = _DEFAULT_BURST,
     min_sleep_s: float = _DEFAULT_MIN_SLEEP_S,
@@ -570,39 +572,35 @@ async def run_for_ids(
                     if isinstance(candidate_value, ArxivCandidate)
                     else ArxivCandidate(
                         arxiv_id=candidate_value,
-                        license_value=license_default,
-                        license_source=(
-                            "manual_override"
-                            if normalize_license(license_default) != "unknown"
-                            else "unknown"
-                        ),
+                        license_value=None,
+                        license_source="unknown",
                     )
                 )
                 arxiv_id = candidate.arxiv_id
                 if not is_valid_arxiv_id(arxiv_id):
                     log.warning("arxiv_html.invalid_id", id=arxiv_id)
                     continue
-                license_value = candidate.license_value
-                license_source = candidate.license_source
-                if normalize_license(license_value) == "unknown":
-                    license_value = license_default
-                    license_source = (
-                        "manual_override"
-                        if normalize_license(license_default) != "unknown"
-                        else "unknown"
-                    )
-                if normalize_license(license_value) == "unknown":
-                    license_value, license_source = await fetch_arxiv_license_with_source(
-                        arxiv_id,
-                        client,
-                        bucket=bucket,
-                        min_sleep_s=min_sleep_s,
-                    )
+                # Discovery decisions use the discovery record's identity. The
+                # full-body record has a distinct canonical URL/doc_id, so it
+                # resolves the canonical arXiv item again rather than copying a
+                # licence value without its original evidence URL/revision.
+                # This keeps the admission row joined to Gold independently
+                # auditable and still occurs before any HTML/PDF request.
+                license_value, license_source = await fetch_arxiv_license_with_source(
+                    arxiv_id,
+                    client,
+                    bucket=bucket,
+                    min_sleep_s=min_sleep_s,
+                )
                 admission = decide_license_admission(
                     source_url=canonical_arxiv_url(arxiv_id, mirror="arxiv"),
                     source_feed=feed_name,
                     license_value=license_value,
                     license_source=license_source,
+                    resolver=f"arxiv:{license_source}",
+                    evidence_url=f"https://arxiv.org/abs/{arxiv_id}",
+                    evidence_revision=arxiv_id,
+                    evidence_scope="item",
                 )
                 if admission_cm is not None:
                     await admission_cm.send(admission.decision)
@@ -630,6 +628,35 @@ async def run_for_ids(
                         raise
                     continue
 
+                fetched_license = (
+                    outcome.extracted.spdx_license
+                    if outcome.extracted is not None
+                    else None
+                )
+                if fetched_license and normalize_license(fetched_license) != admission.license_id:
+                    conflict = decide_license_admission(
+                        source_url=canonical_arxiv_url(arxiv_id, mirror="arxiv"),
+                        source_feed=feed_name,
+                        license_value=(
+                            f"conflict:{admission.license_id}|"
+                            f"{normalize_license(fetched_license)}"
+                        ),
+                        license_source="html_meta",
+                        resolver="arxiv:preflight-html-reconciliation",
+                        evidence_url=f"https://arxiv.org/html/{arxiv_id}",
+                        evidence_revision=arxiv_id,
+                        evidence_scope="item",
+                    )
+                    if admission_cm is not None:
+                        await admission_cm.send(conflict.decision)
+                    log.warning(
+                        "arxiv_html.license_conflict",
+                        arxiv_id=arxiv_id,
+                        preflight=admission.license_id,
+                        fetched=normalize_license(fetched_license),
+                    )
+                    continue
+
                 payload = (
                     outcome.html
                     if outcome.html is not None
@@ -640,7 +667,8 @@ async def run_for_ids(
                     outcome=outcome,
                     feed_name=feed_name,
                     bucket=cfg.minio_bronze_bucket,
-                    license_default=admission.license_id,
+                    admitted_license=admission.license_id,
+                    admitted_license_source=license_source,
                     training_usage=admission.training_usage,
                     bytes_size=len(payload),
                 )
@@ -701,11 +729,6 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="SourceFeed label written onto every Bronze record.",
     )
     p.add_argument(
-        "--license-default",
-        default=None,
-        help="Explicit licence for a trusted backfill manifest; live records use per-paper metadata.",
-    )
-    p.add_argument(
         "--max-records",
         type=int,
         default=None,
@@ -713,7 +736,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--stream-topic",
-        default="docs.normalized",
+        default="raw.fetched",
         help="Stream-mode subscription topic.",
     )
     p.add_argument(
@@ -724,7 +747,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--auto-offset-reset",
         choices=("earliest", "latest"),
-        default="latest",
+        default="earliest",
         help="Initial offset for a new consumer group; explicit backfills use --ids-file.",
     )
     return p
@@ -742,7 +765,6 @@ async def _async_main(args: argparse.Namespace) -> int:
             ids,
             cfg,
             feed_name=args.feed_name,
-            license_default=args.license_default,
         )
         log.info("arxiv_html.backfill.done", emitted=emitted)
         return emitted
@@ -765,7 +787,6 @@ async def _run_stream(args: argparse.Namespace, cfg: IngestConfig) -> int:
             ids,
             cfg,
             feed_name=args.feed_name,
-            license_default=args.license_default,
             raise_on_fetch_error=True,
         )
         # A zero-emission batch can still be fully handled when every paper

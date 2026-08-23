@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
@@ -15,6 +16,17 @@ log = get_logger(__name__)
 
 ARXIV_ABS_BASE = "https://arxiv.org/abs"
 ARXIV_API_QUERY = "https://export.arxiv.org/api/query"
+_ARXIV_URL_RE = re.compile(
+    r"^https?://(?:www\.)?arxiv\.org/(?:abs|pdf|html)/"
+    r"([a-z\-]+/\d{7}(?:v\d+)?|\d{4}\.\d{4,6}(?:v\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def arxiv_id_from_url(url: str) -> str | None:
+    """Return the individual arXiv identifier carried by a canonical URL."""
+    match = _ARXIV_URL_RE.match(url.strip()) if url else None
+    return match.group(1) if match else None
 
 
 class _AbsLicenseParser(HTMLParser):
@@ -45,6 +57,11 @@ def _license_from_abs_html(payload: bytes) -> str | None:
     parser = _AbsLicenseParser()
     parser.feed(payload.decode("utf-8", errors="replace"))
     return parser.value
+
+
+def license_from_arxiv_abs_html(payload: bytes) -> str | None:
+    """Public bounded-parser entry point for archived arXiv abs pages."""
+    return _license_from_abs_html(payload)
 
 
 async def fetch_arxiv_license_with_source(

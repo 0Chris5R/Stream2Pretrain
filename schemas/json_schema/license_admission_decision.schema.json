@@ -31,6 +31,65 @@
       "title": "License Source",
       "type": "string"
     },
+    "raw_license": {
+      "anyOf": [
+        {"maxLength": 512, "type": "string"},
+        {"type": "null"}
+      ],
+      "default": null,
+      "title": "Raw License"
+    },
+    "normalized_license": {
+      "default": "unknown",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Normalized License",
+      "type": "string"
+    },
+    "resolver": {
+      "default": "legacy",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Resolver",
+      "type": "string"
+    },
+    "evidence_url": {
+      "anyOf": [
+        {"format": "uri", "maxLength": 2083, "minLength": 1, "type": "string"},
+        {"type": "null"}
+      ],
+      "default": null,
+      "title": "Evidence Url"
+    },
+    "evidence_revision": {
+      "anyOf": [
+        {"maxLength": 256, "type": "string"},
+        {"type": "null"}
+      ],
+      "default": null,
+      "title": "Evidence Revision"
+    },
+    "evidence_scope": {
+      "default": "unknown",
+      "enum": ["item", "file", "repository_ref", "source_terms", "dataset_wrapper", "unknown"],
+      "title": "Evidence Scope",
+      "type": "string"
+    },
+    "policy_revision": {
+      "default": "license-policy-legacy",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Policy Revision",
+      "type": "string"
+    },
+    "resolved_at": {
+      "anyOf": [
+        {"format": "date-time", "type": "string"},
+        {"type": "null"}
+      ],
+      "default": null,
+      "title": "Resolved At"
+    },
     "observed_at": {
       "format": "date-time",
       "title": "Observed At",
@@ -47,6 +106,17 @@
       "minLength": 1,
       "title": "Source Feed",
       "type": "string"
+    },
+    "source_format": {
+      "anyOf": [
+        {
+          "enum": ["html", "pdf", "latex", "code", "web", "metadata", "review", "markdown"],
+          "type": "string"
+        },
+        {"type": "null"}
+      ],
+      "default": null,
+      "title": "Source Format"
     },
     "source_url": {
       "format": "uri",

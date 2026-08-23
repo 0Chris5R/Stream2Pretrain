@@ -187,6 +187,17 @@ class _LicenseAdmissionsConnection:
                     False,
                 )
             ]
+        elif "GROUP BY source_feed, license_id, status" in sql:
+            self.description = [
+                ("source_feed",),
+                ("license_id",),
+                ("status",),
+                ("count",),
+            ]
+            self.rows = [("rss-arxiv-cs-ai", "CC-BY-4.0", "admitted", 2)]
+        elif "GROUP BY source_feed, license_source" in sql:
+            self.description = [("source_feed",), ("license_source",), ("count",)]
+            self.rows = [("rss-arxiv-cs-ai", "rss_entry", 4)]
         elif "GROUP BY source_feed" in sql:
             self.description = [
                 ("source_feed",),
@@ -197,6 +208,64 @@ class _LicenseAdmissionsConnection:
                 ("last_observed_at",),
             ]
             self.rows = [("rss-arxiv-cs-ai", 4, 2, 1, 1, "2026-08-22 12:00:00")]
+        else:
+            raise AssertionError(f"unexpected SQL: {sql}")
+        return self
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self.rows
+
+
+class _AdmissionOnlyDetailConnection:
+    def __init__(self) -> None:
+        self.description: list[tuple[str]] = []
+        self.rows: list[tuple[object, ...]] = []
+
+    def execute(self, sql: str, _params: list[object]) -> _AdmissionOnlyDetailConnection:
+        if "FROM decisions" in sql:
+            self.description = [("doc_id",)]
+            self.rows = []
+        elif "status = 'quarantined'" in sql:
+            self.description = [
+                ("doc_id",),
+                ("title",),
+                ("source_url",),
+                ("source_feed",),
+                ("source_format",),
+                ("valid_from",),
+                ("license_id",),
+                ("license_source",),
+                ("reason",),
+                ("raw_license",),
+                ("normalized_license",),
+                ("resolver",),
+                ("evidence_url",),
+                ("evidence_revision",),
+                ("evidence_scope",),
+                ("policy_revision",),
+                ("resolved_at",),
+            ]
+            self.rows = [
+                (
+                    "sha256:" + "a" * 64,
+                    "https://example.test/paper",
+                    "https://example.test/paper",
+                    "rss-example",
+                    "html",
+                    "2026-08-23 10:00:00",
+                    "unknown",
+                    "unknown",
+                    "item-level machine-readable licence is unresolved",
+                    None,
+                    "unknown",
+                    "web-page-license-probe",
+                    "https://example.test/paper",
+                    None,
+                    "unknown",
+                    "license-policy-2026-08-23",
+                    "2026-08-23 10:00:00",
+                )
+            ]
         else:
             raise AssertionError(f"unexpected SQL: {sql}")
         return self
@@ -223,6 +292,10 @@ def test_license_admissions_exposes_durable_24h_source_activity() -> None:
             "posttrain_transform_only": 1,
             "quarantined": 1,
             "last_observed_at": "2026-08-22 12:00:00",
+            "license_distribution": [
+                {"license_id": "CC-BY-4.0", "status": "admitted", "count": 2}
+            ],
+            "license_provenance": [{"license_source": "rss_entry", "count": 4}],
         }
     ]
     activity_sql, activity_params = next(
@@ -237,6 +310,23 @@ def test_source_activity_bounds_requested_window() -> None:
 
     assert service.source_activity(window_hours=0)["window_hours"] == 1
     assert service.source_activity(window_hours=10_000)["window_hours"] == 168
+
+
+def test_document_exposes_prefetch_license_quarantine_for_audit() -> None:
+    service = DuckDBQueryService(
+        _AdmissionOnlyDetailConnection(),
+        decisions_relation="decisions",
+        license_admissions_relation="license_admissions",
+    )
+
+    document = service.document("sha256:" + "a" * 64)
+
+    assert document is not None
+    assert document["admission_only"] is True
+    assert document["route"] == "quarantine"
+    assert document["training_usage"] == "quarantined"
+    assert document["reject_reasons"] == ["license_missing"]
+    assert document["license_admission"]["resolver"] == "web-page-license-probe"
 
 
 def test_safe_query_rejects_writes_and_multiple_statements() -> None:
@@ -355,9 +445,9 @@ def test_document_filters_are_parameterized_and_hide_fixtures() -> None:
     )
 
     assert "source_feed NOT LIKE 'local-%'" in where
-    assert "COALESCE(spdx_license, license) IN" in where
     assert "LIST_CONTAINS(content_tags, ?)" in where
-    assert "LIST_CONTAINS(eligible_routes, ?)" in where
+    assert "route = ?" in where
+    assert "eligible_routes" not in where
     assert "benchmark_candidate" not in where
     assert "figure_count > 0" in where
     assert "edu_score >= ?" in where
@@ -366,7 +456,6 @@ def test_document_filters_are_parameterized_and_hide_fixtures() -> None:
         "%method%",
         "%method%",
         "%method%",
-        "reasoning_candidate",
         "reasoning_candidate",
         "empirical_evidence",
         3.0,

@@ -19,6 +19,7 @@ label.
 from __future__ import annotations
 
 import io
+import re
 import tarfile
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -66,6 +67,10 @@ _LANG_BY_EXT: dict[str, str] = {
 
 DEFAULT_ALLOWED_EXTENSIONS: tuple[str, ...] = tuple(sorted(_LANG_BY_EXT.keys()))
 DEFAULT_MAX_FILE_SIZE_BYTES: int = 1 * 1024 * 1024  # 1 MiB
+_GENERATED_OR_VENDOR_PATH = re.compile(
+    r"(?:^|/)(?:\.git|__pycache__|build|coverage|dist|generated|node_modules|target|third_party|vendor|vendors)(?:/|$)|\.min\.(?:css|js)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,8 @@ def iter_tarball_files(
             path = _strip_top_dir(member.name)
             if not path or path.endswith("/"):
                 continue
+            if _GENERATED_OR_VENDOR_PATH.search(path):
+                continue
             if not _has_allowed_extension(path, allowed_extensions):
                 continue
             language = _language_for(path)
@@ -191,6 +198,14 @@ def iter_tarball_files(
             data = extracted.read()
             if len(data) > max_file_size_bytes:
                 # Defensive: tar header lied about size.
+                continue
+            if b"\x00" in data:
+                continue
+            try:
+                data.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                # Stack v2 excludes undecodable source objects rather than
+                # silently injecting replacement characters into training.
                 continue
             yield ExtractedFile(
                 path=path,

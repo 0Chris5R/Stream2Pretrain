@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from processor.scientific_policy import representative_segments, route_document
+from processor.scientific_policy import (
+    composite_quality_score,
+    representative_segments,
+    route_document,
+)
 from processor.tests.test_curate import _silver
 from schemas.silver import SilverSegment
 
@@ -106,3 +110,19 @@ def test_upstream_curation_never_allocates_a_benchmark_split() -> None:
 
     assert decision.route == "posttrain_candidate"
     assert "benchmark_candidate" not in decision.eligible_routes
+
+
+def test_composite_does_not_substitute_non_applicable_web_signals() -> None:
+    score = composite_quality_score(
+        edu_score=5.0,
+        structural_quality_score=5.0,
+        lang_score=1.0,
+        gopher_pass=False,
+        c4_pass=False,
+        perplexity_bucket="tail",
+        language_applicable=False,
+        web_heuristics_applicable=False,
+        perplexity_applicable=False,
+    )
+
+    assert score == 5.0

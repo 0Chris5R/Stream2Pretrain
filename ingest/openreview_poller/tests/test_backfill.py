@@ -140,16 +140,17 @@ async def test_run_backfill_streams_rows(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     assert stats.dataset_id == "alice/REVIEWARENA"
     assert stats.rows_seen == 3
-    assert stats.papers_emitted == 2
+    assert stats.papers_emitted == 0
     assert stats.reviews_emitted == 2
     assert stats.skipped == 0
     formats = [m["record"].source_format for m in fake_producer.sent]
-    assert formats.count("markdown") == 2
+    assert formats.count("markdown") == 0
     assert formats.count("review") == 2
-    assert {m["record"].training_usage for m in fake_producer.sent} == {"posttrain_transform_only"}
-    assert {m["record"].spdx_license for m in fake_producer.sent} == {"unknown"}
+    assert {m["record"].training_usage for m in fake_producer.sent} == {
+        "pretrain_and_posttrain"
+    }
+    assert {m["record"].spdx_license for m in fake_producer.sent} == {"CC-BY-4.0"}
     pipelines = [m["record"].extraction_pipeline for m in fake_producer.sent]
-    assert backfill.PIPELINE_MARKDOWN_BACKFILL in pipelines
     assert backfill.PIPELINE_REVIEW_BACKFILL in pipelines
 
 
@@ -192,6 +193,7 @@ async def test_run_backfill_respects_max_rows(
             "year": 2026,
             "markdown": f"# Paper {i}\n\nScientific text {i}.",
             "reviews_json": json.dumps([{"summary": f"R{i}"}]),
+            "paper_license": "CC-BY-4.0",
         }
         for i in range(10)
     ]

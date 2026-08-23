@@ -40,7 +40,10 @@ rbac:
 redpanda:
   bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
   schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
-  startingOffset: beginning
+  # OFFSET_STORED imports an existing native-consumer group position on the
+  # first Bytewax execution and falls back to earliest for a clean cluster.
+  # Subsequent restarts resume from the Bytewax recovery database.
+  startingOffset: stored
   # Processor stages retain 64 KiB of record-framing headroom below this.
   maxMessageBytes: 2097152
   saslMechanism: ""
@@ -52,8 +55,11 @@ redpanda:
     docsNormalized: docs.normalized
     docsNormalizedSmoke: docs.normalized.smoke
     docsCurated: docs.curated
+    docsCuratedSmoke: docs.curated.smoke
     curationDecisions: curation.decisions
+    curationDecisionsSmoke: curation.decisions.smoke
     licenseAdmissions: license.admissions
+    licenseAdmissionsSmoke: license.admissions.smoke
     deconAttest: decon.attest
     foundryJobs: foundry.jobs
     foundryEvents: foundry.events
@@ -123,6 +129,13 @@ networkPolicy:
       - api2.openreview.net
       - api.openreview.net
       - openreview.net
+    seed:
+      - huggingface.co
+      - cdn-lfs.huggingface.co
+      - web.archive.org
+      - arxiv.org
+      - softwareheritage.s3.amazonaws.com
+      - s3.amazonaws.com
     blogs:
       - openai.com
       - deepmind.google
@@ -141,7 +154,7 @@ sources:
   arxiv:
     enabled: true
     oaiPmh:
-      name: arxiv-oai-cs
+      name: oai-arxiv-cs
       endpoint: https://oaipmh.arxiv.org/oai
       set: cs
       pollIntervalSeconds: 7200
@@ -158,13 +171,12 @@ sources:
       kind: cronjob
       schedule: "27 */2 * * *"
       licenseDefault: per-record
-    # Native arXiv full-paper-HTML fetcher (v0.2.0). Subscribes to
-    # ``docs.normalized`` and walks every fresh arXiv id through
+    # Native arXiv full-paper-HTML fetcher (v0.2.0). Subscribes to arXiv
+    # discovery envelopes on ``raw.fetched`` and walks every fresh id through
     # ``arxiv.org/html/<id>`` (with ``ar5iv.labs.arxiv.org`` as fallback).
     htmlFetcher:
       enabled: true
       feedName: arxiv-html-fetcher
-      licenseDefault: per-record
       backfill:
         enabled: false
         schedule: "23 4 * * *"
@@ -236,6 +248,20 @@ sources:
     models:
       name: hf-models
       endpoint: https://huggingface.co/api/models
+      pollIntervalSeconds: 600
+      kind: deployment
+      tokenSecret: stream2pretrain-hf
+      tokenSecretKey: token
+    datasets:
+      name: hf-datasets
+      endpoint: https://huggingface.co/api/datasets
+      pollIntervalSeconds: 600
+      kind: deployment
+      tokenSecret: stream2pretrain-hf
+      tokenSecretKey: token
+    spaces:
+      name: hf-spaces
+      endpoint: https://huggingface.co/api/spaces
       pollIntervalSeconds: 600
       kind: deployment
       tokenSecret: stream2pretrain-hf
@@ -321,26 +347,22 @@ ingest:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: 500m, memory: 256Mi}
   # arXiv full-paper-HTML fetcher (v0.2.0). Long-running Deployment that
-  # subscribes to docs.normalized for arXiv ids and fetches the rendered
+  # subscribes to raw.fetched for arXiv ids and fetches the rendered
   # HTML body (with ar5iv as fallback). Toggle via
   # ``sources.arxiv.htmlFetcher.enabled``.
   arxivHtmlFetcher:
     image: stream2pretrain/ingest-arxiv-html
     replicas: 1
-    # v2 begins at the live head. Historical paper ids are handled by the
-    # explicit, bounded backfill CronJob instead of blocking fresh enrichment.
+    # The durable group starts at earliest on a clean cluster so every retained
+    # discovery is handled. Historical ids outside retention use the bounded
+    # backfill CronJob.
     consumerGroup: s2p-arxiv-html-fetcher-v2
-    autoOffsetReset: latest
-    # Bound how many ids one Deployment loop drains before yielding back
-    # to KEDA. Empty / 0 means unlimited. Useful for testing on small
-    # clusters; production should leave this 0.
+    autoOffsetReset: earliest
+    # Optional bounded drain for explicit diagnostics. Production is unlimited.
     maxRecordsPerLoop: 0
-    scaling:
-      minReplicas: 0
-      maxReplicas: 1
-      # docs.normalized lag threshold; arXiv ids form a small fraction of
-      # the topic, so keep this low. needs-measurement on the real cluster.
-      lagThreshold: 200
+    # The shared raw.fetched topic also carries this worker's output, so its
+    # Kafka lag is not a valid autoscaling signal. Keep one fixed replica until
+    # a source-specific Prometheus backlog metric is implemented.
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 768Mi}
@@ -387,9 +409,6 @@ ingest:
     # 1 MiB default per-file ceiling. Files above this are skipped without
     # being read into memory.
     maxFileSizeBytes: 1048576
-    # The live DHBW cluster processed roughly 5k retained files in three
-    # minutes, while 11k-file CI snapshots exceeded the consumer poll bound.
-    maxFilesPerRelease: 5000
     # These prefixes were observed on pytorch/pytorch as ephemeral CI refs,
     # not published software releases.
     excludedTagPrefixes:
@@ -398,17 +417,6 @@ ingest:
     # Above the measured bounded-release time and aligned with processor
     # consumers, so healthy work does not forfeit its partition before commit.
     maxPollIntervalMilliseconds: 900000
-    # OSI permissive default. Repos whose GitHub License API SPDX id is not
-    # in this list are skipped entirely (no tarball download, no records).
-    allowedLicenses:
-      - Apache-2.0
-      - MIT
-      - BSD-2-Clause
-      - BSD-3-Clause
-      - ISC
-      - MPL-2.0
-      - Unlicense
-      - CC0-1.0
     # Four replicas share one GitHub credential. Limiting each to 0.25 req/s
     # bounds the aggregate steady-state budget at 3600 req/h, leaving headroom
     # below GitHub's authenticated 5000 req/h core limit for the poller.
@@ -500,13 +508,15 @@ processor:
     # a real extraction dependency is missing.
     requireRealModels: true
     doclingEnabled: true
-    # This stateless stage commits source offsets to Redpanda only after its
-    # normalized output batch is delivered, so partitions can move safely
-    # between replicas.
+    # Bytewax owns source progress in a durable recovery database. Scale this
+    # as one coordinated execution, never with independent Kafka-lag replicas.
     replicas: 1
-    commitBatchSize: 16
-    commitIntervalSeconds: 2
-    maxPollIntervalMs: 900000
+    checkpoint:
+      existingClaim: ""
+      storageClass: ""
+      size: 2Gi
+      recoveryPartitions: 4
+      snapshotSeconds: 1
     # A multi-minute production PDF must not starve the bounded deployment
     # health check. This fixed worker runs the identical normalization image
     # against the 24-hour canary topic but is not production capacity.
@@ -514,6 +524,12 @@ processor:
       enabled: true
       replicas: 1
       consumerGroup: s2p-fetcher-canary
+      checkpoint:
+        existingClaim: ""
+        storageClass: ""
+        size: 1Gi
+        recoveryPartitions: 1
+        snapshotSeconds: 1
       resources:
         requests: {cpu: 100m, memory: 512Mi}
         limits: {cpu: 1, memory: 2Gi}
@@ -538,6 +554,8 @@ processor:
     checkpoint:
       storageClass: ""
       size: 20Gi
+      recoveryPartitions: 4
+      snapshotSeconds: 1
     onnxModel: /models/fineweb-edu/model.onnx
     minHashBands: 14
     minHashRowsPerBand: 9
@@ -592,6 +610,8 @@ processor:
       existingClaim: ""
       storageClass: ""
       size: 2Gi
+      recoveryPartitions: 4
+      snapshotSeconds: 1
     maintenance:
       enabled: true
       schedule: "17 * * * *"
@@ -699,9 +719,8 @@ mixtureController:
 seedLoader:
   enabled: false
   image: stream2pretrain/processor-seed-loader
-  # `inProcess` runs the synchronous fallback (no Bytewax workers) which is
-  # the right shape for a one-shot Job on the dev cluster. Flip to false
-  # only when scaling to multiple worker Pods is wanted.
+  # The seed Job serializes admission -> Silver acknowledgement -> cursor.
+  # Keep this true until a transactional cross-topic Bytewax outbox exists.
   inProcess: true
   dryRun: false
   # Components to ingest, in priority order. Override on the helm CLI:
@@ -766,18 +785,14 @@ ui:
 # KEDA scaling
 # -----------------------------------------------------------------------------
 keda:
-  # Fetcher lag is broker-visible and safe for partition-based autoscaling.
-  # Curate and Iceberg remain stateful Bytewax single writers until their
-  # state is moved behind an externally coordinated boundary.
+  # Core Bytewax fetcher and curator progress is not represented by Kafka
+  # consumer-group commits and is intentionally excluded from Kafka-lag KEDA.
+  # KEDA remains available to independently committing ingest/model workers.
   enabled: false
   pollingInterval: 15
   cooldownPeriod: 60
   prometheus:
     serverAddress: http://kps-prometheus.monitoring.svc:9090
-  fetcher:
-    minReplicas: 1
-    maxReplicas: 4
-    lagThreshold: 250
   triggerAuthSecret: stream2pretrain-keda-redpanda
   # Set ``auth.enabled: true`` only when the Redpanda profile actually has
   # SASL/TLS turned on and the secret named by ``triggerAuthSecret`` exists

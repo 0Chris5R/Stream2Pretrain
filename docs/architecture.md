@@ -38,20 +38,26 @@ Deployment depending on cadence):
 
 | SourceFeed | Workload | Cadence | Output topic |
 |---|---|---|---|
-| `rss-arxiv-cs-*` (4 feeds) | `ingest-rss` Deployment | 2h conditional GET | `raw.fetched` |
+| `rss-arxiv-cs-*` (4 feeds) | per-SourceFeed `ingest-rss` CronJob | 2h conditional GET | `raw.fetched` |
 | `oai-arxiv-cs` | `ingest-oaipmh` CronJob | 2h with resumption tokens | `raw.fetched` |
-| `github-events` | `ingest-github-events` Deployment | `X-Poll-Interval` (~60s) | `raw.fetched` |
-| `github-releases` | `ingest-github-releases` Deployment | 2h ETag-conditional | `raw.fetched` + `github.release.jobs` |
-| `hf-models`, `hf-daily-papers` | `ingest-hf` Deployment | 10-15 min | `raw.fetched` |
-| `*-blog` RSS bundle | shares `ingest-rss` workload | 6-24h | `raw.fetched` |
-| Sitemaps | `ingest-sitemap` CronJob | per-feed | `raw.fetched` |
+| `github-events` | `ingest-github-events` Deployment | `X-Poll-Interval` (~60s) | `github.release.jobs` discovery only |
+| `github-releases` | `ingest-github-releases` Deployment | 2h ETag-conditional | `github.release.jobs` discovery only |
+| `hf-models`, `hf-datasets`, `hf-spaces` | `ingest-hf-cards` Deployment | 10-15 min | exact-revision card content to `raw.fetched` |
+| `hf-daily-papers` | `ingest-hf-daily-papers` CronJob | 6h | arXiv discovery to `raw.fetched` |
+| `*-blog` RSS feeds | per-SourceFeed `ingest-rss` CronJob | 6-24h | `raw.fetched` |
+| Sitemaps | per-SourceFeed `ingest-sitemap` CronJob | per-feed | `raw.fetched` |
 
-Every poller writes the **raw bytes** to MinIO under
+Every content poller writes the **raw bytes** to MinIO under
 `s3://bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.html.gz` and
 emits a `BronzeRecord` pointer (defined in `schemas/bronze.py`) onto
 `raw.fetched`. A doc that fetches twice in the same minute deduplicates by
 `doc_id`; the bronze object is overwritten with the latest bytes plus a fresh
 `fetched_at`.
+
+Discovery is not training content. OAI, arXiv RSS, Daily Papers, and Hub list
+responses schedule an exact paper or card artifact. GitHub events and release
+feeds schedule an exact release tarball. Metadata-only envelopes are excluded
+before body extraction and cannot reach Gold directly.
 
 GitHub release metadata is dual-published to the bounded
 `github.release.jobs` control topic. Tarball workers scale on that topic's
@@ -64,14 +70,19 @@ A single-binary Kafka API broker. Topics:
 
 | Topic | Producer(s) | Consumer(s) | Partitions (dev / prod) |
 |---|---|---|---|
-| `raw.fetched` | all pollers | curator | 1 / 12 |
-| `docs.normalized` | curator (after extract+lang+tags) | curator (next stage) + UI streams | 1 / 12 |
-| `curation.decisions` | curator | Iceberg writer | 1 / 12 |
-| `docs.curated` | curator, accepted subset only | training/export consumers | 1 / 12 |
+| `raw.fetched` | all content pollers | Bytewax fetcher | 4 / 12 |
+| `docs.normalized` | Bytewax fetcher | Bytewax curator | 4 / 12 |
+| `curation.decisions` | Bytewax curator | Iceberg writer | 4 / 12 |
+| `docs.curated` | Bytewax curator, accepted subset only | training/export consumers | 4 / 12 |
 | `decon.attest` | Decon-Gate | UI + verifier scripts | 1 / 3 |
 
 Partition counts and retention windows live in `schemas/topics.py`. The
 prod profile is `needs-measurement` until the Week 5 throughput benchmark.
+Deployment probes use parallel 24-hour `raw.smoke`, `docs.normalized.smoke`,
+`curation.decisions.smoke`, and `docs.curated.smoke` lanes. They never write
+the exact canary document into a production topic. Licence evidence uses the
+matching `license.admissions.smoke` lane, and the temporary Bronze object is
+deleted after the probe.
 
 ### Engine: Bytewax curator
 
@@ -87,13 +98,13 @@ A Python streaming dataflow with the Rust core. The pipeline is wired in
 5. `minhash` - 112-perm signature using Rensa.
 6. `lshbloom` - band-partitioned Bloom near-dup index (RocksDB-checkpointed).
 7. `quality_classifier` - source-aware CPU inference: pinned FinePDFs Edu v2
-   for scientific HTML/PDF, pinned FineWeb-Edu for rendered web pages, and
-   transparent versioned rules for code, peer reviews, and structured API/OAI
-   metadata. This avoids reporting out-of-domain web/PDF model scores for JSON
-   values or review forms. Scientific segments retain FineWeb-Edu only as a
-   labelled comparison signal during calibration.
-8. `kenlm_perplexity` - mmap'd binary KenLM model for natural-language prose;
-   code and structured metadata bypass this prose-specific signal.
+   for scientific HTML/PDF, pinned FineWeb-Edu for ordinary web prose and as
+   an audit-only signal for card/documentation prose, Stack v2/Dolma-grounded
+   rules for source code, and OpenReview form-schema completeness for peer
+   reviews. Structured discovery metadata has no educational score.
+8. `kenlm_perplexity` - mmap'd binary KenLM model gated only on ordinary web
+   prose. Scientific text, code, reviews, metadata, cards, and repository
+   documentation bypass this web-domain signal.
 9. `pii_regex` - email / phone / SSN / credit-card / IP scan.
 10. `decon_gate` - 13-gram Bloom + E5 embedding sketch plus signed attestation API.
 11. `validity_interval_enricher` - populates `[valid_from, valid_to)` from
@@ -105,6 +116,11 @@ A Python streaming dataflow with the Rust core. The pipeline is wired in
     go to `docs.curated`.
 13. `iceberg_writer` - commits all outcomes to the decision table, accepted
     rows to Gold, and emits an attestation for the complete committed batch.
+
+Malformed or tombstone records are never silently checkpointed. Deterministic
+record-local failures are written idempotently to the Gold bucket under
+`processing-failures/`; transient storage, model, and unknown failures stop the
+execution so retained Bytewax recovery replays the input.
 
 Operators are pure functions over `(key, value)` tuples; the Bytewax runtime
 handles partitioning, state, and recovery.
@@ -144,7 +160,10 @@ histograms, and safe read-only query routes. The Next.js App Router app exposes:
 
 ### Cross-cutting
 
-- **Autoscaling**: KEDA `ScaledObject` per consumer group keyed by Kafka lag.
+- **Autoscaling**: KEDA scales independently committing ingest workers and
+  stateless model services. Core Bytewax flows use durable recovery and
+  coordinated stop-and-start rescaling; ordinary broker-lag KEDA is not safe
+  for their source progress.
 - **Observability**: kube-prometheus-stack scrapes every `/metrics`, Loki
   picks up structured logs, Tempo records OTel traces. The pollers, fulltext
   fetchers, curator, and Iceberg writer all emit a `trace_id` that is stored
@@ -152,8 +171,11 @@ histograms, and safe read-only query routes. The Next.js App Router app exposes:
 - **Ingress + TLS**: Traefik IngressRoute with cert-manager.
 - **Policy**: OPA Gatekeeper validates SourceFeed admission. Constraint
   templates live in `charts/stream2pretrain/templates/gatekeeper-constraints.yaml`.
-- **Network**: default-deny `NetworkPolicy`, per-pod egress allowlist
-  derived from `egressAllow` on the SourceFeed.
+- **Network**: the base chart has default-deny `NetworkPolicy` plus broad
+  per-component external HTTP(S) egress. `SourceFeed.egressAllow` records the
+  expected hostnames for audit and FQDN-policy generation; exact hostname
+  enforcement requires an FQDN-aware CNI. The measured DHBW profile currently
+  leaves NetworkPolicy disabled, as stated in the README limits.
 
 ## Mermaid view
 
@@ -224,7 +246,7 @@ flowchart LR
 |---|---|---|
 | Redpanda | worker-1 (dedicated) | 2 vCPU, 2 GiB RAM, 20 GiB disk |
 | MinIO | worker-2 | 1 vCPU, 1 GiB RAM, 50 GiB disk |
-| Bytewax curator (1-6 replicas) | both workers | 1 vCPU, 1 GiB RAM each |
+| Bytewax fetcher and curator | both workers | `needs-measurement` |
 | Polaris | control or worker-2 | 0.5 vCPU, 512 MiB |
 | DuckDB | control | 1 vCPU, 1 GiB |
 | UI | control | 0.25 vCPU, 256 MiB |

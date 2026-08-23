@@ -10,11 +10,10 @@ Composes the five seed-corpus components from :mod:`processor.seed`:
 
 Each :class:`processor.seed.types.SeedDocument` is mapped onto a
 :class:`schemas.silver.SilverRecord` and emitted to ``docs.normalized``.
-The ``source_feed = "seed:<repo_id>"`` Kafka header is a transport-only
-debug aid; ``SilverRecord`` does not carry ``source_feed``, so curate.py
-(which reads ``msg.value`` only) cannot dispatch on it. Downstream
-seed-vs-live discrimination is done via :attr:`SilverRecord.extraction_pipeline`
-instead - every seed component stamps a distinct id (``pes2o-seed-2026-06``,
+The ``source_feed = "seed:<repo_id>"`` identity is carried in both the Kafka
+header and ``SilverRecord``. Downstream source-aware curation can therefore
+dispatch on the real dataset as well as :attr:`SilverRecord.extraction_pipeline`.
+Every seed component stamps a distinct id (``pes2o-seed-2026-06``,
 ``redpajama-arxiv-2023-04``, ``fineweb-edu-2024``, ``stack-edu-2024``,
 ``wayback-backfill-2026-06``) that no live extractor produces. Iceberg
 ``as_of(timestamp)`` queries should filter on
@@ -178,7 +177,12 @@ def _normalize_seed_url(repo_id: str, raw_url: str, native_id: str) -> str:
     return raw_url
 
 
-def to_silver(doc: SeedDocument, *, trace_id: str | None = None) -> SilverRecord:
+def to_silver(
+    doc: SeedDocument,
+    *,
+    trace_id: str | None = None,
+    training_usage: str = "pretrain_and_posttrain",
+) -> SilverRecord:
     """Map a :class:`SeedDocument` onto a :class:`SilverRecord`.
 
     The downstream ``curate`` dataflow re-runs Gopher / C4 / KenLM / MinHash
@@ -214,10 +218,12 @@ def to_silver(doc: SeedDocument, *, trace_id: str | None = None) -> SilverRecord
         valid_to=None,
         valid_from_source="dataset_metadata",
         trace_id=trace_id or _new_trace_id(),
+        source_feed=f"seed:{doc.repo_id}",
         source_format=doc.source_format,
         extraction_pipeline=doc.extraction_pipeline,
         spdx_license=doc.spdx_license,
         spdx_license_source=doc.spdx_license_source,
+        training_usage=training_usage,  # type: ignore[arg-type]
     )
 
 
@@ -230,6 +236,10 @@ def seed_admission(doc: SeedDocument) -> LicenseAdmissionDecision:
         license_value=doc.spdx_license,
         license_source=doc.spdx_license_source,
         source_format=doc.source_format,
+        resolver=doc.license_resolver,
+        evidence_url=doc.license_evidence_url,
+        evidence_revision=doc.license_evidence_revision,
+        evidence_scope=doc.license_evidence_scope,
     ).decision
 
 
@@ -290,7 +300,7 @@ def stream_component(
     cursor_store: CursorStore,
     cfg: SeedLoaderConfig,
     on_record: Callable[[str, SilverRecord], None],
-    on_admission: Callable[[LicenseAdmissionDecision], None] | None = None,
+    on_admission: Callable[[LicenseAdmissionDecision], None],
 ) -> SeedCursor:
     """Stream one component end-to-end; return the final cursor.
 
@@ -305,17 +315,30 @@ def stream_component(
     rows_since_flush = 0
     for doc in factory(cursor, cfg):
         admission = seed_admission(doc)
-        if on_admission is not None:
-            on_admission(admission)
-        if admission.status == "admitted":
-            record = to_silver(doc, trace_id=admission.trace_id)
-            on_record(repo_id, record)
+        on_admission(admission)
+        if admission.status in {"admitted", "posttrain_transform_only"}:
+            # A dry run has no durable admission sink. Existing HF rows can
+            # still be inspected because their body already arrived with row
+            # metadata, but a deferred archive body must not be fetched.
+            materialized = None if cfg.dry_run and doc.body_loader is not None else doc.materialize_body()
+            if materialized is not None:
+                record = to_silver(
+                    materialized,
+                    trace_id=admission.trace_id,
+                    training_usage=(
+                        "posttrain_transform_only"
+                        if admission.status == "posttrain_transform_only"
+                        else "pretrain_and_posttrain"
+                    ),
+                )
+                on_record(repo_id, record)
         cursor.advance(doc.native_id)
         rows_since_flush += 1
-        if rows_since_flush >= CURSOR_FLUSH_INTERVAL:
+        if not cfg.dry_run and rows_since_flush >= CURSOR_FLUSH_INTERVAL:
             cursor_store.save(cursor)
             rows_since_flush = 0
-    cursor_store.save(cursor)
+    if not cfg.dry_run:
+        cursor_store.save(cursor)
     return cursor
 
 
@@ -332,6 +355,12 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
     unit tests can import :mod:`processor.seed_loader` on a CI image
     without the runtime extra installed.
     """
+    if "wayback" in seed_cfg.components:
+        raise RuntimeError(
+            "the Wayback adapter requires S2P_SEED_INPROCESS=1 so the durable "
+            "licence admission acknowledgement precedes its deferred body fetch"
+        )
+
     from bytewax import operators as op
     from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage
     from bytewax.dataflow import Dataflow
@@ -390,8 +419,16 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
                 raise
             admission = seed_admission(doc)
             record = (
-                to_silver(doc, trace_id=admission.trace_id)
-                if admission.status == "admitted"
+                to_silver(
+                    doc,
+                    trace_id=admission.trace_id,
+                    training_usage=(
+                        "posttrain_transform_only"
+                        if admission.status == "posttrain_transform_only"
+                        else "pretrain_and_posttrain"
+                    ),
+                )
+                if admission.status in {"admitted", "posttrain_transform_only"}
                 else None
             )
             self._cursor.advance(doc.native_id)
@@ -455,10 +492,12 @@ def build_dataflow(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> o
 
 
 def run_inprocess(cfg: common.ProcessorConfig, seed_cfg: SeedLoaderConfig) -> dict[str, Any]:
-    """Synchronous fallback runner (no Bytewax) for the smoke job.
+    """Run the ordered seed admission and publication path.
 
-    Returns per-component stats. Used by :func:`main` when the
-    ``S2P_SEED_INPROCESS=1`` env var is set, and by the unit tests.
+    This intentionally serializes the two durable writes: the admission is
+    acknowledged first, then an admitted Silver row is acknowledged, and only
+    then may the source cursor advance. A split Bytewax graph cannot provide
+    that cross-topic ordering without a transactional outbox.
     """
     s3 = boto3.client(
         "s3",
@@ -511,6 +550,12 @@ def _build_sink(
     )
 
     def _produce(repo_id: str, rec: SilverRecord) -> None:
+        delivery_errors: list[str] = []
+
+        def _delivered(error: object | None, _message: object) -> None:
+            if error is not None:
+                delivery_errors.append(str(error))
+
         headers = [
             ("trace_id", rec.trace_id.encode("ascii")),
             ("source_feed", f"seed:{repo_id}".encode()),
@@ -520,8 +565,11 @@ def _build_sink(
             key=rec.doc_id.encode("utf-8"),
             value=common.silver_dumps(rec),
             headers=headers,
+            on_delivery=_delivered,
         )
         producer.poll(0)
+        if producer.flush() != 0 or delivery_errors:
+            raise RuntimeError("failed to durably publish seed Silver record")
 
     return _produce
 
@@ -555,6 +603,12 @@ def _build_admission_sink(
     )
 
     def _produce(decision: LicenseAdmissionDecision) -> None:
+        delivery_errors: list[str] = []
+
+        def _delivered(error: object | None, _message: object) -> None:
+            if error is not None:
+                delivery_errors.append(str(error))
+
         producer.produce(
             cfg.license_admissions_topic,
             key=decision.decision_id.encode("ascii"),
@@ -563,8 +617,11 @@ def _build_admission_sink(
                 ("trace_id", decision.trace_id.encode("ascii")),
                 ("schema", b"LicenseAdmissionDecision/v1"),
             ],
+            on_delivery=_delivered,
         )
         producer.poll(0)
+        if producer.flush() != 0 or delivery_errors:
+            raise RuntimeError("failed to durably publish seed licence admission")
 
     return _produce
 
@@ -581,15 +638,13 @@ def main() -> None:
         dry_run=seed_cfg.dry_run,
         max_docs_per_component=seed_cfg.max_docs_per_component,
     )
-    inprocess = os.environ.get("S2P_SEED_INPROCESS", "0") == "1"
-    if inprocess:
-        stats = run_inprocess(cfg, seed_cfg)
-        log.info("seed loader finished (inprocess)", **stats)
-        return
-    flow = build_dataflow(cfg, seed_cfg)
-    from bytewax.run import cli_main  # type: ignore[import-not-found]
-
-    cli_main(flow)
+    if os.environ.get("S2P_SEED_INPROCESS", "0") != "1":
+        raise RuntimeError(
+            "strict seed admission requires S2P_SEED_INPROCESS=1 until a "
+            "transactional cross-topic Bytewax outbox is implemented"
+        )
+    stats = run_inprocess(cfg, seed_cfg)
+    log.info("seed loader finished", **stats)
 
 
 __all__ = [

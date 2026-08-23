@@ -20,7 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
+from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId, TrainingUsage
 
 # Risk-tier follows the MixtureVitae / Common Pile convention:
 #   1 = trainable under current policy (explicit allowlisted content licence,
@@ -42,6 +42,7 @@ CorpusRoute = Literal[
     "retry",
 ]
 RejectReason = Literal[
+    "metadata_only",
     "language_filter",
     "gopher_filter",
     "c4_nopunc_filter",
@@ -54,7 +55,11 @@ RejectReason = Literal[
     "validity_interval_invalid",
     "minhash_backend_mismatch",
     "insufficient_body",
+    "insubstantial_review",
     "insufficient_scientific_body",
+    "code_quality_filter",
+    "secret_detected",
+    "incomplete_scientific_extraction",
 ]
 
 
@@ -229,6 +234,10 @@ class GoldRecord(BaseModel):
     spdx_license_source: SpdxLicenseSource = Field(
         default="unknown",
         description="Where the SPDX id was read from.",
+    )
+    training_usage: TrainingUsage = Field(
+        default="pretrain_and_posttrain",
+        description="Purpose boundary inherited from the pre-fetch item licence decision.",
     )
 
     scientific_artifact_s3_uri: str | None = Field(

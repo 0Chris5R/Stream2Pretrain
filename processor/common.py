@@ -27,11 +27,13 @@ import logging
 import os
 import secrets
 import sys
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import boto3
 import orjson
 import structlog
 from opentelemetry import trace
@@ -136,6 +138,165 @@ class ProcessorConfig:
         return self.env == "dev"
 
 
+class DeterministicProcessingError(ValueError):
+    """A record-local error that will recur unchanged when replayed."""
+
+
+@dataclass(slots=True)
+class BytewaxRuntimeStatus:
+    """Readiness shared between a Bytewax source and the HTTP probe thread.
+
+    A process is ready only after the runtime has started and every registered
+    Kafka source has successfully built at least one assigned partition.  This
+    avoids advertising readiness merely because the model objects and probe
+    socket were created.
+    """
+
+    required_sources: set[str] = field(default_factory=set)
+    assigned_sources: set[str] = field(default_factory=set)
+    runtime_started: bool = False
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def register_source(self, source_name: str) -> None:
+        with self._lock:
+            self.required_sources.add(source_name)
+
+    def mark_source_assigned(self, source_name: str) -> None:
+        with self._lock:
+            self.assigned_sources.add(source_name)
+
+    def mark_runtime_started(self) -> None:
+        with self._lock:
+            self.runtime_started = True
+
+    def mark_runtime_stopped(self) -> None:
+        with self._lock:
+            self.runtime_started = False
+
+    def is_ready(self) -> bool:
+        with self._lock:
+            return (
+                self.runtime_started
+                and bool(self.required_sources)
+                and self.required_sources.issubset(self.assigned_sources)
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DurableProcessingFailureWriter:
+    """Write idempotent processing quarantines without adding a Kafka topic.
+
+    The object key is derived from the Kafka coordinate and payload digest.
+    Replaying the same poison record therefore overwrites identical JSON rather
+    than creating unbounded audit objects.  A failed object-store write raises,
+    so Bytewax cannot snapshot beyond a failure that was not durably recorded.
+    """
+
+    s3: Any
+    bucket: str
+    prefix: str = "processing-failures"
+    error_revision: str = "processing-failure-v1"
+
+    @classmethod
+    def from_config(cls, cfg: ProcessorConfig) -> "DurableProcessingFailureWriter":
+        return cls(
+            s3=boto3.client(
+                "s3",
+                endpoint_url=cfg.minio_endpoint,
+                aws_access_key_id=cfg.minio_access_key,
+                aws_secret_access_key=cfg.minio_secret_key,
+                region_name="us-east-1",
+            ),
+            bucket=os.environ.get(
+                "S2P_PROCESSING_FAILURE_BUCKET",
+                os.environ.get("S2P_STATE_BUCKET", cfg.gold_bucket),
+            ),
+            prefix=os.environ.get("S2P_PROCESSING_FAILURE_PREFIX", "processing-failures"),
+        )
+
+    def record(self, *, stage: str, message: object, reason: str) -> str:
+        import hashlib
+        import re
+
+        payload = getattr(message, "value", None)
+        payload_bytes = bytes(payload) if payload is not None else b""
+        payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        topic = str(getattr(message, "topic", None) or "unknown")
+        partition = int(getattr(message, "partition", -1) or 0)
+        offset = int(getattr(message, "offset", -1) or 0)
+        safe_stage = (
+            re.sub(r"[^a-z0-9_.-]+", "-", stage.lower()).strip("-") or "unknown"
+        )
+        safe_topic = re.sub(r"[^A-Za-z0-9_.-]+", "-", topic).strip("-") or "unknown"
+        safe_prefix = "/".join(
+            re.sub(r"[^A-Za-z0-9_.-]+", "-", part).strip("-")
+            for part in self.prefix.strip("/").split("/")
+            if part.strip("/")
+        )
+        if not safe_prefix:
+            raise RuntimeError("S2P_PROCESSING_FAILURE_PREFIX must contain a path segment")
+        doc_id: str | None = None
+        trace_id: str | None = None
+        if payload_bytes:
+            try:
+                decoded = orjson.loads(payload_bytes)
+            except orjson.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, dict):
+                candidate_doc_id = decoded.get("doc_id")
+                candidate_trace_id = decoded.get("trace_id")
+                doc_id = candidate_doc_id if isinstance(candidate_doc_id, str) else None
+                trace_id = candidate_trace_id if isinstance(candidate_trace_id, str) else None
+        message_key = getattr(message, "key", None)
+        if doc_id is None and message_key:
+            try:
+                doc_id = bytes(message_key).decode("utf-8")
+            except (TypeError, UnicodeDecodeError):
+                doc_id = None
+        headers = getattr(message, "headers", None) or []
+        if trace_id is None:
+            for header_name, header_value in headers:
+                if header_name != "trace_id" or not header_value:
+                    continue
+                try:
+                    trace_id = bytes(header_value).decode("ascii")
+                except (TypeError, UnicodeDecodeError):
+                    trace_id = None
+                break
+        coordinate = f"{topic}:{partition}:{offset}:{payload_sha256}"
+        if doc_id is None:
+            doc_id = f"unresolved:{payload_sha256}"
+        if trace_id is None:
+            trace_id = hashlib.sha256(coordinate.encode("utf-8")).hexdigest()[:32]
+        body = orjson.dumps(
+            {
+                "schema_version": 1,
+                "stage": stage,
+                "reason": reason,
+                "retry_classification": "deterministic",
+                "error_revision": self.error_revision,
+                "topic": topic,
+                "partition": partition,
+                "offset": offset,
+                "payload_sha256": payload_sha256,
+                "doc_id": doc_id,
+                "trace_id": trace_id,
+            },
+            option=orjson.OPT_SORT_KEYS,
+        )
+        key = (
+            f"{safe_prefix}/stage={safe_stage}/topic={safe_topic}/"
+            f"partition={partition}/offset={offset}-{payload_sha256[:16]}.json"
+        )
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+        )
+        return f"s3://{self.bucket}/{key}"
+
+
 def load_config() -> ProcessorConfig:
     """Build a :class:`ProcessorConfig` from the process environment."""
     return ProcessorConfig(
@@ -186,6 +347,10 @@ def kafka_starting_offset() -> int:
         "start": -2,
         "end": -1,
         "latest": -1,
+        # confluent_kafka.OFFSET_STORED. This is the one-time bridge from
+        # existing broker commits into a new Bytewax recovery database. Once
+        # the first snapshot exists, recovery progress is authoritative.
+        "stored": -1000,
     }
     if raw in offsets:
         return offsets[raw]
@@ -193,7 +358,7 @@ def kafka_starting_offset() -> int:
         return int(raw)
     except ValueError as exc:
         raise RuntimeError(
-            "S2P_KAFKA_START_OFFSET must be beginning/earliest/end/latest or an int"
+            "S2P_KAFKA_START_OFFSET must be beginning/earliest/end/latest/stored or an int"
         ) from exc
 
 
@@ -225,7 +390,48 @@ def kafka_payload_max_bytes() -> int:
     return configured
 
 
-def run_bytewax_flow(flow: object, cfg: ProcessorConfig, flow_name: str) -> None:
+def tracked_kafka_source(
+    *,
+    runtime_status: BytewaxRuntimeStatus | None,
+    source_name: str,
+    brokers: list[str],
+    topics: list[str],
+    starting_offset: int,
+    add_config: dict[str, str],
+) -> object:
+    """Build a KafkaSource that reports real partition assignment readiness."""
+    from bytewax.connectors.kafka import KafkaSource
+
+    if runtime_status is None:
+        return KafkaSource(
+            brokers=brokers,
+            topics=topics,
+            starting_offset=starting_offset,
+            add_config=add_config,
+        )
+    runtime_status.register_source(source_name)
+
+    class _TrackedKafkaSource(KafkaSource):
+        def build_part(self, step_id: str, for_part: str, resume_state: int | None) -> object:
+            partition = super().build_part(step_id, for_part, resume_state)
+            runtime_status.mark_source_assigned(source_name)
+            return partition
+
+    return _TrackedKafkaSource(
+        brokers=brokers,
+        topics=topics,
+        starting_offset=starting_offset,
+        add_config=add_config,
+    )
+
+
+def run_bytewax_flow(
+    flow: object,
+    cfg: ProcessorConfig,
+    recovery_name: str,
+    *,
+    runtime_status: BytewaxRuntimeStatus | None = None,
+) -> None:
     """Run one flow with durable source-offset recovery enabled.
 
     Bytewax's Kafka connector deliberately disables broker-side offset commits
@@ -236,16 +442,38 @@ def run_bytewax_flow(flow: object, cfg: ProcessorConfig, flow_name: str) -> None
     from bytewax.recovery import RecoveryConfig, init_db_dir
     from bytewax.run import cli_main
 
-    recovery_dir = Path(cfg.state_dir) / "bytewax" / flow_name
+    recovery_dir = Path(cfg.state_dir) / "bytewax" / recovery_name
     recovery_dir.mkdir(parents=True, exist_ok=True)
-    if not any(recovery_dir.glob("part-*.sqlite3")):
-        init_db_dir(recovery_dir, 1)
+    partitions = _env_int("S2P_BYTEWAX_RECOVERY_PARTITIONS", 1)
+    if partitions < 1:
+        raise RuntimeError("S2P_BYTEWAX_RECOVERY_PARTITIONS must be positive")
+    existing_databases = sorted(recovery_dir.glob("part-*.sqlite3"))
+    if not existing_databases:
+        init_db_dir(recovery_dir, partitions)
+        existing_databases = sorted(recovery_dir.glob("part-*.sqlite3"))
+    expected_databases = {
+        recovery_dir / f"part-{partition}.sqlite3" for partition in range(partitions)
+    }
+    if set(existing_databases) != expected_databases:
+        existing_names = [path.name for path in existing_databases]
+        raise RuntimeError(
+            f"Bytewax recovery partition mismatch for {recovery_name}: "
+            f"configured={partitions} existing={existing_names}"
+        )
     interval = timedelta(seconds=_env_float("S2P_BYTEWAX_SNAPSHOT_SECONDS", 1.0))
-    cli_main(
-        flow,
-        epoch_interval=interval,
-        recovery_config=RecoveryConfig(recovery_dir),
-    )
+    if interval.total_seconds() <= 0:
+        raise RuntimeError("S2P_BYTEWAX_SNAPSHOT_SECONDS must be positive")
+    if runtime_status is not None:
+        runtime_status.mark_runtime_started()
+    try:
+        cli_main(
+            flow,
+            epoch_interval=interval,
+            recovery_config=RecoveryConfig(recovery_dir),
+        )
+    finally:
+        if runtime_status is not None:
+            runtime_status.mark_runtime_stopped()
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +629,9 @@ def decon_loads(payload: bytes) -> DeconAttestation:
 
 
 __all__ = [
+    "BytewaxRuntimeStatus",
+    "DeterministicProcessingError",
+    "DurableProcessingFailureWriter",
     "ProcessorConfig",
     "bronze_loads",
     "bronze_loads_dict",
@@ -413,8 +644,11 @@ __all__ = [
     "gold_loads",
     "init_tracer",
     "kafka_payload_max_bytes",
+    "kafka_starting_offset",
     "load_config",
     "new_trace_id",
+    "run_bytewax_flow",
     "silver_dumps",
     "silver_loads",
+    "tracked_kafka_source",
 ]

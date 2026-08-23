@@ -15,7 +15,7 @@ The implemented source adapters cover:
 - arXiv OAI-PMH metadata, RSS feeds, and native HTML
 - AI laboratory and project RSS feeds
 - GitHub events, releases, and release source archives
-- Hugging Face model metadata and daily papers
+- Exact-version Hugging Face model, dataset, and Space cards plus Daily Papers discovery
 - OpenReview submissions and reviews
 - A one-shot historical seed loader for controlled backfill
 
@@ -48,9 +48,9 @@ flowchart LR
     licence --> decisions["Corpus route ledger"]
     licence --> bronze["MinIO Bronze"]
     licence --> raw["Redpanda raw.fetched"]
-    raw --> fetcher["Partitioned fetcher consumer group"]
+    raw --> fetcher["Bytewax fetcher with durable recovery"]
     fetcher --> normalized["Redpanda docs.normalized"]
-    normalized --> curate["Priority-aware stateful curator"]
+    normalized --> curate["Bytewax stateful curator"]
     curate --> decisions["Redpanda curation.decisions"]
     curate --> clean["Redpanda docs.curated"]
     decisions --> writer["Iceberg writer"]
@@ -75,11 +75,11 @@ These choices support the use case directly. They are not included only to incre
 | Component | Technology | Responsibility and rationale |
 |---|---|---|
 | Source pollers | Python and async HTTP | Discover new records while respecting source-specific formats and rate limits. |
-| Licence admission | Redpanda and Iceberg | Log an immutable allow or quarantine decision before any document-body request. |
+| Licence admission | Redpanda and Iceberg | Log an immutable pretraining, transform-only, or quarantine route before any document-body request. |
 | Bronze writer | MinIO | Preserve immutable compressed source material before transformation. |
 | Event bus | Redpanda | Decouple ingestion, curation, storage, and replay through named topics. |
 | Fetcher | Bytewax and Resiliparse | Load Bronze bytes, extract text and scientific structure, then emit normalized records. |
-| Curator | Stateful Kafka consumer | Apply language, quality, PII, duplication, routing, and decontamination policies with broker-owned progress and durable global dedup state. |
+| Curator | Stateful Bytewax flow | Apply language, quality, PII, duplication, routing, and decontamination policies with durable recovery and global dedup state. |
 | Iceberg writer | PyIceberg | Persist all decisions and the accepted subset as Parquet-backed Iceberg tables. |
 | Catalog | Apache Polaris | Resolve table metadata and snapshots through the Iceberg REST protocol. |
 | Query service | DuckDB API | Read exact Iceberg metadata versions and expose typed read-only endpoints. |
@@ -109,6 +109,8 @@ The repository is organized by responsibility:
 - [`infra/`](infra) contains OpenStack, k3s, Helmfile, and platform configuration.
 - [`scripts/`](scripts) contains deployment, bootstrap, smoke, and benchmark tools.
 - [`docs/continuous-deployment.md`](docs/continuous-deployment.md) documents the main-branch image build, VPN, and application deployment workflow.
+- [`docs/SOURCE_LICENSE_ADMISSION_MATRIX.md`](docs/SOURCE_LICENSE_ADMISSION_MATRIX.md) records the item-level licence resolver and pre-fetch boundary for every live and preload source.
+- [`docs/SOURCE_PROCESSING_POLICY.md`](docs/SOURCE_PROCESSING_POLICY.md) records the discovery-versus-content boundary, extraction path, exact classifier revision, non-applicable signals, and Gold reachability for every source.
 
 ## 5. Processing Logic
 
@@ -120,7 +122,10 @@ Quality is source-aware:
 
 - Scientific HTML, PDF, and LaTeX use the FinePDFs profile.
 - General web text uses the FineWeb-Edu profile.
-- Code uses a separate versioned code-quality policy.
+- Hugging Face cards and repository documentation use a Markdown prose projection and retain FineWeb-Edu as an audit signal without Common-Crawl page-shape gates.
+- Code uses a separate Stack v2 and Dolma-grounded quality policy.
+- OpenReview review forms use schema completeness; ratings, recommendations, confidence, and decisions remain audit metadata rather than training labels.
+- RSS, OAI, Hub-list, Daily Papers, GitHub event, and release envelopes are discovery-only and never become training text.
 
 This prevents a web-education classifier from being treated as a meaningful
 code classifier. The DHBW chart fails closed on missing models. FinePDFs,
@@ -131,17 +136,23 @@ revision and backend.
 
 Before these transformations, the shared licence gate records both verbatim
 pretraining rights and transform-only post-training rights. Explicit
-permissive content can reach pretraining. Unknown or gray-area sources,
-including arXiv's non-exclusive distribution grant, can reach only the
-transformative post-training route; explicit non-commercial,
-no-derivatives, and provider-prohibited content remains quarantined. The
-curator also applies language confidence, Gopher and C4 heuristics,
-perplexity, PII detection, license policy, and MinHash near-duplicate
-detection.
+permissive content can reach pretraining. Only explicitly allowlisted
+transform-only licences, including arXiv's non-exclusive distribution grant,
+can reach the post-training-only route. Missing, unknown, dataset-wrapper,
+no-derivatives, and provider-prohibited rights remain quarantined. The
+curator also applies PII detection, licence policy, and MinHash near-duplicate
+detection. Language confidence gates natural-language profiles, not source
+code. Gopher, C4, and KenLM gates apply only to ordinary web prose, where those
+web-derived signals are meaningful.
 
 ### Stateful processing
 
-Near-duplicate detection maintains state across documents. The curator commits its Redpanda offset only after outputs are delivered and retains the global dedup index on its checkpoint PVC. The Iceberg writer uses the stable key `doc_id`, scoring version, classifier revision, and policy revision to suppress deterministic replay duplicates.
+Near-duplicate detection maintains state across documents. Bytewax snapshots
+source progress and operator state into the fetcher and curator checkpoint
+PVCs. Output is keyed by `doc_id`, so a crash between sink delivery and the
+next recovery snapshot can replay a record without creating a second logical
+decision. The Iceberg writer also uses the scoring, classifier, and policy
+revisions to suppress deterministic replay duplicates.
 
 ### Experimental post-training extension
 
@@ -190,7 +201,7 @@ contract are documented in
 
 The cockpit serves the result-viewer role. It is a separate container and a Kubernetes Deployment. It does not use mock data.
 
-The dashboard calls the Next.js `/api/dashboard` route. That route combines durable Iceberg totals from DuckDB with Prometheus activity metrics. It shows licence admission totals, recent pre-fetch decisions, and a compact post-training summary. Other pages expose document search, source status, benchmark safety, strictly licence-filtered dataset export, post-training inspection, and mixture views.
+The dashboard calls the Next.js `/api/dashboard` route. That route combines durable Iceberg totals from DuckDB with Prometheus activity metrics. It shows corpus-route totals, recent processing activity, and a compact post-training summary. Other pages expose document search, source status, benchmark safety, strictly licence-filtered dataset export, post-training inspection, and mixture views. Per-item licence evidence is available in each document's collapsed advanced audit view, including items quarantined before body fetch.
 
 A typical user flow is:
 
@@ -220,7 +231,13 @@ The Helm chart parameterizes replica counts, resources, images, topics, endpoint
 
 Horizontal scale was demonstrated on the DHBW cluster. The UI Deployment scaled from one to three ready replicas in 14 measured seconds. The pod screenshot shows all three replicas. A temporary request for twenty replicas left seven unavailable, triggered `Stream2PretrainDeploymentUnavailable`, and the alert cleared after restoring one replica.
 
-The fetcher is stateless across records and commits Redpanda consumer-group offsets only after its normalized output is delivered. Kafka partitions are its unit of parallelism, and the DHBW profile uses KEDA to keep one replica warm and scale to four at a measured lag threshold. The curator also exposes authoritative broker lag and prioritizes a separate deployment-health lane, but its global near-duplicate state remains single-writer. Horizontal curator scaling requires splitting stateless scoring from that externally coordinated dedup state.
+The core fetcher and curator are coordinated Bytewax executions. They retain
+recovery state on PVCs and deliberately do not use ordinary Kafka-lag KEDA,
+because broker consumer-group offsets are not the authoritative Bytewax
+checkpoint. Independent ingestion workers and stateless classifier services
+remain horizontally scalable. Rescaling a core flow is a coordinated
+stop-and-start operation using the pre-created recovery partitions, not a set
+of independent replicas joining the group.
 
 ## 9. Deployment Guide
 
@@ -368,7 +385,9 @@ Known limits are:
 - Strict classifier replicas are stateless and CPU-autoscaled, but the measured three-node DHBW profile can host at most two replicas while preserving one node for the stateful curator. Larger throughput requires additional worker nodes.
 - The submitted benchmark reserve contains synthetic canaries. It proves coverage and signing mechanics but not full real-benchmark recall. The pinned builder requires an authorized GPQA token.
 - CI publishes immutable images to GHCR and provides the cluster pull secret when required. Cross-node fetcher scheduling still depends on worker egress and registry availability.
-- Fetcher KEDA scaling is bounded to the four `raw.fetched` partitions. Curator and Iceberg writer are deliberately single-writer until their state is externalized.
+- Core Bytewax fetcher and curator scaling requires a coordinated restart;
+  standard Kafka-lag KEDA is intentionally disabled for them. Iceberg remains
+  a single writer until its commit coordination is externalized.
 - Polaris uses an in-memory catalog backend in the dev profile. MinIO data is persistent, but production catalog recovery needs a relational backend.
 - Ingress, DNS, and TLS use Traefik, ExternalDNS with RFC2136, and the shared wildcard certificate. NetworkPolicy, Gatekeeper enforcement, Tempo, and Loki remain disabled in the measured profile.
 - Production throughput, safe partition counts, and maximum corpus size are `needs-measurement`.

@@ -54,6 +54,14 @@ data:
         "endpoint": {{ .Values.sources.huggingface.models.endpoint | quote }},
         "poll_interval_seconds": {{ .Values.sources.huggingface.models.pollIntervalSeconds }}
       },
+      "datasets": {
+        "endpoint": {{ .Values.sources.huggingface.datasets.endpoint | quote }},
+        "poll_interval_seconds": {{ .Values.sources.huggingface.datasets.pollIntervalSeconds }}
+      },
+      "spaces": {
+        "endpoint": {{ .Values.sources.huggingface.spaces.endpoint | quote }},
+        "poll_interval_seconds": {{ .Values.sources.huggingface.spaces.pollIntervalSeconds }}
+      },
       "daily_papers": {
         "endpoint": {{ .Values.sources.huggingface.dailyPapers.endpoint | quote }},
         "poll_interval_seconds": {{ .Values.sources.huggingface.dailyPapers.pollIntervalSeconds }}
@@ -74,7 +82,7 @@ data:
           {{- else }}
           "rateLimit": {"requestsPerSecond": 0.5, "burst": 1},
           {{- end }}
-          "licenseDefault": "unknown",
+          "licenseDefault": "per-record",
           "enabled": true
         }
         {{- end }}

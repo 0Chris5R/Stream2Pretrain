@@ -184,11 +184,14 @@ class ScientificProcessor:
         )
         self._ocr = TesseractOCR(allow_fallback=not require_real_models)
         self._max_image_bytes = int(os.environ.get("S2P_MAX_FIGURE_BYTES", "10485760"))
-        self._max_figures = int(os.environ.get("S2P_MAX_FIGURES_PER_DOCUMENT", "32"))
+        # Zero means all figures. A non-zero value remains an emergency
+        # operator guard, but hitting it marks the document incomplete and the
+        # curator routes it to retry rather than accepting partial data.
+        self._max_figures = int(os.environ.get("S2P_MAX_FIGURES_PER_DOCUMENT", "0"))
         self._http_timeout = float(os.environ.get("S2P_FIGURE_HTTP_TIMEOUT", "20"))
         self._docling_enabled = os.environ.get("S2P_DOCLING_ENABLED", "1") == "1"
         self._docling_models = self._models_dir / "docling"
-        self._max_pdf_pages = int(os.environ.get("S2P_DOCLING_MAX_PAGES", "40"))
+        self._max_pdf_pages = int(os.environ.get("S2P_DOCLING_MAX_PAGES", "0"))
         self._max_pdf_bytes = int(os.environ.get("S2P_DOCLING_MAX_BYTES", "52428800"))
         if require_real_models and self._docling_enabled:
             if importlib.util.find_spec("docling") is None:
@@ -218,14 +221,19 @@ class ScientificProcessor:
         )
         figures: list[ScientificFigure] = []
         warnings = list(document.warnings)
-        for figure in document.figures[: self._max_figures]:
+        selected_figures = (
+            document.figures[: self._max_figures] if self._max_figures else document.figures
+        )
+        for figure in selected_figures:
             try:
                 figures.append(self._enrich_figure(doc_id, source_url, figure))
             except Exception as exc:
+                warning = f"figure_enrichment_failed:{figure.figure_id}:{type(exc).__name__}"
+                warnings.append(warning)
                 figures.append(
-                    figure.model_copy(update={"warnings": [*figure.warnings, str(exc)[:240]]})
+                    figure.model_copy(update={"warnings": [*figure.warnings, warning]})
                 )
-        if len(document.figures) > self._max_figures:
+        if self._max_figures and len(document.figures) > self._max_figures:
             warnings.append("figure_limit_reached")
         document = document.model_copy(update={"figures": figures, "warnings": warnings})
         return self._store_document(document=document, plain_text=plain_text)
@@ -305,11 +313,10 @@ class ScientificProcessor:
         stream = DocumentStream(
             name=f"{doc_id.removeprefix('sha256:')}.pdf", stream=io.BytesIO(pdf)
         )
-        result = converter.convert(
-            stream,
-            max_num_pages=self._max_pdf_pages,
-            max_file_size=self._max_pdf_bytes,
-        )
+        convert_options: dict[str, int] = {"max_file_size": self._max_pdf_bytes}
+        if self._max_pdf_pages:
+            convert_options["max_num_pages"] = self._max_pdf_pages
+        result = converter.convert(stream, **convert_options)
         source_document = result.document
         raw_key = f"scientific/{doc_id.removeprefix('sha256:')}/document.docling.json"
         self._s3.put_object(  # type: ignore[union-attr]
@@ -415,7 +422,12 @@ class ScientificProcessor:
 
         figures: list[ScientificFigure] = []
         warnings: list[str] = []
-        for index, picture in enumerate(source_document.pictures[: self._max_figures]):
+        selected_pictures = (
+            source_document.pictures[: self._max_figures]
+            if self._max_figures
+            else source_document.pictures
+        )
+        for index, picture in enumerate(selected_pictures):
             if not isinstance(picture, PictureItem):
                 continue
             figure_id = f"figure-{index + 1}"
@@ -437,8 +449,10 @@ class ScientificProcessor:
                     self._enrich_image_payload(doc_id, figure, buffer.getvalue(), "image/png")
                 )
             except Exception as exc:
-                figures.append(figure.model_copy(update={"warnings": [str(exc)[:240]]}))
-        if len(source_document.pictures) > self._max_figures:
+                warning = f"figure_enrichment_failed:{figure_id}:{type(exc).__name__}"
+                warnings.append(warning)
+                figures.append(figure.model_copy(update={"warnings": [warning]}))
+        if self._max_figures and len(source_document.pictures) > self._max_figures:
             warnings.append("figure_limit_reached")
 
         plain_text = source_document.export_to_markdown(strict_text=True).strip()
@@ -475,7 +489,11 @@ class ScientificProcessor:
         from pypdf import PdfReader  # type: ignore[import-untyped]
 
         reader = PdfReader(io.BytesIO(pdf), strict=False)
-        page_limit = min(len(reader.pages), self._max_pdf_pages)
+        page_limit = (
+            min(len(reader.pages), self._max_pdf_pages)
+            if self._max_pdf_pages
+            else len(reader.pages)
+        )
         sections: list[ScientificSection] = []
         page_texts: list[str] = []
         for index, page in enumerate(reader.pages[:page_limit]):

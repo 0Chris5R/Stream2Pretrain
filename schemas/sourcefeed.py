@@ -27,23 +27,7 @@ FeedProtocol = Literal[
     "manual",
 ]
 
-LicenseDefault = Literal[
-    "per-record",
-    "arxiv-non-exclusive-distribution",
-    "unknown",
-    "CC-BY-4.0",
-    "CC-BY-SA-4.0",
-    "CC-BY-3.0",
-    "CC-BY-SA-3.0",
-    "CC0-1.0",
-    "Apache-2.0",
-    "MIT",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "MPL-2.0",
-    "ISC",
-    "Unlicense",
-]
+LicenseDefault = Literal["per-record"]
 
 
 class RateLimitSpec(BaseModel):
@@ -87,13 +71,18 @@ class SourceFeedSpec(BaseModel):
     poll_interval_seconds: int = Field(..., gt=0, le=86400)
     rate_limit: RateLimitSpec
     auth: AuthSpec = Field(default_factory=AuthSpec)
-    license_default: LicenseDefault = "unknown"
+    license_default: LicenseDefault = "per-record"
     enabled: bool = True
 
-    # Optional egress allow-list - hostnames the per-feed NetworkPolicy permits.
+    # Advisory hostname inventory for CNI/FQDN policy generation and audit.
+    # Kubernetes NetworkPolicy cannot itself select destinations by DNS name.
     egress_allow: list[str] = Field(
         default_factory=list,
-        description="Hostnames the SourceFeed pod may dial (NetworkPolicy egress).",
+        description=(
+            "Expected destination hostnames for policy generation and audit. "
+            "Enforcement requires an FQDN-aware CNI; plain Kubernetes "
+            "NetworkPolicy cannot match DNS names."
+        ),
     )
 
     # Optional content-type filter for REST endpoints whose responses we need

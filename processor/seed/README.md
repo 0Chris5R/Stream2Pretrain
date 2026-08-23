@@ -1,6 +1,6 @@
 # processor/seed - Seed corpus loaders
 
-Stream2Pretrain v0.2.0 ships a one-shot Bytewax Job (``processor.seed_loader``)
+Stream2Pretrain v0.2.0 ships a one-shot Kubernetes Job (``processor.seed_loader``)
 that streams the five-component seed mixture from
 ``docs/research-seed-corpus.md`` directly into ``docs.normalized`` as Silver
 records. This directory holds the per-component loaders the dataflow
@@ -11,10 +11,10 @@ composes.
 | # | Module                        | HuggingFace id (or source)                          | License      |
 |---|-------------------------------|-----------------------------------------------------|--------------|
 | 1 | ``pes2o``                     | ``allenai/peS2o`` (data/v3/, falls back to default) | Per-paper only; wrapper is not inherited |
-| 2 | ``redpajama_arxiv``           | ``togethercomputer/RedPajama-Data-1T`` (``arxiv``)  | Apache-2.0   |
+| 2 | ``redpajama_arxiv``           | ``togethercomputer/RedPajama-Data-1T`` (``arxiv``)  | Per-paper only; wrapper is not inherited |
 | 3 | ``fineweb_edu_filter``        | ``HuggingFaceFW/fineweb-edu`` + URL allowlist       | Per-page only; wrapper is not inherited |
 | 4 | ``stack_edu_filter``          | ``HuggingFaceTB/stack-edu`` + Python+ML filter      | Per-file SPDX only; wrapper is not inherited |
-| 5 | ``wayback_backfill``          | Wayback Machine timemap of the Phase-1 RSS/Atom set | per-feed     |
+| 5 | ``wayback_backfill``          | Wayback Machine timemap of the Phase-1 RSS/Atom set | Per-item captured evidence |
 
 All five honor the ``valid_from`` precedence rule from
 ``processor/operators/validity.py``: dataset-native publication metadata
@@ -36,7 +36,7 @@ The ``native_id`` shape per component:
 - RedPajama-arxiv: arXiv id from ``meta.url`` (``2402.01234``).
 - FineWeb-Edu: ``id`` column or original URL.
 - Stack-Edu: ``blob_id`` (content sha) when present.
-- Wayback: ``<feed_name>:<14-char timestamp>``.
+- Wayback: ``<feed_name>:<14-char timestamp>:<item-url-hash>``.
 
 ## Honest scope notes
 
@@ -48,23 +48,30 @@ The ``native_id`` shape per component:
 - **Token counts** for peS2o v3 and FineWeb-Edu domain-filter yield are
   ``needs-measurement`` per ``docs/research-seed-corpus.md``. Treat the
   ranges in that doc as upper bounds for capacity planning, not contracts.
-- **Wayback** is best-effort: the timemap endpoint is not rate-limited
-  per IP but archive.org may serve degraded snapshots. The loader catches
-  every HTTP exception and continues; it never fails the Job because of a
-  single bad capture.
+- **Wayback** treats feed captures as discovery envelopes only. Item rights
+  come from the archived entry or a bounded captured-page probe. After the
+  admission event is durably acknowledged, the retained item is fetched and
+  extracted with the scientific arXiv or Resiliparse web profile. Feed XML and
+  summaries never enter Silver. Archive errors skip only the affected capture.
 - **No wrapper-licence inheritance**: per-document licences are surfaced via
-  ``SilverRecord.spdx_license``. Rows without an explicit content licence are
-  written to `license.admissions` and quarantined before `docs.normalized`,
-  even if the hosting dataset is ODC-By. Curator and export checks provide
-  additional defence for legacy rows.
+  ``SilverRecord.spdx_license``. Permissive rows enter both routes, reviewed
+  NC or arXiv non-exclusive rows enter transform-only post-training, and
+  unresolved or ND rows become quarantine events in the corpus routes ledger
+  before `docs.normalized`, even if the hosting dataset is ODC-By. Curator and
+  export checks provide additional defence for legacy rows.
 
 ## Running
 
-The canonical entry point is the Bytewax Job rendered by the Helm template
+The canonical entry point is the Kubernetes Job rendered by the Helm template
 ``charts/stream2pretrain/templates/job-seed-loader.yaml``. For local dev
 the bundled script is::
 
     bash scripts/seed_corpus.sh --components=pes2o,stack-edu --dry-run
 
-In-process execution (no Bytewax runtime) is supported via
-``S2P_SEED_INPROCESS=1``; this is what the unit tests exercise.
+In-process execution is the deployment default. It is required when the
+Wayback component is selected because the synchronous admission sink waits for
+the durable acknowledgement before invoking the deferred retained-body fetch.
+The deployed Job uses the ordered in-process runner for all five components.
+It acknowledges the admission decision before an admitted Silver row and the
+Silver row before cursor advancement. The older split-sink Bytewax graph is
+not deployable until it has a transactional cross-topic outbox.

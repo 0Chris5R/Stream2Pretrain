@@ -1,4 +1,4 @@
-"""Horizontally scalable fetcher: ``raw.fetched`` -> ``docs.normalized``.
+"""Bytewax fetcher: ``raw.fetched`` -> ``docs.normalized``.
 
 Per record the dataflow:
 
@@ -11,11 +11,9 @@ Per record the dataflow:
    enricher.
 5. Emits the SilverRecord on ``docs.normalized``.
 
-The extraction itself is deterministic per Kafka offset.  This stage has no
-cross-record operator state, so broker-committed consumer-group offsets are a
-better ownership boundary than a pod-local Bytewax recovery database: Kafka
-can divide partitions between replicas, KEDA can observe real lag, and a pod
-can move to another node without carrying local source state with it.
+Bytewax recovery owns source progress. Production and smoke traffic run as
+separate executions with separate recovery directories so a deployment canary
+cannot advance production progress or mutate production state.
 """
 
 from __future__ import annotations
@@ -23,17 +21,13 @@ from __future__ import annotations
 import gzip
 import io
 import os
-import signal
-import socket
-import time
-from collections.abc import Callable
+import re
 from dataclasses import dataclass
 from typing import Any, cast
 
 import boto3
 import orjson
 from botocore.exceptions import BotoCoreError, ClientError
-from confluent_kafka import Consumer, KafkaError, KafkaException, Producer, TopicPartition
 from defusedxml import ElementTree as DefusedElementTree  # type: ignore[import-untyped]
 from defusedxml.common import DefusedXmlException  # type: ignore[import-untyped]
 
@@ -49,15 +43,12 @@ from processor.operators.minhash import MinHasher
 from processor.operators.validity import ValidityEnricher, WaybackLookup
 from processor.probes import start_probe_server
 from processor.scientific import ScientificProcessingResult, ScientificProcessor
+from processor.source_policy import resolve_source_policy
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
-_SCIENTIFIC_SOURCE_MARKERS = (
-    "arxiv",
-    "openreview",
-    "pes2o",
-    "redpajama-arxiv",
-)
+FETCHER_FLOW_NAME = "s2p-fetcher-v2"
+FETCHER_RECOVERY_NAME = "fetcher-v2"
 
 
 @dataclass(slots=True)
@@ -114,41 +105,47 @@ def build_state(cfg: common.ProcessorConfig, *, with_wayback: bool = True) -> Fe
 def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
     """Read the raw HTML pointed at by ``bronze.raw_html_s3_uri``.
 
-    Strips the ``s3://<bucket>/`` prefix and uses the configured MinIO
-    client for the actual GET. On any S3 error returns an empty bytes
-    object so downstream operators degrade gracefully.
+    Strips the ``s3://<bucket>/`` prefix and uses the configured MinIO client
+    for the actual GET. Invalid pointers, size violations, corrupt compression,
+    and storage failures raise so Bytewax cannot checkpoint past an unread body.
     """
     uri = bronze.raw_html_s3_uri
     if not uri.startswith("s3://"):
-        return b""
+        raise ValueError(f"invalid raw object URI for {bronze.doc_id}")
     rest = uri[len("s3://") :]
     bucket, _, key = rest.partition("/")
     if not bucket or not key:
-        return b""
+        raise ValueError(f"incomplete raw object URI for {bronze.doc_id}")
     max_object_bytes = int(os.environ.get("S2P_MAX_RAW_OBJECT_BYTES", str(64 * 1024 * 1024)))
     max_expanded_bytes = int(os.environ.get("S2P_MAX_EXPANDED_OBJECT_BYTES", str(64 * 1024 * 1024)))
     if max_object_bytes <= 0 or max_expanded_bytes <= 0:
         raise ValueError("raw object byte limits must be positive")
     if bronze.bytes_size is not None and bronze.bytes_size > max_object_bytes:
-        return b""
+        raise ValueError(f"raw object exceeds the configured bound for {bronze.doc_id}")
     try:
         resp = state.s3.get_object(Bucket=bucket, Key=key)
         content_length = resp.get("ContentLength")
         if isinstance(content_length, int) and content_length > max_object_bytes:
-            return b""
+            raise ValueError(f"raw object exceeds the configured bound for {bronze.doc_id}")
         body = cast(bytes, resp["Body"].read(max_object_bytes + 1))
-    except (BotoCoreError, ClientError):
-        return b""
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"raw object read failed for {bronze.doc_id}") from exc
     if len(body) > max_object_bytes:
-        return b""
+        raise ValueError(f"raw object exceeds the configured bound for {bronze.doc_id}")
     if uri.endswith(".gz") or resp.get("ContentEncoding") == "gzip":
         try:
             with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
                 expanded = compressed.read(max_expanded_bytes + 1)
-            return expanded if len(expanded) <= max_expanded_bytes else b""
-        except (EOFError, OSError):
-            return body
-    return body if len(body) <= max_expanded_bytes else b""
+            if len(expanded) > max_expanded_bytes:
+                raise ValueError(
+                    f"expanded raw object exceeds the configured bound for {bronze.doc_id}"
+                )
+            return expanded
+        except (EOFError, OSError) as exc:
+            raise ValueError(f"corrupt gzip body for {bronze.doc_id}") from exc
+    if len(body) > max_expanded_bytes:
+        raise ValueError(f"raw object exceeds the configured bound for {bronze.doc_id}")
+    return body
 
 
 def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
@@ -209,18 +206,153 @@ def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
     return text, title
 
 
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_HTML = re.compile(r"<[^>]+>")
+_REVIEW_ADMIN_FIELDS = frozenset(
+    {
+        "authors",
+        "authorids",
+        "cdate",
+        "confidence",
+        "decision",
+        "forum",
+        "id",
+        "invitation",
+        "license",
+        "license_url",
+        "mdate",
+        "note_id",
+        "rating",
+        "recommendation",
+        "reviewer",
+        "reviewer_id",
+        "signatures",
+        "venue",
+        "year",
+    }
+)
+
+
+def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
+    """Extract card/README prose while excluding YAML and fenced code.
+
+    The immutable Bronze object remains the exact source. This projection is
+    the text sent to FineWeb-Edu, privacy, deduplication, and export.
+    """
+    raw = payload.decode("utf-8", errors="replace").strip()
+    lines = raw.splitlines()
+    metadata_lines: list[str] = []
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for index in range(1, len(lines)):
+            if lines[index].strip() in {"---", "..."}:
+                metadata_lines = lines[1:index]
+                start = index + 1
+                break
+
+    prose: list[str] = []
+    title: str | None = None
+    in_fence = False
+    fence_marker = ""
+    for raw_line in lines[start:]:
+        stripped = raw_line.strip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+            continue
+        if in_fence:
+            continue
+        if stripped.startswith("<!--") or not stripped:
+            if prose and prose[-1] != "":
+                prose.append("")
+            continue
+        cleaned = stripped.lstrip("#> ").strip()
+        cleaned = re.sub(r"^[-*+]\s+", "", cleaned)
+        cleaned = _MARKDOWN_LINK.sub(lambda match: match.group(1), cleaned)
+        cleaned = _MARKDOWN_HTML.sub(" ", cleaned)
+        cleaned = " ".join(cleaned.split())
+        if not cleaned:
+            continue
+        if title is None and stripped.startswith("#"):
+            title = cleaned
+        prose.append(cleaned)
+    text = "\n".join(prose).strip()
+    return text, title, "\n".join(metadata_lines)[:32768]
+
+
+def _openreview_value(value: object) -> object:
+    """Unwrap the ``{"value": ...}`` envelope used by OpenReview API v2."""
+    if isinstance(value, dict) and "value" in value:
+        return value["value"]
+    return value
+
+
+def _review_payload_text(payload: bytes) -> tuple[str, str | None, str]:
+    """Project public OpenReview form fields without administrative labels.
+
+    Rating, confidence, recommendation, and decision are retained as audit
+    metadata. They are never interpreted as review-quality labels.
+    """
+    try:
+        raw = orjson.loads(payload)
+    except orjson.JSONDecodeError:
+        text = payload.decode("utf-8", errors="replace").strip()
+        return text, None, "legacy_unstructured_review"
+    if not isinstance(raw, dict):
+        return "", None, "invalid_review_envelope"
+
+    content = raw.get("content")
+    fields = content if isinstance(content, dict) else raw
+    title_value = _openreview_value(raw.get("title"))
+    if not isinstance(title_value, str):
+        title_value = _openreview_value(fields.get("title"))
+    title = title_value.strip() if isinstance(title_value, str) and title_value.strip() else None
+
+    metadata: list[str] = []
+    for key in ("id", "note_id", "forum", "invitation", "venue", "year"):
+        value = _openreview_value(raw.get(key))
+        if value not in (None, ""):
+            metadata.append(f"{key}: {value}")
+
+    blocks: list[str] = []
+    for key, wrapped in fields.items():
+        normalized_key = str(key).strip().lower().replace(" ", "_")
+        value = _openreview_value(wrapped)
+        if normalized_key in _REVIEW_ADMIN_FIELDS or normalized_key == "title":
+            if value not in (None, ""):
+                metadata.append(f"{normalized_key}: {value}")
+            continue
+        values: list[str] = []
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, list):
+            values = [item for item in value if isinstance(item, str)]
+        elif isinstance(value, dict):
+            values = [item for item in value.values() if isinstance(item, str)]
+        cleaned = "\n".join(item.strip() for item in values if item.strip()).strip()
+        if cleaned:
+            blocks.append(f"[FIELD {normalized_key}]\n{cleaned}")
+    return "\n\n".join(blocks), title, "\n".join(metadata)[:32768]
+
+
 def uses_scientific_extraction(bronze: BronzeRecord) -> bool:
     """Return whether an HTML record belongs to a scientific-document source.
 
     General blogs and crawled web pages must stay on Resiliparse/FineWeb. The
     presence of an HTML wire format alone does not make a page a paper.
     """
-    if bronze.source_format in {"pdf", "latex", "markdown"}:
-        return True
-    if bronze.source_format != "html":
-        return False
-    identity = f"{bronze.source_feed} {bronze.extraction_pipeline}".lower()
-    return any(marker in identity for marker in _SCIENTIFIC_SOURCE_MARKERS)
+    return (
+        resolve_source_policy(
+            source_feed=bronze.source_feed,
+            source_format=bronze.source_format,
+            extraction_pipeline=bronze.extraction_pipeline,
+        ).family
+        == "scientific_paper"
+    )
 
 
 def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> SilverRecord | None:
@@ -236,10 +368,31 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
     included_section_count = 0
     excluded_section_count = 0
     excluded_sections: list[str] = []
-    if bronze.source_format in {"metadata", "review"}:
+    if bronze.source_format == "metadata":
         text, title = _structured_payload_text(raw_html)
+        # Discovery envelopes are retained in Bronze only and normally bypass
+        # normalize. Keeping an empty model projection here makes direct replay
+        # and legacy calls fail closed as well.
+        model_text = ""
+        source_metadata_text = text[:32768]
+        extracted_with = bronze.extraction_pipeline
+        extraction_pipeline = bronze.extraction_pipeline
+    elif bronze.source_format == "review":
+        text, title, source_metadata_text = _review_payload_text(raw_html)
         model_text = text
-        source_metadata_text = title or ""
+        extracted_with = bronze.extraction_pipeline
+        extraction_pipeline = bronze.extraction_pipeline
+    elif bronze.source_format == "web" and (
+        "markdown" in bronze.content_type.lower()
+        or resolve_source_policy(
+            source_feed=bronze.source_feed,
+            source_format=bronze.source_format,
+            extraction_pipeline=bronze.extraction_pipeline,
+        ).family
+        == "repository_documentation"
+    ):
+        text, title, source_metadata_text = _markdown_prose_projection(raw_html)
+        model_text = text
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
     elif bronze.source_format in {"code", "latex", "markdown"}:
@@ -339,15 +492,15 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         excluded_sections = list(document.excluded_sections)
     else:
         source_word_count = len(text.split())
-        training_word_count = source_word_count
-        included_section_count = 1 if text else 0
-        if text:
+        training_word_count = len(model_text.split())
+        included_section_count = 1 if model_text else 0
+        if model_text:
             segments = [
                 SilverSegment(
                     segment_id="document",
                     title=title or "Document",
-                    text=model_text or text,
-                    word_count=len((model_text or text).split()),
+                    text=model_text,
+                    word_count=len(model_text.split()),
                 )
             ]
     lang_result = state.lang_id.identify(model_text or text)
@@ -368,7 +521,7 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         url=bronze.url,
         title=title,
         text=text,
-        model_text=model_text or text,
+        model_text=model_text,
         source_metadata_text=source_metadata_text,
         structured_text=structured_text,
         segments=segments,
@@ -419,6 +572,10 @@ def process_bronze_payload(
 ) -> SilverRecord | None:
     """Deserialize a Kafka payload, run the pipeline, return the silver row."""
     bronze = common.bronze_loads(payload)
+    # Metadata envelopes schedule content work but are not corpus documents.
+    # Skip before the MinIO read, extraction, OCR, language, and MinHash stages.
+    if bronze.source_format == "metadata":
+        return None
     # Defence in depth for legacy producers and replayed topics. This check is
     # intentionally before the MinIO GET, extraction, OCR, and model pipeline.
     pretrain_allowed = is_training_permitted(
@@ -431,53 +588,135 @@ def process_bronze_payload(
     if not pretrain_allowed and not transform_allowed:
         return None
     raw_html = fetch_raw_bytes(state, bronze)
+    if not raw_html:
+        raise RuntimeError(f"raw body is unavailable for {bronze.doc_id}")
     silver = normalize(state, bronze, raw_html)
+    if silver is None:
+        raise ValueError(f"extraction produced no trainable body for {bronze.doc_id}")
     if silver is not None and metrics is not None:
         metrics.record_normalized(source_feed=silver.source_feed)
     return silver
 
 
-def native_consumer_config(cfg: common.ProcessorConfig) -> dict[str, object]:
-    """Return a bounded, manually committed Kafka consumer configuration."""
-    reset = "latest" if common.kafka_starting_offset() == -1 else "earliest"
-    config: dict[str, object] = {
-        **common.kafka_consumer_config(cfg.consumer_group),
-        "bootstrap.servers": cfg.redpanda_brokers,
-        "client.id": f"s2p-fetcher-{socket.gethostname()}",
-        "auto.offset.reset": reset,
-        "enable.auto.commit": False,
-        "enable.auto.offset.store": False,
-        # PDF extraction can be intentionally slow. This is a liveness bound,
-        # not an unbounded timeout; poison records are caught below.
-        "max.poll.interval.ms": int(os.environ.get("S2P_FETCHER_MAX_POLL_INTERVAL_MS", "900000")),
-        "session.timeout.ms": 45_000,
-        "partition.assignment.strategy": "cooperative-sticky",
-        "queued.max.messages.kbytes": 65_536,
-    }
-    return config
+def build_dataflow(
+    cfg: common.ProcessorConfig,
+    *,
+    runtime_status: common.BytewaxRuntimeStatus | None = None,
+) -> object:
+    """Construct the production or isolated-smoke Bytewax execution."""
+    from bytewax import operators as op
+    from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage
+    from bytewax.dataflow import Dataflow
 
+    tracer = common.init_tracer("s2p-fetcher", cfg)
+    input_topics = fetcher_input_topics(cfg)
+    if len(input_topics) != 1:
+        raise RuntimeError(
+            "one Bytewax fetcher execution must own exactly one traffic-class topic"
+        )
+    output_topic = os.environ.get("S2P_FETCHER_OUTPUT_TOPIC", cfg.normalized_topic).strip()
+    if not output_topic:
+        raise RuntimeError("S2P_FETCHER_OUTPUT_TOPIC must not be empty")
+    smoke_input = os.environ.get("S2P_SMOKE_RAW_TOPIC", "raw.smoke").strip()
+    smoke_output = os.environ.get(
+        "S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke"
+    ).strip()
+    is_smoke_execution = input_topics[0] == smoke_input
+    if (input_topics[0] == smoke_input) != (output_topic == smoke_output):
+        raise RuntimeError("fetcher smoke input and output must use the isolated smoke lane")
+    state = build_state(
+        cfg,
+        with_wayback=os.environ.get("S2P_WAYBACK_LOOKUP_ENABLED", "0") == "1",
+    )
+    failure_writer = common.DurableProcessingFailureWriter.from_config(cfg)
+    flow_name = os.environ.get("S2P_BYTEWAX_FLOW_NAME", FETCHER_FLOW_NAME).strip()
+    if not flow_name:
+        raise RuntimeError("S2P_BYTEWAX_FLOW_NAME must not be empty")
+    flow = Dataflow(flow_name)
+    source = common.tracked_kafka_source(
+        runtime_status=runtime_status,
+        source_name="raw_fetched",
+        brokers=cfg.redpanda_brokers.split(","),
+        topics=input_topics,
+        starting_offset=common.kafka_starting_offset(),
+        add_config=common.kafka_consumer_config(cfg.consumer_group),
+    )
+    inp = op.input("raw_fetched", flow, source)
+    payload_max_bytes = common.kafka_payload_max_bytes()
 
-def native_producer_config(cfg: common.ProcessorConfig) -> dict[str, object]:
-    """Return an idempotent producer configuration for normalized records."""
-    return {
-        **common.kafka_producer_config(),
-        "bootstrap.servers": cfg.redpanda_brokers,
-        "client.id": f"s2p-fetcher-{socket.gethostname()}",
-        "enable.idempotence": True,
-        "acks": "all",
-        "compression.type": "zstd",
-        "linger.ms": 20,
-        "message.timeout.ms": 300_000,
-    }
+    def _step(msg: object) -> KafkaSinkMessage | None:
+        payload = getattr(msg, "value", None)
+        if payload is None:
+            failure_writer.record(stage="fetcher", message=msg, reason="kafka_tombstone")
+            PROCESSOR_METRICS.record_failure(stage="normalize", reason="kafka_tombstone")
+            return None
+        with tracer.start_as_current_span("fetcher.process") as span:
+            try:
+                silver = process_bronze_payload(state, payload)
+                if silver is None:
+                    return None
+                encoded = common.silver_dumps(silver)
+                if len(encoded) > payload_max_bytes:
+                    raise common.DeterministicProcessingError(
+                        f"normalized payload for {silver.doc_id} is {len(encoded)} bytes; "
+                        f"limit is {payload_max_bytes}"
+                    )
+            except ValueError as exc:
+                span.record_exception(exc)
+                reason = type(exc).__name__
+                failure_writer.record(stage="fetcher", message=msg, reason=reason)
+                PROCESSOR_METRICS.record_failure(stage="normalize", reason=reason)
+                return None
+            except ClientError as exc:
+                error_code = str(exc.response.get("Error", {}).get("Code", ""))
+                if is_smoke_execution and error_code in {
+                    "404",
+                    "NoSuchKey",
+                    "NoSuchObject",
+                    "NotFound",
+                }:
+                    # Successful canaries delete their synthetic Bronze body.
+                    # If a canary recovery PVC is rebuilt before raw.smoke
+                    # retention expires, skip that now-expired exact fixture
+                    # without poisoning the production failure ledger.
+                    reason = "expired_smoke_bronze"
+                    failure_writer.record(stage="fetcher-smoke", message=msg, reason=reason)
+                    PROCESSOR_METRICS.record_failure(stage="normalize", reason=reason)
+                    return None
+                span.record_exception(exc)
+                PROCESSOR_METRICS.record_failure(stage="normalize", reason=type(exc).__name__)
+                raise
+            except Exception as exc:
+                span.record_exception(exc)
+                PROCESSOR_METRICS.record_failure(stage="normalize", reason=type(exc).__name__)
+                # Unknown, storage, extraction, and model failures must stop the
+                # execution before Bytewax snapshots source progress.
+                raise
+            PROCESSOR_METRICS.record_normalized(source_feed=silver.source_feed)
+            span.set_attribute("doc_id", silver.doc_id)
+            return KafkaSinkMessage(
+                key=silver.doc_id.encode("utf-8"),
+                value=encoded,
+                headers=[("trace_id", silver.trace_id.encode("ascii"))],
+            )
+
+    mapped = op.map("fetcher_normalize", inp, _step)
+    filtered = op.filter("fetcher_drop_intentional", mapped, lambda message: message is not None)
+    sink = KafkaSink(
+        brokers=cfg.redpanda_brokers.split(","),
+        topic=output_topic,
+        add_config=common.kafka_producer_config(),
+    )
+    op.output("fetcher_sink", filtered, sink)
+    return flow
 
 
 def fetcher_input_topics(cfg: common.ProcessorConfig) -> list[str]:
     """Return this worker's explicitly assigned traffic class.
 
-    Production and deployment-canary records use separate consumer groups in
-    Kubernetes. A slow PDF on the production lane must not starve the bounded
-    canary check. The two-topic default preserves the convenient single-worker
-    local-development setup.
+    Production and deployment-canary records use separate Bytewax executions.
+    The default is production-only; smoke traffic must always be selected
+    explicitly so it cannot mutate production recovery.
     """
     configured = os.environ.get("S2P_FETCHER_INPUT_TOPICS", "").strip()
     if configured:
@@ -485,174 +724,7 @@ def fetcher_input_topics(cfg: common.ProcessorConfig) -> list[str]:
         if not topics:
             raise RuntimeError("S2P_FETCHER_INPUT_TOPICS did not contain a topic")
         return list(dict.fromkeys(topics))
-    smoke_topic = os.environ.get("S2P_SMOKE_RAW_TOPIC", "raw.smoke").strip()
-    return list(dict.fromkeys(topic for topic in (cfg.raw_topic, smoke_topic) if topic))
-
-
-def run_native_fetcher(
-    cfg: common.ProcessorConfig,
-    *,
-    state: FetcherState | None = None,
-    consumer_factory: Callable[[dict[str, object]], Any] = Consumer,
-    producer_factory: Callable[[dict[str, object]], Any] = Producer,
-    should_stop: Callable[[], bool] | None = None,
-    max_messages: int | None = None,
-) -> None:
-    """Consume, normalize, produce, then commit offsets in bounded batches.
-
-    Output delivery is flushed before the corresponding input offsets are
-    synchronously committed. A crash between those operations can duplicate a
-    document, but cannot lose it; all downstream records are keyed by doc id so
-    this is the intended at-least-once contract.
-    """
-    if max_messages is not None and max_messages < 1:
-        raise ValueError("max_messages must be positive when provided")
-    should_stop = should_stop or (lambda: False)
-    state = state or build_state(cfg, with_wayback=False)
-    tracer = common.init_tracer("s2p-fetcher", cfg)
-    log = common.get_logger("s2p.fetcher")
-    consumer = consumer_factory(native_consumer_config(cfg))
-    producer = producer_factory(native_producer_config(cfg))
-    topics = fetcher_input_topics(cfg)
-    output_topic = os.environ.get("S2P_FETCHER_OUTPUT_TOPIC", cfg.normalized_topic).strip()
-    if not output_topic:
-        raise RuntimeError("S2P_FETCHER_OUTPUT_TOPIC must not be empty")
-
-    batch_size = int(os.environ.get("S2P_FETCHER_COMMIT_BATCH_SIZE", "16"))
-    batch_seconds = float(os.environ.get("S2P_FETCHER_COMMIT_INTERVAL_SECONDS", "2"))
-    flush_timeout = float(os.environ.get("S2P_FETCHER_FLUSH_TIMEOUT_SECONDS", "60"))
-    retry_attempts = int(os.environ.get("S2P_FETCHER_RECORD_ATTEMPTS", "3"))
-    if batch_size < 1 or batch_seconds <= 0 or flush_timeout <= 0 or retry_attempts < 1:
-        raise RuntimeError("fetcher batch, timeout, and retry settings must be positive")
-
-    payload_max_bytes = common.kafka_payload_max_bytes()
-    pending_offsets: dict[tuple[str, int], int] = {}
-    pending_records = 0
-    processed_messages = 0
-    last_commit = time.monotonic()
-    delivery_errors: list[str] = []
-
-    def on_delivery(error: object | None, message: object) -> None:
-        """Capture asynchronous delivery failures before committing input."""
-        if error is not None:
-            delivery_errors.append(str(error))
-
-    def commit_batch() -> None:
-        nonlocal pending_records, last_commit
-        if not pending_offsets:
-            return
-        undelivered = producer.flush(flush_timeout)
-        if undelivered:
-            raise RuntimeError(f"normalized producer still has {undelivered} undelivered records")
-        if delivery_errors:
-            detail = "; ".join(delivery_errors[:3])
-            raise RuntimeError(f"normalized producer delivery failed: {detail}")
-        offsets = [
-            TopicPartition(topic, partition, offset)
-            for (topic, partition), offset in sorted(pending_offsets.items())
-        ]
-        consumer.commit(offsets=offsets, asynchronous=False)
-        log.info(
-            "fetcher batch committed",
-            records=pending_records,
-            partitions=len(offsets),
-        )
-        pending_offsets.clear()
-        pending_records = 0
-        delivery_errors.clear()
-        last_commit = time.monotonic()
-
-    def on_revoke(_consumer: object, _partitions: object) -> None:
-        """Finish the current at-least-once batch before losing ownership."""
-        commit_batch()
-
-    consumer.subscribe(topics, on_revoke=on_revoke)
-
-    try:
-        while not should_stop():
-            message = consumer.poll(1.0)
-            now = time.monotonic()
-            if message is None:
-                if pending_offsets and now - last_commit >= batch_seconds:
-                    commit_batch()
-                if max_messages is not None and processed_messages >= max_messages:
-                    break
-                continue
-            error = message.error()
-            if error is not None:
-                if error.code() == KafkaError._PARTITION_EOF:
-                    continue
-                raise KafkaException(error)
-
-            payload = message.value()
-            silver: SilverRecord | None = None
-            if payload is not None:
-                for attempt in range(1, retry_attempts + 1):
-                    try:
-                        with tracer.start_as_current_span("fetcher.process") as span:
-                            silver = process_bronze_payload(state, payload)
-                            if silver is not None:
-                                span.set_attribute("doc_id", silver.doc_id)
-                                span.set_attribute("lang", silver.lang)
-                        break
-                    except Exception as exc:
-                        PROCESSOR_METRICS.record_failure(
-                            stage="normalize", reason=type(exc).__name__
-                        )
-                        if attempt == retry_attempts:
-                            log.warning(
-                                "fetcher record exhausted retries",
-                                topic=message.topic(),
-                                partition=message.partition(),
-                                offset=message.offset(),
-                                attempts=attempt,
-                                error=str(exc),
-                                exception_type=type(exc).__name__,
-                                exc_info=True,
-                            )
-                        else:
-                            time.sleep(min(2 ** (attempt - 1) * 0.25, 2.0))
-
-            if silver is not None:
-                encoded = common.silver_dumps(silver)
-                if len(encoded) > payload_max_bytes:
-                    PROCESSOR_METRICS.record_failure(stage="normalize", reason="payload_too_large")
-                    log.warning(
-                        "normalized payload exceeds bounded Kafka record size",
-                        doc_id=silver.doc_id,
-                        payload_bytes=len(encoded),
-                        payload_max_bytes=payload_max_bytes,
-                        source_feed=silver.source_feed,
-                    )
-                else:
-                    while True:
-                        try:
-                            producer.produce(
-                                output_topic,
-                                key=silver.doc_id.encode("utf-8"),
-                                value=encoded,
-                                headers=[("trace_id", silver.trace_id.encode("ascii"))],
-                                on_delivery=on_delivery,
-                            )
-                            producer.poll(0)
-                            PROCESSOR_METRICS.record_normalized(source_feed=silver.source_feed)
-                            break
-                        except BufferError:
-                            producer.poll(0.25)
-
-            key = (message.topic(), message.partition())
-            pending_offsets[key] = max(pending_offsets.get(key, 0), message.offset() + 1)
-            pending_records += 1
-            processed_messages += 1
-            if pending_records >= batch_size or now - last_commit >= batch_seconds:
-                commit_batch()
-            if max_messages is not None and processed_messages >= max_messages:
-                break
-    finally:
-        try:
-            commit_batch()
-        finally:
-            consumer.close()
+    return [cfg.raw_topic]
 
 
 def main() -> None:
@@ -661,19 +733,22 @@ def main() -> None:
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.fetcher")
     topics = fetcher_input_topics(cfg)
-    log.info("starting scalable fetcher", brokers=cfg.redpanda_brokers, topics=topics)
-    state = build_state(cfg, with_wayback=False)
-    stopping = False
-
-    def _stop(_signum: int, _frame: object) -> None:
-        nonlocal stopping
-        stopping = True
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-    # Do not publish readiness until heavyweight models have initialized.
-    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
-    run_native_fetcher(cfg, state=state, should_stop=lambda: stopping)
+    log.info("starting Bytewax fetcher", brokers=cfg.redpanda_brokers, topics=topics)
+    runtime_status = common.BytewaxRuntimeStatus()
+    flow = build_dataflow(cfg, runtime_status=runtime_status)
+    start_probe_server(
+        metrics_provider=PROCESSOR_METRICS.render_prometheus,
+        readiness_provider=runtime_status.is_ready,
+    )
+    recovery_name = os.environ.get("S2P_BYTEWAX_RECOVERY_NAME", FETCHER_RECOVERY_NAME).strip()
+    if not recovery_name:
+        raise RuntimeError("S2P_BYTEWAX_RECOVERY_NAME must not be empty")
+    common.run_bytewax_flow(
+        flow,
+        cfg,
+        recovery_name,
+        runtime_status=runtime_status,
+    )
 
 
 def serialize_for_kafka(record: SilverRecord) -> tuple[bytes, bytes]:

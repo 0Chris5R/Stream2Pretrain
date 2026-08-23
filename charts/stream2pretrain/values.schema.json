@@ -37,16 +37,17 @@
     },
     "redpanda": {
       "type": "object",
-      "required": ["bootstrapServers", "topics"],
+      "required": ["bootstrapServers", "startingOffset", "maxMessageBytes", "topics"],
       "properties": {
         "bootstrapServers": {"type": "string", "minLength": 1},
         "schemaRegistry": {"type": "string"},
-        "startingOffset": {"type": "string", "enum": ["beginning", "end"]},
+        "startingOffset": {"type": "string", "const": "stored"},
+        "maxMessageBytes": {"type": "integer", "minimum": 65537},
         "saslMechanism": {"type": "string"},
         "authSecret": {"type": "string"},
         "topics": {
           "type": "object",
-          "required": ["rawFetched", "smokeRaw", "githubReleaseJobs", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "curationDecisions", "licenseAdmissions", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
+          "required": ["rawFetched", "smokeRaw", "githubReleaseJobs", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "docsCuratedSmoke", "curationDecisions", "curationDecisionsSmoke", "licenseAdmissions", "licenseAdmissionsSmoke", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
           "properties": {
             "rawFetched": {"type": "string"},
             "smokeRaw": {"type": "string"},
@@ -54,8 +55,11 @@
             "docsNormalized": {"type": "string"},
             "docsNormalizedSmoke": {"type": "string"},
             "docsCurated": {"type": "string"},
+            "docsCuratedSmoke": {"type": "string"},
             "curationDecisions": {"type": "string"},
+            "curationDecisionsSmoke": {"type": "string"},
             "licenseAdmissions": {"type": "string"},
+            "licenseAdmissionsSmoke": {"type": "string"},
             "deconAttest": {"type": "string"},
             "foundryJobs": {"type": "string"},
             "foundryEvents": {"type": "string"},
@@ -139,7 +143,7 @@
                 "endpoint": {"type": "string", "format": "uri"},
                 "set": {"type": "string"},
                 "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-                "licenseDefault": {"type": "string"},
+                "licenseDefault": {"type": "string", "enum": ["per-record"]},
                 "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
                 "schedule": {"type": "string"}
               }
@@ -152,16 +156,15 @@
                 "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
                 "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
                 "schedule": {"type": "string"},
-                "licenseDefault": {"type": "string"}
+                "licenseDefault": {"type": "string", "enum": ["per-record"]}
               }
             },
             "htmlFetcher": {
               "type": "object",
-              "required": ["enabled", "feedName", "licenseDefault"],
+              "required": ["enabled", "feedName"],
               "properties": {
                 "enabled": {"type": "boolean"},
                 "feedName": {"type": "string", "minLength": 1, "maxLength": 128},
-                "licenseDefault": {"type": "string", "minLength": 1},
                 "backfill": {
                   "type": "object",
                   "required": ["enabled"],
@@ -211,10 +214,34 @@
         },
         "huggingface": {
           "type": "object",
-          "required": ["enabled", "models", "dailyPapers"],
+          "required": ["enabled", "models", "datasets", "spaces", "dailyPapers"],
           "properties": {
             "enabled": {"type": "boolean"},
             "models": {
+              "type": "object",
+              "required": ["name", "endpoint", "pollIntervalSeconds", "tokenSecret", "tokenSecretKey"],
+              "properties": {
+                "name": {"type": "string"},
+                "endpoint": {"type": "string", "format": "uri"},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "tokenSecret": {"type": "string"},
+                "tokenSecretKey": {"type": "string"}
+              }
+            },
+            "datasets": {
+              "type": "object",
+              "required": ["name", "endpoint", "pollIntervalSeconds", "tokenSecret", "tokenSecretKey"],
+              "properties": {
+                "name": {"type": "string"},
+                "endpoint": {"type": "string", "format": "uri"},
+                "pollIntervalSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
+                "tokenSecret": {"type": "string"},
+                "tokenSecretKey": {"type": "string"}
+              }
+            },
+            "spaces": {
               "type": "object",
               "required": ["name", "endpoint", "pollIntervalSeconds", "tokenSecret", "tokenSecretKey"],
               "properties": {
@@ -292,23 +319,14 @@
         },
         "arxivHtmlFetcher": {
           "type": "object",
-          "required": ["image", "replicas", "consumerGroup", "autoOffsetReset", "scaling", "resources"],
+          "required": ["image", "replicas", "consumerGroup", "autoOffsetReset", "resources"],
           "properties": {
             "image": {"type": "string", "minLength": 1},
             "tag": {"type": "string"},
-            "replicas": {"type": "integer", "minimum": 0},
+            "replicas": {"type": "integer", "const": 1},
             "consumerGroup": {"type": "string", "minLength": 1},
             "autoOffsetReset": {"type": "string", "enum": ["earliest", "latest"]},
             "maxRecordsPerLoop": {"type": "integer", "minimum": 0},
-            "scaling": {
-              "type": "object",
-              "required": ["minReplicas", "maxReplicas", "lagThreshold"],
-              "properties": {
-                "minReplicas": {"type": "integer", "minimum": 0},
-                "maxReplicas": {"type": "integer", "minimum": 1},
-                "lagThreshold": {"type": "integer", "minimum": 1}
-              }
-            },
             "resources": {"type": "object"}
           }
         },
@@ -321,10 +339,8 @@
             "consumerGroup",
             "allowedExtensions",
             "maxFileSizeBytes",
-            "maxFilesPerRelease",
             "excludedTagPrefixes",
             "maxPollIntervalMilliseconds",
-            "allowedLicenses",
             "requestRatePerSecond",
             "requestBurst",
             "keda",
@@ -341,18 +357,12 @@
               "items": {"type": "string", "pattern": "^\\.[A-Za-z0-9]+$"}
             },
             "maxFileSizeBytes": {"type": "integer", "minimum": 1},
-            "maxFilesPerRelease": {"type": "integer", "minimum": 1},
             "excludedTagPrefixes": {
               "type": "array",
               "minItems": 1,
               "items": {"type": "string", "minLength": 1}
             },
             "maxPollIntervalMilliseconds": {"type": "integer", "minimum": 300000},
-            "allowedLicenses": {
-              "type": "array",
-              "minItems": 1,
-              "items": {"type": "string", "minLength": 1}
-            },
             "requestRatePerSecond": {"type": "number", "exclusiveMinimum": 0},
             "requestBurst": {"type": "integer", "minimum": 1},
             "keda": {
@@ -427,7 +437,84 @@
         }
       }
     },
-    "processor": {"type": "object"},
+    "processor": {
+      "type": "object",
+      "required": ["fetcher", "curate", "iceberg"],
+      "properties": {
+        "fetcher": {
+          "type": "object",
+          "required": ["replicas", "checkpoint", "canary"],
+          "properties": {
+            "replicas": {"type": "integer", "const": 1},
+            "checkpoint": {
+              "type": "object",
+              "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
+              "properties": {
+                "existingClaim": {"type": "string"},
+                "storageClass": {"type": "string"},
+                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
+                "recoveryPartitions": {"type": "integer", "minimum": 1},
+                "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
+              }
+            },
+            "canary": {
+              "type": "object",
+              "required": ["enabled", "replicas", "checkpoint"],
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "replicas": {"type": "integer", "const": 1},
+                "checkpoint": {
+                  "type": "object",
+                  "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
+                  "properties": {
+                    "existingClaim": {"type": "string"},
+                    "storageClass": {"type": "string"},
+                    "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
+                    "recoveryPartitions": {"type": "integer", "minimum": 1},
+                    "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "curate": {
+          "type": "object",
+          "required": ["replicas", "checkpoint"],
+          "properties": {
+            "replicas": {"type": "integer", "const": 1},
+            "checkpoint": {
+              "type": "object",
+              "required": ["storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
+              "properties": {
+                "storageClass": {"type": "string"},
+                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
+                "recoveryPartitions": {"type": "integer", "minimum": 1},
+                "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
+              }
+            }
+          }
+        },
+        "iceberg": {
+          "type": "object",
+          "required": ["replicas", "checkpoint"],
+          "properties": {
+            "replicas": {"type": "integer", "const": 1},
+            "checkpoint": {
+              "type": "object",
+              "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
+              "properties": {
+                "existingClaim": {"type": "string"},
+                "storageClass": {"type": "string"},
+                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
+                "recoveryPartitions": {"type": "integer", "minimum": 1},
+                "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
+              }
+            }
+          }
+        }
+      }
+    },
     "mixtureController": {"type": "object"},
     "seedLoader": {
       "type": "object",
@@ -436,7 +523,7 @@
       "properties": {
         "enabled": {"type": "boolean"},
         "image": {"type": "string", "minLength": 1},
-        "inProcess": {"type": "boolean"},
+        "inProcess": {"type": "boolean", "const": true},
         "dryRun": {"type": "boolean"},
         "components": {
           "type": "array",
@@ -483,17 +570,13 @@
             "serverAddress": {"type": "string", "format": "uri"}
           }
         },
-        "fetcher": {
+        "triggerAuthSecret": {"type": "string"},
+        "auth": {
           "type": "object",
-          "properties": {
-            "minReplicas": {"type": "integer", "minimum": 0},
-            "maxReplicas": {"type": "integer", "minimum": 1},
-            "lagThreshold": {"type": "integer", "minimum": 1}
-          }
-        },
-        "curate": {"type": "object"},
-        "iceberg": {"type": "object"},
-        "triggerAuthSecret": {"type": "string"}
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {"enabled": {"type": "boolean"}}
+        }
       }
     },
     "observability": {

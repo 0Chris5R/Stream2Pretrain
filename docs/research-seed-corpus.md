@@ -2,18 +2,23 @@
 
 Research date: 2026-06-15. Sources cited inline. Every numerical figure not directly verified against an upstream dataset card or paper is marked `needs-measurement`.
 
-Policy amendment, 2026-08-19: this document preserves the original source
-research, but its wrapper-licence recommendation is superseded. Stream2Pretrain
-does not treat ODC-By, Apache-2.0, or another dataset wrapper as permission for
-each contained paper, page, or file. The seed loader now requires an explicit
-allowlisted per-record content licence and quarantines all other rows before
-curation. The historical volume recommendations below are therefore not
-expected retained volumes under the strict policy and remain
-`needs-measurement`.
+Policy amendment, 2026-08-23: this document preserves the original source
+research, but every wrapper-level redistribution claim below is superseded.
+Stream2Pretrain does not treat ODC-By, Apache-2.0, or another dataset wrapper
+as permission for each contained paper, page, or file. The seed loader requires
+item-level evidence. Permissive items may enter pretraining and post-training,
+reviewed NC/arXiv non-exclusive items may enter derived post-training only, and
+ND, unknown, or wrapper-only items quarantine before Silver and curation. The
+historical volume recommendations are therefore not expected retained volumes
+and remain `needs-measurement`.
 
 ## TL;DR
 
-For a frontier-LLM-research-focused seed corpus that fits a DHBWCloud 2-worker MinIO budget (target 500 GB - 2 TB usable), the recommended Stream2Pretrain v0.1 seed mixture is: **(1) `allenai/peS2o` v3** (academic papers from S2ORC, the Dolma/OLMo academic backbone, ~120 GB on Hub, ~42B+ tokens at v2, freshness cutoff 2023-01-03 for v2; v3 is on Hub but un-carded), **(2) `togethercomputer/RedPajama-Data-1T` arxiv subset** (~92 GB, ~28B tokens, LaTeX-derived arXiv, 2023 cutoff) as a complementary LaTeX-derived view, **(3) `HuggingFaceFW/fineweb-edu`** sampled to a ~50-100 GB AI/ML-domain slice via URL filter (CC-derived web with FineWeb-Edu classifier scores >=3, ODC-By 1.0), **(4) `HuggingFaceTB/stack-edu`** filtered for Python ML repos (~100 GB target, ODC-By, the educational-quality code subset that Dolma 3 Mix uses for its 0.41T code component), and **(5) a custom historical RSS/Atom backfill** of the same Phase-1 source list defined in `SOURCES.md` going back 24 months (arXiv OAI-PMH `from=2024-06-01`, GitHub Releases Atom history, lab blogs via Wayback). Total target: 400-700 GB on disk, 50-90B tokens, all under ODC-By or CC-BY family licenses compatible with our Apache-2.0 release. Wire it in as a dedicated **Bronze backfill mode**: a one-shot Bytewax dataflow that reads HF parquet/zst shards, tags them with `valid_from = original_publication_date`, `valid_to = null`, `source_feed = "seed:<dataset_id>"`, and emits to the same `docs.normalized` topic the live pipeline already consumes - so Silver/Gold curation operators run identically over historical and live documents.
+The original candidate mixture combines peS2o v3, RedPajama arXiv,
+FineWeb-Edu, Stack-Edu, and a historical RSS/Atom backfill. Upstream size and
+token estimates below describe candidate input only. They do not establish a
+redistributable retained corpus: every paper, page, and file must independently
+pass the item-level policy amendment above before Silver emission.
 
 ## 1. Generic science / AI corpora
 
@@ -29,7 +34,7 @@ For a frontier-LLM-research-focused seed corpus that fits a DHBWCloud 2-worker M
 
 - HF id: `togethercomputer/RedPajama-Data-V2` (https://huggingface.co/datasets/togethercomputer/RedPajama-Data-V2). Multi-trillion-token CC-derived corpus, multilingual; **arxiv is NOT in V2** - V2 is CC-only. The arXiv shard lives in V1.
 - arXiv subset: **`togethercomputer/RedPajama-Data-1T`** with config name `"arxiv"`. Per the original RedPajama release this slice is ~92 GB / ~28B tokens of LaTeX-extracted arXiv papers (https://www.together.ai/blog/redpajama). Cutoff 2023-04 (`needs-measurement` for exact date).
-- License: Apache-2.0 wrapper, content under arXiv's per-paper licenses (mostly CC-BY or arXiv non-exclusive; permissive for research, must respect upstream).
+- License: Apache-2.0 wrapper, with each paper governed by its own arXiv licence. The wrapper is ignored. Permissive paper licences may enter both routes, reviewed arXiv non-exclusive or NC licences are transform-only, and unresolved or ND papers quarantine.
 - Primary use case: LaTeX-source-derived arXiv papers, complementary to peS2o's PDF-derived view. Useful for the Stream2Pretrain shadow-A/B demo (compare PDF vs LaTeX extraction quality).
 
 ### 1.3 `allenai/dolma` (v1.7 and v3) - aggregate corpora that EMBED peS2o + arxiv
@@ -46,7 +51,7 @@ For a frontier-LLM-research-focused seed corpus that fits a DHBWCloud 2-worker M
 ### 1.5 `nvidia/Nemotron-CC` and `nvidia/Nemotron-CC-Math`
 
 - HF id (root): `nvidia/Nemotron-CC` (~6.3T tokens; multi-license per-document, https://presenc.ai/research/open-pretraining-datasets-2026). Math subset documented in the Nemotron-CC-Math paper (NVIDIA 2025) but exact HF id and token count `needs-measurement`.
-- License: mixed, must respect per-document tags. **Risk for Apache-2.0 release**: not safe to redistribute wholesale. Use only for derived metrics or with strict per-document license filtering.
+- License: mixed, so the wrapper cannot establish a route. Every document needs immutable item evidence. Permissive items may enter both routes, reviewed NC items are transform-only, and unresolved or ND items quarantine.
 
 ### 1.6 `common-pile/*` (Common Pile v0.1)
 
@@ -75,11 +80,11 @@ There is **no dedicated "frontier LLM research only" pretraining corpus** as of 
 
 ### 2.2 HuggingFace Daily Papers historical archive
 
-- Endpoint `https://huggingface.co/api/daily_papers` (already in `SOURCES.md`). Backfill via paginating `before=<date>` going back to 2023-05 launch. Estimate: ~20-50 papers/day x ~750 days = 15-37k papers. License: HF API ToS allows research use (https://huggingface.co/docs/hub/en/rate-limits). Each paper points to an arXiv id, so the actual paper text comes from peS2o/arxiv anyway; the value here is the **community signal** (upvotes, comments) used to weight quality.
+- Endpoint `https://huggingface.co/api/daily_papers` (already in `SOURCES.md`). Backfill via paginating `before=<date>` going back to 2023-05 launch. Estimate: ~20-50 papers/day x ~750 days = 15-37k papers. The API response is discovery and ranking metadata only; it does not license the linked paper. Each paper points to an arXiv id whose own immutable licence evidence decides the text route. The value here is the **community signal** (upvotes, comments) used to weight quality.
 
 ### 2.3 AI-lab blog historical archives
 
-- OpenAI News archive (https://openai.com/news/), DeepMind Blog (https://deepmind.google/blog), HF Blog (https://huggingface.co/blog), BAIR (https://bair.berkeley.edu/blog/), EleutherAI (https://blog.eleuther.ai/), Anthropic engineering posts (Anthropic does not publish full-archive RSS; community mirrors exist). Total volume is small - mid-thousands of posts over 5 years. Practical approach: write a one-shot Wayback-Machine backfill scraper, license under fair-use research, store with original `valid_from`.
+- OpenAI News archive (https://openai.com/news/), DeepMind Blog (https://deepmind.google/blog), HF Blog (https://huggingface.co/blog), BAIR (https://bair.berkeley.edu/blog/), EleutherAI (https://blog.eleuther.ai/), Anthropic engineering posts (Anthropic does not publish full-archive RSS; community mirrors exist). Total volume is small - mid-thousands of posts over 5 years. The Wayback adapter treats archived feeds as discovery only, resolves archived item rights, and quarantines unresolved pages. Archive availability or research use is not a content licence.
 
 ### 2.4 Distill.pub archive
 
@@ -88,12 +93,12 @@ There is **no dedicated "frontier LLM research only" pretraining corpus** as of 
 ### 2.5 Lecture corpora (CS224N, CS25, CS336, Karpathy's nanoGPT/llm.c)
 
 - Stanford CS224N transcripts: published on YouTube, transcripts via youtube-transcript-api - **out of scope** per `SOURCES.md` (ToS).
-- Stanford CS25 / CS336 lecture notes: PDFs on course websites, public, no clear license - fair-use ingest only.
+- Stanford CS25 / CS336 lecture notes: PDFs on course websites, public, but without clear item rights. Under the current contract they quarantine and are not fetched as training content.
 - Karpathy walkthroughs: nanoGPT and llm.c READMEs and code comments are MIT-licensed (https://github.com/karpathy/nanoGPT, https://github.com/karpathy/llm.c). Already covered by Stack-Edu/StackV2.
 
 ### 2.6 LessWrong / Alignment Forum
 
-- GreaterWrong RSS (https://www.greaterwrong.com/index.rss?view=alignment-forum). Already in Phase-2 source list. Archive is downloadable in bulk via the LessWrong GraphQL API. License: CC-BY-NC-SA per LW ToS - **incompatible with Apache-2.0 release**, exclude or document under research-fair-use only.
+- GreaterWrong RSS (https://www.greaterwrong.com/index.rss?view=alignment-forum). Already in the Phase-2 catalogue. Archive availability does not establish item rights. A reviewed CC-BY-NC-SA item is transform-only and excluded from verbatim pretraining; unresolved or ND items quarantine.
 
 ### 2.7 Verdict on frontier-LLM-research-specific corpora
 
@@ -118,7 +123,7 @@ This is structurally identical to what AllenAI does inside Dolma's academic comp
 
 ### 3.3 Hand-curated AI repo bulk clone (Phase-2 expansion)
 
-- The 30-repo allowlist already in `SOURCES.md` (`huggingface/transformers`, `vllm-project/vllm`, `pytorch/pytorch`, `karpathy/llm.c`, `mlfoundations/dclm`, `huggingface/datatrove`, `NVIDIA-NeMo/Curator`, `allenai/dolma`, `bytewax/bytewax`, etc.). Bulk-clone via `gh repo clone`, run through the same Bytewax curator. Volume: a few GB. License: each repo's OSI license; honor the Apache-2.0 / MIT / BSD-3 they're under.
+- The 30-repo allowlist already in `SOURCES.md` (`huggingface/transformers`, `vllm-project/vllm`, `pytorch/pytorch`, `karpathy/llm.c`, `mlfoundations/dclm`, `huggingface/datatrove`, `NVIDIA-NeMo/Curator`, `allenai/dolma`, `bytewax/bytewax`, etc.). The implemented path resolves the top-level licence at the exact release tag and records the licence blob SHA before tarball fetch, then admits each retained file separately, including exact-byte evidence for a file SPDX header. The allowlist itself is relevance metadata, not licence evidence.
 - This is essentially **already covered by Stack-Edu**, but a fresh clone ensures the most recent commits are in.
 
 ### 3.4 Codeforces / DeepMind code-contest corpora
@@ -129,27 +134,31 @@ This is structurally identical to what AllenAI does inside Dolma's academic comp
 
 | Dataset | HF id | Total size (compressed) | Tokens | Cutoff | License | Apache-2.0 release safe? | On-domain for frontier LLM? |
 |---|---|---|---|---|---|---|---|
-| `allenai/peS2o` v2 | `allenai/peS2o` | `needs-measurement` (HF Hub ~100GB v2) | 42.01B | 2023-01-03 | ODC-By 1.0 | yes | broad academic, filter to cs.* |
-| `allenai/peS2o` v3 | `allenai/peS2o` (`data/v3/`) | ~120 GB on Hub (Hub UI) | `needs-measurement` | `needs-measurement` (~2024-10) | ODC-By 1.0 | yes | broad academic, filter to cs.* |
-| RedPajama v1 arxiv | `togethercomputer/RedPajama-Data-1T` config `arxiv` | ~92 GB | ~28B | 2023-04 | Apache-2.0 wrapper + per-paper | yes (with attribution) | yes (LaTeX arXiv) |
-| Dolma v1.7 | `allenai/dolma` | 4.5 TB gz | 3T | 2024-04 | ODC-By 1.0 | yes | aggregate, too big |
-| Dolma 3 Mix | `allenai/dolma3_*` (per-component) | `needs-measurement` | 5.93T | 2025-11 | ODC-By 1.0 | yes | aggregate, slice the arxiv-50B and academic-810B subsets |
-| FineWeb | `HuggingFaceFW/fineweb` | tens of TB | ~15T | 2024-04 | ODC-By 1.0 | yes | only after URL filter |
-| FineWeb-Edu | `HuggingFaceFW/fineweb-edu` | a few TB | ~1.3T | 2024-04 | ODC-By 1.0 | yes | sample after URL filter |
+| `allenai/peS2o` v2 | `allenai/peS2o` | `needs-measurement` (HF Hub ~100GB v2) | 42.01B | 2023-01-03 | ODC-By wrapper + per-paper | item-dependent | broad academic, filter to cs.* |
+| `allenai/peS2o` v3 | `allenai/peS2o` (`data/v3/`) | ~120 GB on Hub (Hub UI) | `needs-measurement` | `needs-measurement` (~2024-10) | ODC-By wrapper + per-paper | item-dependent | broad academic, filter to cs.* |
+| RedPajama v1 arxiv | `togethercomputer/RedPajama-Data-1T` config `arxiv` | ~92 GB | ~28B | 2023-04 | Apache-2.0 wrapper + per-paper | item-dependent | yes (LaTeX arXiv) |
+| Dolma v1.7 | `allenai/dolma` | 4.5 TB gz | 3T | 2024-04 | ODC-By wrapper + item rights | item-dependent | aggregate, too big |
+| Dolma 3 Mix | `allenai/dolma3_*` (per-component) | `needs-measurement` | 5.93T | 2025-11 | ODC-By wrapper + item rights | item-dependent | aggregate, slice the arxiv-50B and academic-810B subsets |
+| FineWeb | `HuggingFaceFW/fineweb` | tens of TB | ~15T | 2024-04 | ODC-By wrapper + page rights | item-dependent | only after URL filter |
+| FineWeb-Edu | `HuggingFaceFW/fineweb-edu` | a few TB | ~1.3T | 2024-04 | ODC-By wrapper + page rights | item-dependent | sample after URL filter |
 | DCLM-Baseline | `mlfoundations/dclm-baseline-1.0` | `needs-measurement` | ~3.8T | 2024 | CC-BY-4.0 | yes | only after URL filter |
 | Nemotron-CC | `nvidia/Nemotron-CC` | `needs-measurement` | ~6.3T | 2024 | mixed per-doc | **NO**, redistribute only with per-doc license tracking | yes after filter |
 | Common Pile v0.1 | `common-pile/*` | ~8 TB raw / 1.8 TB filtered | ~8T (counted) | 2025-06 | per-component PD/CC-BY | yes (most permissive) | mixed; arxiv subset useful |
 | `bigcode/the-stack-v2` | `bigcode/the-stack-v2` | 50-70 TB `needs-measurement` | hundreds of B | 2024 | upstream + BigCode terms | conditional, must filter to permissive-only | broad code, filter |
-| `HuggingFaceTB/stack-edu` | `HuggingFaceTB/stack-edu` | `needs-measurement` | ~410B (OLMo-3 used) | 2024-2025 | ODC-By family | yes | yes after Python+ML filter |
+| `HuggingFaceTB/stack-edu` | `HuggingFaceTB/stack-edu` | `needs-measurement` | ~410B (OLMo-3 used) | 2024-2025 | wrapper + detected per-file rights | item-dependent | yes after Python+ML filter |
 | OpenAlex bulk | external S3, not HF dataset | ~330 GB metadata (https://docs.openalex.org/download-all-data/openalex-snapshot) | metadata only | rolling | CC0 | yes | metadata enrichment only |
-| HF Daily Papers archive | `huggingface.co/api/daily_papers` (custom backfill) | small | small | live | HF API ToS | yes (research) | very on-domain |
-| AI-lab blog backfill | custom Wayback | small | small | live | per-blog ToS | research-fair-use only | very on-domain |
-| LessWrong / Alignment Forum | GreaterWrong RSS / GraphQL | small | small | live | CC-BY-NC-SA | **NO** for Apache-2.0 release | on-domain but excluded |
+| HF Daily Papers archive | `huggingface.co/api/daily_papers` (custom backfill) | small | small | live | HF API terms for metadata; linked paper rights separate | metadata only | very on-domain |
+| AI-lab blog backfill | custom Wayback | small | small | live | archived item rights or immutable page evidence | item-dependent | very on-domain |
+| LessWrong / Alignment Forum | GreaterWrong RSS / GraphQL | small | small | live | per-item rights; reviewed CC-BY-NC-SA is transform-only | no verbatim pretraining for NC items | on-domain Phase-2 candidate |
 
 License-posture summary for an Apache-2.0 release:
-- **Safe to redistribute curated outputs**: peS2o, RedPajama (v1 arxiv), Dolma, FineWeb/FineWeb-Edu, DCLM-Baseline, Common Pile, Stack-Edu (under ODC-By/CC-BY-4.0).
-- **Do not redistribute, only metadata + URL pointers**: Nemotron-CC (mixed per-doc), Stack v2 (upstream-respect), LessWrong/Alignment Forum (NC).
-- For our project the model is: ingest content under any license, **carry the per-document `license` and `license_source` columns into Gold** (already in the data passport in `RESEARCH.md` section 6), and at distribution time filter to documents whose license is in the Apache-2.0-compatible allowlist.
+- **Item-dependent**: dataset membership alone never makes peS2o, RedPajama,
+  Dolma, FineWeb/FineWeb-Edu, DCLM, Nemotron, or Stack-Edu content
+  redistributable. Exact row evidence decides the route.
+- **Source-wide evidence is exceptional**: it must be explicitly reviewed and
+  scoped to the content itself, not merely the collection or hosting service.
+- Stream2Pretrain decides the route before Silver/model processing. It does not
+  ingest arbitrary licences and postpone filtering until distribution.
 
 ## 5. Recommended Stream2Pretrain v0.1 seed mixture
 
@@ -165,7 +174,9 @@ Recommended 5-component seed:
 | 4 | Stack-Edu Python+ML filter | `HuggingFaceTB/stack-edu` | 80 GB | 8-12B `needs-measurement` | Code, especially Python ML repos. Same dataset OLMo-3 used for code. |
 | 5 | Historical RSS/Atom backfill | custom (arXiv OAI, GH Releases, HF Daily Papers, lab blogs via Wayback) | 5-10 GB | ~1B | Validates the streaming pipeline can operate in "backfill mode" before live polling kicks in; this is also the demo for `valid_from` populated from per-document publication dates. |
 
-Total: ~275-280 GB Bronze, ~55-65B tokens, all under permissive licenses compatible with Apache-2.0.
+Total candidate input was estimated at ~275-280 GB and ~55-65B tokens. Retained
+licence-admitted volume is `needs-measurement`; the original wrapper-based
+compatibility claim is withdrawn.
 
 This stays well under the 500 GB lower bound, leaving room for live ingestion to grow the corpus organically over the demo period without re-tuning storage.
 

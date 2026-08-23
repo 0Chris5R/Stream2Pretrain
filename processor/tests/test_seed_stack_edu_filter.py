@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 import yaml
 
 from processor.seed import stack_edu_filter as se
@@ -71,6 +72,18 @@ def test_license_for_per_file_spdx() -> None:
     assert source == "dataset_metadata"
 
 
+def test_license_for_reads_stack_edu_detected_licence() -> None:
+    spdx, source = se.license_for({"detected_licenses": ["Apache-2.0"]})
+    assert spdx == "Apache-2.0"
+    assert source == "dataset_metadata"
+
+
+def test_license_for_quarantines_ambiguous_detected_licences() -> None:
+    spdx, source = se.license_for({"detected_licenses": ["MIT", "Apache-2.0"]})
+    assert spdx is None
+    assert source == "unknown"
+
+
 def test_license_for_does_not_substitute_dataset_wrapper() -> None:
     spdx, source = se.license_for({})
     assert spdx is None
@@ -94,8 +107,55 @@ def test_to_seed_document_python_ml_repo() -> None:
     assert doc.source_format == "code"
     assert doc.spdx_license == "Apache-2.0"
     assert doc.url.startswith("https://github.com/huggingface/transformers/")
+    assert "/blob/deadbeef/" in doc.url
+    assert doc.license_resolver == "stack-edu-file-item-field"
+    assert doc.license_evidence_revision == f"{se.DATASET_REVISION}:deadbeef"
+    assert doc.license_evidence_scope == "file"
     assert doc.extraction_pipeline == "stack-edu-2024"
     assert doc.extra["language"] == "Python"
+
+
+def test_metadata_only_row_defers_swh_body_fetch() -> None:
+    row = {
+        "blob_id": "a" * 40,
+        "language": "Python",
+        "repo_name": "huggingface/transformers",
+        "path": "src/transformers/modeling.py",
+        "detected_licenses": ["Apache-2.0"],
+    }
+    doc = se.to_seed_document(row)
+
+    assert doc is not None
+    assert doc.text == ""
+    assert doc.body_loader is not None
+    assert doc.spdx_license == "Apache-2.0"
+    assert doc.license_evidence_revision == f"{se.DATASET_REVISION}:{'a' * 40}"
+
+
+def test_metadata_only_row_materializes_exact_swh_blob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: list[str] = []
+
+    def fake_fetch(blob_id: str) -> str:
+        requested.append(blob_id)
+        return "def train():\n    return 1\n"
+
+    monkeypatch.setattr(se, "fetch_software_heritage_blob", fake_fetch)
+    row = {
+        "blob_id": "b" * 40,
+        "language": "Python",
+        "repo_name": "huggingface/transformers",
+        "path": "src/transformers/trainer.py",
+        "detected_licenses": ["Apache-2.0"],
+    }
+    doc = se.to_seed_document(row)
+
+    assert doc is not None
+    materialized = doc.materialize_body()
+    assert requested == ["b" * 40]
+    assert materialized is not None
+    assert materialized.text.startswith("def train")
 
 
 def test_to_seed_document_drops_non_python() -> None:

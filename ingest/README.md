@@ -17,12 +17,14 @@ See ``../SOURCES.md`` for the full feed catalogue and rate limits, and
 | ``github_events/`` | Long-running Deployment (60 s ``X-Poll-Interval``) | continuous |
 | ``github_releases/`` | Atom feed CronJob across curated AI repos | every 2 h |
 | ``github_release_tarball_fetcher/`` | Per-release source tarball expander, one ``CodeFileRecord`` per allow-listed file | event-driven on ``github.release.jobs`` |
-| ``hf_poller/`` | HF Hub REST CronJob (models + daily_papers) | every 10-15 min / 6 h |
+| ``hf_poller/`` | HF Hub exact-version model/dataset/Space cards plus Daily Papers discovery | every 10-15 min / 6 h |
 | ``arxiv_html_fetcher/`` | Native arXiv ``/html/<id>`` fulltext fetcher with ``ar5iv.labs.arxiv.org`` fallback | event-driven on ``docs.normalized`` |
 | ``openreview_poller/`` | OpenReview API v2 venue poll + REVIEWARENA backfill | every 6 h / one-shot |
 | ``common/`` | Shared HTTP client, Kafka producer, MinIO writer, OTel, structlog | n/a |
 
-Every poller emits identical ``BronzeRecord`` shapes per ``schemas/bronze.py``.
+Content pollers emit identical ``BronzeRecord`` shapes per
+``schemas/bronze.py``. Discovery-only records schedule the corresponding
+full-text or release worker and are excluded from training-body curation.
 
 ## Local dev loop
 

@@ -30,10 +30,10 @@ from ingest.common.feeds import (
 )
 from ingest.common.http_client import build_async_client, build_headers
 from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
-from ingest.common.license_admission import effective_license
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
+from ingest.common.page_license import resolve_page_license
 from ingest.common.rate_limit import TokenBucket
 from ingest.common.state import FeedStateStore
 from schemas.sourcefeed import SourceFeedSpec
@@ -74,12 +74,12 @@ def parse_sitemap_xml(xml_text: str) -> tuple[list[tuple[str, str | None]], list
     return ([], [])
 
 
-async def fetch_sitemap(client: httpx.AsyncClient, url: str) -> str | None:
-    """Fetch a sitemap (handling .gz) and return its text or None on failure."""
+async def fetch_sitemap(client: httpx.AsyncClient, url: str) -> str:
+    """Fetch a sitemap (handling .gz), raising so cursors never skip failures."""
     resp = await client.get(url)
     if resp.status_code >= 400:
         log.warning("sitemap.fetch_failed", url=url, status=resp.status_code)
-        return None
+        resp.raise_for_status()
     payload = resp.content
     if url.endswith(".gz") or resp.headers.get("content-type", "").endswith("gzip"):
         with suppress(OSError):
@@ -101,8 +101,6 @@ async def collect_urls(client: httpx.AsyncClient, root_url: str) -> list[tuple[s
             continue
         visited.add(sm_url)
         text = await fetch_sitemap(client, sm_url)
-        if text is None:
-            continue
         urls, children = parse_sitemap_xml(text)
         out.extend(urls)
         for c in children:
@@ -131,12 +129,13 @@ async def poll_feed(
     seen: set[str] = set()
     emitted = 0
     new_lastmod: dict[str, str] = {}
+    entry_failures: list[str] = []
     for url, lastmod in urls:
         prev = seen_lastmod.get(url)
         if lastmod and prev == lastmod:
             continue  # unchanged - skip the page fetch entirely
         await bucket_limit.acquire()
-        license_id, license_source = effective_license(None, feed.license_default)
+        evidence = await resolve_page_license(client, url)
         try:
             rec = await fetch_and_publish(
                 client,
@@ -147,17 +146,26 @@ async def poll_feed(
                 bucket=bucket,
                 expected_content_type="text/html",
                 seen=seen,
-                license_value=license_id,
-                license_source=license_source,
+                license_value=evidence.raw_license,
+                license_source=evidence.license_source,
+                license_resolver=evidence.resolver,
+                license_evidence_url=evidence.evidence_url,
+                license_evidence_revision=evidence.evidence_revision or lastmod,
+                license_evidence_scope=evidence.evidence_scope,
                 admission_producer=admission_producer,
             )
         except httpx.HTTPError as exc:
             log.warning("sitemap.entry_failed", feed=feed.name, url=url, err=str(exc))
+            entry_failures.append(url)
             continue
         if rec is not None:
             emitted += 1
         if lastmod:
             new_lastmod[url] = lastmod
+    if entry_failures:
+        raise RuntimeError(
+            f"{len(entry_failures)} of {len(urls)} sitemap entries failed for {feed.name}"
+        )
     state_store.put(feed.name, {"lastmod": {**seen_lastmod, **new_lastmod}})
     return emitted
 
@@ -184,6 +192,7 @@ async def run_pass(cfg: IngestConfig, feeds: list[SourceFeedSpec]) -> int:
             bucket=cfg.minio_bronze_bucket,
         ) as minio,
     ):
+        failures: list[str] = []
         for feed in feeds:
             try:
                 total += await poll_feed(
@@ -197,6 +206,9 @@ async def run_pass(cfg: IngestConfig, feeds: list[SourceFeedSpec]) -> int:
                 )
             except Exception as exc:
                 log.exception("sitemap.feed_error", feed=feed.name, err=str(exc))
+                failures.append(feed.name)
+    if failures:
+        raise RuntimeError(f"Sitemap feed polling failed: {', '.join(failures)}")
     return total
 
 

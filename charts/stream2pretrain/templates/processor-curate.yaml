@@ -3,6 +3,9 @@
 {{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
 {{- $signingMount := "/var/run/secrets/stream2pretrain/decon-signing" }}
 {{- $externalModels := or .Values.processor.curate.modelBundle.bootstrap (ne .Values.processor.curate.modelBundle.url "") }}
+{{- if ne (int .Values.processor.curate.replicas) 1 }}
+{{- fail "processor.curate.replicas must be exactly 1 until coordinated Bytewax multi-worker recovery is implemented" }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -13,6 +16,9 @@ metadata:
 spec:
   serviceName: {{ $name }}
   replicas: {{ .Values.processor.curate.replicas }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -133,10 +139,18 @@ spec:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
+            - name: S2P_BYTEWAX_FLOW_NAME
+              value: "s2p-curate-v2"
+            - name: S2P_BYTEWAX_RECOVERY_NAME
+              value: "curate-v2"
             - name: S2P_CHECKPOINT_DIR
               value: /var/lib/s2p/checkpoint
             - name: S2P_STATE_DIR
               value: /var/lib/s2p/checkpoint
+            - name: S2P_BYTEWAX_RECOVERY_PARTITIONS
+              value: {{ .Values.processor.curate.checkpoint.recoveryPartitions | int | quote }}
+            - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
+              value: {{ .Values.processor.curate.checkpoint.snapshotSeconds | quote }}
             - name: S2P_MODELS_DIR
               value: {{ ternary "/models" "/opt/models" $externalModels | quote }}
             {{- if and .Values.processor.modelService.enabled (not $externalModels) }}

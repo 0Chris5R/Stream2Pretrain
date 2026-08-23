@@ -14,7 +14,6 @@ from ingest.common.http_client import build_async_client
 from ingest.common.rate_limit import TokenBucket
 from ingest.common.tests.conftest import FakeMinio  # type: ignore[attr-defined]
 from ingest.github_release_tarball_fetcher.fetcher import (
-    DEFAULT_ALLOWED_LICENSES,
     FetcherConfig,
     ReleaseRef,
     TarballMetrics,
@@ -22,6 +21,7 @@ from ingest.github_release_tarball_fetcher.fetcher import (
     code_object_key,
     code_s3_uri,
     fetch_repo_license,
+    fetch_repo_license_evidence,
     fetch_tarball,
     is_release_candidate,
     parse_release_url,
@@ -29,6 +29,7 @@ from ingest.github_release_tarball_fetcher.fetcher import (
 )
 from processor.common import bronze_loads
 from schemas.bronze import BronzeRecord
+from schemas.license_admission import LicenseAdmissionDecision
 
 
 def _cfg() -> IngestConfig:
@@ -81,6 +82,14 @@ class _FakeCodeProducer:
         self.headers.append(headers)
 
 
+class _FakeAdmissionProducer:
+    def __init__(self) -> None:
+        self.sent: list[LicenseAdmissionDecision] = []
+
+    async def send(self, decision: LicenseAdmissionDecision) -> None:
+        self.sent.append(decision)
+
+
 def _build_tarball(files: dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
     top = "huggingface-transformers-deadbee"
@@ -126,13 +135,6 @@ def test_code_object_key_layout() -> None:
     assert uri == "s3://bronze/" + key
 
 
-def test_default_allowed_licenses_contains_apache_and_mit() -> None:
-    assert "Apache-2.0" in DEFAULT_ALLOWED_LICENSES
-    assert "MIT" in DEFAULT_ALLOWED_LICENSES
-    # GPL is intentionally excluded.
-    assert "GPL-3.0" not in DEFAULT_ALLOWED_LICENSES
-
-
 @pytest.mark.asyncio
 async def test_github_requests_fall_back_anonymously_after_stale_token() -> None:
     ref = ReleaseRef("huggingface", "transformers", "v5.0.0")
@@ -141,8 +143,12 @@ async def test_github_requests_fall_back_anonymously_after_stale_token() -> None
         return httpx.Response(401, json={"message": "Bad credentials"})
 
     def anonymous_handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url).endswith("/repos/huggingface/transformers"):
-            return httpx.Response(200, json={"license": {"spdx_id": "Apache-2.0"}})
+        if request.url.path.endswith("/repos/huggingface/transformers/license"):
+            assert request.url.params["ref"] == "v5.0.0"
+            return httpx.Response(
+                200,
+                json={"license": {"spdx_id": "Apache-2.0"}, "sha": "a" * 40},
+            )
         if "/tarball/" in str(request.url):
             return httpx.Response(200, content=b"public-tarball")
         return httpx.Response(404)
@@ -162,6 +168,38 @@ async def test_github_requests_fall_back_anonymously_after_stale_token() -> None
 
 
 @pytest.mark.asyncio
+async def test_repo_license_requires_and_retains_immutable_blob_sha() -> None:
+    ref = ReleaseRef("huggingface", "transformers", "v5.0.0")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["ref"] == ref.tag
+        return httpx.Response(
+            200,
+            json={
+                "license": {"spdx_id": "Apache-2.0"},
+                "sha": "f" * 40,
+                "path": "LICENSE",
+                "html_url": (
+                    "https://github.com/huggingface/transformers/blob/"
+                    f"{'f' * 40}/LICENSE"
+                ),
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        evidence = await fetch_repo_license_evidence(client, ref)
+    finally:
+        await client.aclose()
+
+    assert evidence is not None
+    assert evidence.spdx_id == "Apache-2.0"
+    assert evidence.blob_sha == "f" * 40
+    assert evidence.path == "LICENSE"
+    assert evidence.api_url.endswith("/license?ref=v5.0.0")
+
+
+@pytest.mark.asyncio
 async def test_process_release_emits_records_and_writes_minio() -> None:
     ref = ReleaseRef("huggingface", "transformers", "v5.0.0")
     tarball = _build_tarball(
@@ -174,10 +212,15 @@ async def test_process_release_emits_records_and_writes_minio() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
-        if url.endswith("/repos/huggingface/transformers"):
+        if request.url.path.endswith("/repos/huggingface/transformers/license"):
+            assert request.url.params["ref"] == "v5.0.0"
             return httpx.Response(
                 200,
-                json={"license": {"spdx_id": "Apache-2.0"}},
+                json={
+                    "license": {"spdx_id": "Apache-2.0"},
+                    "sha": "b" * 40,
+                    "path": "LICENSE",
+                },
                 headers={"content-type": "application/json"},
             )
         if "/tarball/" in url:
@@ -204,6 +247,7 @@ async def test_process_release_emits_records_and_writes_minio() -> None:
             minio=minio,
             producer=producer,
             bucket=bucket,
+            admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
             valid_from=valid_from,
         )
     finally:
@@ -214,13 +258,17 @@ async def test_process_release_emits_records_and_writes_minio() -> None:
     assert paths == {"src/foo.py", "README.md"}
     for r in producer.sent:
         assert r.source_feed == "github-release-tarballs"
-        assert r.source_format == "code"
-        assert r.extraction_pipeline == "github-release-tarball-2026-06"
         assert r.spdx_license == "Apache-2.0"
         assert r.spdx_license_source == "github_api"
         assert r.fetched_at == valid_from
         assert r.raw_html_s3_uri.startswith("s3://bronze/code/repo=huggingface__transformers/")
-        assert bronze_loads(r.model_dump_json().encode("utf-8")).source_format == "code"
+        round_trip = bronze_loads(r.model_dump_json().encode("utf-8"))
+        if str(r.url).endswith("README.md"):
+            assert round_trip.source_format == "web"
+            assert round_trip.extraction_pipeline == "github-readme-markdown-v1"
+        else:
+            assert round_trip.source_format == "code"
+            assert round_trip.extraction_pipeline == "github-release-tarball-2026-06"
     # And one MinIO object per emitted file.
     keys = list(minio.objects.keys())
     assert len(keys) == 2
@@ -232,8 +280,11 @@ async def test_process_release_skips_disallowed_license() -> None:
     ref = ReleaseRef("evil", "gpl-only", "v1.0.0")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url).endswith("/repos/evil/gpl-only"):
-            return httpx.Response(200, json={"license": {"spdx_id": "GPL-3.0"}})
+        if request.url.path.endswith("/repos/evil/gpl-only/license"):
+            return httpx.Response(
+                200,
+                json={"license": {"spdx_id": "GPL-3.0"}, "sha": "c" * 40},
+            )
         # The tarball endpoint must not be hit if the license check rejects.
         return httpx.Response(500, text="should not be called")
 
@@ -251,6 +302,7 @@ async def test_process_release_skips_disallowed_license() -> None:
             minio=minio,
             producer=producer,
             bucket=bucket,
+            admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
             valid_from=None,
         )
     finally:
@@ -266,7 +318,7 @@ async def test_process_release_skips_when_license_missing() -> None:
     ref = ReleaseRef("noLicense", "mystery", "v0")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url).endswith("/repos/noLicense/mystery"):
+        if request.url.path.endswith("/repos/noLicense/mystery/license"):
             return httpx.Response(200, json={"license": None})
         return httpx.Response(404)
 
@@ -284,6 +336,7 @@ async def test_process_release_skips_when_license_missing() -> None:
             minio=minio,
             producer=producer,
             bucket=bucket,
+            admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()
@@ -296,8 +349,11 @@ async def test_process_release_handles_tarball_error() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
-        if url.endswith("/repos/hf/transformers"):
-            return httpx.Response(200, json={"license": {"spdx_id": "MIT"}})
+        if request.url.path.endswith("/repos/hf/transformers/license"):
+            return httpx.Response(
+                200,
+                json={"license": {"spdx_id": "MIT"}, "sha": "d" * 40},
+            )
         if "/tarball/" in url:
             return httpx.Response(502, text="bad gateway")
         return httpx.Response(404)
@@ -316,6 +372,7 @@ async def test_process_release_handles_tarball_error() -> None:
             minio=minio,
             producer=producer,
             bucket=bucket,
+            admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()
@@ -343,13 +400,16 @@ def test_release_candidate_excludes_observed_ci_refs(tag: str, expected: bool) -
 
 
 @pytest.mark.asyncio
-async def test_process_release_bounds_files_per_release() -> None:
+async def test_process_release_does_not_silently_cap_release_files() -> None:
     ref = ReleaseRef("huggingface", "transformers", "v5.0.0")
     tarball = _build_tarball({f"src/file_{index}.py": b"x = 1\n" for index in range(5)})
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url).endswith("/repos/huggingface/transformers"):
-            return httpx.Response(200, json={"license": {"spdx_id": "Apache-2.0"}})
+        if request.url.path.endswith("/repos/huggingface/transformers/license"):
+            return httpx.Response(
+                200,
+                json={"license": {"spdx_id": "Apache-2.0"}, "sha": "e" * 40},
+            )
         return httpx.Response(200, content=tarball)
 
     client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
@@ -360,23 +420,19 @@ async def test_process_release_bounds_files_per_release() -> None:
         emitted = await process_release(
             ref,
             cfg=_cfg(),
-            fetcher_cfg=FetcherConfig(max_files_per_release=3),
+            fetcher_cfg=FetcherConfig(),
             client=client,
             minio=minio,
             producer=producer,
             bucket=TokenBucket(rate=100.0, burst=8),
+            admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
         )
     finally:
         await client.aclose()
 
-    assert emitted == 3
-    assert len(minio.objects) == 3
-    assert len(producer.sent) == 3
-
-
-def test_fetcher_config_rejects_unbounded_work() -> None:
-    with pytest.raises(ValueError, match="file limits"):
-        FetcherConfig(max_files_per_release=0)
+    assert emitted == 5
+    assert len(minio.objects) == 5
+    assert len(producer.sent) == 5
 
 
 def test_tarball_metrics_render_prometheus() -> None:

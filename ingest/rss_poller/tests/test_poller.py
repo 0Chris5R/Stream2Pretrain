@@ -117,6 +117,7 @@ async def test_poll_feed_emits_records(tmp_path: Path) -> None:
     assert emitted == 2
     assert len(fake_producer.sent) == 2
     assert len(fake_admissions.sent) == 2
+    assert {sent["record"].source_format for sent in fake_producer.sent} == {"html"}
     saved = state.get("rss-test")
     assert saved.get("etag") == '"feed-v1"'
 
@@ -200,3 +201,143 @@ async def test_poll_feed_rejects_non_feed_success_response(tmp_path: Path) -> No
             )
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unlicensed_item_is_quarantined_after_bounded_probe(tmp_path: Path) -> None:
+    body = """<rss version="2.0"><channel><title>x</title>
+    <item><title>Unlicensed</title><link>https://example.com/unlicensed</link></item>
+    </channel></rss>"""
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/rss":
+            return httpx.Response(200, text=body, headers={"content-type": "application/rss+xml"})
+        return httpx.Response(200, text="<html><head></head><body>private body</body></html>")
+
+    producer = FakeProducer()
+    admissions = FakeProducer()
+    minio = FakeMinio()
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        emitted = await poll_feed(
+            _feed(),
+            client=client,
+            producer=producer,  # type: ignore[arg-type]
+            minio=minio,  # type: ignore[arg-type]
+            bucket="bronze",
+            state_store=FeedStateStore(tmp_path),
+            admission_producer=admissions,  # type: ignore[arg-type]
+        )
+    finally:
+        await client.aclose()
+
+    assert emitted == 0
+    assert not producer.sent
+    assert not minio.objects
+    assert admissions.sent[0]["record"].status == "quarantined"
+    # One HEAD and one bounded range probe are allowed; no separate full GET.
+    assert requests == [("GET", "/rss"), ("HEAD", "/unlicensed"), ("GET", "/unlicensed")]
+
+
+@pytest.mark.asyncio
+async def test_item_html_license_is_admitted_before_full_fetch(tmp_path: Path) -> None:
+    body = """<rss version="2.0"><channel><title>x</title>
+    <item><title>Licensed</title><link>https://example.com/licensed</link></item>
+    </channel></rss>"""
+    requests: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rss":
+            return httpx.Response(200, text=body, headers={"content-type": "application/rss+xml"})
+        requests.append((request.method, request.headers.get("range")))
+        if request.method == "HEAD":
+            return httpx.Response(200, request=request)
+        if request.headers.get("range"):
+            return httpx.Response(
+                206,
+                request=request,
+                text='<meta name="dcterms.license" content="CC-BY-4.0">',
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            text="<html><body>licensed body</body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    producer = FakeProducer()
+    admissions = FakeProducer()
+    minio = FakeMinio()
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        emitted = await poll_feed(
+            _feed(),
+            client=client,
+            producer=producer,  # type: ignore[arg-type]
+            minio=minio,  # type: ignore[arg-type]
+            bucket="bronze",
+            state_store=FeedStateStore(tmp_path),
+            admission_producer=admissions,  # type: ignore[arg-type]
+        )
+    finally:
+        await client.aclose()
+
+    assert emitted == 1
+    assert admissions.sent[0]["record"].resolver == "bounded-html-license-metadata"
+    assert admissions.sent[0]["record"].evidence_scope == "item"
+    assert requests == [
+        ("HEAD", None),
+        ("GET", "bytes=0-65535"),
+        ("GET", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_arxiv_rss_record_is_discovery_metadata_not_duplicate_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = """<rss version="2.0"><channel><title>arXiv</title>
+    <item><title>Paper</title><link>https://arxiv.org/abs/2608.01234</link></item>
+    </channel></rss>"""
+
+    async def fake_arxiv_license(*_: object, **__: object) -> tuple[str, str]:
+        return "CC-BY-4.0", "arxiv_api"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rss":
+            return httpx.Response(200, text=body, request=request)
+        return httpx.Response(
+            200,
+            text="<html><body>abstract page</body></html>",
+            request=request,
+            headers={"content-type": "text/html"},
+        )
+
+    monkeypatch.setattr(
+        "ingest.rss_poller.poller.fetch_arxiv_license_with_source",
+        fake_arxiv_license,
+    )
+    producer = FakeProducer()
+    admissions = FakeProducer()
+    minio = FakeMinio()
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        emitted = await poll_feed(
+            _feed(),
+            client=client,
+            producer=producer,  # type: ignore[arg-type]
+            minio=minio,  # type: ignore[arg-type]
+            bucket="bronze",
+            state_store=FeedStateStore(tmp_path),
+            admission_producer=admissions,  # type: ignore[arg-type]
+        )
+    finally:
+        await client.aclose()
+
+    assert emitted == 1
+    record = producer.sent[0]["record"]
+    assert record.source_format == "metadata"
+    assert record.extraction_pipeline == "arxiv-rss-discovery-v1"
+    assert record.spdx_license == "CC-BY-4.0"

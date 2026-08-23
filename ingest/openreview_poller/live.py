@@ -48,6 +48,8 @@ from ingest.common.state import FeedStateStore
 from schemas.bronze import BronzeRecord
 
 log = get_logger(__name__)
+OPENREVIEW_TERMS_URL = "https://openreview.net/legal/terms"
+OPENREVIEW_TERMS_REVISION = "retrieved-2026-08-23"
 
 OPENREVIEW_BASE_V2 = "https://api2.openreview.net"
 OPENREVIEW_PDF_BASE = "https://openreview.net/pdf"
@@ -303,7 +305,12 @@ async def emit_submission(
         source_url=pdf_url,
         source_feed=SOURCE_FEED,
         license_value=raw_license,
-        license_source="dataset_metadata" if raw_license else "unknown",
+        license_source="openreview_note" if raw_license else "unknown",
+        source_format="pdf",
+        resolver="openreview-article-license-field",
+        evidence_url=f"https://openreview.net/forum?id={note.forum}",
+        evidence_revision=note.id,
+        evidence_scope="item" if raw_license else "unknown",
     )
     await admission_producer.send(admission.decision)
     if not admission.fetch_allowed:
@@ -318,7 +325,9 @@ async def emit_submission(
         status, body = await fetch_pdf_bytes(http, pdf_url)
     except Exception as exc:
         log.warning("openreview.pdf_fetch_failed", note=note.id, err=str(exc))
-        return False
+        raise
+    if status >= 500 or status in {408, 425, 429}:
+        raise RuntimeError(f"transient OpenReview PDF response {status} for {note.id}")
     if status != 200 or not body:
         log.warning("openreview.pdf_bad_status", note=note.id, status=status)
         return False
@@ -356,7 +365,7 @@ async def emit_submission(
         extraction_pipeline=PIPELINE_PDF_PENDING,
         spdx_license=admission.license_id,
         training_usage=admission.training_usage,
-        spdx_license_source="dataset_metadata",
+        spdx_license_source="openreview_note" if raw_license else "unknown",
     )
     await producer.send(
         record,
@@ -393,11 +402,21 @@ async def emit_review_thread(
         raw_license = _str_or_none(note.content.get("license")) or _str_or_none(
             note.content.get("license_url")
         )
+        terms_based = raw_license is None
         admission = decide_license_admission(
             source_url=url,
             source_feed=SOURCE_FEED,
-            license_value=raw_license,
-            license_source="dataset_metadata" if raw_license else "unknown",
+            license_value=raw_license or "CC-BY-4.0",
+            license_source="openreview_note" if raw_license else "openreview_terms",
+            source_format="review",
+            resolver=(
+                "openreview-comment-license-field"
+                if raw_license
+                else "openreview-public-comment-terms"
+            ),
+            evidence_url=url if raw_license else OPENREVIEW_TERMS_URL,
+            evidence_revision=note.id if raw_license else OPENREVIEW_TERMS_REVISION,
+            evidence_scope="item" if raw_license else "source_terms",
         )
         await admission_producer.send(admission.decision)
         if not admission.fetch_allowed:
@@ -446,7 +465,7 @@ async def emit_review_thread(
             extraction_pipeline=PIPELINE_REVIEW,
             spdx_license=admission.license_id,
             training_usage=admission.training_usage,
-            spdx_license_source="dataset_metadata",
+            spdx_license_source="openreview_terms" if terms_based else "openreview_note",
         )
         await producer.send(
             record,
@@ -470,6 +489,12 @@ def _iter_notes(items: Any, *, venue_id: str) -> Iterator[_NoteView]:
             continue
 
 
+def _note_revision_key(note: _NoteView) -> str:
+    """Return a stable identity for one version of an OpenReview note."""
+    revision = note.mdate_ms or note.cdate_ms or 0
+    return f"{note.id}:{revision}"
+
+
 async def poll_venue(
     venue: VenueSpec,
     *,
@@ -484,7 +509,9 @@ async def poll_venue(
 ) -> tuple[int, int, int]:
     """One venue pass; returns (submissions_emitted, reviews_emitted, skipped)."""
     state = state_store.get(venue.state_key)
-    seen: set[str] = set(state.get("seen_note_ids", []))
+    legacy_seen: set[str] = set(state.get("seen_note_ids", []))
+    seen_submissions: set[str] = set(state.get("seen_submission_revisions", []))
+    seen_replies: set[str] = set(state.get("seen_reply_revisions", []))
 
     # openreview-py is synchronous (uses requests, paginates server-side).
     # A venue with thousands of submissions can take many seconds; running
@@ -499,54 +526,73 @@ async def poll_venue(
         "openreview.venue_listed",
         venue=venue.venue_id,
         total=len(submissions),
-        seen=len(seen),
+        seen=len(seen_submissions) + len(legacy_seen),
     )
 
     submissions_emitted = 0
     reviews_emitted = 0
     skipped = 0
     for note in submissions:
-        if note.id in seen:
+        submission_revision = _note_revision_key(note)
+        if note.id in legacy_seen or submission_revision in seen_submissions:
             skipped += 1
-            continue
-        ok = await emit_submission(
-            note=note,
-            venue=venue,
-            cfg=cfg,
-            producer=producer,
-            minio=minio,
-            http=http,
-            bucket=bucket,
-            admission_producer=admission_producer,
-        )
-        if not ok:
-            continue
-        submissions_emitted += 1
+        else:
+            ok = await emit_submission(
+                note=note,
+                venue=venue,
+                cfg=cfg,
+                producer=producer,
+                minio=minio,
+                http=http,
+                bucket=bucket,
+                admission_producer=admission_producer,
+            )
+            if ok:
+                submissions_emitted += 1
+            # Missing/restrictive rights, a missing PDF field, or a stable 4xx
+            # is a completed result for this exact note revision. A later
+            # mdate creates a new revision key. Transient failures raise above
+            # and therefore never advance state.
+            seen_submissions.add(submission_revision)
         # Pull the review thread for the same forum; openreview-py's
         # get_notes(forum=...) returns the root note plus all replies.
+        # Review rights are independent from the submission-paper licence, so
+        # a quarantined paper must not suppress its permissively licensed
+        # public reviews or rebuttals. A failed thread request is not an empty
+        # thread: fail the venue pass and retry without advancing ``seen``.
         # Same async-blocking concern as the get_all_notes call above.
-        try:
-            raw_replies = await asyncio.to_thread(or_client.get_notes, forum=note.forum)
-            forum_replies = list(_iter_notes(raw_replies, venue_id=venue.venue_id))
-        except Exception as exc:
-            log.warning("openreview.forum_fetch_failed", note=note.id, err=str(exc))
-            forum_replies = []
+        raw_replies = await asyncio.to_thread(or_client.get_notes, forum=note.forum)
+        forum_replies = list(_iter_notes(raw_replies, venue_id=venue.venue_id))
+        new_replies = [
+            reply
+            for reply in forum_replies
+            if reply.id != note.forum and _note_revision_key(reply) not in seen_replies
+        ]
         reviews_emitted += await emit_review_thread(
             forum_id=note.forum,
-            notes=forum_replies,
+            notes=new_replies,
             venue=venue,
             cfg=cfg,
             producer=producer,
             minio=minio,
             admission_producer=admission_producer,
         )
-        seen.add(note.id)
+        seen_replies.update(_note_revision_key(reply) for reply in new_replies)
 
-    # Bound the seen-set; OpenReview venues stay below 10k submissions, so we
-    # keep up to 20k ids to span two seasons.
-    if len(seen) > 20000:
-        seen = set(sorted(seen)[-10000:])
-    state_store.put(venue.state_key, {"seen_note_ids": sorted(seen)})
+    # Bound versioned state while retaining the legacy key for upgrades. New
+    # replies are checked every pass even after a submission has been handled.
+    if len(seen_submissions) > 20000:
+        seen_submissions = set(sorted(seen_submissions)[-10000:])
+    if len(seen_replies) > 100000:
+        seen_replies = set(sorted(seen_replies)[-50000:])
+    state_store.put(
+        venue.state_key,
+        {
+            "seen_note_ids": sorted(legacy_seen),
+            "seen_submission_revisions": sorted(seen_submissions),
+            "seen_reply_revisions": sorted(seen_replies),
+        },
+    )
     return submissions_emitted, reviews_emitted, skipped
 
 

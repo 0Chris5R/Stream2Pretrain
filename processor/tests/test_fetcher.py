@@ -7,15 +7,14 @@ from typing import Any
 
 import pytest
 
-from processor import common
 from processor.fetcher import (
     FetcherState,
+    _markdown_prose_projection,
+    _review_payload_text,
     fetch_raw_bytes,
     fetcher_input_topics,
-    native_consumer_config,
     normalize,
     process_bronze_payload,
-    run_native_fetcher,
     serialize_for_kafka,
     uses_scientific_extraction,
 )
@@ -91,6 +90,49 @@ def test_scientific_extraction_is_source_aware(bronze_record: BronzeRecord) -> N
     assert uses_scientific_extraction(blog) is False
     assert uses_scientific_extraction(paper) is True
     assert uses_scientific_extraction(review) is False
+
+
+def test_hf_card_projection_excludes_frontmatter_and_fenced_code() -> None:
+    payload = b"""---
+license: apache-2.0
+pipeline_tag: text-generation
+---
+# Useful Model
+
+This card explains the intended use and evaluation results.
+
+```python
+SECRET = "not training prose"
+```
+"""
+
+    text, title, metadata = _markdown_prose_projection(payload)
+
+    assert title == "Useful Model"
+    assert "intended use" in text
+    assert "SECRET" not in text
+    assert "pipeline_tag" in metadata
+
+
+def test_openreview_projection_separates_labels_from_review_prose() -> None:
+    payload = b'''{
+      "id": "note-1",
+      "forum": "paper-1",
+      "invitation": "ICLR.cc/2026/Conference/-/Official_Review",
+      "content": {
+        "summary": {"value": "The paper studies robust optimization."},
+        "strengths": {"value": "The evaluation covers several baselines."},
+        "rating": {"value": "8: accept"},
+        "confidence": {"value": "4: high"}
+      }
+    }'''
+
+    text, _, metadata = _review_payload_text(payload)
+
+    assert "[FIELD summary]" in text
+    assert "[FIELD strengths]" in text
+    assert "8: accept" not in text
+    assert "rating: 8: accept" in metadata
 
 
 def test_fetch_raw_bytes_rejects_oversized_stored_object(
@@ -202,6 +244,8 @@ def test_normalize_structured_metadata_extracts_human_text(bronze_record: Bronze
     assert silver.title == "Research model"
     assert "scientific retrieval" in silver.text
     assert "https://example.invalid" not in silver.text
+    assert silver.model_text == ""
+    assert silver.segments == []
     assert silver.extracted_with == "hf-api-json-v1"
 
 
@@ -232,6 +276,8 @@ def test_normalize_oai_xml_extracts_text_without_training_on_markup(
     assert "reproducible streaming pipeline" in silver.text
     assert "<dc:" not in silver.text
     assert "https://arxiv.org" not in silver.text
+    assert silver.model_text == ""
+    assert silver.segments == []
     assert silver.extracted_with == "oai-pmh-metadata-v1"
 
 
@@ -283,183 +329,21 @@ def test_serialize_for_kafka_roundtrip(silver_record: Any) -> None:
     assert decoded["doc_id"] == silver_record.doc_id
 
 
-class _FakeMessage:
-    def __init__(self, payload: bytes) -> None:
-        self._payload = payload
-
-    def error(self) -> None:
-        return None
-
-    def value(self) -> bytes:
-        return self._payload
-
-    def topic(self) -> str:
-        return "raw.fetched"
-
-    def partition(self) -> int:
-        return 2
-
-    def offset(self) -> int:
-        return 7
-
-
-class _FakeConsumer:
-    def __init__(self, config: dict[str, object], payload: bytes) -> None:
-        self.config = config
-        self._message = _FakeMessage(payload)
-        self.topics: list[str] = []
-        self.commits: list[tuple[list[Any], bool]] = []
-        self.closed = False
-
-    def subscribe(self, topics: list[str], *, on_revoke: Any = None) -> None:
-        self.topics = topics
-        self.on_revoke = on_revoke
-
-    def poll(self, _timeout: float) -> _FakeMessage | None:
-        message, self._message = self._message, None
-        return message
-
-    def commit(self, *, offsets: list[Any], asynchronous: bool) -> None:
-        self.commits.append((offsets, asynchronous))
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _FakeProducer:
-    def __init__(self, config: dict[str, object], *, delivery_error: object = None) -> None:
-        self.config = config
-        self.delivery_error = delivery_error
-        self.records: list[dict[str, Any]] = []
-
-    def produce(self, topic: str, **kwargs: Any) -> None:
-        self.records.append({"topic": topic, **kwargs})
-        callback = kwargs.get("on_delivery")
-        if callback is not None:
-            callback(self.delivery_error, object())
-
-    def poll(self, _timeout: float) -> None:
-        return None
-
-    def flush(self, _timeout: float) -> int:
-        return 0
-
-
-def test_native_fetcher_commits_only_after_output_delivery(
-    bronze_record: BronzeRecord,
-    silver_record: Any,
-    monkeypatch: Any,
+def test_fetcher_input_topics_default_to_production_only(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = common.load_config()
-    consumer: _FakeConsumer | None = None
-    producer: _FakeProducer | None = None
-
-    def consumer_factory(config: dict[str, object]) -> _FakeConsumer:
-        nonlocal consumer
-        consumer = _FakeConsumer(config, bronze_record.model_dump_json().encode())
-        return consumer
-
-    def producer_factory(config: dict[str, object]) -> _FakeProducer:
-        nonlocal producer
-        producer = _FakeProducer(config)
-        return producer
-
-    monkeypatch.setattr("processor.fetcher.process_bronze_payload", lambda *_: silver_record)
-    monkeypatch.setenv("S2P_SMOKE_RAW_TOPIC", "raw.smoke")
-    run_native_fetcher(
-        cfg,
-        state=_state(_FakeS3(b"")),
-        consumer_factory=consumer_factory,
-        producer_factory=producer_factory,
-        max_messages=1,
-    )
-
-    assert consumer is not None
-    assert producer is not None
-    assert consumer.topics == ["raw.fetched", "raw.smoke"]
-    assert consumer.config["enable.auto.commit"] is False
-    assert consumer.config["enable.auto.offset.store"] is False
-    assert producer.records[0]["topic"] == "docs.normalized"
-    assert consumer.commits[0][0][0].partition == 2
-    assert consumer.commits[0][0][0].offset == 8
-    assert consumer.commits[0][1] is False
-    assert consumer.closed is True
-
-
-def test_native_fetcher_does_not_commit_after_delivery_failure(
-    bronze_record: BronzeRecord,
-    silver_record: Any,
-    monkeypatch: Any,
-) -> None:
-    cfg = common.load_config()
-    consumer: _FakeConsumer | None = None
-
-    def consumer_factory(config: dict[str, object]) -> _FakeConsumer:
-        nonlocal consumer
-        consumer = _FakeConsumer(config, bronze_record.model_dump_json().encode())
-        return consumer
-
-    def producer_factory(config: dict[str, object]) -> _FakeProducer:
-        return _FakeProducer(config, delivery_error=RuntimeError("broker rejected record"))
-
-    monkeypatch.setattr("processor.fetcher.process_bronze_payload", lambda *_: silver_record)
-    with pytest.raises(RuntimeError, match="producer delivery failed"):
-        run_native_fetcher(
-            cfg,
-            state=_state(_FakeS3(b"")),
-            consumer_factory=consumer_factory,
-            producer_factory=producer_factory,
-            max_messages=1,
-        )
-
-    assert consumer is not None
-    assert consumer.commits == []
-    assert consumer.closed is True
-
-
-def test_native_consumer_defaults_to_earliest(monkeypatch: Any) -> None:
-    monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "beginning")
-    monkeypatch.delenv("S2P_SMOKE_RAW_TOPIC", raising=False)
     monkeypatch.delenv("S2P_FETCHER_INPUT_TOPICS", raising=False)
-    cfg = common.load_config()
+    from processor import common
 
-    assert native_consumer_config(cfg)["auto.offset.reset"] == "earliest"
-    assert fetcher_input_topics(cfg) == ["raw.fetched", "raw.smoke"]
+    assert fetcher_input_topics(common.load_config()) == ["raw.fetched"]
 
 
-def test_fetcher_input_topics_support_isolated_traffic_class(monkeypatch: Any) -> None:
+def test_fetcher_input_topics_support_isolated_traffic_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from processor import common
+
     cfg = common.load_config()
     monkeypatch.setenv("S2P_FETCHER_INPUT_TOPICS", " raw.smoke, raw.smoke ")
 
     assert fetcher_input_topics(cfg) == ["raw.smoke"]
-
-
-def test_native_fetcher_supports_isolated_output_lane(
-    bronze_record: BronzeRecord,
-    silver_record: Any,
-    monkeypatch: Any,
-) -> None:
-    cfg = common.load_config()
-    producer: _FakeProducer | None = None
-
-    def consumer_factory(config: dict[str, object]) -> _FakeConsumer:
-        return _FakeConsumer(config, bronze_record.model_dump_json().encode())
-
-    def producer_factory(config: dict[str, object]) -> _FakeProducer:
-        nonlocal producer
-        producer = _FakeProducer(config)
-        return producer
-
-    monkeypatch.setattr("processor.fetcher.process_bronze_payload", lambda *_: silver_record)
-    monkeypatch.setenv("S2P_FETCHER_INPUT_TOPICS", "raw.smoke")
-    monkeypatch.setenv("S2P_FETCHER_OUTPUT_TOPIC", "docs.normalized.smoke")
-    run_native_fetcher(
-        cfg,
-        state=_state(_FakeS3(b"")),
-        consumer_factory=consumer_factory,
-        producer_factory=producer_factory,
-        max_messages=1,
-    )
-
-    assert producer is not None
-    assert producer.records[0]["topic"] == "docs.normalized.smoke"

@@ -77,7 +77,7 @@ def test_stream_source_filter_matches_deployed_feed_names() -> None:
     assert _is_arxiv_source_feed("oai-arxiv-cs", None)
     assert _is_arxiv_source_feed("rss-arxiv-cs-lg", None)
     assert _is_arxiv_source_feed("arxiv-oai-cs", None)
-    assert not _is_arxiv_source_feed("hf-daily-papers", None)
+    assert _is_arxiv_source_feed("hf-daily-papers", None)
     assert _is_arxiv_source_feed("custom-arxiv", ("custom-arxiv",))
 
 
@@ -113,12 +113,11 @@ async def test_stream_reuses_one_consumer_and_commits_each_handled_batch(
         auto_offset_reset="latest",
         max_records=None,
         feed_name="arxiv-html-fetcher",
-        license_default="per-record",
     )
 
     assert await fetcher_module._run_stream(args, _cfg()) == 33
-    assert batches == [32, 1]
-    assert consumer.commits == 2
+    assert batches == [1] * 33
+    assert consumer.commits == 33
 
 
 @pytest.mark.asyncio
@@ -148,7 +147,6 @@ async def test_stream_commits_a_fully_quarantined_batch(
         auto_offset_reset="latest",
         max_records=None,
         feed_name="arxiv-html-fetcher",
-        license_default="per-record",
     )
 
     assert await fetcher_module._run_stream(args, _cfg()) == 0
@@ -348,6 +346,15 @@ async def test_fetch_one_falls_back_to_ar5iv_on_404() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
+        if "arxiv.org/abs/" in url:
+            return httpx.Response(
+                200,
+                text=(
+                    '<div class="abs-license"><a '
+                    'href="https://creativecommons.org/licenses/by/4.0/">'
+                    "view license</a></div>"
+                ),
+            )
         if "arxiv.org/html/" in url and "ar5iv.labs" not in url:
             state["primary_calls"] += 1
             return httpx.Response(404, text="not found")
@@ -479,7 +486,8 @@ def test_make_bronze_record_html_branch() -> None:
         outcome=outcome,
         feed_name="arxiv-html-fetcher",
         bucket="bronze",
-        license_default="CC-BY-4.0",
+        admitted_license="CC-BY-4.0",
+        admitted_license_source="oai_metadata",
         bytes_size=len(ARXIV_HTML_SAMPLE),
     )
     assert content_type == "text/html"
@@ -514,14 +522,15 @@ def test_make_bronze_record_metadata_stub_branch() -> None:
         outcome=outcome,
         feed_name="arxiv-html-fetcher",
         bucket="bronze",
-        license_default="arxiv-non-exclusive-distribution",
+        admitted_license="arxiv-non-exclusive-distribution",
+        admitted_license_source="arxiv_api",
         bytes_size=len(stub),
     )
     assert content_type == "application/json"
     assert key.endswith(".stub.json.gz")
     assert record.source_format == "metadata"
     assert record.http_status == 404
-    assert record.spdx_license_source == "manual_override"
+    assert record.spdx_license_source == "arxiv_api"
     assert b"fulltext_unavailable" in stub
 
 
@@ -543,7 +552,8 @@ def test_make_bronze_record_pdf_branch() -> None:
         outcome=outcome,
         feed_name="arxiv-html-fetcher",
         bucket="bronze",
-        license_default="arxiv-non-exclusive-distribution",
+        admitted_license="arxiv-non-exclusive-distribution",
+        admitted_license_source="arxiv_api",
         bytes_size=len(outcome.html or b""),
     )
 
@@ -586,10 +596,12 @@ async def test_run_for_ids_emits_one_record_per_id() -> None:
     minio = _FakeMinio()
     producer = _FakeProducer()
     emitted = await run_for_ids(
-        ["2401.12345", "2401.12346"],
+        [
+            ArxivCandidate("2401.12345", "CC-BY-4.0", "oai_metadata"),
+            ArxivCandidate("2401.12346", "CC-BY-4.0", "rss_entry"),
+        ],
         _cfg(),
         feed_name="arxiv-html-fetcher",
-        license_default="CC-BY-4.0",
         rate_per_second=64.0,
         burst=64,
         min_sleep_s=0.0,
@@ -602,6 +614,43 @@ async def test_run_for_ids_emits_one_record_per_id() -> None:
     assert {r.source_format for r in producer.records} == {"html"}
     assert {r.extraction_pipeline for r in producer.records} == {"arxiv-html-2026-06"}
     assert len(minio.objects) == 2
+
+
+@pytest.mark.asyncio
+async def test_non_item_provenance_never_replaces_item_level_arxiv_lookup() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.host == "arxiv.org" and "/abs/" in request.url.path:
+            return httpx.Response(
+                200,
+                text=(
+                    '<div class="abs-license"><a '
+                    'href="https://creativecommons.org/licenses/by/4.0/">'
+                    "view license</a></div>"
+                ),
+            )
+        if request.url.host == "arxiv.org" and "/html/" in request.url.path:
+            return httpx.Response(200, text=ARXIV_HTML_SAMPLE)
+        raise AssertionError(f"unexpected URL {request.url}")
+
+    emitted = await run_for_ids(
+        [ArxivCandidate("2401.12345", "arxiv-non-exclusive-distribution", "manual_override")],
+        _cfg(),
+        feed_name="arxiv-html-fetcher",
+        rate_per_second=64.0,
+        burst=64,
+        min_sleep_s=0.0,
+        transport=httpx.MockTransport(handler),
+        producer_override=_FakeProducer(),  # type: ignore[arg-type]
+        admission_producer_override=_FakeAdmissionProducer(),  # type: ignore[arg-type]
+        minio_override=_FakeMinio(),  # type: ignore[arg-type]
+    )
+
+    assert emitted == 1
+    assert calls[0] == "https://arxiv.org/abs/2401.12345"
+    assert calls[1] == "https://arxiv.org/html/2401.12345"
 
 
 @pytest.mark.asyncio
@@ -626,7 +675,6 @@ async def test_backfill_preflights_license_before_fulltext() -> None:
         ["2401.12345"],
         _cfg(),
         feed_name="arxiv-html-backfill",
-        license_default=None,
         rate_per_second=64.0,
         burst=64,
         min_sleep_s=0.0,
@@ -641,6 +689,7 @@ async def test_backfill_preflights_license_before_fulltext() -> None:
     assert "/html/2401.12345" in calls[1]
     assert admissions.records[0].license_source == "html_meta"
     assert admissions.records[0].status == "admitted"
+    assert admissions.records[0].evidence_revision == "2401.12345"
 
 
 @pytest.mark.asyncio
@@ -665,7 +714,6 @@ async def test_disallowed_backfill_license_never_fetches_body() -> None:
         ["2401.12345"],
         _cfg(),
         feed_name="arxiv-html-backfill",
-        license_default=None,
         rate_per_second=64.0,
         burst=64,
         min_sleep_s=0.0,

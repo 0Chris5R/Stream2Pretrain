@@ -45,6 +45,13 @@ class OAIRecord:
         arxiv_id = self.identifier.split(":", 2)[2]
         return f"https://arxiv.org/abs/{arxiv_id}"
 
+    def arxiv_id(self) -> str | None:
+        """Return the item identifier when this is an arXiv OAI record."""
+        if not self.identifier.startswith("oai:arXiv.org:"):
+            return None
+        value = self.identifier.split(":", 2)[2].strip()
+        return value or None
+
     def license_value(self) -> str | None:
         """Return a per-record licence from arXiv/DC metadata, if present."""
         if not self.metadata_xml:

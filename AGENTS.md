@@ -11,6 +11,28 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 
 ## Decision log
 
+### 2026-08-23 - Pipeline remediation contract locked
+
+- `docs/PIPELINE_REMEDIATION_CONTRACT.md` is the binding source of truth for
+  remediation of `fix/deployment-pipeline`.
+- Licence admission is purpose-aware but always per individual content item:
+  permissive items may enter pretraining and post-training, reviewed grey-area
+  items may only ground derived post-training artifacts, and restrictive or
+  unresolved items are quarantined before body fetch.
+- Source defaults, hosting platforms, and dataset wrapper licences never replace
+  item-level licence resolution.
+- Bytewax remains the production stream engine. Deployment recovery changes
+  must preserve coverage and at-least-once behavior without silently replacing
+  the frozen architecture.
+- Source-aware quality policies require current primary-source research and
+  explicit model, revision, licence, projection, threshold, and CPU-runtime
+  documentation.
+- The Sources cockpit covers every configured source workload, not only
+  SourceFeed CRDs, and reports observed item-level licence outcomes.
+- Storage maintenance remains configurable for the constrained cluster.
+- The Foundry is complete only after live SFT and RL acceptance, inspectability,
+  human audit, and benchmark-split behavior are verified.
+
 ### 2026-08-19 - Post-training foundry contract locked
 
 - `docs/POSTTRAIN_FOUNDRY.md` is the binding source of truth for the
@@ -23,9 +45,10 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - `posttrain_candidate` replaces `reasoning_candidate`; the old value is a
   historical read alias and is not accepted by the worker unless explicitly
   enabled.
-- Every pretraining and post-training content path uses the same strict
-  fail-closed licence admission contract. Missing or excluded licences are
-  quarantined before body fetch, extraction, OCR, classifiers, or curation.
+- Every pretraining and post-training content path uses the per-item
+  purpose-aware licence contract in `docs/PIPELINE_REMEDIATION_CONTRACT.md`.
+  Grey-area content may be fetched only for derived post-training generation;
+  restrictive or unresolved items are quarantined before body fetch.
 - Provider qualification benchmarks, score thresholds, availability
   heartbeats, maximum-gap rules, and provider approval are deliberately absent.
 - Human approval and rejection apply per generated SFT/RL artifact. The
@@ -244,18 +267,25 @@ cadence on MinIO bronze, and DHBWCloud quotas.
 
 ### 2026-08-19 - Strict content-license admission policy
 
+Superseded on 2026-08-23 by the per-item purpose-aware policy in
+`docs/PIPELINE_REMEDIATION_CONTRACT.md`. The immutable pre-fetch decision and
+item-level provenance requirements below remain in force.
+
 - Every content-bearing source emits an immutable `license.admissions` record
   before it may retrieve or process the document body. Publication failure
   fails the ingest attempt closed.
-- Missing, unknown, non-commercial, no-derivatives, arXiv non-exclusive, and
-  other non-allowlisted licences are quarantined before Bronze storage,
-  extraction, OCR, classifiers, or curation. Replayed legacy Bronze records
-  receive the same defensive check before their MinIO object is read.
+- Missing, unknown, no-derivatives, wrapper-only, and other unreviewed
+  licences are quarantined before Bronze storage, extraction, OCR,
+  classifiers, or curation. Reviewed non-commercial and arXiv non-exclusive
+  items may enter only the derived post-training route and are excluded from
+  verbatim pretraining. Replayed legacy Bronze records receive the same
+  defensive check before their MinIO object is read.
 - Dataset wrapper licences such as ODC-By do not establish rights in each
   contained paper, page, or code file. Only per-record content licences or an
   explicitly audited source-wide content licence qualify.
-- The Iceberg admission ledger records both admitted and quarantined decisions.
-  Gold and dataset export retain the exact licence identifier and provenance.
+- The corpus routes ledger records permissive, transform-only, and quarantined
+  decisions. Gold and dataset export retain the exact licence identifier and
+  provenance.
 - This is a conservative curation and provenance policy, not a legal-compliance
   determination.
 

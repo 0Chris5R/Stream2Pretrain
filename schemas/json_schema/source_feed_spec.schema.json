@@ -98,7 +98,7 @@
       "$ref": "#/$defs/AuthSpec"
     },
     "egressAllow": {
-      "description": "Hostnames the SourceFeed pod may dial (NetworkPolicy egress).",
+      "description": "Expected destination hostnames for policy generation and audit. Enforcement requires an FQDN-aware CNI; plain Kubernetes NetworkPolicy cannot match DNS names.",
       "items": {
         "type": "string"
       },
@@ -118,23 +118,9 @@
       "type": "string"
     },
     "licenseDefault": {
-      "default": "unknown",
+      "default": "per-record",
       "enum": [
-        "per-record",
-        "arxiv-non-exclusive-distribution",
-        "unknown",
-        "CC-BY-4.0",
-        "CC-BY-SA-4.0",
-        "CC-BY-3.0",
-        "CC-BY-SA-3.0",
-        "CC0-1.0",
-        "Apache-2.0",
-        "MIT",
-        "BSD-2-Clause",
-        "BSD-3-Clause",
-        "MPL-2.0",
-        "ISC",
-        "Unlicense"
+        "per-record"
       ],
       "title": "Licensedefault",
       "type": "string"

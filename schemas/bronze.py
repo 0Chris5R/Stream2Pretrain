@@ -73,10 +73,17 @@ SourceFormat = Literal[
 
 SpdxLicenseSource = Literal[
     "github_api",
+    "file_header",
+    "http_link",
     "html_meta",
     "rss_entry",
     "oai_metadata",
     "arxiv_api",
+    "openreview_note",
+    "openreview_terms",
+    "hf_card",
+    "archived_page",
+    "source_terms",
     "dataset_metadata",
     "manual_override",
     "unknown",
@@ -84,12 +91,15 @@ SpdxLicenseSource = Literal[
 """Provenance of the SPDX id attached to the document.
 
 - ``github_api``: GitHub ``/repos/{o}/{r}/license`` response.
+- ``file_header``: a licence identifier attached to the individual file.
+- ``http_link``: an RFC 8288 ``Link`` response header with ``rel=license``.
 - ``html_meta``: ``<meta name="dc.rights">`` / ``<meta name="license">`` tag
   on the source HTML page.
 - ``dataset_metadata``: per-blob attestation in a HuggingFace dataset
   (``the-stack-v2``, ``stack-edu``, etc.).
-- ``manual_override``: a SourceFeed CRD ``license_default`` value applied
-  because the source publishes no machine-readable license.
+- ``manual_override``: explicit synthetic-fixture or audited administrative
+  provenance. Normal SourceFeed CRDs accept only ``per-record`` resolution and
+  cannot use this value as a source-wide default.
 - ``unknown``: no machine-readable licence was available.
 """
 

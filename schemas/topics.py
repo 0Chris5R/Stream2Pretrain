@@ -24,9 +24,12 @@ GITHUB_RELEASE_JOBS: Final[str] = "github.release.jobs"
 DOCS_NORMALIZED: Final[str] = "docs.normalized"
 DOCS_NORMALIZED_SMOKE: Final[str] = "docs.normalized.smoke"
 DOCS_CURATED: Final[str] = "docs.curated"
+DOCS_CURATED_SMOKE: Final[str] = "docs.curated.smoke"
 DECON_ATTEST: Final[str] = "decon.attest"
 CURATION_DECISIONS: Final[str] = "curation.decisions"
+CURATION_DECISIONS_SMOKE: Final[str] = "curation.decisions.smoke"
 LICENSE_ADMISSIONS: Final[str] = "license.admissions"
+LICENSE_ADMISSIONS_SMOKE: Final[str] = "license.admissions.smoke"
 FOUNDRY_JOBS: Final[str] = "foundry.jobs"
 FOUNDRY_EVENTS: Final[str] = "foundry.events"
 FOUNDRY_ARTIFACTS: Final[str] = "foundry.artifacts"
@@ -48,8 +51,11 @@ ALL_TOPICS: Final[tuple[str, ...]] = (
     DOCS_NORMALIZED,
     DOCS_NORMALIZED_SMOKE,
     DOCS_CURATED,
+    DOCS_CURATED_SMOKE,
     CURATION_DECISIONS,
+    CURATION_DECISIONS_SMOKE,
     LICENSE_ADMISSIONS,
+    LICENSE_ADMISSIONS_SMOKE,
     DECON_ATTEST,
     FOUNDRY_JOBS,
     FOUNDRY_EVENTS,
@@ -100,10 +106,10 @@ def dev_topic_configs() -> list[TopicConfig]:
     """Topic configs for the local dev stack and small k3s clusters."""
     return [
         TopicConfig(
-            RAW_FETCHED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+            RAW_FETCHED, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
-            RAW_SMOKE, partitions=1, replication_factor=1, retention_ms=_SMOKE_RETENTION_MS
+            RAW_SMOKE, partitions=4, replication_factor=1, retention_ms=_SMOKE_RETENTION_MS
         ),
         TopicConfig(
             GITHUB_RELEASE_JOBS,
@@ -112,22 +118,40 @@ def dev_topic_configs() -> list[TopicConfig]:
             retention_ms=_DEV_RETENTION_MS,
         ),
         TopicConfig(
-            DOCS_NORMALIZED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+            DOCS_NORMALIZED, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
             DOCS_NORMALIZED_SMOKE,
-            partitions=1,
+            partitions=4,
             replication_factor=1,
             retention_ms=_SMOKE_RETENTION_MS,
         ),
         TopicConfig(
-            DOCS_CURATED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+            DOCS_CURATED, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
-            CURATION_DECISIONS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+            DOCS_CURATED_SMOKE,
+            partitions=4,
+            replication_factor=1,
+            retention_ms=_SMOKE_RETENTION_MS,
+        ),
+        TopicConfig(
+            CURATION_DECISIONS, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+        ),
+        TopicConfig(
+            CURATION_DECISIONS_SMOKE,
+            partitions=4,
+            replication_factor=1,
+            retention_ms=_SMOKE_RETENTION_MS,
         ),
         TopicConfig(
             LICENSE_ADMISSIONS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+        ),
+        TopicConfig(
+            LICENSE_ADMISSIONS_SMOKE,
+            partitions=4,
+            replication_factor=1,
+            retention_ms=_SMOKE_RETENTION_MS,
         ),
         TopicConfig(
             DECON_ATTEST, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
@@ -176,10 +200,28 @@ def prod_topic_configs() -> list[TopicConfig]:
             DOCS_CURATED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS
         ),
         TopicConfig(
+            DOCS_CURATED_SMOKE,
+            partitions=3,
+            replication_factor=3,
+            retention_ms=_SMOKE_RETENTION_MS,
+        ),
+        TopicConfig(
             CURATION_DECISIONS, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS
         ),
         TopicConfig(
+            CURATION_DECISIONS_SMOKE,
+            partitions=3,
+            replication_factor=3,
+            retention_ms=_SMOKE_RETENTION_MS,
+        ),
+        TopicConfig(
             LICENSE_ADMISSIONS, partitions=6, replication_factor=3, retention_ms=_PROD_RETENTION_MS
+        ),
+        TopicConfig(
+            LICENSE_ADMISSIONS_SMOKE,
+            partitions=3,
+            replication_factor=3,
+            retention_ms=_SMOKE_RETENTION_MS,
         ),
         TopicConfig(
             DECON_ATTEST, partitions=3, replication_factor=3, retention_ms=_PROD_RETENTION_MS

@@ -167,10 +167,16 @@ Iceberg + observability).
   value: {{ .Values.redpanda.topics.docsNormalizedSmoke | quote }}
 - name: S2P_CURATED_TOPIC
   value: {{ .Values.redpanda.topics.docsCurated | quote }}
+- name: S2P_SMOKE_CURATED_TOPIC
+  value: {{ .Values.redpanda.topics.docsCuratedSmoke | quote }}
 - name: S2P_DECISIONS_TOPIC
   value: {{ .Values.redpanda.topics.curationDecisions | quote }}
+- name: S2P_SMOKE_DECISIONS_TOPIC
+  value: {{ .Values.redpanda.topics.curationDecisionsSmoke | quote }}
 - name: S2P_LICENSE_ADMISSIONS_TOPIC
   value: {{ .Values.redpanda.topics.licenseAdmissions | quote }}
+- name: S2P_SMOKE_LICENSE_ADMISSIONS_TOPIC
+  value: {{ .Values.redpanda.topics.licenseAdmissionsSmoke | quote }}
 - name: S2P_DECON_TOPIC
   value: {{ .Values.redpanda.topics.deconAttest | quote }}
 - name: S2P_FOUNDRY_JOBS_TOPIC

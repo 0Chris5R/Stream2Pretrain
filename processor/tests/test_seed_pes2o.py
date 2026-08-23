@@ -77,6 +77,11 @@ def test_to_seed_document_basic() -> None:
     assert doc.source_format == "latex"
     assert doc.spdx_license == "https://creativecommons.org/licenses/by/4.0/"
     assert doc.spdx_license_source == "dataset_metadata"
+    assert doc.license_resolver == "pes2o-paper-item-field"
+    assert doc.license_evidence_scope == "item"
+    assert doc.license_evidence_revision == (
+        f"{pes2o.DATASET_REVISION}:0000000000000007"
+    )
     assert doc.valid_from == datetime(2024, 9, 1, tzinfo=UTC)
 
 
@@ -88,6 +93,7 @@ def test_to_seed_document_does_not_inherit_dataset_wrapper_license() -> None:
     assert doc is not None
     assert doc.spdx_license is None
     assert doc.spdx_license_source == "unknown"
+    assert doc.license_evidence_scope == "unknown"
 
 
 def test_to_seed_document_drops_non_cs_rows() -> None:
