@@ -773,10 +773,10 @@ jobs:
           if [[ "$DEPLOY_MODE" == "audit-ui" ]]; then
             echo "::group::Rendered browser audit"
             audit_dir="$RUNNER_TEMP/ui-audit"
-            mkdir -p "$audit_dir"
-            kubectl -n stream2pretrain port-forward \
-              service/stream2pretrain-ui 18080:3000 \
-              >"$RUNNER_TEMP/ui-port-forward.log" 2>&1 &
+          mkdir -p "$audit_dir"
+          kubectl -n stream2pretrain port-forward \
+            service/stream2pretrain-ui 18080:http \
+            >"$RUNNER_TEMP/ui-port-forward.log" 2>&1 &
             ui_port_forward_pid=$!
             for _ in $(seq 1 30); do
               curl --fail --silent http://127.0.0.1:18080/api/health >/dev/null && break
