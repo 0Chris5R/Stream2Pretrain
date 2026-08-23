@@ -9,6 +9,7 @@ import os
 import secrets
 import time
 import zlib
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -164,12 +165,8 @@ def assert_document_absent(
 def close_consumers(consumers: list[Consumer]) -> None:
     """Best-effort resource cleanup for every canary exit path."""
     for consumer in consumers:
-        try:
+        with suppress(Exception):
             consumer.close()
-        except Exception:
-            # Closing a consumer that an exact-document read already closed is
-            # harmless; cleanup must not mask the data-path or S3 result.
-            pass
 
 
 def main() -> None:

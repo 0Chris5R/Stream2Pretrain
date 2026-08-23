@@ -52,7 +52,7 @@ def test_production_leak_check_matches_exact_document() -> None:
     decision_consumer = _Consumer("sha256:target")
     curated_consumer = _Consumer("sha256:other")
 
-    with pytest.raises(RuntimeError, match="leaked into production topic curation.decisions"):
+    with pytest.raises(RuntimeError, match=r"leaked into production topic curation\.decisions"):
         assert_document_absent(
             {
                 "curation.decisions": decision_consumer,  # type: ignore[dict-item]

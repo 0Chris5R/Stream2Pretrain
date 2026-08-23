@@ -197,8 +197,8 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
 
 
 __all__ = [
-    "DEFAULT_URL_ALLOWLIST",
     "DATASET_REVISION",
+    "DEFAULT_URL_ALLOWLIST",
     "REPO_ID",
     "SPDX",
     "content_license_for",
