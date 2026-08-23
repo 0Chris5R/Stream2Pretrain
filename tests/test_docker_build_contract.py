@@ -94,6 +94,20 @@ def test_curator_startup_probe_guards_slow_model_initialization() -> None:
     assert "initialDelaySeconds: 60" not in template
 
 
+def test_catalog_bootstrap_precedes_application_rollout() -> None:
+    template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "job-polaris-bootstrap.yaml"
+    ).read_text(encoding="utf-8")
+    dockerfile = (ROOT / "processor" / "Dockerfile.app").read_text(encoding="utf-8")
+
+    assert '"helm.sh/hook": pre-install,pre-upgrade' in template
+    assert '"helm.sh/hook-weight": "-10"' in template
+    assert "python -m processor.polaris_bootstrap" in template
+    assert "--apply --register-missing --register-only" in template
+    assert "activeDeadlineSeconds: 300" in template
+    assert "from processor.polaris_bootstrap import main as bootstrap" in dockerfile
+
+
 def test_github_tarball_scaler_uses_a_non_amplifying_job_topic() -> None:
     values = (ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text(encoding="utf-8")
     template = (
