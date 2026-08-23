@@ -145,6 +145,7 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "pin_component processor_quality_model processor-quality-model" in workflow
     assert "processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}" in workflow
     assert "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}" in workflow
+    assert "service/stream2pretrain-ui 18080:http" in workflow
     assert "minimum_rootfs_available=$((6 * 1024 * 1024 * 1024))" in workflow
     assert "Existing unschedulable Pods will be reconciled by this release" in workflow
     unschedulable_gate = workflow[
