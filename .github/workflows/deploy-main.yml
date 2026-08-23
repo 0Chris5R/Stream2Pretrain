@@ -15,6 +15,7 @@ on:
           - deploy
           - diagnose
           - audit-ui
+          - repair-monitoring
           - validate-sources
           - validate-foundry
           - inspect-storage
@@ -671,6 +672,7 @@ jobs:
           vpn_log="$RUNNER_TEMP/openconnect.log"
           ui_port_forward_pid=""
           foundry_port_forward_pid=""
+          prometheus_port_forward_pid=""
           curator_canary_job=""
           vpn_args=(
             --protocol=anyconnect
@@ -699,6 +701,9 @@ jobs:
             fi
             if [[ -n "$foundry_port_forward_pid" ]]; then
               kill "$foundry_port_forward_pid" 2>/dev/null || true
+            fi
+            if [[ -n "$prometheus_port_forward_pid" ]]; then
+              kill "$prometheus_port_forward_pid" 2>/dev/null || true
             fi
             sudo -n kill "$vpn_pid" 2>/dev/null || true
             sudo -n pkill -TERM -x openconnect 2>/dev/null || true
@@ -769,6 +774,41 @@ jobs:
           ip -6 route get "$api_host" >&2 || true
 
           kubectl --request-timeout=20s get nodes
+
+          if [[ "$DEPLOY_MODE" == "repair-monitoring" ]]; then
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=kube-prometheus-stack \
+              apply \
+              --reset-values \
+              --wait \
+              --timeout 600 \
+              --suppress-secrets
+            kubectl -n monitoring wait \
+              --for=condition=Ready pod/prometheus-kps-prometheus-0 \
+              --timeout=600s
+            kubectl -n monitoring port-forward \
+              service/kps-prometheus 19090:9090 \
+              >"$RUNNER_TEMP/prometheus-port-forward.log" 2>&1 &
+            prometheus_port_forward_pid=$!
+            for _ in $(seq 1 60); do
+              if curl --fail --silent --show-error \
+                http://127.0.0.1:19090/-/ready; then
+                exit 0
+              fi
+              if ! kill -0 "$prometheus_port_forward_pid" 2>/dev/null; then
+                cat "$RUNNER_TEMP/prometheus-port-forward.log" >&2
+                exit 1
+              fi
+              sleep 2
+            done
+            kubectl -n monitoring get pod/prometheus-kps-prometheus-0 -o wide
+            kubectl -n monitoring logs prometheus-kps-prometheus-0 \
+              -c prometheus --tail=160 || true
+            exit 1
+          fi
 
           if [[ "$DEPLOY_MODE" == "audit-ui" ]]; then
             echo "::group::Rendered browser audit"

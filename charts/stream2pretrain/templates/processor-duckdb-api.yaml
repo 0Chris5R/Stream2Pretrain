@@ -40,6 +40,16 @@ spec:
               value: {{ .Values.processor.duckdbApi.apiPort | quote }}
             - name: S2P_DUCKDB_GOLD_RELATION
               value: {{ .Values.processor.duckdbApi.goldRelation | quote }}
+            - name: S2P_DUCKDB_CATALOG_REFRESH_SECONDS
+              value: {{ .Values.processor.duckdbApi.catalogRefreshSeconds | quote }}
+            - name: S2P_DUCKDB_MEMORY_LIMIT
+              value: {{ .Values.processor.duckdbApi.memoryLimit | quote }}
+            - name: S2P_DUCKDB_THREADS
+              value: {{ .Values.processor.duckdbApi.threads | quote }}
+            - name: S2P_DUCKDB_TEMP_DIRECTORY
+              value: /tmp/duckdb-spill
+            - name: S2P_DUCKDB_MAX_TEMP_DIRECTORY_SIZE
+              value: {{ .Values.processor.duckdbApi.maxTempDirectorySize | quote }}
             - name: HOME
               value: /tmp
           livenessProbe:
@@ -57,7 +67,8 @@ spec:
               mountPath: /tmp
       volumes:
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.processor.duckdbApi.tempStorageSizeLimit }}
 ---
 apiVersion: v1
 kind: Service
