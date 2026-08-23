@@ -199,39 +199,52 @@ jobs:
           - image: ingest-rss
             context: .
             dockerfile: ingest/rss_poller/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/rss_poller
           - image: ingest-oaipmh
             context: .
             dockerfile: ingest/oaipmh_poller/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/oaipmh_poller
           - image: ingest-sitemap
             context: .
             dockerfile: ingest/sitemap_poller/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/sitemap_poller
           - image: ingest-github-events
             context: .
             dockerfile: ingest/github_events/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_events
           - image: ingest-github-releases
             context: .
             dockerfile: ingest/github_releases/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_events ingest/github_releases
           - image: ingest-hf
             context: .
             dockerfile: ingest/hf_poller/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/hf_poller
           - image: ingest-arxiv-html
             context: .
             dockerfile: ingest/arxiv_html_fetcher/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher
           - image: ingest-github-tarball-fetcher
             context: .
             dockerfile: ingest/github_release_tarball_fetcher/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_release_tarball_fetcher
           - image: ingest-openreview
             context: .
             dockerfile: ingest/openreview_poller/Dockerfile
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/openreview_poller
           - image: processor
             context: .
             dockerfile: processor/Dockerfile.app
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
           - image: ui
             context: ui
             dockerfile: Dockerfile
+            inputs: ui
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -246,19 +259,69 @@ jobs:
       - name: Resolve image registry
         id: image
         shell: bash
+        env:
+          IMAGE_INPUTS: ${{ matrix.inputs }}
+          PROCESSOR_BASE_IMAGE: ${{ needs.processor-base.outputs.image }}
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          echo "registry=ghcr.io/${owner}" >> "$GITHUB_OUTPUT"
+          registry="ghcr.io/${owner}"
+          component_tree_hash() {
+            local revision="$1"
+            {
+              git ls-tree -r -z "$revision" -- $IMAGE_INPUTS | sort -z
+              if [[ "${{ matrix.image }}" == "processor" ]]; then
+                printf '%s\n' "processor-base=$PROCESSOR_BASE_IMAGE"
+              fi
+            } | sha256sum | cut -c1-24
+          }
+          content_hash="$(component_tree_hash HEAD)"
+          content_ref="${registry}/stream2pretrain/${{ matrix.image }}:content-${content_hash}"
+          revision_ref="${registry}/stream2pretrain/${{ matrix.image }}:${GITHUB_SHA}"
+          exists=false
+          validated=false
+          reuse_ref=""
+          if docker buildx imagetools inspect "$content_ref" >/dev/null 2>&1; then
+            exists=true
+            validated=true
+            reuse_ref="$content_ref"
+            echo "Reusing immutable component image $content_ref"
+          elif parent="$(git rev-parse HEAD^ 2>/dev/null)" \
+            && [[ "$(component_tree_hash "$parent")" == "$content_hash" ]]; then
+            parent_ref="${registry}/stream2pretrain/${{ matrix.image }}:${parent}"
+            if docker buildx imagetools inspect "$parent_ref" >/dev/null 2>&1; then
+              exists=true
+              reuse_ref="$parent_ref"
+              echo "Reusing unchanged parent image $parent_ref"
+            fi
+          fi
+          if [[ "$exists" != true ]]; then
+            echo "Building new component content $content_ref"
+          fi
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "content_ref=$content_ref" >> "$GITHUB_OUTPUT"
+          echo "revision_ref=$revision_ref" >> "$GITHUB_OUTPUT"
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+          echo "validated=$validated" >> "$GITHUB_OUTPUT"
+          echo "reuse_ref=$reuse_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Reuse unchanged component image
+        if: steps.image.outputs.exists == 'true'
+        shell: bash
+        env:
+          REUSE_REF: ${{ steps.image.outputs.reuse_ref }}
+          REVISION_REF: ${{ steps.image.outputs.revision_ref }}
+        run: docker buildx imagetools create --tag "$REVISION_REF" "$REUSE_REF"
 
       - name: Build and publish image
+        if: steps.image.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:${{ github.sha }}
+          tags: ${{ steps.image.outputs.revision_ref }}
           build-args: |
             PROCESSOR_BASE_IMAGE=${{ needs.processor-base.outputs.image }}
           # GHCR can garbage-collect blobs referenced only by a mutable
@@ -274,7 +337,7 @@ jobs:
         # Ingest images use relocated console entrypoints and need this guard.
         # The processor image is multi-GB and its import path is already
         # exercised by cluster_smoke.py; pulling it again would dominate CI.
-        if: startsWith(matrix.image, 'ingest-')
+        if: startsWith(matrix.image, 'ingest-') && steps.image.outputs.validated != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -282,6 +345,14 @@ jobs:
           docker pull "$image"
           docker run --rm --entrypoint python "$image" -c \
             'import ingest, schemas; print("runtime imports ready")'
+
+      - name: Publish validated content alias
+        if: steps.image.outputs.validated != 'true'
+        shell: bash
+        env:
+          CONTENT_REF: ${{ steps.image.outputs.content_ref }}
+          REVISION_REF: ${{ steps.image.outputs.revision_ref }}
+        run: docker buildx imagetools create --tag "$CONTENT_REF" "$REVISION_REF"
 
   deploy:
     name: Deploy application release
