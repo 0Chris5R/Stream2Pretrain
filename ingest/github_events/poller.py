@@ -256,18 +256,22 @@ async def run_loop(
                 continue
 
             poll_interval = float(resp.headers.get("x-poll-interval", DEFAULT_POLL_INTERVAL))
+            successful_poll = False
             if resp.status_code == 304:
-                log.debug("github_events.not_modified")
+                log.info("github_events.not_modified", target=target_url)
                 INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="not_modified")
+                successful_poll = True
             elif resp.status_code == 200:
-                INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="success")
-                if resp.headers.get("etag"):
-                    etags[target_url] = resp.headers["etag"]
                 try:
                     events = resp.json()
-                except ValueError:
-                    events = []
+                except ValueError as exc:
+                    log.warning("github_events.invalid_json", target=target_url, err=str(exc))
+                    INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="error")
+                    events = None
                 if isinstance(events, list):
+                    INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="success")
+                    if resp.headers.get("etag"):
+                        etags[target_url] = resp.headers["etag"]
                     emitted = await _process_events(
                         events,
                         producer=producer,
@@ -285,6 +289,14 @@ async def run_loop(
                         target=target_url,
                         rate_limit_remaining=resp.headers.get("x-ratelimit-remaining"),
                     )
+                    successful_poll = True
+                elif events is not None:
+                    log.warning(
+                        "github_events.invalid_shape",
+                        target=target_url,
+                        payload_type=type(events).__name__,
+                    )
+                    INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="error")
             elif resp.status_code == 401 and using_authenticated_client:
                 # Public events remain available without credentials. A stale
                 # optional token must reduce the rate budget, not disable the
@@ -312,17 +324,20 @@ async def run_loop(
                 log.warning("github_events.unexpected_status", status=resp.status_code)
                 INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED, outcome="error")
 
-            # Persist truncated seen-set so memory stays bounded across restarts.
-            if len(seen) > 5000:
-                seen = set(list(seen)[-2500:])
-            state.put(
-                SOURCE_FEED,
-                {
-                    "etags": etags,
-                    "seen_doc_ids": sorted(seen),
-                    "target_index": (target_index + 1) % len(targets),
-                },
-            )
+            if successful_poll:
+                # Persist only verified responses; malformed success pages and
+                # upstream errors must not commit a cursor or ETag.
+                if len(seen) > 5000:
+                    seen = set(list(seen)[-2500:])
+                state.put(
+                    SOURCE_FEED,
+                    {
+                        "etags": etags,
+                        "seen_doc_ids": sorted(seen),
+                        "target_index": (target_index + 1) % len(targets),
+                        "last_success_at": datetime.now(UTC).isoformat(),
+                    },
+                )
             target_index = (target_index + 1) % len(targets)
             iteration += 1
             if max_iterations is not None and iteration >= max_iterations:

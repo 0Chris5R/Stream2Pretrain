@@ -284,3 +284,29 @@ async def test_run_loop_polls_configured_org_endpoint(
     )
 
     assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_success_payload_does_not_advance_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>challenge</html>", headers={"etag": '"bad"'})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(evt_module, "BronzeProducer", lambda *a, **kw: FakeProducer())
+    monkeypatch.setattr(evt_module, "MinioWriter", lambda *a, **kw: FakeMinio())
+    monkeypatch.setattr(
+        evt_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(
+            transport=transport,
+            headers=kw.get("headers", {}),
+        ),
+    )
+
+    assert await evt_module.run_loop(_cfg(tmp_path), max_iterations=1) == 0
+    state = evt_module.FeedStateStore("./.s2p-state/github_events").get(evt_module.SOURCE_FEED)
+    assert state == {}
