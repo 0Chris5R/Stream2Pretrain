@@ -101,13 +101,18 @@ app.kubernetes.io/part-of: stream2pretrain
 Render the image reference for a component.
 Caller passes (dict "ctx" . "image" "<repo>" "tag" "<override-or-empty>").
 Falls back to .Chart.AppVersion when tag is empty.
+An image pinned with @sha256 is already immutable and must not receive a tag.
 */}}
 {{- define "stream2pretrain.image" -}}
 {{- $ctx := .ctx -}}
+{{- if contains "@sha256:" .image -}}
+{{- printf "%s/%s" $ctx.Values.image.registry .image -}}
+{{- else -}}
 {{- $tag := default $ctx.Chart.AppVersion $ctx.Values.image.tag -}}
 {{- if .tag -}}{{- $tag = .tag -}}{{- end -}}
 {{- if eq $tag "" -}}{{- $tag = $ctx.Chart.AppVersion -}}{{- end -}}
 {{- printf "%s/%s:%s" $ctx.Values.image.registry .image $tag -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

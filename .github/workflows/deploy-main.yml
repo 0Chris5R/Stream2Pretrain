@@ -360,17 +360,17 @@ jobs:
             model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-embedding-model
             model_profile: embedding
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-kenlm-model
             model_profile: kenlm
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.app
@@ -506,15 +506,90 @@ jobs:
           REVISION_REF: ${{ steps.image.outputs.revision_ref }}
         run: docker buildx imagetools create --tag "$CONTENT_REF" "$REVISION_REF"
 
+  image-pin:
+    name: Pin release images by digest
+    if: inputs.mode == '' || inputs.mode == 'deploy'
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    outputs:
+      ingest_rss: ${{ steps.pin.outputs.ingest_rss }}
+      ingest_oaipmh: ${{ steps.pin.outputs.ingest_oaipmh }}
+      ingest_sitemap: ${{ steps.pin.outputs.ingest_sitemap }}
+      ingest_github_events: ${{ steps.pin.outputs.ingest_github_events }}
+      ingest_github_releases: ${{ steps.pin.outputs.ingest_github_releases }}
+      ingest_hf: ${{ steps.pin.outputs.ingest_hf }}
+      ingest_arxiv_html: ${{ steps.pin.outputs.ingest_arxiv_html }}
+      ingest_github_tarball_fetcher: ${{ steps.pin.outputs.ingest_github_tarball_fetcher }}
+      ingest_openreview: ${{ steps.pin.outputs.ingest_openreview }}
+      processor: ${{ steps.pin.outputs.processor }}
+      processor_quality_model: ${{ steps.pin.outputs.processor_quality_model }}
+      processor_embedding_model: ${{ steps.pin.outputs.processor_embedding_model }}
+      processor_kenlm_model: ${{ steps.pin.outputs.processor_kenlm_model }}
+      processor_fetcher_model: ${{ steps.pin.outputs.processor_fetcher_model }}
+      ui: ${{ steps.pin.outputs.ui }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable component manifests
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          pin_component() {
+            local output_name="$1"
+            local repository="$2"
+            local image="ghcr.io/${owner}/stream2pretrain/${repository}:${GITHUB_SHA}"
+            local digest
+            digest="sha256:$(
+              docker buildx imagetools inspect "$image" --raw \
+                | sha256sum | cut -d ' ' -f1
+            )"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Could not resolve an immutable digest for $image" >&2
+              exit 1
+            fi
+            echo "${output_name}=${digest}" >> "$GITHUB_OUTPUT"
+            echo "Pinned ${repository}@${digest}"
+          }
+          pin_component ingest_rss ingest-rss
+          pin_component ingest_oaipmh ingest-oaipmh
+          pin_component ingest_sitemap ingest-sitemap
+          pin_component ingest_github_events ingest-github-events
+          pin_component ingest_github_releases ingest-github-releases
+          pin_component ingest_hf ingest-hf
+          pin_component ingest_arxiv_html ingest-arxiv-html
+          pin_component ingest_github_tarball_fetcher ingest-github-tarball-fetcher
+          pin_component ingest_openreview ingest-openreview
+          pin_component processor processor
+          pin_component processor_quality_model processor-quality-model
+          pin_component processor_embedding_model processor-embedding-model
+          pin_component processor_kenlm_model processor-kenlm-model
+          pin_component processor_fetcher_model processor-fetcher-model
+          pin_component ui ui
+
   deploy:
     name: Deploy application release
     if: >-
       always() &&
       ((github.event_name == 'workflow_dispatch' && inputs.mode != 'deploy') ||
-      (needs.validate.result == 'success' && needs.build.result == 'success'))
+      (needs.validate.result == 'success' && needs.build.result == 'success' &&
+      needs.image-pin.result == 'success'))
     needs:
       - validate
       - build
+      - image-pin
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -529,6 +604,21 @@ jobs:
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
+      IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
+      IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
+      IMAGE_DIGEST_INGEST_SITEMAP: ${{ needs.image-pin.outputs.ingest_sitemap }}
+      IMAGE_DIGEST_INGEST_GITHUB_EVENTS: ${{ needs.image-pin.outputs.ingest_github_events }}
+      IMAGE_DIGEST_INGEST_GITHUB_RELEASES: ${{ needs.image-pin.outputs.ingest_github_releases }}
+      IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
+      IMAGE_DIGEST_INGEST_ARXIV_HTML: ${{ needs.image-pin.outputs.ingest_arxiv_html }}
+      IMAGE_DIGEST_INGEST_GITHUB_TARBALL: ${{ needs.image-pin.outputs.ingest_github_tarball_fetcher }}
+      IMAGE_DIGEST_INGEST_OPENREVIEW: ${{ needs.image-pin.outputs.ingest_openreview }}
+      IMAGE_DIGEST_PROCESSOR: ${{ needs.image-pin.outputs.processor }}
+      IMAGE_DIGEST_PROCESSOR_QUALITY: ${{ needs.image-pin.outputs.processor_quality_model }}
+      IMAGE_DIGEST_PROCESSOR_EMBEDDING: ${{ needs.image-pin.outputs.processor_embedding_model }}
+      IMAGE_DIGEST_PROCESSOR_KENLM: ${{ needs.image-pin.outputs.processor_kenlm_model }}
+      IMAGE_DIGEST_PROCESSOR_FETCHER: ${{ needs.image-pin.outputs.processor_fetcher_model }}
+      IMAGE_DIGEST_UI: ${{ needs.image-pin.outputs.ui }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -897,6 +987,103 @@ jobs:
               kubectl -n stream2pretrain patch "$cronjob" \
                 --type=merge -p '{"spec":{"suspend":true}}'
             done < <(kubectl -n stream2pretrain get cronjob -o name)
+            echo "::endgroup::"
+
+            echo "::group::Compact durable curator LevelDB state"
+            curator_statefulset=stream2pretrain-processor-curate
+            curator_compactor=stream2pretrain-curator-state-compactor
+            curator_replicas="$(
+              kubectl -n stream2pretrain get "statefulset/$curator_statefulset" \
+                -o jsonpath='{.spec.replicas}'
+            )"
+            curator_image="$(
+              kubectl -n stream2pretrain get "statefulset/$curator_statefulset" -o json \
+                | jq -r '
+                    .spec.template.spec.containers[]
+                    | select(.name == "curate")
+                    | .image
+                  '
+            )"
+            curator_claim="$(
+              kubectl -n stream2pretrain get pvc \
+                -l app.kubernetes.io/component=processor-curate -o json \
+                | jq -r 'first(.items[].metadata.name) // empty'
+            )"
+            : "${curator_image:?Curator image was not found}"
+            : "${curator_claim:?Curator checkpoint PVC was not found}"
+
+            kubectl -n stream2pretrain scale \
+              "statefulset/$curator_statefulset" --replicas=0
+            kubectl -n stream2pretrain wait --for=delete \
+              "pod/${curator_statefulset}-0" --timeout=180s \
+              || ! kubectl -n stream2pretrain get \
+                "pod/${curator_statefulset}-0" >/dev/null 2>&1
+            kubectl -n stream2pretrain delete "job/$curator_compactor" \
+              --ignore-not-found --wait=true
+
+            compaction_script="$(< scripts/compact_lsh_state.py)"
+            compactor_json="$(
+              kubectl -n stream2pretrain create job "$curator_compactor" \
+                --image="$curator_image" --dry-run=client -o json
+            )"
+            compaction_ok=true
+            if ! jq \
+              --arg claim "$curator_claim" \
+              --arg script "$compaction_script" '
+                .spec.backoffLimit = 0
+                | .spec.activeDeadlineSeconds = 1800
+                | .spec.ttlSecondsAfterFinished = 300
+                | .spec.template.spec.priorityClassName = "system-node-critical"
+                | .spec.template.spec.tolerations = [{
+                    key: "node.kubernetes.io/disk-pressure",
+                    operator: "Exists",
+                    effect: "NoSchedule"
+                  }]
+                | .spec.template.spec.containers[0].name = "compactor"
+                | .spec.template.spec.containers[0].command = ["python", "-c", $script]
+                | .spec.template.spec.containers[0].imagePullPolicy = "IfNotPresent"
+                | .spec.template.spec.containers[0].resources = {
+                    requests: {
+                      cpu: "50m",
+                      memory: "128Mi",
+                      "ephemeral-storage": "16Mi"
+                    },
+                    limits: {
+                      cpu: "500m",
+                      memory: "512Mi",
+                      "ephemeral-storage": "128Mi"
+                    }
+                  }
+                | .spec.template.spec.containers[0].volumeMounts = [{
+                    name: "checkpoint",
+                    mountPath: "/var/lib/s2p/checkpoint"
+                  }]
+                | .spec.template.spec.volumes = [{
+                    name: "checkpoint",
+                    persistentVolumeClaim: {claimName: $claim}
+                  }]
+              ' <<<"$compactor_json" \
+              | kubectl -n stream2pretrain apply -f -; then
+              compaction_ok=false
+            elif ! kubectl -n stream2pretrain wait \
+              --for=condition=Complete "job/$curator_compactor" --timeout=1800s; then
+              compaction_ok=false
+            fi
+            kubectl -n stream2pretrain logs "job/$curator_compactor" \
+              --all-containers --prefix --ignore-errors || true
+            if [[ "$compaction_ok" != true ]]; then
+              kubectl -n stream2pretrain describe "job/$curator_compactor" || true
+            fi
+            kubectl -n stream2pretrain delete "job/$curator_compactor" \
+              --ignore-not-found --wait=false
+            kubectl -n stream2pretrain scale \
+              "statefulset/$curator_statefulset" --replicas="$curator_replicas"
+            kubectl -n stream2pretrain get \
+              "statefulset/$curator_statefulset" pod -o wide || true
+            if [[ "$compaction_ok" != true ]]; then
+              echo "Curator state compaction failed; the original PVC was preserved." >&2
+              exit 1
+            fi
             echo "::endgroup::"
 
             echo "::group::Start MinIO for API-level recovery"
@@ -1293,6 +1480,110 @@ jobs:
             echo "::endgroup::"
           }
 
+          echo "::group::Release capacity preflight"
+          unschedulable_pods="$(
+            kubectl -n stream2pretrain get pods -o json \
+              | jq -r '
+                  .items[]
+                  | select(.status.phase == "Pending")
+                  | select(any(
+                      .status.conditions[]?;
+                      .type == "PodScheduled"
+                      and .status == "False"
+                      and .reason == "Unschedulable"
+                    ))
+                  | .metadata.name
+                '
+          )"
+          if [[ -n "$unschedulable_pods" ]]; then
+            echo "The existing release has unschedulable Pods:" >&2
+            printf '%s\n' "$unschedulable_pods" >&2
+            report_deploy_failure
+            exit 1
+          fi
+
+          worker_nodes="$(
+            kubectl get nodes -o json \
+              | jq -r '
+                  .items[]
+                  | select((.spec.unschedulable // false) | not)
+                  | select(
+                      (.metadata.labels | has("node-role.kubernetes.io/control-plane") | not)
+                      and (.metadata.labels | has("node-role.kubernetes.io/master") | not)
+                    )
+                  | .metadata.name
+                '
+          )"
+          if [[ -z "$worker_nodes" ]]; then
+            worker_nodes="$(
+              kubectl get nodes -o json \
+                | jq -r '
+                    .items[]
+                    | select((.spec.unschedulable // false) | not)
+                    | .metadata.name
+                  '
+            )"
+          fi
+          minimum_rootfs_available=$((6 * 1024 * 1024 * 1024))
+          capacity_ok=true
+          while read -r node; do
+            [[ -n "$node" ]] || continue
+            node_json="$(kubectl get "node/$node" -o json)"
+            ready="$(
+              jq -r '
+                  first(.status.conditions[] | select(.type == "Ready") | .status)
+                  // "Unknown"
+                ' <<<"$node_json"
+            )"
+            pressure="$(
+              jq -r '
+                  [
+                    .status.conditions[]
+                    | select(
+                        (.type == "DiskPressure"
+                          or .type == "MemoryPressure"
+                          or .type == "PIDPressure")
+                        and .status == "True"
+                      )
+                    | .type
+                  ]
+                  | join(",")
+                ' <<<"$node_json"
+            )"
+            summary="$(
+              kubectl get --raw "/api/v1/nodes/${node}/proxy/stats/summary"
+            )"
+            available="$(jq -r '.node.fs.availableBytes // 0' <<<"$summary")"
+            capacity="$(jq -r '.node.fs.capacityBytes // 0' <<<"$summary")"
+            jq -n \
+              --arg node "$node" \
+              --arg ready "$ready" \
+              --arg pressure "$pressure" \
+              --argjson available "$available" \
+              --argjson capacity "$capacity" \
+              '{
+                node: $node,
+                ready: $ready,
+                pressure: $pressure,
+                rootfsAvailableBytes: $available,
+                rootfsCapacityBytes: $capacity
+              }'
+            if [[ "$ready" != "True" \
+               || -n "$pressure" \
+               || "$available" -lt "$minimum_rootfs_available" ]]; then
+              capacity_ok=false
+            fi
+          done <<<"$worker_nodes"
+          if [[ "$capacity_ok" != true ]]; then
+            echo "Release preflight requires every schedulable worker to be Ready," >&2
+            echo "pressure-free, and have at least 6 GiB rootfs available." >&2
+            echo "The threshold covers the observed 2.54 GB kubelet reserve plus" >&2
+            echo "the 2.30 GB largest application image and a safety margin." >&2
+            report_deploy_failure
+            exit 1
+          fi
+          echo "::endgroup::"
+
           minio_ready_addresses="$(
             kubectl -n minio get endpointslice \
               -l kubernetes.io/service-name=minio -o json \
@@ -1381,28 +1672,47 @@ jobs:
               rpk group describe s2p-curate
           fi
 
+          : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
+          : "${IMAGE_DIGEST_INGEST_OAIPMH:?Missing pinned ingest-oaipmh digest}"
+          : "${IMAGE_DIGEST_INGEST_SITEMAP:?Missing pinned ingest-sitemap digest}"
+          : "${IMAGE_DIGEST_INGEST_GITHUB_EVENTS:?Missing pinned GitHub events digest}"
+          : "${IMAGE_DIGEST_INGEST_GITHUB_RELEASES:?Missing pinned GitHub releases digest}"
+          : "${IMAGE_DIGEST_INGEST_HF:?Missing pinned HF digest}"
+          : "${IMAGE_DIGEST_INGEST_ARXIV_HTML:?Missing pinned arXiv HTML digest}"
+          : "${IMAGE_DIGEST_INGEST_GITHUB_TARBALL:?Missing pinned GitHub tarball digest}"
+          : "${IMAGE_DIGEST_INGEST_OPENREVIEW:?Missing pinned OpenReview digest}"
+          : "${IMAGE_DIGEST_PROCESSOR:?Missing pinned processor digest}"
+          : "${IMAGE_DIGEST_PROCESSOR_QUALITY:?Missing pinned quality digest}"
+          : "${IMAGE_DIGEST_PROCESSOR_EMBEDDING:?Missing pinned embedding digest}"
+          : "${IMAGE_DIGEST_PROCESSOR_KENLM:?Missing pinned KenLM digest}"
+          : "${IMAGE_DIGEST_PROCESSOR_FETCHER:?Missing pinned fetcher digest}"
+          : "${IMAGE_DIGEST_UI:?Missing pinned UI digest}"
+
           helm_overrides=(
-            --set "image.registry=${registry}"
-            --set "image.tag=${GITHUB_SHA}"
+            --set-string "image.registry=${registry}"
+            --set-string "image.tag=${GITHUB_SHA}"
             --set "image.pullPolicy=IfNotPresent"
-            --set "processor.fetcher.tag=${GITHUB_SHA}"
-            --set "processor.curate.tag=${GITHUB_SHA}"
-            --set "processor.modelService.profiles.quality.tag=${GITHUB_SHA}"
-            --set "processor.modelService.profiles.embedding.tag=${GITHUB_SHA}"
-            --set "processor.modelService.profiles.kenlm.tag=${GITHUB_SHA}"
-            --set "ingest.arxivHtmlFetcher.tag=${GITHUB_SHA}"
-            --set "mixtureController.tag=${GITHUB_SHA}"
-            --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model"
-            --set "processor.curate.image=stream2pretrain/processor"
-            --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model"
-            --set "processor.modelService.profiles.embedding.image=stream2pretrain/processor-embedding-model"
-            --set "processor.modelService.profiles.kenlm.image=stream2pretrain/processor-kenlm-model"
-            --set "processor.iceberg.image=stream2pretrain/processor"
-            --set "processor.duckdbApi.image=stream2pretrain/processor"
-            --set "processor.deconGate.image=stream2pretrain/processor"
-            --set "processor.foundry.image=stream2pretrain/processor"
-            --set "mixtureController.image=stream2pretrain/processor"
-            --set "seedLoader.image=stream2pretrain/processor"
+            --set-string "ingest.rss.image=stream2pretrain/ingest-rss@${IMAGE_DIGEST_INGEST_RSS}"
+            --set-string "ingest.oaipmh.image=stream2pretrain/ingest-oaipmh@${IMAGE_DIGEST_INGEST_OAIPMH}"
+            --set-string "ingest.sitemap.image=stream2pretrain/ingest-sitemap@${IMAGE_DIGEST_INGEST_SITEMAP}"
+            --set-string "ingest.githubEvents.image=stream2pretrain/ingest-github-events@${IMAGE_DIGEST_INGEST_GITHUB_EVENTS}"
+            --set-string "ingest.githubReleases.image=stream2pretrain/ingest-github-releases@${IMAGE_DIGEST_INGEST_GITHUB_RELEASES}"
+            --set-string "ingest.hf.image=stream2pretrain/ingest-hf@${IMAGE_DIGEST_INGEST_HF}"
+            --set-string "ingest.arxivHtmlFetcher.image=stream2pretrain/ingest-arxiv-html@${IMAGE_DIGEST_INGEST_ARXIV_HTML}"
+            --set-string "ingest.githubTarballFetcher.image=stream2pretrain/ingest-github-tarball-fetcher@${IMAGE_DIGEST_INGEST_GITHUB_TARBALL}"
+            --set-string "ingest.openreview.image=stream2pretrain/ingest-openreview@${IMAGE_DIGEST_INGEST_OPENREVIEW}"
+            --set-string "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
+            --set-string "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set-string "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
+            --set-string "processor.modelService.profiles.embedding.image=stream2pretrain/processor-embedding-model@${IMAGE_DIGEST_PROCESSOR_EMBEDDING}"
+            --set-string "processor.modelService.profiles.kenlm.image=stream2pretrain/processor-kenlm-model@${IMAGE_DIGEST_PROCESSOR_KENLM}"
+            --set-string "processor.iceberg.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set-string "processor.duckdbApi.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set-string "processor.deconGate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set-string "processor.foundry.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set-string "mixtureController.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set-string "seedLoader.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set-string "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}"
           )
 
           if [[ -n "${GHCR_PULL_TOKEN:-}" ]]; then
