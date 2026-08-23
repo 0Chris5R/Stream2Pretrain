@@ -400,14 +400,98 @@ def _delete_source_schedule(name: str, *, namespace: str) -> None:
                 raise
 
 
-def _sourcefeed_status(item: dict[str, Any]) -> dict[str, Any]:
+def _as_utc_iso(value: Any) -> str | None:
+    if not isinstance(value, datetime):
+        return None
+    normalized = value if value.tzinfo else value.replace(tzinfo=UTC)
+    return normalized.astimezone(UTC).isoformat()
+
+
+def _source_job_runtime(jobs: list[Any]) -> dict[str, dict[str, Any]]:
+    """Summarize the latest real Kubernetes Job for each SourceFeed."""
+    grouped: dict[str, list[Any]] = {}
+    for job in jobs:
+        metadata = getattr(job, "metadata", None)
+        labels = getattr(metadata, "labels", None) or {}
+        source_name = labels.get("stream2pretrain.io/source-feed")
+        if isinstance(source_name, str) and source_name:
+            grouped.setdefault(source_name, []).append(job)
+
+    observations: dict[str, dict[str, Any]] = {}
+    for source_name, source_jobs in grouped.items():
+
+        def started_at(job: Any) -> datetime:
+            metadata = getattr(job, "metadata", None)
+            status = getattr(job, "status", None)
+            return (
+                getattr(status, "start_time", None)
+                or getattr(metadata, "creation_timestamp", None)
+                or datetime.min.replace(tzinfo=UTC)
+            )
+
+        latest = max(source_jobs, key=started_at)
+        latest_status = getattr(latest, "status", None)
+        successes = [
+            job
+            for job in source_jobs
+            if int(getattr(getattr(job, "status", None), "succeeded", None) or 0) > 0
+        ]
+        last_success = None
+        if successes:
+            successful = max(
+                successes,
+                key=lambda job: (
+                    getattr(getattr(job, "status", None), "completion_time", None)
+                    or started_at(job)
+                ),
+            )
+            successful_status = getattr(successful, "status", None)
+            last_success = _as_utc_iso(
+                getattr(successful_status, "completion_time", None) or started_at(successful)
+            )
+
+        active = int(getattr(latest_status, "active", None) or 0) > 0
+        failed = int(getattr(latest_status, "failed", None) or 0) > 0
+        succeeded = int(getattr(latest_status, "succeeded", None) or 0) > 0
+        phase = (
+            "Polling" if active else "Failed" if failed else "Active" if succeeded else "Pending"
+        )
+        error = None
+        if failed:
+            conditions = getattr(latest_status, "conditions", None) or []
+            failure = next(
+                (
+                    condition
+                    for condition in conditions
+                    if str(getattr(condition, "type", "")).lower() == "failed"
+                ),
+                None,
+            )
+            error = (
+                getattr(failure, "message", None)
+                or getattr(failure, "reason", None)
+                or "Scheduled ingest job failed"
+            )
+        observations[source_name] = {
+            "phase": phase,
+            "last_attempt_at": _as_utc_iso(started_at(latest)),
+            "last_success_at": last_success,
+            "last_error": error,
+        }
+    return observations
+
+
+def _sourcefeed_status(
+    item: dict[str, Any], runtime: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Map a SourceFeed CRD item to the UI status payload."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
     spec_raw = item.get("spec", {}) if isinstance(item.get("spec"), dict) else {}
     spec_raw.setdefault("name", metadata.get("name", "unnamed"))
     spec = SourceFeedSpec.model_validate(spec_raw)
     status = item.get("status", {}) if isinstance(item.get("status"), dict) else {}
-    phase = str(status.get("phase", "Pending"))
+    runtime = runtime or {}
+    phase = str(runtime.get("phase") or status.get("phase", "Pending"))
     poll_state = {
         "Active": "idle",
         "Polling": "polling",
@@ -418,9 +502,11 @@ def _sourcefeed_status(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": spec.name,
         "spec": spec.model_dump(mode="json"),
-        "last_success_at": status.get("lastSuccessAt"),
-        "last_attempt_at": status.get("lastPolledAt"),
-        "last_error": status.get("lastErrorMessage"),
+        "last_success_at": runtime.get("last_success_at") or status.get("lastSuccessAt"),
+        "last_attempt_at": runtime.get("last_attempt_at") or status.get("lastPolledAt"),
+        "last_error": (
+            runtime.get("last_error") if "last_error" in runtime else status.get("lastErrorMessage")
+        ),
         "documents_24h": int(status.get("docsEmitted24h") or status.get("docsEmittedTotal") or 0),
         "error_rate_24h": float(status.get("errorRate24h") or 0.0),
         "poll_state": poll_state,
@@ -479,7 +565,20 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
             namespace=namespace,
             plural="sourcefeeds",
         )
-        return web.json_response([_sourcefeed_status(item) for item in resp.get("items", [])])
+        jobs = batch_api.list_namespaced_job(
+            namespace,
+            label_selector="stream2pretrain.io/source-feed",
+        )
+        runtime = _source_job_runtime(list(jobs.items or []))
+        return web.json_response(
+            [
+                _sourcefeed_status(
+                    item,
+                    runtime=runtime.get(str(item.get("metadata", {}).get("name", ""))),
+                )
+                for item in resp.get("items", [])
+            ]
+        )
 
     async def create_source(request: web.Request) -> web.Response:
         body = await request.json()

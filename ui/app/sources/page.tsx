@@ -221,7 +221,7 @@ export default function SourcesPage() {
               ))}
               {sources.data?.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
+                  <TableCell colSpan={10} className="h-32 text-center text-muted-foreground">
                     No sources
                   </TableCell>
                 </TableRow>
