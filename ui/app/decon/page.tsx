@@ -58,7 +58,9 @@ export default function BenchmarkSafetyPage() {
           >
             {coverage.data.corpus_kind === 'restricted_reserve'
               ? 'Restricted reserve'
-              : 'Demo canaries'}
+              : coverage.data.corpus_kind === 'synthetic_canary'
+                ? 'Synthetic canary reserve'
+                : 'Demo canaries'}
           </Badge>
         ) : null}
       </div>

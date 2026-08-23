@@ -94,7 +94,7 @@ export type DeconAttestation = z.infer<typeof DeconAttestationSchema>;
 export const BenchmarkCoverageSchema = z.object({
   benchmark_set_version: z.string(),
   manifest_sha256: z.string(),
-  corpus_kind: z.enum(['demo_canaries', 'restricted_reserve']),
+  corpus_kind: z.enum(['demo_canaries', 'synthetic_canary', 'restricted_reserve']),
   item_count: z.number().int().nonnegative(),
   per_benchmark_items: z.record(z.string(), z.number().int().nonnegative()),
   non_empty_benchmarks: z.array(z.string()),

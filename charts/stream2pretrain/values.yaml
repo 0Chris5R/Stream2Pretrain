@@ -607,8 +607,17 @@ processor:
     replicas: 1
     apiPort: 8090
     goldRelation: gold
+    # Bound catalog staleness while avoiding one Polaris metadata reload for
+    # every aggregate in a single dashboard request.
+    catalogRefreshSeconds: 30
+    # DuckDB otherwise assumes most host memory is available and Kubernetes
+    # kills the API during whole-table sorts. Spill bounded scans to emptyDir.
+    memoryLimit: 512MB
+    threads: 1
+    maxTempDirectorySize: 3GB
+    tempStorageSizeLimit: 4Gi
     resources:
-      requests: {cpu: 100m, memory: 256Mi}
+      requests: {cpu: 100m, memory: 512Mi}
       limits: {cpu: 1, memory: 1Gi}
   deconGate:
     image: stream2pretrain/decon-gate
@@ -753,9 +762,6 @@ ui:
     host: stream2pretrain.local
     ingressClassName: traefik
     tlsSecret: ""
-  env:
-    duckdbCacheSeconds: 30
-
 # -----------------------------------------------------------------------------
 # KEDA scaling
 # -----------------------------------------------------------------------------

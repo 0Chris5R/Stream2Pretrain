@@ -43,6 +43,7 @@ class DuckDBQueryService:
         decisions_relation: str = "decisions",
         license_admissions_relation: str = "license_admissions",
         refresh_iceberg: bool = False,
+        catalog_refresh_seconds: float = 30.0,
         artifact_store: ScientificArtifactStore | None = None,
     ) -> None:
         if not _RELATION_RE.fullmatch(gold_relation):
@@ -56,6 +57,8 @@ class DuckDBQueryService:
         self._decisions = decisions_relation
         self._license_admissions = license_admissions_relation
         self._refresh_iceberg = refresh_iceberg
+        self._catalog_refresh_seconds = max(0.0, catalog_refresh_seconds)
+        self._relation_refreshed_at: dict[str, float] = {}
         self._artifact_store = artifact_store
 
     @classmethod
@@ -75,12 +78,14 @@ class DuckDBQueryService:
             # which does not maintain DuckDB's optional version-hint.text.
             conn.execute("SET unsafe_enable_version_guessing = true")
         _configure_s3(conn)
+        _configure_runtime_limits(conn)
         return cls(
             conn,
             gold_relation=gold_relation,
             decisions_relation=decisions_relation,
             license_admissions_relation=license_admissions_relation,
             refresh_iceberg=True,
+            catalog_refresh_seconds=float(os.environ.get("S2P_DUCKDB_CATALOG_REFRESH_SECONDS", "30")),
             artifact_store=ScientificArtifactStore.from_env(),
         )
 
@@ -787,16 +792,8 @@ class DuckDBQueryService:
             raise ValueError("multiple SQL statements are not allowed")
         started = time.perf_counter()
         if self._refresh_iceberg:
-            _register_iceberg_relation(
-                self._conn,
-                self._gold,
-                os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated"),
-            )
-            _register_iceberg_relation(
-                self._conn,
-                self._decisions,
-                os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions"),
-            )
+            self._prepare_relation(self._gold)
+            self._prepare_relation(self._decisions)
         rows = self._rows(stripped, params, relation=None)
         return {"rows": rows, "durationMs": (time.perf_counter() - started) * 1000.0}
 
@@ -808,18 +805,37 @@ class DuckDBQueryService:
         relation: str | None = None,
     ) -> list[dict[str, Any]]:
         if self._refresh_iceberg and relation is not None:
-            if relation == self._license_admissions:
-                _register_license_relation(self._conn, relation)
-            else:
-                table_name = (
-                    os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated")
-                    if relation == self._gold
-                    else os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
-                )
-                _register_iceberg_relation(self._conn, relation, table_name)
+            self._prepare_relation(relation)
         result = self._conn.execute(sql, params)
         names = [str(col[0]) for col in (result.description or [])]
         return [dict(zip(names, row, strict=True)) for row in result.fetchall()]
+
+    def _prepare_relation(self, relation: str) -> None:
+        """Refresh an Iceberg view at most once per configured cache window.
+
+        A typed endpoint often runs several aggregate queries over the same
+        relation. Reloading Polaris metadata and recreating the DuckDB view for
+        every aggregate serialised all UI requests behind redundant catalog
+        calls. The API still observes new snapshots within the short bounded
+        refresh interval.
+        """
+        now = time.monotonic()
+        refreshed_at = self._relation_refreshed_at.get(relation)
+        if (
+            refreshed_at is not None
+            and now - refreshed_at < self._catalog_refresh_seconds
+        ):
+            return
+        if relation == self._license_admissions:
+            _register_license_relation(self._conn, relation)
+        else:
+            table_name = (
+                os.environ.get("S2P_ICEBERG_GOLD_TABLE", "curated")
+                if relation == self._gold
+                else os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
+            )
+            _register_iceberg_relation(self._conn, relation, table_name)
+        self._relation_refreshed_at[relation] = time.monotonic()
 
 
 def _load_extensions(conn: DuckDBConnection) -> None:
@@ -851,6 +867,23 @@ def _configure_s3(conn: DuckDBConnection) -> None:
         "s3_url_style": "path",
         "s3_use_ssl": use_ssl,
     }
+    for key, value in settings.items():
+        conn.execute(f"SET {key}={_sql_string(value)}")
+
+
+def _configure_runtime_limits(conn: DuckDBConnection) -> None:
+    """Keep analytical scans inside the container and spill to bounded disk."""
+    settings = {
+        "memory_limit": os.environ.get("S2P_DUCKDB_MEMORY_LIMIT", "512MB"),
+        "threads": os.environ.get("S2P_DUCKDB_THREADS", "1"),
+        "temp_directory": os.environ.get(
+            "S2P_DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb-spill"
+        ),
+        "max_temp_directory_size": os.environ.get(
+            "S2P_DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "3GB"
+        ),
+    }
+    os.makedirs(settings["temp_directory"], exist_ok=True)
     for key, value in settings.items():
         conn.execute(f"SET {key}={_sql_string(value)}")
 

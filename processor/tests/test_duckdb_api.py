@@ -7,6 +7,7 @@ import pytest
 
 from processor.duckdb_api import (
     DuckDBQueryService,
+    _configure_runtime_limits,
     _create_empty_gold_relation,
     _optional_bool,
     _register_iceberg_relation,
@@ -306,6 +307,40 @@ def test_iceberg_relation_defensively_deduplicates_recipe_rows(monkeypatch) -> N
     assert "version = '00001-test'" in sql
     assert "ROW_NUMBER() OVER" in sql
     assert "PARTITION BY doc_id, scoring_version, classifier_revision, policy_revision" in sql
+
+
+def test_iceberg_relation_refresh_is_cached_between_aggregate_queries(monkeypatch) -> None:
+    conn = _FakeConnection()
+    registrations: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "processor.duckdb_api._register_iceberg_relation",
+        lambda _conn, relation, table: registrations.append((relation, table)),
+    )
+    service = DuckDBQueryService(
+        conn,
+        refresh_iceberg=True,
+        catalog_refresh_seconds=30,
+    )
+
+    service.quality_histogram()
+
+    assert registrations == [("gold", "curated")]
+
+
+def test_duckdb_runtime_limits_enable_bounded_spilling(monkeypatch, tmp_path) -> None:
+    conn = _FakeConnection()
+    spill = tmp_path / "spill"
+    monkeypatch.setenv("S2P_DUCKDB_TEMP_DIRECTORY", str(spill))
+    monkeypatch.setenv("S2P_DUCKDB_MEMORY_LIMIT", "384MB")
+
+    _configure_runtime_limits(conn)
+
+    assert spill.is_dir()
+    statements = [sql for sql, _params in conn.calls]
+    assert "SET memory_limit='384MB'" in statements
+    assert "SET threads='1'" in statements
+    assert f"SET temp_directory='{spill}'" in statements
+    assert "SET max_temp_directory_size='3GB'" in statements
 
 
 def test_document_filters_are_parameterized_and_hide_fixtures() -> None:

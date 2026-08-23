@@ -53,8 +53,14 @@ prometheus:
     scrapeInterval: 30s
     evaluationInterval: 30s
     enableAdminAPI: true
+    # Prometheus 2.54 does not enable container-aware GOMEMLIMIT by default.
+    # Reserve 25% of the 2 GiB cgroup for mmap/WAL and runtime overhead so a
+    # WAL replay cannot repeatedly cross the Kubernetes memory limit.
     enableFeatures:
-      - exemplar-storage
+      - auto-gomemlimit
+    additionalArgs:
+      - name: auto-gomemlimit.ratio
+        value: "0.75"
     resources:
       requests:
         cpu: 200m
