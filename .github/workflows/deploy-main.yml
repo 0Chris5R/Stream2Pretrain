@@ -168,7 +168,7 @@ jobs:
                   "iceberg-writer",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
+                      "S2P_BYTEWAX_RECOVERY_PARTITIONS": "1",
                   },
               ),
           )
