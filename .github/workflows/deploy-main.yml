@@ -38,16 +38,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "0.8.17"
           enable-cache: true
 
       - name: Install Helm 3
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@v5.0.1
         with:
           version: "${{ env.HELM_VERSION }}"
 
@@ -128,19 +128,19 @@ jobs:
             extra: runtime
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install uv for dependency fingerprinting
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "0.8.17"
           enable-cache: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -185,7 +185,7 @@ jobs:
 
       - name: Build and publish dependency base
         if: matrix.profile == 'none' && steps.base.outputs.exists != 'true'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: processor/Dockerfile
@@ -201,7 +201,7 @@ jobs:
 
       - name: Build and publish ${{ matrix.profile }} model base
         if: matrix.profile != 'none' && steps.base.outputs.exists != 'true'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: processor/Dockerfile
@@ -231,19 +231,19 @@ jobs:
       fetcher_image: ${{ steps.pin.outputs.fetcher_image }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install uv for dependency fingerprinting
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "0.8.17"
           enable-cache: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -381,15 +381,15 @@ jobs:
             inputs: ui
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 2
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -466,7 +466,7 @@ jobs:
 
       - name: Build and publish image
         if: steps.image.outputs.exists != 'true'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
@@ -531,10 +531,10 @@ jobs:
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
 
       - name: Install Helm 3
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@v5.0.1
         with:
           version: "${{ env.HELM_VERSION }}"
 
@@ -1487,7 +1487,7 @@ jobs:
 
       - name: Upload rendered UI audit
         if: ${{ always() && inputs.mode == 'audit-ui' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: stream2pretrain-ui-audit-${{ github.run_id }}
           path: ${{ runner.temp }}/ui-audit
