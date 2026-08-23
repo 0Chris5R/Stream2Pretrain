@@ -20,6 +20,7 @@ from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
 
 REPO_ID: str = "HuggingFaceFW/fineweb-edu"
+DATASET_REVISION: str = "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9"
 SPDX: str = "unknown"
 
 # Default allowlist; values.yaml is the canonical source. Kept here so unit
@@ -134,6 +135,8 @@ def to_seed_document(
     if isinstance(score, (int, float)):
         extra["fineweb_edu_score"] = f"{float(score):.3f}"
     content_license = content_license_for(row)
+    evidence_revision_raw = row.get("dump") or row.get("date") or nid
+    evidence_revision = str(evidence_revision_raw) if evidence_revision_raw is not None else nid
     return SeedDocument(
         repo_id=REPO_ID,
         native_id=nid,
@@ -146,6 +149,12 @@ def to_seed_document(
         extraction_pipeline="fineweb-edu-2024",
         spdx_license=content_license,
         spdx_license_source="dataset_metadata" if content_license else "unknown",
+        license_resolver="fineweb-page-item-field",
+        license_evidence_url=(
+            f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}"
+        ),
+        license_evidence_revision=f"{DATASET_REVISION}:{evidence_revision}",
+        license_evidence_scope="item" if content_license else "unknown",
         extra=extra,
     )
 
@@ -183,11 +192,13 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
         REPO_ID,
         split="train",
         streaming=True,
+        revision=DATASET_REVISION,
     )
 
 
 __all__ = [
     "DEFAULT_URL_ALLOWLIST",
+    "DATASET_REVISION",
     "REPO_ID",
     "SPDX",
     "content_license_for",

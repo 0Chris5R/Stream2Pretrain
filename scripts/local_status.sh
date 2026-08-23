@@ -26,7 +26,9 @@ echo
 echo "Redpanda topics"
 "${COMPOSE[@]}" exec -T redpanda \
   rpk -X brokers=redpanda:29092 topic describe \
-  raw.fetched raw.smoke docs.normalized docs.curated curation.decisions license.admissions decon.attest -p
+  raw.fetched raw.smoke docs.normalized docs.normalized.smoke docs.curated \
+  docs.curated.smoke curation.decisions curation.decisions.smoke \
+  license.admissions license.admissions.smoke decon.attest -p
 
 check_url() {
   local label="$1"

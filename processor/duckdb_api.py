@@ -332,13 +332,16 @@ class DuckDBQueryService:
         }
 
     def source_activity(self, *, window_hours: int = 24) -> dict[str, Any]:
-        """Return one efficient durable observation count per source."""
+        """Return durable per-source decisions and their licence evidence."""
         bounded_hours = max(1, min(window_hours, 24 * 7))
         cutoff = datetime.now(UTC) - timedelta(hours=bounded_hours)
         sources = self._rows(
             f"""
             SELECT
-              source_feed,
+              CASE
+                WHEN source_feed LIKE 'seed:wayback:%' THEN 'seed:wayback'
+                ELSE source_feed
+              END AS source_feed,
               CAST(COUNT(*) AS BIGINT) AS documents,
               CAST(COUNT(*) FILTER (WHERE status = 'admitted') AS BIGINT) AS admitted,
               CAST(COUNT(*) FILTER (
@@ -348,12 +351,72 @@ class DuckDBQueryService:
               CAST(MAX(observed_at) AS VARCHAR) AS last_observed_at
             FROM {self._license_admissions}
             WHERE observed_at >= CAST(? AS TIMESTAMP)
-            GROUP BY source_feed
+            GROUP BY 1
             ORDER BY source_feed
             """,
             [cutoff.isoformat()],
             relation=self._license_admissions,
         )
+        license_rows = self._rows(
+            f"""
+            SELECT
+              CASE
+                WHEN source_feed LIKE 'seed:wayback:%' THEN 'seed:wayback'
+                ELSE source_feed
+              END AS source_feed,
+              license_id,
+              status,
+              CAST(COUNT(*) AS BIGINT) AS count
+            FROM {self._license_admissions}
+            WHERE observed_at >= CAST(? AS TIMESTAMP)
+            GROUP BY 1, license_id, status
+            ORDER BY source_feed, count DESC, license_id, status
+            """,
+            [cutoff.isoformat()],
+            relation=self._license_admissions,
+        )
+        provenance_rows = self._rows(
+            f"""
+            SELECT
+              CASE
+                WHEN source_feed LIKE 'seed:wayback:%' THEN 'seed:wayback'
+                ELSE source_feed
+              END AS source_feed,
+              license_source,
+              CAST(COUNT(*) AS BIGINT) AS count
+            FROM {self._license_admissions}
+            WHERE observed_at >= CAST(? AS TIMESTAMP)
+            GROUP BY 1, license_source
+            ORDER BY source_feed, count DESC, license_source
+            """,
+            [cutoff.isoformat()],
+            relation=self._license_admissions,
+        )
+        by_source: dict[str, dict[str, Any]] = {
+            str(row["source_feed"]): row for row in sources
+        }
+        for row in sources:
+            row["license_distribution"] = []
+            row["license_provenance"] = []
+        for row in license_rows:
+            source = by_source.get(str(row["source_feed"]))
+            if source is not None:
+                source["license_distribution"].append(
+                    {
+                        "license_id": row["license_id"],
+                        "status": row["status"],
+                        "count": row["count"],
+                    }
+                )
+        for row in provenance_rows:
+            source = by_source.get(str(row["source_feed"]))
+            if source is not None:
+                source["license_provenance"].append(
+                    {
+                        "license_source": row["license_source"],
+                        "count": row["count"],
+                    }
+                )
         return {"window_hours": bounded_hours, "sources": sources}
 
     def documents(
@@ -408,6 +471,57 @@ class DuckDBQueryService:
             "perplexity_asc": "perplexity ASC, valid_from DESC",
         }.get(sort, "valid_from DESC, doc_id ASC")
         sql = f"""
+        WITH document_rows AS (
+          SELECT
+            doc_id, text, source_feed, source_format, lang, valid_from,
+            quality_score, edu_score, structural_quality_score, reasoning_score,
+            benchmark_score, perplexity, risk_tier, route,
+            COALESCE(training_usage, 'pretrain_and_posttrain') AS training_usage,
+            content_tags, reject_reasons, source_word_count, training_word_count,
+            included_section_count, excluded_section_count, figure_count,
+            table_count, equation_count, citation_count,
+            scientific_artifact_s3_uri,
+            FALSE AS admission_only
+          FROM {self._decisions}
+          UNION ALL
+          SELECT
+            admission.doc_id,
+            CAST(admission.source_url AS VARCHAR) AS text,
+            admission.source_feed,
+            COALESCE(admission.source_format, 'unfetched') AS source_format,
+            'not_applicable' AS lang,
+            admission.observed_at AS valid_from,
+            0.0 AS quality_score,
+            0.0 AS edu_score,
+            0.0 AS structural_quality_score,
+            0.0 AS reasoning_score,
+            0.0 AS benchmark_score,
+            0.0 AS perplexity,
+            3 AS risk_tier,
+            'quarantine' AS route,
+            'quarantined' AS training_usage,
+            CAST([] AS VARCHAR[]) AS content_tags,
+            CASE WHEN admission.license_id = 'unknown'
+                 THEN CAST(['license_missing'] AS VARCHAR[])
+                 ELSE CAST(['license_not_permitted'] AS VARCHAR[])
+            END AS reject_reasons,
+            0 AS source_word_count,
+            0 AS training_word_count,
+            0 AS included_section_count,
+            0 AS excluded_section_count,
+            0 AS figure_count,
+            0 AS table_count,
+            0 AS equation_count,
+            0 AS citation_count,
+            CAST(NULL AS VARCHAR) AS scientific_artifact_s3_uri,
+            TRUE AS admission_only
+          FROM {self._license_admissions} AS admission
+          WHERE admission.status = 'quarantined'
+            AND NOT EXISTS (
+              SELECT 1 FROM {self._decisions} AS decision
+              WHERE decision.doc_id = admission.doc_id
+            )
+        )
         SELECT
           doc_id,
           TRIM(LEADING '# ' FROM SPLIT_PART(text, '\n', 1)) AS title,
@@ -423,6 +537,7 @@ class DuckDBQueryService:
           perplexity,
           risk_tier,
           route,
+          COALESCE(training_usage, 'pretrain_and_posttrain') AS training_usage,
           content_tags,
           reject_reasons,
           source_word_count,
@@ -434,17 +549,21 @@ class DuckDBQueryService:
           equation_count,
           citation_count,
           scientific_artifact_s3_uri,
+          admission_only,
           SUBSTR(text, 1, 320) AS text_preview,
           CAST(COUNT(*) OVER () AS BIGINT) AS _total
-        FROM {self._decisions}
+        FROM document_rows
         {where}
         ORDER BY {order_by}
         LIMIT ? OFFSET ?
         """
+        if self._refresh_iceberg:
+            self._prepare_relation(self._decisions)
+            self._prepare_relation(self._license_admissions)
         rows = self._rows(
             sql,
             [*params, bounded_size, (bounded_page - 1) * bounded_size],
-            relation=self._decisions,
+            relation=None,
         )
         total = int(rows[0].pop("_total")) if rows else 0
         return {
@@ -457,18 +576,49 @@ class DuckDBQueryService:
 
     def document_facets(self, *, include_fixtures: bool = False) -> dict[str, list[str]]:
         """Return collection values used by compact filter controls."""
+        if self._refresh_iceberg:
+            self._prepare_relation(self._decisions)
+            self._prepare_relation(self._license_admissions)
         fixture_clause = "" if include_fixtures else "WHERE source_feed NOT LIKE 'local-%'"
+        admission_rows = f"""
+          SELECT admission.source_feed,
+                 COALESCE(admission.source_format, 'unfetched') AS source_format,
+                 CASE WHEN admission.license_id = 'unknown'
+                      THEN 'license_missing' ELSE 'license_not_permitted' END AS reason
+          FROM {self._license_admissions} AS admission
+          WHERE admission.status = 'quarantined'
+            AND NOT EXISTS (
+              SELECT 1 FROM {self._decisions} AS decision
+              WHERE decision.doc_id = admission.doc_id
+            )
+        """
         sources = self._rows(
-            f"SELECT DISTINCT source_feed AS value FROM {self._decisions} "
-            f"{fixture_clause} ORDER BY value",
+            f"""
+            SELECT DISTINCT source_feed AS value
+            FROM (
+              SELECT source_feed FROM {self._decisions}
+              UNION ALL
+              SELECT source_feed FROM ({admission_rows}) AS early
+            ) AS source_rows
+            {fixture_clause}
+            ORDER BY value
+            """,
             [],
-            relation=self._decisions,
+            relation=None,
         )
         formats = self._rows(
-            f"SELECT DISTINCT source_format AS value FROM {self._decisions} "
-            f"{fixture_clause} ORDER BY value",
+            f"""
+            SELECT DISTINCT source_format AS value
+            FROM (
+              SELECT source_feed, source_format FROM {self._decisions}
+              UNION ALL
+              SELECT source_feed, source_format FROM ({admission_rows}) AS early
+            ) AS format_rows
+            {fixture_clause}
+            ORDER BY value
+            """,
             [],
-            relation=self._decisions,
+            relation=None,
         )
         conjunction = "WHERE" if not fixture_clause else "AND"
         tags = self._rows(
@@ -479,11 +629,20 @@ class DuckDBQueryService:
             relation=self._decisions,
         )
         reasons = self._rows(
-            f"SELECT DISTINCT reason AS value FROM {self._decisions}, "
-            f"UNNEST(reject_reasons) AS values(reason) {fixture_clause} "
-            f"{conjunction} reason IS NOT NULL ORDER BY value",
+            f"""
+            SELECT DISTINCT reason AS value
+            FROM (
+              SELECT source_feed, reason
+              FROM {self._decisions}, UNNEST(reject_reasons) AS values(reason)
+              UNION ALL
+              SELECT source_feed, reason FROM ({admission_rows}) AS early
+            ) AS reason_rows
+            {fixture_clause}
+            {conjunction} reason IS NOT NULL
+            ORDER BY value
+            """,
             [],
-            relation=self._decisions,
+            relation=None,
         )
         return {
             "sources": [str(row["value"]) for row in sources],
@@ -527,6 +686,7 @@ class DuckDBQueryService:
           , spdx_license, spdx_license_source
         FROM {self._decisions}
         {where}
+          AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
           AND risk_tier = 1
           AND ARRAY_LENGTH(reject_reasons) = 0
         ORDER BY valid_from ASC, doc_id ASC
@@ -573,6 +733,7 @@ class DuckDBQueryService:
               CAST(COUNT(DISTINCT source_feed) AS BIGINT) AS source_count
             FROM {self._decisions}
             {where}
+              AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
               AND risk_tier = 1
               AND ARRAY_LENGTH(reject_reasons) = 0
             """,
@@ -588,6 +749,7 @@ class DuckDBQueryService:
               tokenizer_revision, perplexity_scorer, minhash_backend, lsh_backend
             FROM {self._decisions}
             {where}
+              AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
               AND risk_tier = 1
               AND ARRAY_LENGTH(reject_reasons) = 0
             ORDER BY policy_revision, classifier_revision
@@ -664,10 +826,6 @@ class DuckDBQueryService:
         params: list[Any] = []
         if not include_fixtures:
             clauses.append("source_feed NOT LIKE 'local-%'")
-        # Defence in depth: even historical or manually inserted rows cannot
-        # be exported unless their content licence is on the same strict
-        # allowlist used before fetch.
-        clauses.append(f"COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})")
         if search and search.strip():
             clauses.append(
                 "(LOWER(text) LIKE ? OR LOWER(doc_id) LIKE ? OR LOWER(source_feed) LIKE ?)"
@@ -675,13 +833,8 @@ class DuckDBQueryService:
             needle = f"%{search.strip().lower()}%"
             params.extend([needle, needle, needle])
         if routes:
-            clauses.append(
-                "("
-                + " OR ".join("(route = ? OR LIST_CONTAINS(eligible_routes, ?))" for _ in routes)
-                + ")"
-            )
-            for value in routes:
-                params.extend([value, value])
+            clauses.append("(" + " OR ".join("route = ?" for _ in routes) + ")")
+            params.extend(routes)
         for column, values in (
             ("source_feed", sources),
             ("source_format", source_formats),
@@ -727,6 +880,7 @@ class DuckDBQueryService:
           contaminated_with, extraction_pipeline, classifier_revision, classifier_backend,
           scoring_version, policy_revision, license, license_source,
           spdx_license, spdx_license_source,
+          COALESCE(training_usage, 'pretrain_and_posttrain') AS training_usage,
           scientific_artifact_s3_uri, figure_count, table_count, equation_count,
           citation_count, extraction_warnings, lang_score, gopher_pass,
           c4_nopunc_pass, c4_curly_brace_pass, c4_lorem_ipsum_pass,
@@ -752,8 +906,86 @@ class DuckDBQueryService:
         """
         rows = self._rows(sql, [doc_id], relation=self._decisions)
         if not rows:
-            return None
+            admission_only = self._rows(
+                f"""
+                SELECT
+                  doc_id,
+                  CAST(source_url AS VARCHAR) AS title,
+                  CAST(source_url AS VARCHAR) AS source_url,
+                  source_feed,
+                  COALESCE(source_format, 'unfetched') AS source_format,
+                  CAST(observed_at AS VARCHAR) AS valid_from,
+                  license_id,
+                  license_source,
+                  reason,
+                  raw_license,
+                  normalized_license,
+                  resolver,
+                  CAST(evidence_url AS VARCHAR) AS evidence_url,
+                  evidence_revision,
+                  evidence_scope,
+                  policy_revision,
+                  CAST(resolved_at AS VARCHAR) AS resolved_at
+                FROM {self._license_admissions}
+                WHERE doc_id = ? AND status = 'quarantined'
+                ORDER BY observed_at DESC, decision_id DESC
+                LIMIT 1
+                """,
+                [doc_id],
+                relation=self._license_admissions,
+            )
+            if not admission_only:
+                return None
+            admission = admission_only[0]
+            reject_reason = (
+                "license_missing"
+                if str(admission.get("license_id")) == "unknown"
+                else "license_not_permitted"
+            )
+            return {
+                "admission_only": True,
+                "doc_id": admission["doc_id"],
+                "title": admission["title"],
+                "source_url": admission["source_url"],
+                "source_feed": admission["source_feed"],
+                "source_format": admission["source_format"],
+                "valid_from": admission["valid_from"],
+                "route": "quarantine",
+                "training_usage": "quarantined",
+                "content_tags": [],
+                "reject_reasons": [reject_reason],
+                "license_admission": {
+                    "status": "quarantined",
+                    "license_id": admission["license_id"],
+                    "license_source": admission["license_source"],
+                    "reason": admission["reason"],
+                    "raw_license": admission["raw_license"],
+                    "normalized_license": admission["normalized_license"],
+                    "resolver": admission["resolver"],
+                    "evidence_url": admission["evidence_url"],
+                    "evidence_revision": admission["evidence_revision"],
+                    "evidence_scope": admission["evidence_scope"],
+                    "policy_revision": admission["policy_revision"],
+                    "resolved_at": admission["resolved_at"],
+                },
+            }
         row = rows[0]
+        row["admission_only"] = False
+        admission_rows = self._rows(
+            f"""
+            SELECT status, license_id, license_source, reason, raw_license,
+                   normalized_license, resolver, evidence_url, evidence_revision,
+                   evidence_scope, policy_revision,
+                   CAST(resolved_at AS VARCHAR) AS resolved_at
+            FROM {self._license_admissions}
+            WHERE doc_id = ?
+            ORDER BY observed_at DESC, decision_id DESC
+            LIMIT 1
+            """,
+            [doc_id],
+            relation=self._license_admissions,
+        )
+        row["license_admission"] = admission_rows[0] if admission_rows else None
         try:
             import orjson
 
@@ -935,10 +1167,19 @@ def _create_empty_license_relation(conn: DuckDBConnection, relation: str) -> Non
           CAST(NULL AS VARCHAR) AS doc_id,
           CAST(NULL AS VARCHAR) AS source_feed,
           CAST(NULL AS VARCHAR) AS source_url,
+          CAST(NULL AS VARCHAR) AS source_format,
           CAST(NULL AS TIMESTAMP) AS observed_at,
           CAST(NULL AS VARCHAR) AS status,
           CAST(NULL AS VARCHAR) AS license_id,
           CAST(NULL AS VARCHAR) AS license_source,
+          CAST(NULL AS VARCHAR) AS raw_license,
+          CAST(NULL AS VARCHAR) AS normalized_license,
+          CAST(NULL AS VARCHAR) AS resolver,
+          CAST(NULL AS VARCHAR) AS evidence_url,
+          CAST(NULL AS VARCHAR) AS evidence_revision,
+          CAST(NULL AS VARCHAR) AS evidence_scope,
+          CAST(NULL AS VARCHAR) AS policy_revision,
+          CAST(NULL AS TIMESTAMP) AS resolved_at,
           CAST(NULL AS VARCHAR) AS reason,
           CAST(NULL AS VARCHAR) AS trace_id,
           CAST(FALSE AS BOOLEAN) AS content_fetch_started
@@ -1110,6 +1351,7 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           , CAST('unknown' AS VARCHAR) AS decon_embedding_revision
           , CAST('unknown' AS VARCHAR) AS benchmark_set_version
           , CAST('unknown' AS VARCHAR) AS classifier_backend
+          , CAST('pretrain_and_posttrain' AS VARCHAR) AS training_usage
         WHERE FALSE
         """
     )

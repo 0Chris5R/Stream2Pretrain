@@ -10,7 +10,10 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
-  suspend: {{ not .Values.sources.arxiv.enabled }}
+  # Template only. The SourceFeed controller clones this Job template into
+  # one independently scheduled CronJob per CRD. Running this aggregate job
+  # as well would ingest every configured arXiv entry twice.
+  suspend: true
   schedule: {{ .Values.sources.arxiv.rss.schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
@@ -72,77 +75,5 @@ spec:
             - name: state
               persistentVolumeClaim:
                 claimName: {{ $stateClaim | quote }}
-            {{- end }}
-{{- end }}
-{{- if .Values.sources.blogs.enabled }}
----
-{{- $blogName := printf "%s-ingest-blogs" (include "stream2pretrain.fullname" .) }}
-{{- $blogStateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: {{ $blogName }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" "ingest-blogs") | nindent 4 }}
-spec:
-  schedule: {{ .Values.sources.blogs.schedule | quote }}
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      backoffLimit: 2
-      activeDeadlineSeconds: 1800
-      template:
-        metadata:
-          labels:
-            {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" "ingest-blogs") | nindent 12 }}
-            stream2pretrain.io/egress-class: blogs
-        spec:
-          serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
-          restartPolicy: OnFailure
-          {{- include "stream2pretrain.imagePullSecrets" . | nindent 10 }}
-          {{- include "stream2pretrain.podSecurityContext" . | nindent 10 }}
-          {{- include "stream2pretrain.scheduling" . | nindent 10 }}
-          containers:
-            - name: blogs
-              image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.rss.image) | quote }}
-              imagePullPolicy: {{ .Values.image.pullPolicy }}
-              command: ["python", "-m", "ingest.rss_poller.poller"]
-              {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
-              args:
-                - --config
-                - /etc/s2p/feeds/blogs.json
-              env:
-                {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
-                - name: S2P_COMPONENT
-                  value: ingest-blogs
-                - name: S2P_FEED_CONFIG
-                  value: /etc/s2p/feeds/blogs.json
-                - name: S2P_STATE_ROOT
-                  value: /var/lib/s2p-state
-              volumeMounts:
-                - name: feeds
-                  mountPath: /etc/s2p/feeds
-                  readOnly: true
-                - name: tmp
-                  mountPath: /tmp
-                {{- if eq .Values.ingest.state.backend "pvc" }}
-                - name: state
-                  mountPath: /var/lib/s2p-state
-                {{- end }}
-              resources:
-                {{- toYaml .Values.ingest.rss.resources | nindent 16 }}
-          volumes:
-            - name: feeds
-              configMap:
-                name: {{ include "stream2pretrain.fullname" . }}-feeds
-            - name: tmp
-              emptyDir: {}
-            {{- if eq .Values.ingest.state.backend "pvc" }}
-            - name: state
-              persistentVolumeClaim:
-                claimName: {{ $blogStateClaim | quote }}
             {{- end }}
 {{- end }}

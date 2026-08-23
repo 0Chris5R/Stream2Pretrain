@@ -26,15 +26,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import signal
-import socket
-import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any, Literal, Protocol, cast
-
-from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
@@ -50,7 +45,6 @@ from processor.decon_gate import (  # type: ignore[attr-defined]
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.model_client import (
     CuratorModelClient,
-    ModelServiceError,
     RemoteEmbeddingSketch,
     RemoteKenLMScorer,
     RemoteQualityClassifier,
@@ -64,18 +58,19 @@ from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiScanner
 from processor.operators.quality import QualityClassifier, QualityScore
 from processor.operators.source_quality import (
-    MetadataQualityPolicy,
+    MetadataDiscoveryPolicy,
     PeerReviewQualityPolicy,
+    is_substantive_review,
 )
 from processor.probes import start_probe_server
 from processor.scientific_policy import (
     RouteDecision,
     aggregate_segment_scores,
     composite_quality_score,
-    representative_segments,
     route_document,
     source_scores,
 )
+from processor.source_policy import resolve_source_policy
 from processor.tokenize import Tokenizer
 from schemas.decon import BenchmarkName
 from schemas.gold import GoldRecord, PiiFlag, RejectReason, RiskTier, SegmentScore
@@ -83,6 +78,8 @@ from schemas.silver import SilverRecord, SilverSegment
 
 POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
+CURATOR_FLOW_NAME = "s2p-curate-v2"
+CURATOR_RECOVERY_NAME = "curate-v2"
 
 
 class QualityScorer(Protocol):
@@ -114,7 +111,7 @@ class CurateState:
     finepdfs_quality: QualityScorer
     fineweb_quality: QualityScorer
     code_quality: CodeQualityPolicy
-    metadata_quality: MetadataQualityPolicy
+    metadata_discovery: MetadataDiscoveryPolicy
     review_quality: PeerReviewQualityPolicy
     pii: PiiScanner
     decon: DeconGate
@@ -211,7 +208,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         finepdfs_quality=finepdfs_quality,
         fineweb_quality=fineweb_quality,
         code_quality=CodeQualityPolicy(),
-        metadata_quality=MetadataQualityPolicy(),
+        metadata_discovery=MetadataDiscoveryPolicy(),
         review_quality=PeerReviewQualityPolicy(),
         pii=pii,
         decon=decon,
@@ -231,7 +228,7 @@ def _decision_cache_key(state: CurateState, payload: bytes) -> str:
             state.scoring_version,
             state.finepdfs_quality.revision,
             state.fineweb_quality.revision,
-            state.metadata_quality.revision,
+            state.metadata_discovery.revision,
             state.review_quality.revision,
             state.kenlm.scorer,
             state.pii.revision,
@@ -269,11 +266,16 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             word_count=len((silver.model_text or silver.text).split()),
         )
     ]
+    source_policy = resolve_source_policy(
+        source_feed=silver.source_feed,
+        source_format=silver.source_format,
+        extraction_pipeline=silver.extraction_pipeline,
+    )
     quality_profile = _quality_profile(silver)
-    is_scientific = quality_profile == "scientific"
-    is_code = quality_profile == "code"
-    is_metadata = quality_profile == "metadata"
-    is_web = quality_profile == "web"
+    is_scientific = source_policy.family == "scientific_paper"
+    is_code = source_policy.family == "source_code"
+    is_metadata = not source_policy.training_text
+    uses_fineweb = source_policy.quality_profile == "fineweb_edu"
     primary_quality: QualityScorer
     if is_code:
         primary_quality = state.code_quality
@@ -282,15 +284,14 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     elif quality_profile == "review":
         primary_quality = state.review_quality
     elif is_metadata:
-        primary_quality = state.metadata_quality
+        primary_quality = state.metadata_discovery
     else:
         primary_quality = state.fineweb_quality
     comparison_quality: QualityScorer | None = state.fineweb_quality if is_scientific else None
-    max_scored_segments = max(1, int(os.environ.get("S2P_MAX_SCORED_SEGMENTS", "10")))
-    sampled_ids = {
-        segment.segment_id
-        for segment in representative_segments(source_segments, limit=max_scored_segments)
-    }
+    # Every retained segment is classified. Representative sampling was a
+    # pilot cost shortcut and could make a document-level decision from only a
+    # subset of the actual training projection.
+    sampled_ids = {segment.segment_id for segment in source_segments}
     segment_scores: list[SegmentScore] = []
     kept_segments: list[SilverSegment] = []
     runtime_excluded: list[str] = []
@@ -303,10 +304,10 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         segment_pii = state.pii.flags(segment.text)
         segment_blocking_pii = state.pii.blocking_flags(segment.text)
         exclusion_reasons: list[str] = []
-        if not segment_c4.curly_brace_pass and not is_scientific and not is_code:
+        if source_policy.web_heuristic_gate and not segment_c4.curly_brace_pass:
             exclusion_reasons.append("C4 curly-brace signal isolated to this section")
             removed_for_c4 = True
-        if not segment_c4.lorem_ipsum_pass:
+        if source_policy.web_heuristic_gate and not segment_c4.lorem_ipsum_pass:
             exclusion_reasons.append("placeholder boilerplate isolated to this section")
             removed_for_c4 = True
         sensitive = sorted(set(segment_blocking_pii) & high_confidence_pii)
@@ -328,14 +329,16 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         segment_bucket: str | None = None
         if segment.segment_id in sampled_ids:
             quality_result = (
-                state.code_quality.score(segment.text, path=segment.title)
+                state.code_quality.score(segment.text, path=str(silver.url))
                 if is_code
                 else primary_quality.score(segment.text)
             )
             comparison_result = (
                 comparison_quality.score(segment.text) if comparison_quality is not None else None
             )
-            perplexity_result = None if is_code or is_metadata else state.kenlm.score(segment.text)
+            perplexity_result = (
+                state.kenlm.score(segment.text) if source_policy.kenlm_mode != "off" else None
+            )
             edu_score = quality_result.edu_score
             quality_classifier_revision = quality_result.revision
             if is_scientific:
@@ -346,7 +349,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
                 comparison_classifier_revision = (
                     comparison_result.revision if comparison_result is not None else None
                 )
-            elif is_web:
+            elif uses_fineweb:
                 fineweb_edu_score = quality_result.edu_score
             segment_perplexity = (
                 perplexity_result.perplexity if perplexity_result is not None else None
@@ -369,7 +372,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
                 perplexity_bucket=segment_bucket,  # type: ignore[arg-type]
                 c4_pass=(
                     segment_c4.nopunc_pass
-                    and (segment_c4.curly_brace_pass or is_code)
+                    and (segment_c4.curly_brace_pass or not source_policy.web_heuristic_gate)
                     and segment_c4.lorem_ipsum_pass
                 ),
                 pii_flags=segment_pii,
@@ -393,7 +396,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     if kept_segments and not measured_kept:
         fallback_segment = kept_segments[0]
         quality_result = (
-            state.code_quality.score(fallback_segment.text, path=fallback_segment.title)
+            state.code_quality.score(fallback_segment.text, path=str(silver.url))
             if is_code
             else primary_quality.score(fallback_segment.text)
         )
@@ -403,7 +406,9 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             else None
         )
         perplexity_result = (
-            None if is_code or is_metadata else state.kenlm.score(fallback_segment.text)
+            state.kenlm.score(fallback_segment.text)
+            if source_policy.kenlm_mode != "off"
+            else None
         )
         segment_scores = [
             score.model_copy(
@@ -414,7 +419,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
                         comparison_result.edu_score
                         if comparison_result is not None
                         else None
-                        if not is_web
+                        if not uses_fineweb
                         else quality_result.edu_score
                     ),
                     "quality_classifier_revision": quality_result.revision,
@@ -442,7 +447,13 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     runtime_excluded.extend(structured_exclusions)
     text = _training_projection(silver, kept_segments, structured_text=structured_text)
     reject: list[RejectReason] = []
-    minimum_words = 20 if is_code else 12 if is_metadata else 50
+    minimum_words = 20 if is_code else 1 if quality_profile == "review" else 50
+    if is_metadata:
+        reject.append("metadata_only")
+    if quality_profile == "review" and not is_substantive_review(
+        model_text, silver.source_metadata_text
+    ):
+        reject.append("insubstantial_review")
     if len(model_text.split()) < minimum_words:
         reject.append("insufficient_scientific_body" if is_scientific else "insufficient_body")
     if removed_body_pii and not kept_segments:
@@ -451,7 +462,10 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         reject.append("c4_nopunc_filter")
 
     gopher_stats = state.gopher.stats(model_text)
-    gopher_pass = True if is_code or is_metadata else state.gopher.passes(model_text)
+    # Gopher/FineWeb heuristics are web-crawl filters. They remain visible as
+    # diagnostics on scientific and review prose but never hard-reject those
+    # source families.
+    gopher_pass = state.gopher.passes(model_text) if source_policy.web_heuristic_gate else True
     if not gopher_pass and not {
         "insufficient_body",
         "insufficient_scientific_body",
@@ -459,11 +473,11 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         reject.append("gopher_filter")
     cstats = state.c4.stats(model_text)
     c4_pass = (
-        cstats.nopunc_pass
-        and cstats.lorem_ipsum_pass
-        and (cstats.curly_brace_pass or is_scientific or is_code)
+        cstats.nopunc_pass and cstats.lorem_ipsum_pass and cstats.curly_brace_pass
+        if source_policy.web_heuristic_gate
+        else True
     )
-    if not c4_pass and not {
+    if source_policy.web_heuristic_gate and not c4_pass and not {
         "insufficient_body",
         "insufficient_scientific_body",
     }.intersection(reject):
@@ -480,8 +494,15 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         if measured_buckets
         else 1.0
     )
-    if not is_code and not is_metadata and tail_fraction >= 0.75 and perplexity > 2000:
+    if source_policy.kenlm_mode == "gate" and tail_fraction >= 0.75 and perplexity > 2000:
         reject.append("high_perplexity")
+
+    if is_code:
+        code_issues = state.code_quality.rejection_reasons(model_text, path=str(silver.url))
+        if "credential_like_secret" in code_issues:
+            reject.append("secret_detected")
+        if any(issue != "credential_like_secret" for issue in code_issues):
+            reject.append("code_quality_filter")
 
     retained_view = silver.model_copy(
         update={
@@ -498,13 +519,26 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         gopher_pass=gopher_pass,
         c4_pass=c4_pass,
         perplexity_bucket=perplexity_bucket,
+        language_applicable=source_policy.language_gate,
+        web_heuristics_applicable=source_policy.web_heuristic_gate,
+        perplexity_applicable=source_policy.kenlm_mode != "off",
     )
-    if edu_score < 0.75 and structure.structural_quality_score < 2.0:
+    # FineWeb-Edu's official model card recommends retaining integer scores
+    # 3 and above. It is a grounded gate only for ordinary web prose. Hub
+    # cards and repository documentation use the score as an audit signal
+    # because their structured Markdown is outside that web-crawl threshold.
+    if source_policy.family == "web_prose" and edu_score < 3.0:
         reject.append("low_quality_score")
-    if silver.lang != "en" or silver.lang_score < 0.5:
+    if source_policy.language_gate and (silver.lang != "en" or silver.lang_score < 0.5):
         reject.append("language_filter")
     if _license_reject_reason(silver) is not None:
         reject.append("license_excluded")
+    if is_scientific and any(
+        warning.startswith("figure_enrichment_failed:")
+        or warning in {"figure_limit_reached", "page_limit_reached"}
+        for warning in silver.extraction_warnings
+    ):
+        reject.append("incomplete_scientific_extraction")
 
     pii_flags = state.pii.blocking_flags(text)
     if pii_flags:
@@ -577,7 +611,9 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         excluded_section_count=silver.excluded_section_count + len(runtime_excluded),
         excluded_sections=[*silver.excluded_sections, *runtime_excluded],
         lang_score=silver.lang_score,
-        lang_detector_revision=silver.lang_detector_revision,
+        lang_detector_revision=(
+            silver.lang_detector_revision if source_policy.language_gate else "not-applicable"
+        ),
         tokenizer_revision=f"{token_count.backend}:cl100k_base",
         gopher_pass=gopher_pass,
         gopher_word_count=gopher_stats.word_count,
@@ -593,7 +629,9 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         c4_fraction_lines_with_punct=cstats.fraction_lines_with_punct,
         perplexity=perplexity,
         perplexity_bucket=perplexity_bucket,  # type: ignore[arg-type]
-        perplexity_scorer=state.kenlm.scorer,
+        perplexity_scorer=(
+            state.kenlm.scorer if source_policy.kenlm_mode != "off" else "not-applicable"
+        ),
         near_duplicate=near.is_near_duplicate,
         near_dup_cluster_id=near.cluster_id,
         minhash_backend=sig.backend,
@@ -624,6 +662,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         extraction_pipeline=silver.extraction_pipeline,
         spdx_license=silver.spdx_license,
         spdx_license_source=silver.spdx_license_source,
+        training_usage=silver.training_usage,
         scientific_artifact_s3_uri=silver.scientific_artifact_s3_uri,
         figure_count=silver.figure_count,
         table_count=silver.table_count,
@@ -730,13 +769,13 @@ def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
 
 def _uses_scientific_quality_profile(silver: SilverRecord) -> bool:
     """Select the PDF-trained classifier only for scientific-source records."""
-    if silver.source_format in {"code", "metadata", "review", "web"}:
-        return False
-    if silver.source_format in {"pdf", "latex", "markdown"}:
-        return True
-    identity = f"{silver.source_feed} {silver.extraction_pipeline}".lower()
-    return silver.source_format == "html" and any(
-        marker in identity for marker in ("arxiv", "openreview", "pes2o", "redpajama-arxiv")
+    return (
+        resolve_source_policy(
+            source_feed=silver.source_feed,
+            source_format=silver.source_format,
+            extraction_pipeline=silver.extraction_pipeline,
+        ).family
+        == "scientific_paper"
     )
 
 
@@ -744,13 +783,18 @@ def _quality_profile(
     silver: SilverRecord,
 ) -> Literal["code", "metadata", "review", "scientific", "web"]:
     """Choose a classifier whose training domain matches the source family."""
-    if silver.source_format == "code":
+    policy = resolve_source_policy(
+        source_feed=silver.source_feed,
+        source_format=silver.source_format,
+        extraction_pipeline=silver.extraction_pipeline,
+    )
+    if policy.family == "source_code":
         return "code"
-    if silver.source_format == "metadata":
+    if not policy.training_text:
         return "metadata"
-    if silver.source_format == "review":
+    if policy.family == "peer_review":
         return "review"
-    if _uses_scientific_quality_profile(silver):
+    if policy.family == "scientific_paper":
         return "scientific"
     return "web"
 
@@ -830,25 +874,46 @@ def process_silver_decision_payload(
     return decision, trainable
 
 
-def build_dataflow(cfg: common.ProcessorConfig) -> object:
+def build_dataflow(
+    cfg: common.ProcessorConfig,
+    *,
+    runtime_status: common.BytewaxRuntimeStatus | None = None,
+) -> object:
     """Build the Bytewax dataflow object."""
     from bytewax import operators as op
-    from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage, KafkaSource
+    from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage
     from bytewax.dataflow import Dataflow
 
     tracer = common.init_tracer("s2p-curate", cfg)
-    log = common.get_logger("s2p.curate")
+    flow_name = os.environ.get("S2P_BYTEWAX_FLOW_NAME", CURATOR_FLOW_NAME).strip()
+    if not flow_name:
+        raise RuntimeError("S2P_BYTEWAX_FLOW_NAME must not be empty")
+    input_topic = os.environ.get("S2P_CURATOR_INPUT_TOPIC", cfg.normalized_topic).strip()
+    if not input_topic:
+        raise RuntimeError("S2P_CURATOR_INPUT_TOPIC must not be empty")
+    decision_topic = os.environ.get("S2P_CURATOR_DECISIONS_TOPIC", cfg.decisions_topic).strip()
+    curated_topic = os.environ.get("S2P_CURATOR_CURATED_TOPIC", cfg.curated_topic).strip()
+    if not decision_topic or not curated_topic:
+        raise RuntimeError("curator decision and curated output topics must not be empty")
+    smoke_input = os.environ.get("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke").strip()
+    if input_topic == smoke_input and (
+        decision_topic == cfg.decisions_topic or curated_topic == cfg.curated_topic
+    ):
+        raise RuntimeError("smoke curator outputs must not target production topics")
     state = build_state(cfg)
-    flow = Dataflow("s2p-curate")
+    failure_writer = common.DurableProcessingFailureWriter.from_config(cfg)
+    flow = Dataflow(flow_name)
     payload_max_bytes = common.kafka_payload_max_bytes()
     # Default to ``beginning`` so a restart with no committed group offset
     # replays the topic instead of dropping in-flight bytes (at-least-once
     # semantics; matches the Kappa/streaming-first contract). Operators can
     # override via ``S2P_KAFKA_START_OFFSET=end`` for short-lived debug runs.
     start_offset = common.kafka_starting_offset()
-    source = KafkaSource(
+    source = common.tracked_kafka_source(
+        runtime_status=runtime_status,
+        source_name="docs_normalized",
         brokers=cfg.redpanda_brokers.split(","),
-        topics=[cfg.normalized_topic],
+        topics=[input_topic],
         starting_offset=start_offset,
         add_config=common.kafka_consumer_config(cfg.consumer_group),
     )
@@ -860,29 +925,29 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
         with tracer.start_as_current_span("curate.process") as span:
             payload = getattr(msg, "value", None)
             if payload is None:
+                failure_writer.record(stage="curate", message=msg, reason="kafka_tombstone")
+                PROCESSOR_METRICS.record_failure(stage="curate", reason="kafka_tombstone")
                 return None
             try:
                 decision, trainable = process_silver_decision_payload(
                     state, payload, metrics=PROCESSOR_METRICS
                 )
+                if len(decision) > payload_max_bytes:
+                    raise common.DeterministicProcessingError(
+                        f"curation decision is {len(decision)} bytes; limit is {payload_max_bytes}"
+                    )
+            except ValueError as exc:
+                span.record_exception(exc)
+                reason = type(exc).__name__
+                failure_writer.record(stage="curate", message=msg, reason=reason)
+                PROCESSOR_METRICS.record_failure(stage="curate", reason=reason)
+                return None
             except Exception as exc:
                 span.record_exception(exc)
                 PROCESSOR_METRICS.record_failure(stage="curate", reason=type(exc).__name__)
-                log.warning(
-                    "curation record failed",
-                    error=str(exc),
-                    exception_type=type(exc).__name__,
-                    exc_info=True,
-                )
-                return None
-            if len(decision) > payload_max_bytes:
-                PROCESSOR_METRICS.record_failure(stage="curate", reason="payload_too_large")
-                log.warning(
-                    "curation payload exceeds bounded Kafka record size",
-                    payload_bytes=len(decision),
-                    payload_max_bytes=payload_max_bytes,
-                )
-                return None
+                # Do not let Bytewax snapshot past transient, model, state, or
+                # unexpected deterministic failures without a durable result.
+                raise
             key = getattr(msg, "key", None) or b""
             decision_message = KafkaSinkMessage(key=key, value=decision)
             curated_message = KafkaSinkMessage(key=key, value=decision) if trainable else None
@@ -893,7 +958,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     decisions = op.map("curate_decision_message", filtered, lambda pair: pair[0])
     decision_sink = KafkaSink(
         brokers=cfg.redpanda_brokers.split(","),
-        topic=cfg.decisions_topic,
+        topic=decision_topic,
         add_config=common.kafka_producer_config(),
     )
     op.output("curate_decision_sink", decisions, decision_sink)
@@ -901,204 +966,11 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     accepted = op.map("curate_accepted_message", accepted_pairs, lambda pair: pair[1])
     curated_sink = KafkaSink(
         brokers=cfg.redpanda_brokers.split(","),
-        topic=cfg.curated_topic,
+        topic=curated_topic,
         add_config=common.kafka_producer_config(),
     )
     op.output("curate_sink", accepted, curated_sink)
     return flow
-
-
-def native_curator_consumer_config(
-    cfg: common.ProcessorConfig,
-    *,
-    group_id: str,
-    traffic_class: str,
-) -> dict[str, object]:
-    """Return the broker-owned offset configuration for one curation lane."""
-    reset_override = os.environ.get("S2P_CURATOR_AUTO_OFFSET_RESET", "").strip().lower()
-    if reset_override and reset_override not in {"earliest", "latest"}:
-        raise RuntimeError("S2P_CURATOR_AUTO_OFFSET_RESET must be earliest or latest")
-    reset = reset_override or ("latest" if common.kafka_starting_offset() == -1 else "earliest")
-    return {
-        **common.kafka_consumer_config(group_id),
-        "bootstrap.servers": cfg.redpanda_brokers,
-        "client.id": f"s2p-curate-{traffic_class}-{socket.gethostname()}",
-        "auto.offset.reset": reset,
-        "enable.auto.commit": False,
-        "enable.auto.offset.store": False,
-        "max.poll.interval.ms": int(os.environ.get("S2P_CURATOR_MAX_POLL_INTERVAL_MS", "900000")),
-        "session.timeout.ms": 45_000,
-        "partition.assignment.strategy": "cooperative-sticky",
-        "queued.max.messages.kbytes": 65_536,
-    }
-
-
-def native_curator_producer_config(cfg: common.ProcessorConfig) -> dict[str, object]:
-    """Return an idempotent configuration for decisions and curated rows."""
-    return {
-        **common.kafka_producer_config(),
-        "bootstrap.servers": cfg.redpanda_brokers,
-        "client.id": f"s2p-curate-{socket.gethostname()}",
-        "enable.idempotence": True,
-        "acks": "all",
-        "compression.type": "zstd",
-        "linger.ms": 10,
-        "message.timeout.ms": 300_000,
-    }
-
-
-def run_native_curator(
-    cfg: common.ProcessorConfig,
-    *,
-    state: CurateState | None = None,
-    consumer_factory: Callable[[dict[str, object]], Any] = Consumer,
-    producer_factory: Callable[[dict[str, object]], Any] = Producer,
-    should_stop: Callable[[], bool] | None = None,
-    max_messages: int | None = None,
-) -> None:
-    """Curate production traffic while giving the bounded canary lane priority.
-
-    Both lanes share the exact same model and durable dedup state. The canary
-    consumer is polled before every production record, so a large replay burst
-    cannot hide a broken deployment for hours. Output delivery completes before
-    the corresponding broker offset is committed, preserving at-least-once
-    processing without a pod-local source-offset checkpoint.
-    """
-    if max_messages is not None and max_messages < 1:
-        raise ValueError("max_messages must be positive when provided")
-    should_stop = should_stop or (lambda: False)
-    state = state or build_state(cfg)
-    log = common.get_logger("s2p.curate")
-    smoke_topic = os.environ.get("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke").strip()
-    if not smoke_topic:
-        raise RuntimeError("S2P_SMOKE_NORMALIZED_TOPIC must not be empty")
-    smoke_group = os.environ.get("S2P_CURATOR_SMOKE_GROUP", "s2p-curate-canary").strip()
-    if not smoke_group:
-        raise RuntimeError("S2P_CURATOR_SMOKE_GROUP must not be empty")
-
-    isolated_topic = os.environ.get("S2P_CURATOR_INPUT_TOPIC", "").strip()
-    production_consumer = consumer_factory(
-        native_curator_consumer_config(cfg, group_id=cfg.consumer_group, traffic_class="production")
-    )
-    smoke_consumer = None
-    if not isolated_topic:
-        smoke_consumer = consumer_factory(
-            native_curator_consumer_config(cfg, group_id=smoke_group, traffic_class="canary")
-        )
-    producer = producer_factory(native_curator_producer_config(cfg))
-    production_consumer.subscribe([isolated_topic or cfg.normalized_topic])
-    if smoke_consumer is not None:
-        smoke_consumer.subscribe([smoke_topic])
-    payload_max_bytes = common.kafka_payload_max_bytes()
-    flush_timeout = float(os.environ.get("S2P_CURATOR_FLUSH_TIMEOUT_SECONDS", "60"))
-    retry_attempts = int(os.environ.get("S2P_CURATOR_RECORD_ATTEMPTS", "2"))
-    if flush_timeout <= 0 or retry_attempts < 1:
-        raise RuntimeError("curator timeout and retry settings must be positive")
-    processed_messages = 0
-    delivery_errors: list[str] = []
-
-    def on_delivery(error: object | None, _message: object) -> None:
-        if error is not None:
-            delivery_errors.append(str(error))
-
-    try:
-        while not should_stop():
-            owner = production_consumer
-            message = None
-            if smoke_consumer is not None:
-                owner = smoke_consumer
-                message = smoke_consumer.poll(0)
-            if message is None:
-                owner = production_consumer
-                message = production_consumer.poll(1.0)
-            if message is None:
-                if max_messages is not None and processed_messages >= max_messages:
-                    break
-                continue
-            error = message.error()
-            if error is not None:
-                if error.code() == KafkaError._PARTITION_EOF:
-                    continue
-                raise KafkaException(error)
-
-            payload = message.value()
-            result: tuple[bytes, bool] | None = None
-            if payload is not None:
-                for attempt in range(1, retry_attempts + 1):
-                    try:
-                        result = process_silver_decision_payload(
-                            state, payload, metrics=PROCESSOR_METRICS
-                        )
-                        break
-                    except Exception as exc:
-                        PROCESSOR_METRICS.record_failure(stage="curate", reason=type(exc).__name__)
-                        if attempt == retry_attempts:
-                            log.warning(
-                                "curation record exhausted retries",
-                                topic=message.topic(),
-                                partition=message.partition(),
-                                offset=message.offset(),
-                                attempts=attempt,
-                                error=str(exc),
-                                exception_type=type(exc).__name__,
-                                exc_info=True,
-                            )
-                            if isinstance(exc, ModelServiceError):
-                                # A transient inference outage must leave the
-                                # broker offset untouched so Kafka replays the
-                                # exact document after service recovery.
-                                raise
-                        else:
-                            time.sleep(min(2 ** (attempt - 1) * 0.25, 2.0))
-
-            if result is not None:
-                decision, trainable = result
-                if len(decision) > payload_max_bytes:
-                    PROCESSOR_METRICS.record_failure(stage="curate", reason="payload_too_large")
-                    log.warning(
-                        "curation payload exceeds bounded Kafka record size",
-                        payload_bytes=len(decision),
-                        payload_max_bytes=payload_max_bytes,
-                    )
-                else:
-                    key = message.key() or b""
-                    producer.produce(
-                        cfg.decisions_topic,
-                        key=key,
-                        value=decision,
-                        on_delivery=on_delivery,
-                    )
-                    if trainable:
-                        producer.produce(
-                            cfg.curated_topic,
-                            key=key,
-                            value=decision,
-                            on_delivery=on_delivery,
-                        )
-                    undelivered = producer.flush(flush_timeout)
-                    if undelivered:
-                        raise RuntimeError(
-                            f"curator producer still has {undelivered} undelivered records"
-                        )
-                    if delivery_errors:
-                        detail = "; ".join(delivery_errors[:3])
-                        raise RuntimeError(f"curator producer delivery failed: {detail}")
-                    delivery_errors.clear()
-
-            # Poison records are observable above but must not deadlock a
-            # partition forever. Successful records reach both output topics
-            # before this synchronous source commit.
-            owner.commit(message=message, asynchronous=False)
-            processed_messages += 1
-            if max_messages is not None and processed_messages >= max_messages:
-                break
-    finally:
-        try:
-            producer.flush(flush_timeout)
-        finally:
-            if smoke_consumer is not None:
-                smoke_consumer.close()
-            production_consumer.close()
 
 
 def main() -> None:
@@ -1106,34 +978,23 @@ def main() -> None:
     cfg = common.load_config()
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.curate")
-    smoke_topic = os.environ.get("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke")
-    log.info(
-        "starting scalable curator",
-        brokers=cfg.redpanda_brokers,
-        production_topic=cfg.normalized_topic,
-        canary_topic=smoke_topic,
+    input_topic = os.environ.get("S2P_CURATOR_INPUT_TOPIC", cfg.normalized_topic)
+    log.info("starting Bytewax curator", brokers=cfg.redpanda_brokers, topic=input_topic)
+    runtime_status = common.BytewaxRuntimeStatus()
+    flow = build_dataflow(cfg, runtime_status=runtime_status)
+    start_probe_server(
+        metrics_provider=PROCESSOR_METRICS.render_prometheus,
+        readiness_provider=runtime_status.is_ready,
     )
-    state = build_state(cfg)
-    stopping = False
-
-    def _stop(_signum: int, _frame: object) -> None:
-        nonlocal stopping
-        stopping = True
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
-    try:
-        max_messages_raw = os.environ.get("S2P_CURATOR_MAX_MESSAGES", "").strip()
-        max_messages = int(max_messages_raw) if max_messages_raw else None
-        run_native_curator(
-            cfg,
-            state=state,
-            should_stop=lambda: stopping,
-            max_messages=max_messages,
-        )
-    finally:
-        state.close()
+    recovery_name = os.environ.get("S2P_BYTEWAX_RECOVERY_NAME", CURATOR_RECOVERY_NAME).strip()
+    if not recovery_name:
+        raise RuntimeError("S2P_BYTEWAX_RECOVERY_NAME must not be empty")
+    common.run_bytewax_flow(
+        flow,
+        cfg,
+        recovery_name,
+        runtime_status=runtime_status,
+    )
 
 
 def now_utc() -> Any:

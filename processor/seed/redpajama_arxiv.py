@@ -18,6 +18,7 @@ from processor.seed.types import SeedDocument
 
 REPO_ID: str = "togethercomputer/RedPajama-Data-1T"
 CONFIG_NAME: str = "arxiv"
+DATASET_REVISION: str = "398f92572e94f4793e41c22ab7ea2a788d9e7de4"
 SPDX: str = "unknown"
 
 # RedPajama v1 release date: April 17 2023. Used as a hard fallback when
@@ -136,6 +137,7 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
     valid_from = derive_valid_from(row)
     url = f"https://arxiv.org/abs/{nid}" if not nid.startswith("sha:") else f"hf://{REPO_ID}/{nid}"
     extra: dict[str, str] = {"redpajama_config": CONFIG_NAME}
+    paper_license = paper_license_for(row)
     return SeedDocument(
         repo_id=REPO_ID,
         native_id=nid,
@@ -146,8 +148,14 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         valid_from=valid_from,
         source_format="latex",
         extraction_pipeline="redpajama-arxiv-2023-04",
-        spdx_license=paper_license_for(row),
-        spdx_license_source=("dataset_metadata" if paper_license_for(row) else "unknown"),
+        spdx_license=paper_license,
+        spdx_license_source=("dataset_metadata" if paper_license else "unknown"),
+        license_resolver="redpajama-arxiv-paper-item-field",
+        license_evidence_url=(
+            f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}"
+        ),
+        license_evidence_revision=f"{DATASET_REVISION}:{nid}",
+        license_evidence_scope="item" if paper_license else "unknown",
         extra=extra,
     )
 
@@ -183,11 +191,13 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
         name=CONFIG_NAME,
         split="train",
         streaming=True,
+        revision=DATASET_REVISION,
     )
 
 
 __all__ = [
     "CONFIG_NAME",
+    "DATASET_REVISION",
     "REPO_ID",
     "SPDX",
     "derive_valid_from",

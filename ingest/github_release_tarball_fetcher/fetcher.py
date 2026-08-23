@@ -27,6 +27,7 @@ configured so the maximum four replicas remain below the GitHub REST
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import secrets
 import threading
@@ -65,17 +66,9 @@ log = get_logger(__name__)
 SOURCE_FEED = "github-release-tarballs"
 UPSTREAM_FEED = "github-releases"
 
-DEFAULT_ALLOWED_LICENSES: frozenset[str] = frozenset(
-    {
-        "Apache-2.0",
-        "MIT",
-        "BSD-2-Clause",
-        "BSD-3-Clause",
-        "ISC",
-        "MPL-2.0",
-        "Unlicense",
-        "CC0-1.0",
-    }
+_SPDX_HEADER = re.compile(
+    rb"SPDX-License-Identifier\s*:\s*([A-Za-z0-9.+-]{1,128})",
+    re.IGNORECASE,
 )
 
 # https://github.com/<owner>/<repo>/releases/tag/<tag>
@@ -102,16 +95,23 @@ class ReleaseRef:
 
 
 @dataclass(frozen=True)
+class RepoLicenseEvidence:
+    """GitHub's licence result for one repository ref and licence blob."""
+
+    spdx_id: str
+    api_url: str
+    ref: str
+    blob_sha: str
+    path: str | None = None
+    html_url: str | None = None
+
+
+@dataclass(frozen=True)
 class FetcherConfig:
     """Static configuration for the worker (env-derived)."""
 
     allowed_extensions: tuple[str, ...] = DEFAULT_ALLOWED_EXTENSIONS
     max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES
-    # Live cluster measurements showed 5,057 retained files completing in
-    # about three minutes while 11,000-file CI snapshots exceeded Kafka's
-    # five-minute poll interval. Keep one release below that measured bound.
-    max_files_per_release: int = 5_000
-    allowed_licenses: frozenset[str] = DEFAULT_ALLOWED_LICENSES
     excluded_tag_prefixes: tuple[str, ...] = ("ciflow/", "trunk/")
     request_rate_per_second: float = 1.0
     request_burst: int = 4
@@ -119,8 +119,8 @@ class FetcherConfig:
     consumer_max_poll_interval_ms: int = 900_000
 
     def __post_init__(self) -> None:
-        if self.max_file_size_bytes < 1 or self.max_files_per_release < 1:
-            raise ValueError("tarball file limits must be positive")
+        if self.max_file_size_bytes < 1:
+            raise ValueError("tarball file limit must be positive")
         if self.consumer_max_poll_interval_ms < 300_000:
             raise ValueError("tarball max poll interval must be at least five minutes")
 
@@ -225,6 +225,7 @@ async def _get_with_anonymous_fallback(
     *,
     headers: dict[str, str],
     anonymous_client: httpx.AsyncClient | None = None,
+    params: dict[str, str] | None = None,
 ) -> httpx.Response:
     """GET once with configured auth, then retry a rejected token anonymously.
 
@@ -232,11 +233,11 @@ async def _get_with_anonymous_fallback(
     repository metadata and tarballs remain available without credentials, so a
     stale optional secret must reduce the rate budget rather than stop ingestion.
     """
-    response = await client.get(url, headers=headers)
+    response = await client.get(url, headers=headers, params=params)
     if response.status_code == 401 and anonymous_client is not None:
         log.warning("tarball.auth_rejected_falling_back_anonymous", url=url)
         await response.aclose()
-        return await anonymous_client.get(url, headers=headers)
+        return await anonymous_client.get(url, headers=headers, params=params)
     return response
 
 
@@ -246,18 +247,35 @@ async def fetch_repo_license(
     *,
     anonymous_client: httpx.AsyncClient | None = None,
 ) -> str | None:
-    """Return the SPDX id reported by the GitHub License API.
+    """Compatibility projection of :func:`fetch_repo_license_evidence`."""
+    evidence = await fetch_repo_license_evidence(
+        client,
+        ref,
+        anonymous_client=anonymous_client,
+    )
+    return evidence.spdx_id if evidence is not None else None
 
-    Uses ``GET /repos/{owner}/{repo}`` (cheap, single request). ``None`` if
-    the response is missing the field or the request fails.
+
+async def fetch_repo_license_evidence(
+    client: httpx.AsyncClient,
+    ref: ReleaseRef,
+    *,
+    anonymous_client: httpx.AsyncClient | None = None,
+) -> RepoLicenseEvidence | None:
+    """Return immutable licence evidence reported for an exact release ref.
+
+    Resolves the exact release ref through ``GET /repos/{owner}/{repo}/license``.
+    Git tags can be moved, so the API's licence-file blob SHA is mandatory and
+    becomes the immutable evidence revision.
     """
-    url = f"https://api.github.com/repos/{ref.owner}/{ref.repo}"
+    url = f"https://api.github.com/repos/{ref.owner}/{ref.repo}/license"
     try:
         resp = await _get_with_anonymous_fallback(
             client,
             url,
             headers={"Accept": "application/vnd.github+json"},
             anonymous_client=anonymous_client,
+            params={"ref": ref.tag},
         )
     except httpx.HTTPError as exc:
         log.warning("tarball.license_fetch_failed", repo=ref.full_name, err=str(exc))
@@ -266,13 +284,28 @@ async def fetch_repo_license(
         log.warning("tarball.license_bad_status", repo=ref.full_name, status=resp.status_code)
         return None
     payload = resp.json()
-    license_obj = payload.get("license") if isinstance(payload, dict) else None
-    if not isinstance(license_obj, dict):
+    if not isinstance(payload, dict):
         return None
-    spdx = license_obj.get("spdx_id")
-    if not isinstance(spdx, str) or spdx in {"", "NOASSERTION"}:
+    license_obj = payload.get("license")
+    spdx = license_obj.get("spdx_id") if isinstance(license_obj, dict) else None
+    blob_sha = payload.get("sha")
+    if (
+        not isinstance(spdx, str)
+        or spdx in {"", "NOASSERTION"}
+        or not isinstance(blob_sha, str)
+        or not blob_sha
+    ):
         return None
-    return spdx
+    path = payload.get("path")
+    html_url = payload.get("html_url")
+    return RepoLicenseEvidence(
+        spdx_id=spdx,
+        api_url=f"{url}?ref={ref.tag}",
+        ref=ref.tag,
+        blob_sha=blob_sha,
+        path=path if isinstance(path, str) else None,
+        html_url=html_url if isinstance(html_url, str) else None,
+    )
 
 
 async def fetch_tarball(
@@ -317,8 +350,8 @@ async def process_release(
     minio: MinioWriter,
     producer: BronzeProducerProtocol,
     bucket: TokenBucket,
+    admission_producer: LicenseAdmissionProducer,
     valid_from: datetime | None = None,
-    admission_producer: LicenseAdmissionProducer | None = None,
 ) -> int:
     """Fetch the tarball for ``ref`` and emit one code BronzeRecord per file.
 
@@ -332,19 +365,27 @@ async def process_release(
         return 0
 
     await bucket.acquire()
-    spdx = await fetch_repo_license(client, ref, anonymous_client=anonymous_client)
+    repo_evidence = await fetch_repo_license_evidence(
+        client,
+        ref,
+        anonymous_client=anonymous_client,
+    )
+    spdx = repo_evidence.spdx_id if repo_evidence is not None else None
     admission = decide_license_admission(
         source_url=f"https://github.com/{ref.owner}/{ref.repo}/releases/tag/{ref.tag}",
         source_feed=SOURCE_FEED,
         license_value=spdx,
         license_source="github_api" if spdx else "unknown",
         source_format="code",
+        resolver="github-license-api-ref",
+        evidence_url=repo_evidence.api_url if repo_evidence is not None else (
+            f"https://api.github.com/repos/{ref.owner}/{ref.repo}/license?ref={ref.tag}"
+        ),
+        evidence_revision=repo_evidence.blob_sha if repo_evidence is not None else None,
+        evidence_scope="repository_ref" if spdx else "unknown",
     )
-    if admission_producer is not None:
-        await admission_producer.send(admission.decision)
-    if not admission.fetch_allowed or (
-        admission.admitted and spdx not in fetcher_cfg.allowed_licenses
-    ):
+    await admission_producer.send(admission.decision)
+    if not admission.fetch_allowed:
         log.info(
             "tarball.skip_license",
             repo=ref.full_name,
@@ -367,20 +408,49 @@ async def process_release(
         allowed_extensions=fetcher_cfg.allowed_extensions,
         max_file_size_bytes=fetcher_cfg.max_file_size_bytes,
     ):
-        if emitted >= fetcher_cfg.max_files_per_release:
-            log.info(
-                "tarball.release_file_limit",
-                repo=ref.full_name,
-                tag=ref.tag,
-                max_files=fetcher_cfg.max_files_per_release,
-            )
-            break
+        header_match = _SPDX_HEADER.search(extracted.data[:65536])
+        file_license = (
+            header_match.group(1).decode("ascii", errors="ignore")
+            if header_match is not None
+            else spdx
+        )
+        file_source = "file_header" if header_match is not None else "github_api"
+        file_url = f"https://github.com/{ref.owner}/{ref.repo}/blob/{ref.tag}/{extracted.path}"
+        file_digest = f"sha256:{hashlib.sha256(extracted.data).hexdigest()}"
+        source_format = (
+            "web"
+            if extracted.language in {"markdown", "restructuredtext", "text"}
+            else "code"
+        )
+        file_admission = decide_license_admission(
+            source_url=file_url,
+            source_feed=SOURCE_FEED,
+            license_value=file_license,
+            license_source=file_source,
+            source_format=source_format,
+            resolver=(
+                "spdx-file-header" if header_match is not None else "github-license-api-ref"
+            ),
+            evidence_url=file_url if header_match is not None else (
+                repo_evidence.api_url if repo_evidence is not None else file_url
+            ),
+            evidence_revision=(
+                file_digest
+                if header_match is not None
+                else repo_evidence.blob_sha if repo_evidence is not None else None
+            ),
+            evidence_scope="file" if header_match is not None else "repository_ref",
+        )
+        await admission_producer.send(file_admission.decision)
+        if not file_admission.fetch_allowed:
+            continue
         try:
             await _emit_one_file(
                 extracted,
                 ref=ref,
-                spdx=spdx,
-                training_usage=admission.training_usage,
+                spdx=file_admission.license_id,
+                spdx_source=file_source,
+                training_usage=file_admission.training_usage,
                 cfg=cfg,
                 minio=minio,
                 producer=producer,
@@ -418,6 +488,7 @@ async def _emit_one_file(
     *,
     ref: ReleaseRef,
     spdx: str | None,
+    spdx_source: str = "github_api",
     training_usage: TrainingUsage,
     cfg: IngestConfig,
     minio: MinioWriter,
@@ -445,7 +516,11 @@ async def _emit_one_file(
         fetched_at=valid_from,
         http_status=200,
         http_last_modified=None,
-        content_type="text/plain",
+        content_type=(
+            "text/markdown; charset=utf-8"
+            if extracted.language == "markdown"
+            else "text/plain; charset=utf-8"
+        ),
         raw_html_s3_uri=code_s3_uri(
             bucket=cfg.minio_bronze_bucket,
             owner=ref.owner,
@@ -456,10 +531,20 @@ async def _emit_one_file(
         source_feed=SOURCE_FEED,
         trace_id=_trace_id(),
         bytes_size=len(extracted.data),
-        source_format="code",
-        extraction_pipeline="github-release-tarball-2026-06",
+        source_format=(
+            "web"
+            if extracted.language in {"markdown", "restructuredtext", "text"}
+            else "code"
+        ),
+        extraction_pipeline=(
+            "github-readme-markdown-v1"
+            if extracted.language == "markdown"
+            else "repository-documentation-text-v1"
+            if extracted.language in {"restructuredtext", "text"}
+            else "github-release-tarball-2026-06"
+        ),
         spdx_license=spdx,
-        spdx_license_source="github_api" if spdx else "unknown",
+        spdx_license_source=spdx_source if spdx else "unknown",  # type: ignore[arg-type]
         training_usage=training_usage,
     )
     await producer.send(
@@ -604,8 +689,8 @@ async def _consume_loop(
     minio: MinioWriter,
     bucket: TokenBucket,
     stop_event: asyncio.Event,
+    admission_producer: LicenseAdmissionProducer,
     metrics: TarballMetrics | None = None,
-    admission_producer: LicenseAdmissionProducer | None = None,
 ) -> int:
     """Inner consume-loop, broken out for tests to drive deterministically.
 
@@ -799,17 +884,9 @@ def _fetcher_config_from_env() -> FetcherConfig:
         except ValueError:
             return default
 
-    licenses_raw = os.environ.get("S2P_TARBALL_ALLOWED_LICENSES", "")
-    if licenses_raw.strip():
-        licenses = frozenset(s.strip() for s in licenses_raw.split(",") if s.strip())
-    else:
-        licenses = DEFAULT_ALLOWED_LICENSES
-
     return FetcherConfig(
         allowed_extensions=_csv("S2P_TARBALL_ALLOWED_EXTENSIONS", DEFAULT_ALLOWED_EXTENSIONS),
         max_file_size_bytes=_int("S2P_TARBALL_MAX_FILE_SIZE_BYTES", DEFAULT_MAX_FILE_SIZE_BYTES),
-        max_files_per_release=_int("S2P_TARBALL_MAX_FILES_PER_RELEASE", 5_000),
-        allowed_licenses=licenses,
         excluded_tag_prefixes=_csv("S2P_TARBALL_EXCLUDED_TAG_PREFIXES", ("ciflow/", "trunk/")),
         request_rate_per_second=_float("S2P_TARBALL_RATE_PER_SECOND", 1.0),
         request_burst=_int("S2P_TARBALL_BURST", 4),
@@ -825,9 +902,7 @@ def main() -> None:
     init_tracer("ingest.github_release_tarball_fetcher", cfg)
     log.info(
         "tarball.start",
-        allowed_licenses=sorted(fetcher_cfg.allowed_licenses),
         max_file_size_bytes=fetcher_cfg.max_file_size_bytes,
-        max_files_per_release=fetcher_cfg.max_files_per_release,
         excluded_tag_prefixes=fetcher_cfg.excluded_tag_prefixes,
         rate=fetcher_cfg.request_rate_per_second,
     )

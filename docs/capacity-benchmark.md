@@ -106,13 +106,15 @@ until the target report includes:
 
 Only update topic partition defaults after those four values are recorded.
 
-For the fetcher, record `rpk group describe s2p-fetcher`, KEDA replica count,
-drain rate, output-delivery failures, and per-Pod CPU/memory. Its broker commits
-are the scaling frontier. For curator and Iceberg writer, use the
-`s2p_*_total` Prometheus counters and durable checkpoint frontier; their
-Bytewax groups intentionally do not expose useful broker lag. Partition count,
-Bytewax worker count, recovery partition count, and CPU allocation for those
-stateful stages must be changed and validated together.
+For fetcher, curator, and Iceberg writer, record the `s2p_*_total` Prometheus
+counters, durable recovery frontier, partition assignment, processing-failure
+objects, and per-Pod CPU/memory. Their broker groups bootstrap a clean v2
+recovery through `OFFSET_STORED`, but broker commits are not the steady-state
+Bytewax frontier. Core worker count, recovery partition count, input topic
+partition count, and CPU allocation must be changed and validated together.
+The arXiv HTML worker remains fixed at one replica because shared
+`raw.fetched` lag is self-amplifying; only a source-specific backlog metric can
+justify enabling its scaler.
 
 ## MinIO Throughput Decision
 

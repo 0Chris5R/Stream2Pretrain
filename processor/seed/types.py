@@ -12,7 +12,8 @@ contract can change without rewriting the per-source modules.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from schemas.bronze import SourceFormat, SpdxLicenseSource
@@ -74,6 +75,20 @@ class SeedDocument:
 
     spdx_license: str | None
     spdx_license_source: SpdxLicenseSource
+    license_resolver: str = "seed-row-metadata"
+    license_evidence_url: str | None = None
+    license_evidence_revision: str | None = None
+    license_evidence_scope: str = "unknown"
+
+    body_loader: Callable[[], str] | None = field(default=None, repr=False, compare=False)
+    """Optional deferred retained-body fetch.
+
+    Wayback discovery yields item metadata plus a callable. The seed runner
+    publishes and acknowledges the immutable admission decision before it
+    invokes this callable, so an excluded archived item never downloads its
+    retained page body. Ordinary HF dataset rows already carry ``text`` and
+    leave this unset.
+    """
 
     extra: dict[str, str] = field(default_factory=dict)
     """Free-form per-source metadata.
@@ -89,3 +104,12 @@ class SeedDocument:
     in-process SeedDocument goes out of scope. Tracked as a TODO in
     CLAUDE.md (extend SilverRecord with an extra map). Do not assume the
     tags are queryable in Gold or via ``as_of(timestamp)`` until then."""
+
+    def materialize_body(self) -> SeedDocument | None:
+        """Fetch a deferred body after admission, returning None on no body."""
+        if self.body_loader is None:
+            return self if self.text.strip() else None
+        body = self.body_loader()
+        if not body.strip():
+            return None
+        return replace(self, text=body, body_loader=None)

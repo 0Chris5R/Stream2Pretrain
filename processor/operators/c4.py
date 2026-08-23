@@ -1,7 +1,8 @@
-"""C4-style line-level filters.
+"""FineWeb-compatible line-level quality signals.
 
-Three rules from the original C4 paper (Raffel et al. 2020) plus the
-``lorem ipsum`` boilerplate filter that DataTrove inherited from RefinedWeb:
+FineWeb deliberately disables the original C4 terminal-punctuation document
+gate and uses a substantially lower line-punctuation signal in its own filter
+recipe. The legacy field name is retained in schemas for snapshot compatibility.
 
 - nopunc: drop documents whose fraction of lines ending in valid sentence
   punctuation is too low (text dumps with no real prose end up here).
@@ -68,7 +69,7 @@ class C4Stats:
 class C4Filter:
     """Aggregator of the three C4-style rules."""
 
-    def __init__(self, *, min_punct_fraction: float = 0.5) -> None:
+    def __init__(self, *, min_punct_fraction: float = 0.12) -> None:
         if not 0.0 <= min_punct_fraction <= 1.0:
             raise ValueError("min_punct_fraction must lie in [0, 1]")
         self._min_punct_fraction = min_punct_fraction

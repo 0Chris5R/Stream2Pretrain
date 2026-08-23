@@ -1,5 +1,5 @@
 {{- if .Values.sources.huggingface.enabled }}
-{{- $component := "ingest-hf-models" }}
+{{- $component := "ingest-hf-cards" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $stateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}
 apiVersion: apps/v1
@@ -30,14 +30,14 @@ spec:
       {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       containers:
-        - name: hf-models
+        - name: hf-cards
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.ingest.hf.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "ingest.hf_poller.poller"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           args:
             - --mode
-            - models
+            - hub-cards
             - --config
             - /etc/s2p/feeds/hf.json
             - --poll-interval-seconds

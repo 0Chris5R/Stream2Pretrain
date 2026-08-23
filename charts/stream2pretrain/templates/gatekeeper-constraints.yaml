@@ -82,22 +82,7 @@ spec:
     minPollIntervalSeconds: {{ .Values.gatekeeper.minPollIntervalSeconds }}
     maxPollIntervalSeconds: {{ .Values.gatekeeper.maxPollIntervalSeconds }}
     allowedLicenses:
-      - CC-BY-4.0
-      - CC-BY-SA-4.0
-      - CC-BY-3.0
-      - CC-BY-SA-3.0
-      - CC0-1.0
-      - Apache-2.0
-      - MIT
-      - BSD-2-Clause
-      - BSD-3-Clause
-      - MPL-2.0
-      - ISC
-      - Unlicense
+      # Source configuration is not evidence that every item carries the same
+      # rights. Content adapters must resolve immutable per-item evidence.
       - per-record
-      # These sources are fetchable only for transformed post-training. The
-      # downstream licence gate still excludes them from verbatim exports.
-      - unknown
-      - arxiv-non-exclusive-distribution
-      - ODC-By-1.0
 {{- end }}

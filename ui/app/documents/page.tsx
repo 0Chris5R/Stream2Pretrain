@@ -30,10 +30,11 @@ import { apiFetch } from '@/lib/api';
 import { queryKeys } from '@/lib/query-keys';
 import {
   CorpusRouteSchema,
-  DocumentDetailSchema,
+  DocumentDetailResponseSchema,
   DocumentFacetsSchema,
   DocumentPageSchema,
   type CorpusRoute,
+  type CuratedDocumentDetail,
   type DocumentDetail,
   type DocumentFacets,
   type DocumentPage,
@@ -91,7 +92,7 @@ async function fetchFacets(includeFixtures: boolean): Promise<DocumentFacets> {
 }
 
 async function fetchDocument(docId: string): Promise<DocumentDetail> {
-  return apiFetch(`/api/documents/${encodeURIComponent(docId)}`, DocumentDetailSchema);
+  return apiFetch(`/api/documents/${encodeURIComponent(docId)}`, DocumentDetailResponseSchema);
 }
 
 export default function DocumentsPage() {
@@ -292,13 +293,16 @@ function DocumentTable({
               <TableCell>
                 <RouteBadge route={item.route} />
               </TableCell>
-              <TableCell className="text-right font-mono">{item.edu_score.toFixed(2)}</TableCell>
               <TableCell className="text-right font-mono">
-                {item.quality_score.toFixed(2)}
+                {item.admission_only ? '-' : item.edu_score.toFixed(2)}
               </TableCell>
               <TableCell className="text-right font-mono">
-                {item.included_section_count}/
-                {item.included_section_count + item.excluded_section_count}
+                {item.admission_only ? '-' : item.quality_score.toFixed(2)}
+              </TableCell>
+              <TableCell className="text-right font-mono">
+                {item.admission_only
+                  ? '-'
+                  : `${item.included_section_count}/${item.included_section_count + item.excluded_section_count}`}
               </TableCell>
               <TableCell>
                 <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -319,6 +323,7 @@ function DocumentTable({
 }
 
 function DocumentPanel({ document }: { document: DocumentDetail }) {
+  if (document.admission_only) return <AdmissionOnlyPanel document={document} />;
   const artifact = document.scientific_artifact;
   const classifier = document.classifier_revision.includes('finepdfs')
     ? 'FinePDFs Edu v2'
@@ -391,7 +396,55 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
   );
 }
 
-function DecisionStrip({ document }: { document: DocumentDetail }) {
+function AdmissionOnlyPanel({ document }: { document: Extract<DocumentDetail, { admission_only: true }> }) {
+  const admission = document.license_admission;
+  return (
+    <Card className="overflow-hidden shadow-sm">
+      <div className={`h-1 ${routeColor(document.route)}`} />
+      <CardContent className="space-y-5 p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="mb-2 flex flex-wrap gap-2">
+              <RouteBadge route={document.route} />
+              <Badge variant="outline">NOT FETCHED</Badge>
+            </div>
+            <h2 className="break-all text-xl font-semibold leading-tight">{document.title}</h2>
+          </div>
+          <Button asChild variant="outline" size="sm">
+            <a href={document.source_url} target="_blank" rel="noreferrer">
+              Source <ExternalLink className="ml-1 h-3.5 w-3.5" />
+            </a>
+          </Button>
+        </div>
+        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm dark:bg-red-950/20">
+          <div className="flex items-center gap-2 font-medium">
+            <X className="h-4 w-4 text-red-600" />
+            {admission.reason}
+          </div>
+        </div>
+        <dl className="grid gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-2">
+          {[
+            ['Licence', admission.license_id],
+            ['Resolver', admission.resolver ?? admission.license_source],
+            ['Evidence scope', admission.evidence_scope ?? 'unknown'],
+            ['Evidence revision', admission.evidence_revision ?? 'not available'],
+            ['Evidence URL', admission.evidence_url ?? 'not available'],
+            ['Policy', admission.policy_revision ?? 'not available'],
+            ['Observed', document.valid_from],
+            ['Document id', document.doc_id],
+          ].map(([label, value]) => (
+            <div key={label} className="bg-card p-3">
+              <dt className="text-xs text-muted-foreground">{label}</dt>
+              <dd className="mt-1 break-all font-mono text-xs">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DecisionStrip({ document }: { document: CuratedDocumentDetail }) {
   const blocked = document.reject_reasons.length > 0;
   return (
     <div
@@ -409,7 +462,7 @@ function DecisionStrip({ document }: { document: DocumentDetail }) {
   );
 }
 
-function SectionView({ document }: { document: DocumentDetail }) {
+function SectionView({ document }: { document: CuratedDocumentDetail }) {
   const artifact = document.scientific_artifact;
   if (!artifact) return <Empty label="No structured artifact" />;
   return (
@@ -454,7 +507,7 @@ function SectionView({ document }: { document: DocumentDetail }) {
   );
 }
 
-function ProjectionView({ document }: { document: DocumentDetail }) {
+function ProjectionView({ document }: { document: CuratedDocumentDetail }) {
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-2">
@@ -472,7 +525,7 @@ function ProjectionView({ document }: { document: DocumentDetail }) {
   );
 }
 
-function AssetView({ document }: { document: DocumentDetail }) {
+function AssetView({ document }: { document: CuratedDocumentDetail }) {
   const artifact = document.scientific_artifact;
   if (!artifact) return <Empty label="No scientific assets" />;
   return (
@@ -535,7 +588,7 @@ function AssetView({ document }: { document: DocumentDetail }) {
   );
 }
 
-function AuditView({ document }: { document: DocumentDetail }) {
+function AuditView({ document }: { document: CuratedDocumentDetail }) {
   const rows = [
     ['Quality classifier', `${document.classifier_backend} · ${document.classifier_revision}`],
     [
@@ -560,6 +613,13 @@ function AuditView({ document }: { document: DocumentDetail }) {
     [
       'Licence',
       `${document.spdx_license ?? document.license} · ${document.spdx_license_source || document.license_source}`,
+    ],
+    ['Training use', humanize(document.training_usage)],
+    [
+      'Licence evidence',
+      document.license_admission
+        ? `${document.license_admission.evidence_scope ?? 'unknown'} · ${document.license_admission.resolver ?? document.license_admission.license_source}`
+        : 'No admission record',
     ],
     ['Policy', `${document.policy_revision} · ${document.scoring_version}`],
     ['Document id', document.doc_id],

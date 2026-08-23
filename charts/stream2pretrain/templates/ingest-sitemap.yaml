@@ -10,7 +10,8 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
-  suspend: {{ not .Values.sources.sitemap.enabled }}
+  # Template only. The SourceFeed controller owns the active per-source job.
+  suspend: true
   schedule: {{ .Values.sources.sitemap.schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3

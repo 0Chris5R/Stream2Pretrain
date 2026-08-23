@@ -3,9 +3,8 @@ arXiv full-paper-HTML fetcher.
 
 Two workloads ship under one toggle (``sources.arxiv.htmlFetcher.enabled``):
 
-  - A long-running ``Deployment`` that subscribes to ``docs.normalized`` and
-    fetches the native HTML body for every freshly seen arXiv id. KEDA
-    scales this on the same topic's lag.
+  - A fixed single-replica ``Deployment`` that subscribes to ``raw.fetched``
+    and fetches the native HTML body for every freshly seen arXiv id.
   - An optional ``CronJob`` that runs the same image with ``--ids-file`` for
     backfill or replay. The job is dormant unless
     ``backfill.enabled`` is set so demo clusters do not pay the cost.
@@ -13,17 +12,18 @@ Two workloads ship under one toggle (``sources.arxiv.htmlFetcher.enabled``):
 Per CLAUDE.md the egress class is ``arxiv`` (already wired in
 networkpolicies.yaml).
 
-KEDA note (kept honest): the Kafka trigger does NOT support per-source-feed
-lag selectors as of mid-2026. We scale on the topic-level lag of
-``docs.normalized``; the consumer-group filter on ``source_feed`` happens
-inside the pod. If a fine-grained KEDA selector becomes available later we
-can swap this for a metrics-api-based scaler without churning the rest of
-the chart.
+Kafka-lag KEDA is deliberately absent here. The worker consumes the shared
+``raw.fetched`` topic and publishes enriched arXiv records back to that topic,
+so topic-wide lag is self-amplifying and is not an arXiv work metric. Keep one
+replica until a source-specific Prometheus backlog metric exists.
 */ -}}
 {{- if .Values.sources.arxiv.htmlFetcher.enabled }}
 {{- $component := "ingest-arxiv-html" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $hf := .Values.ingest.arxivHtmlFetcher }}
+{{- if ne (int $hf.replicas) 1 }}
+{{- fail "ingest.arxivHtmlFetcher.replicas must be exactly 1 until a source-specific backlog scaler exists" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -54,10 +54,8 @@ spec:
           args:
             - --feed-name
             - {{ .Values.sources.arxiv.htmlFetcher.feedName | quote }}
-            - --license-default
-            - {{ .Values.sources.arxiv.htmlFetcher.licenseDefault | quote }}
             - --stream-topic
-            - {{ .Values.redpanda.topics.docsNormalized | quote }}
+            - {{ .Values.redpanda.topics.rawFetched | quote }}
             - --consumer-group
             - {{ $hf.consumerGroup | quote }}
             - --auto-offset-reset
@@ -78,45 +76,6 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-{{- if .Values.keda.enabled }}
-{{- $kedaAuthEnabled := .Values.keda.auth.enabled }}
----
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: {{ $name }}
-  pollingInterval: {{ .Values.keda.pollingInterval }}
-  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
-  minReplicaCount: {{ default 1 $hf.scaling.minReplicas }}
-  maxReplicaCount: {{ default 4 $hf.scaling.maxReplicas }}
-  triggers:
-    - type: kafka
-      metadata:
-        # We scale on docs.normalized lag (topic-wide). KEDA's Kafka trigger
-        # cannot filter to a subset of source_feed values; the in-pod
-        # consumer drops non-arxiv records before fetching.
-        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
-        consumerGroup: {{ $hf.consumerGroup | quote }}
-        topic: {{ .Values.redpanda.topics.docsNormalized | quote }}
-        lagThreshold: {{ default 200 $hf.scaling.lagThreshold | quote }}
-        offsetResetPolicy: {{ $hf.autoOffsetReset | quote }}
-        {{- if not $kedaAuthEnabled }}
-        sasl: ""
-        tls: "disable"
-        {{- end }}
-      {{- if $kedaAuthEnabled }}
-      authenticationRef:
-        name: {{ include "stream2pretrain.fullname" . }}-redpanda
-      {{- end }}
-{{- end }}
 {{- if .Values.sources.arxiv.htmlFetcher.backfill.enabled }}
 ---
 {{- $backfillName := printf "%s-backfill" $name }}
@@ -158,8 +117,6 @@ spec:
                 - /etc/s2p/backfill/ids.txt
                 - --feed-name
                 - {{ .Values.sources.arxiv.htmlFetcher.feedName | quote }}
-                - --license-default
-                - {{ .Values.sources.arxiv.htmlFetcher.licenseDefault | quote }}
               env:
                 {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
                 - name: S2P_COMPONENT

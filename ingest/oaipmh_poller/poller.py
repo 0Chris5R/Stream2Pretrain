@@ -13,6 +13,7 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+from ingest.common.arxiv_license import fetch_arxiv_license_with_source
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.feeds import (
     feeds_by_protocol,
@@ -25,6 +26,7 @@ from ingest.common.license_admission import decide_license_admission, normalize_
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
+from ingest.common.rate_limit import TokenBucket
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 from ingest.common.state import FeedStateStore
 from ingest.oaipmh_poller.client import OAIClient
@@ -87,6 +89,7 @@ async def poll_feed(
             client,
             sleep_between_requests=request_interval,
         )
+        license_bucket = TokenBucket(rate=1.0, burst=1)
         async for page in oai.list_pages(
             metadata_prefix=metadata_prefix,
             set_spec=set_spec,
@@ -100,11 +103,28 @@ async def poll_feed(
                     url = record.arxiv_abs_url() or f"oai://{feed.endpoint}/{record.identifier}"
                     per_record_license = normalize_license(record.license_value())
                     license_source = "oai_metadata"
-                    if per_record_license == "unknown":
-                        per_record_license = normalize_license(feed.license_default)
-                        license_source = (
-                            "manual_override" if per_record_license != "unknown" else "unknown"
+                    arxiv_id = record.arxiv_id()
+                    resolver = "oai-record-rights"
+                    evidence_url = url if url.startswith("http") else str(feed.endpoint)
+                    evidence_revision = record.datestamp or record.identifier
+                    evidence_scope = "item" if per_record_license != "unknown" else "unknown"
+                    if per_record_license == "unknown" and arxiv_id is not None:
+                        resolved, license_source = await fetch_arxiv_license_with_source(
+                            arxiv_id,
+                            client,
+                            bucket=license_bucket,
                         )
+                        per_record_license = normalize_license(resolved)
+                        resolver = f"arxiv:{license_source}"
+                        evidence_url = f"https://arxiv.org/abs/{arxiv_id}"
+                        evidence_revision = arxiv_id
+                        evidence_scope = (
+                            "item" if per_record_license != "unknown" else "unknown"
+                        )
+                    elif per_record_license == "unknown":
+                        # A SourceFeed default is not evidence for this OAI
+                        # record. Non-arXiv records therefore fail closed.
+                        license_source = "unknown"
                     trace_id = _random_trace_id()
                     decision_url = (
                         url
@@ -116,7 +136,12 @@ async def poll_feed(
                         source_feed=feed.name,
                         license_value=per_record_license,
                         license_source=license_source,
+                        source_format="metadata",
                         trace_id=trace_id,
+                        resolver=resolver,
+                        evidence_url=evidence_url,
+                        evidence_revision=evidence_revision,
+                        evidence_scope=evidence_scope,
                     )
                     await admission_producer.send(admission.decision)
                     if not admission.fetch_allowed:

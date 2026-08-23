@@ -31,8 +31,7 @@ import httpx
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
-from ingest.common.license_admission import decide_license_admission
+from ingest.common.kafka_producer import BronzeProducer
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.metrics import INGEST_METRICS
 from ingest.common.minio_writer import MinioWriter
@@ -87,7 +86,6 @@ async def _process_events(
     minio: MinioWriter,
     cfg: IngestConfig,
     seen: set[str],
-    admission_producer: LicenseAdmissionProducer | None = None,
     ai_org_filter: frozenset[str] = frozenset(),
 ) -> int:
     emitted = 0
@@ -96,7 +94,16 @@ async def _process_events(
         owner = repo.split("/", 1)[0].lower() if isinstance(repo, str) and "/" in repo else ""
         if not repo or (not is_relevant_repo(repo) and owner not in ai_org_filter):
             continue
-        url = _event_url(evt)
+        # The Events API is discovery only. Only a ReleaseEvent with an exact
+        # tag becomes a durable tarball job; PR, push, and event JSON never
+        # enter the corpus.
+        if evt.get("type") != "ReleaseEvent":
+            continue
+        release = (evt.get("payload") or {}).get("release")
+        tag = release.get("tag_name") if isinstance(release, dict) else None
+        if not isinstance(tag, str) or not tag.strip():
+            continue
+        url = f"https://github.com/{repo}/releases/tag/{tag}"
         if not url:
             continue
         if not url.startswith("http"):
@@ -108,17 +115,6 @@ async def _process_events(
         if doc_id in seen:
             continue
         seen.add(doc_id)
-        admission = decide_license_admission(
-            source_url=url,
-            source_feed=SOURCE_FEED,
-            license_value=None,
-            license_source="unknown",
-            source_format="metadata",
-        )
-        if admission_producer is not None:
-            await admission_producer.send(admission.decision)
-        if not admission.fetch_allowed:
-            continue
         fetched_at = datetime.now(tz=UTC)
         body = json.dumps(evt, sort_keys=True).encode("utf-8")
         key = bronze_object_key(
@@ -153,15 +149,21 @@ async def _process_events(
                 extension="event.json.gz",
             ),
             source_feed=SOURCE_FEED,
-            trace_id=admission.decision.trace_id,
+            trace_id=_trace_id(),
             bytes_size=stored,
             source_format="metadata",
             extraction_pipeline="github-events-api-json-v1",
-            spdx_license=admission.license_id,
+            spdx_license=None,
             spdx_license_source="unknown",
-            training_usage=admission.training_usage,
         )
-        await producer.send(record, headers={"github_event_type": str(evt.get("type", ""))})
+        await producer.send(
+            record,
+            headers={
+                "github_event_type": "ReleaseEvent",
+                "github_repo": repo,
+                "github_ref": tag,
+            },
+        )
         emitted += 1
     return emitted
 
@@ -226,13 +228,10 @@ async def run_loop(
         build_async_client(cfg, headers=authenticated_headers) as authenticated_client,
         build_async_client(cfg, headers=anonymous_headers) as anonymous_client,
         BronzeProducer(
-            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-events"
-        ) as producer,
-        LicenseAdmissionProducer(
             cfg.redpanda_brokers,
-            topic=cfg.license_admissions_topic,
-            client_id="s2p-github-events-license-admission",
-        ) as admission_producer,
+            topic=cfg.github_release_jobs_topic,
+            client_id="s2p-github-event-release-jobs",
+        ) as producer,
         MinioWriter(
             cfg.minio_endpoint,
             cfg.minio_access_key,
@@ -278,7 +277,6 @@ async def run_loop(
                         minio=minio,
                         cfg=cfg,
                         seen=seen,
-                        admission_producer=admission_producer,
                         ai_org_filter=ai_org_filter,
                     )
                     total_emitted += emitted

@@ -189,3 +189,48 @@ async def test_poll_feed_rate_limits_page_requests_not_records(
 
     assert emitted == 3
     assert client_options == [{"sleep_between_requests": 100.0}]
+
+
+@pytest.mark.asyncio
+async def test_non_arxiv_record_never_inherits_feed_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = OAIRecord(
+        identifier="oai:example.org:item-1",
+        datestamp="2026-08-22",
+        set_specs=["papers"],
+        metadata_xml="<metadata><title>Unlicensed</title></metadata>",
+        raw=b"<record />",
+    )
+
+    class _OAIClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def list_pages(self, **_: Any):  # type: ignore[no-untyped-def]
+            yield OAIPage(records=[record], resumption_token=None)
+
+    producers: list[_Producer] = []
+
+    class _TrackedProducer(_Producer):
+        def __init__(self, *_: object, **__: object) -> None:
+            super().__init__()
+            producers.append(self)
+
+    monkeypatch.setattr(poller, "build_async_client", lambda *_args, **_kwargs: _AsyncResource())
+    monkeypatch.setattr(poller, "BronzeProducer", _TrackedProducer)
+    monkeypatch.setattr(poller, "LicenseAdmissionProducer", _TrackedProducer)
+    monkeypatch.setattr(poller, "MinioWriter", _Minio)
+    monkeypatch.setattr(poller, "OAIClient", _OAIClient)
+
+    emitted = await poller.poll_feed(
+        _feed(),
+        _cfg(),
+        state_store=FeedStateStore(tmp_path),
+        max_pages=1,
+    )
+
+    assert emitted == 0
+    assert producers[0].sent == []
+    assert producers[1].sent[0].status == "quarantined"
+    assert producers[1].sent[0].evidence_scope == "unknown"

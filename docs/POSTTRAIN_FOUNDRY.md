@@ -159,11 +159,12 @@ cross-listed papers (43.90 percent). It would therefore remove 54.53 percent
 of the full observed feed, not almost all of it.
 
 The deployment policy records an immutable decision before body retrieval.
-Only the 286 licence-admitted announcements in this observed sample would enter
-Bronze processing, pretraining curation, or post-training eligibility. Missing,
-arXiv non-exclusive, non-commercial, and no-derivatives records are visible in
-the corpus route ledger but never reach extraction or classifiers. This is an
-engineering policy and provenance control, not a legal conclusion. Sources:
+Only the 286 permissively licensed announcements in this observed sample would
+enter verbatim pretraining. Reviewed arXiv non-exclusive and CC BY-NC/NC-SA
+items may be fetched only for derived post-training generation. Missing,
+unknown, wrapper-only, and no-derivatives records remain quarantined and never
+reach extraction or classifiers. This is an engineering policy and provenance
+control, not a legal conclusion. Sources:
 `https://info.arxiv.org/help/license/index.html` and
 `https://info.arxiv.org/help/api/tou.html`.
 

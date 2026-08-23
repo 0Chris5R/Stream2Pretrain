@@ -577,6 +577,7 @@
     "reject_reasons": {
       "items": {
         "enum": [
+          "metadata_only",
           "language_filter",
           "gopher_filter",
           "c4_nopunc_filter",
@@ -589,7 +590,11 @@
           "validity_interval_invalid",
           "minhash_backend_mismatch",
           "insufficient_body",
-          "insufficient_scientific_body"
+          "insubstantial_review",
+          "insufficient_scientific_body",
+          "code_quality_filter",
+          "secret_detected",
+          "incomplete_scientific_extraction"
         ],
         "type": "string"
       },
@@ -729,15 +734,32 @@
       "description": "Where the SPDX id was read from.",
       "enum": [
         "github_api",
+        "file_header",
+        "http_link",
         "html_meta",
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
+        "openreview_note",
+        "openreview_terms",
+        "hf_card",
+        "archived_page",
+        "source_terms",
         "dataset_metadata",
         "manual_override",
         "unknown"
       ],
       "title": "Spdx License Source",
+      "type": "string"
+    },
+    "training_usage": {
+      "default": "pretrain_and_posttrain",
+      "description": "Purpose boundary inherited from the pre-fetch item licence decision.",
+      "enum": [
+        "pretrain_and_posttrain",
+        "posttrain_transform_only"
+      ],
+      "title": "Training Usage",
       "type": "string"
     },
     "structural_quality_score": {

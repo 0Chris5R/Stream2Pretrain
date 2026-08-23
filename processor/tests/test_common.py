@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime
 from types import ModuleType
@@ -9,6 +10,8 @@ from types import ModuleType
 import pytest
 
 from processor.common import (
+    BytewaxRuntimeStatus,
+    DurableProcessingFailureWriter,
     bronze_loads,
     decon_dumps,
     decon_loads,
@@ -83,6 +86,9 @@ def test_kafka_starting_offset_maps_names(monkeypatch) -> None:
     monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "latest")
     assert kafka_starting_offset() == -1
 
+    monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "stored")
+    assert kafka_starting_offset() == -1000
+
     monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "42")
     assert kafka_starting_offset() == 42
 
@@ -156,6 +162,99 @@ def test_run_bytewax_flow_initializes_and_reuses_recovery(monkeypatch, tmp_path)
     assert calls["flow"] is flow
     assert calls["epoch_interval"].total_seconds() == 2.5  # type: ignore[union-attr]
     assert calls["recovery_path"] == expected
+
+
+def test_runtime_status_requires_runtime_and_every_source() -> None:
+    status = BytewaxRuntimeStatus()
+    status.register_source("decisions")
+    status.register_source("admissions")
+    status.mark_runtime_started()
+    status.mark_source_assigned("decisions")
+    assert status.is_ready() is False
+    status.mark_source_assigned("admissions")
+    assert status.is_ready() is True
+    status.mark_runtime_stopped()
+    assert status.is_ready() is False
+
+
+def test_run_bytewax_flow_rejects_recovery_partition_drift(monkeypatch, tmp_path) -> None:
+    recovery_dir = tmp_path / "bytewax" / "fetcher-v2"
+    recovery_dir.mkdir(parents=True)
+    (recovery_dir / "part-0.sqlite3").touch()
+    monkeypatch.setenv("S2P_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("S2P_BYTEWAX_RECOVERY_PARTITIONS", "2")
+
+    bytewax_package = ModuleType("bytewax")
+    bytewax_package.__path__ = []  # type: ignore[attr-defined]
+    recovery_module = ModuleType("bytewax.recovery")
+    recovery_module.RecoveryConfig = object  # type: ignore[attr-defined]
+    recovery_module.init_db_dir = lambda *_args: None  # type: ignore[attr-defined]
+    run_module = ModuleType("bytewax.run")
+    run_module.cli_main = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "bytewax", bytewax_package)
+    monkeypatch.setitem(sys.modules, "bytewax.recovery", recovery_module)
+    monkeypatch.setitem(sys.modules, "bytewax.run", run_module)
+
+    with pytest.raises(RuntimeError, match="recovery partition mismatch"):
+        run_bytewax_flow(object(), load_config(), "fetcher-v2")
+
+
+def test_durable_processing_failure_is_idempotent_and_auditable() -> None:
+    class FakeS3:
+        def __init__(self) -> None:
+            self.writes: list[dict[str, object]] = []
+
+        def put_object(self, **kwargs) -> None:
+            self.writes.append(kwargs)
+
+    class Message:
+        topic = "docs.normalized"
+        partition = 2
+        offset = 41
+        key = b"sha256:key-fallback"
+        headers: list[tuple[str, bytes]] = []
+        value = b'{"doc_id":"sha256:test","trace_id":"0123456789abcdef0123456789abcdef"}'
+
+    s3 = FakeS3()
+    writer = DurableProcessingFailureWriter(s3=s3, bucket="gold")
+    first = writer.record(stage="curate", message=Message(), reason="ValidationError")
+    second = writer.record(stage="curate", message=Message(), reason="ValidationError")
+
+    assert first == second
+    assert s3.writes[0]["Key"] == s3.writes[1]["Key"]
+    body = json.loads(s3.writes[0]["Body"])
+    assert body["doc_id"] == "sha256:test"
+    assert body["topic"] == "docs.normalized"
+    assert body["partition"] == 2
+    assert body["offset"] == 41
+    assert body["retry_classification"] == "deterministic"
+    assert body["error_revision"] == "processing-failure-v1"
+
+
+def test_durable_processing_failure_recovers_audit_identity_from_message() -> None:
+    class FakeS3:
+        def __init__(self) -> None:
+            self.body = b""
+
+        def put_object(self, **kwargs) -> None:
+            self.body = kwargs["Body"]
+
+    class Message:
+        topic = "curation.decisions"
+        partition = 0
+        offset = 9
+        key = b"sha256:key-fallback"
+        headers = [("trace_id", b"fedcba9876543210fedcba9876543210")]
+        value = b"malformed"
+
+    s3 = FakeS3()
+    DurableProcessingFailureWriter(s3=s3, bucket="gold").record(
+        stage="iceberg-gold", message=Message(), reason="ValidationError"
+    )
+
+    body = json.loads(s3.body)
+    assert body["doc_id"] == "sha256:key-fallback"
+    assert body["trace_id"] == "fedcba9876543210fedcba9876543210"
 
 
 def test_bronze_roundtrip() -> None:

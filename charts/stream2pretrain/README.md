@@ -9,6 +9,11 @@ the SourceFeed and MixtureRecipe CRDs, KEDA
 ScaledObjects, NetworkPolicies, ServiceMonitors, the Stream2Pretrain Grafana
 dashboard, and OPA Gatekeeper constraints.
 
+The three stateful core Bytewax executions are deliberately constrained to one
+coordinated replica and retained recovery PVCs. Kafka-lag KEDA is also absent
+from the arXiv HTML worker because its shared `raw.fetched` consume-and-publish
+loop makes topic lag an invalid autoscaling signal.
+
 The platform-layer dependencies (Redpanda, MinIO, Polaris, KEDA controllers,
 OPA Gatekeeper, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
 cert-manager) are NOT included here - install them via `infra/helmfile.yaml`.
@@ -83,14 +88,12 @@ apply -f charts/stream2pretrain/crds/`.
 When `gatekeeper.enabled=true`, the chart installs a ConstraintTemplate +
 Constraint that:
 
-- Allows `unknown`, arXiv distribution-only, and ODC-By source defaults only
-  as purpose-aware inputs; the downstream licence gate restricts their
-  documents to transformed post-training and keeps them out of verbatim
-  pretraining exports.
+- Requires `per-record` licensing. A source-level default never grants rights
+  to every item in a feed; each content adapter must resolve and persist its
+  own evidence before any body request.
 - Rejects SourceFeeds with `pollIntervalSeconds` outside
   `[gatekeeper.minPollIntervalSeconds, gatekeeper.maxPollIntervalSeconds]`.
-- Rejects SourceFeeds whose default is neither a pretraining licence,
-  `per-record`, nor an approved transform-only licence class.
+- Rejects SourceFeeds whose licensing mode is not `per-record`.
 
 ## Grafana dashboard
 

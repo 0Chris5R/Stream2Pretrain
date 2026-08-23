@@ -24,6 +24,7 @@ from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
 
 REPO_ID: str = "allenai/peS2o"
+DATASET_REVISION: str = "636a503e44a3ca1b58e01fb61eab0825cd574de0"
 SPDX: str = "unknown"
 
 # v2 knowledge cutoff per the dataset card.
@@ -162,6 +163,12 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         extraction_pipeline="pes2o-seed-2026-06",
         spdx_license=paper_license,
         spdx_license_source="dataset_metadata" if paper_license else "unknown",
+        license_resolver="pes2o-paper-item-field",
+        license_evidence_url=(
+            f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}/data/v3"
+        ),
+        license_evidence_revision=f"{DATASET_REVISION}:{nid}",
+        license_evidence_scope="item" if paper_license else "unknown",
         extra=extra,
     )
 
@@ -211,16 +218,23 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
             data_dir="data/v3",
             split="train",
             streaming=True,
+            revision=DATASET_REVISION,
         )
     except Exception:
         # v3 layout missing -> fall back to v2 default config.
-        ds = load_dataset(REPO_ID, split="train", streaming=True)
+        ds = load_dataset(
+            REPO_ID,
+            split="train",
+            streaming=True,
+            revision=DATASET_REVISION,
+        )
     return ds  # type: ignore[return-value]
 
 
 __all__ = [
     "ARXIV_CS_PREFIXES",
     "CS_FIELDS",
+    "DATASET_REVISION",
     "REPO_ID",
     "SPDX",
     "derive_valid_from",

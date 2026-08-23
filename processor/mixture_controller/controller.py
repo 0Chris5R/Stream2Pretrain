@@ -219,6 +219,7 @@ def make_kopf_handlers(controller: MixtureController) -> Any:
 
     @kopf.on.create(group, version, "sourcefeeds")  # type: ignore[misc]
     @kopf.on.update(group, version, "sourcefeeds")  # type: ignore[misc]
+    @kopf.on.resume(group, version, "sourcefeeds")  # type: ignore[misc]
     def _on_source_upsert(
         spec: dict[str, Any], name: str, namespace: str, body: dict[str, Any], **_: Any
     ) -> dict[str, Any]:
@@ -301,13 +302,16 @@ def _cron_schedule(interval_seconds: int) -> str:
     return "0 0 * * *" if days == 1 else f"0 0 */{min(days, 31)} * *"
 
 
-def _bind_source_config(job_spec: Any, *, config_name: str, source_name: str) -> None:
+def _bind_source_config(
+    job_spec: Any, *, config_name: str, source_name: str, egress_class: str
+) -> None:
     """Point a cloned poller job at one generated SourceFeed config."""
     from kubernetes import client  # type: ignore[import-untyped]
 
     config_path = "/etc/s2p/feeds/source.json"
     template = job_spec.template
     template.metadata.labels["stream2pretrain.io/source-feed"] = source_name
+    template.metadata.labels["stream2pretrain.io/egress-class"] = egress_class
     for volume in template.spec.volumes or []:
         if volume.name == "feeds":
             volume.config_map.name = config_name
@@ -318,6 +322,12 @@ def _bind_source_config(job_spec: Any, *, config_name: str, source_name: str) ->
         ]
         container.env = [env for env in (container.env or []) if env.name != "S2P_FEED_CONFIG"]
         container.env.append(client.V1EnvVar(name="S2P_FEED_CONFIG", value=config_path))
+
+
+def _source_egress_class(source: SourceFeedSpec) -> str:
+    """Select the chart's broad external-egress policy for a dynamic source."""
+    endpoint_host = str(source.endpoint.host or "").lower()
+    return "arxiv" if endpoint_host.endswith("arxiv.org") else "blogs"
 
 
 def _reconcile_source_schedule(source: SourceFeedSpec, *, namespace: str, owner_uid: str) -> None:
@@ -360,7 +370,12 @@ def _reconcile_source_schedule(source: SourceFeedSpec, *, namespace: str, owner_
 
     base = batch_api.read_namespaced_cron_job(_poller_cronjob_name(source.protocol), namespace)
     job_template = copy.deepcopy(base.spec.job_template)
-    _bind_source_config(job_template.spec, config_name=config_name, source_name=source.name)
+    _bind_source_config(
+        job_template.spec,
+        config_name=config_name,
+        source_name=source.name,
+        egress_class=_source_egress_class(source),
+    )
     cron = client.V1CronJob(
         metadata=client.V1ObjectMeta(
             name=schedule_name,
@@ -499,6 +514,18 @@ def _sourcefeed_status(
         "Failed": "error",
         "Disabled": "idle",
     }.get(phase, "idle")
+    is_arxiv = "arxiv" in spec.name.lower() or "arxiv.org" in str(spec.endpoint).lower()
+    quality_policy = (
+        "FinePDFs Edu v2 on scheduled full text" if is_arxiv else "FineWeb-Edu on page body"
+    )
+    license_resolver = (
+        "arXiv item rights" if is_arxiv else "RSS item or page-level licence metadata"
+    )
+    stages = (
+        ["discover", "license", "dispatch"]
+        if is_arxiv
+        else ["discover", "license", "fetch", "extract", "classify", "route"]
+    )
     return {
         "name": spec.name,
         "spec": spec.model_dump(mode="json"),
@@ -510,6 +537,302 @@ def _sourcefeed_status(
         "documents_24h": int(status.get("docsEmitted24h") or status.get("docsEmittedTotal") or 0),
         "error_rate_24h": float(status.get("errorRate24h") or 0.0),
         "poll_state": poll_state,
+        "management": "sourcefeed",
+        "quality_policy": quality_policy,
+        "license_resolver": license_resolver,
+        "stages": stages,
+        "supports_run": spec.protocol in {"rss", "atom", "oai-pmh", "sitemap"},
+    }
+
+
+_BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
+    {
+        "name": "arxiv-html-fetcher",
+        "component": "ingest-arxiv-html",
+        "kind": "deployment",
+        "protocol": "rest-json",
+        "endpoint": "https://arxiv.org/html",
+        "quality": "FinePDFs Edu v2 on structured full text",
+        "license": "arXiv item rights before full-text fetch",
+        "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
+    },
+    {
+        "name": "github-events",
+        "component": "ingest-github-events",
+        "kind": "deployment",
+        "protocol": "rest-json",
+        "endpoint": "https://api.github.com/events",
+        "quality": "Discovery only",
+        "license": "Resolved at release ref and file",
+        "stages": ["discover", "dispatch"],
+    },
+    {
+        "name": "github-releases",
+        "component": "ingest-github-releases",
+        "kind": "cronjob",
+        "protocol": "atom",
+        "endpoint": "https://github.com/releases.atom",
+        "quality": "Discovery only",
+        "license": "Resolved at release ref and file",
+        "stages": ["discover", "dispatch"],
+    },
+    {
+        "name": "github-release-tarballs",
+        "component": "ingest-github-tarball-fetcher",
+        "kind": "deployment",
+        "protocol": "rest-json",
+        "endpoint": "https://api.github.com/repos",
+        "quality": "Stack v2 / Dolma code rules; FineWeb-Edu audit for docs",
+        "license": "SPDX file header, then tagged repository ref",
+        "stages": ["license", "fetch", "extract", "classify", "route"],
+    },
+    {
+        "name": "hf-models",
+        "component": "ingest-hf-cards",
+        "kind": "deployment",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/api/models",
+        "quality": "FineWeb-Edu audit on versioned model cards",
+        "license": "Model-card item metadata at immutable revision",
+        "stages": ["discover", "license", "fetch", "classify", "route"],
+    },
+    {
+        "name": "hf-datasets",
+        "component": "ingest-hf-cards",
+        "kind": "deployment",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/api/datasets",
+        "quality": "FineWeb-Edu audit on versioned dataset cards",
+        "license": "Dataset-card item metadata at immutable revision",
+        "stages": ["discover", "license", "fetch", "classify", "route"],
+    },
+    {
+        "name": "hf-spaces",
+        "component": "ingest-hf-cards",
+        "kind": "deployment",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/api/spaces",
+        "quality": "FineWeb-Edu audit on versioned Space cards",
+        "license": "Space-card item metadata at immutable revision",
+        "stages": ["discover", "license", "fetch", "classify", "route"],
+    },
+    {
+        "name": "hf-daily-papers",
+        "component": "ingest-hf-daily-papers",
+        "kind": "cronjob",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/api/daily_papers",
+        "quality": "FinePDFs Edu v2 after arXiv full-text extraction",
+        "license": "arXiv item rights",
+        "stages": ["discover", "license", "dispatch"],
+    },
+    {
+        "name": "openreview",
+        "component": "ingest-openreview-live",
+        "kind": "cronjob",
+        "protocol": "rest-json",
+        "endpoint": "https://api2.openreview.net",
+        "quality": "FinePDFs papers / OpenReview form schema",
+        "license": "Article item field / public-comment terms",
+        "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
+    },
+    {
+        "name": "openreview-backfill",
+        "component": "ingest-openreview-backfill",
+        "kind": "job",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/datasets",
+        "quality": "FinePDFs papers / OpenReview form schema",
+        "license": "Article item field / public-comment terms",
+        "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
+    },
+    {
+        "name": "seed:allenai/peS2o",
+        "component": "seed-loader",
+        "seed_component": "pes2o",
+        "kind": "job",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/datasets/allenai/peS2o",
+        "quality": "FinePDFs Edu v2 on scientific rows",
+        "license": "Per-paper row rights; wrapper ignored",
+        "stages": ["license", "extract", "classify", "route"],
+    },
+    {
+        "name": "seed:togethercomputer/RedPajama-Data-1T",
+        "component": "seed-loader",
+        "seed_component": "redpajama-arxiv",
+        "kind": "job",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/datasets/togethercomputer/RedPajama-Data-1T",
+        "quality": "FinePDFs Edu v2 on scientific rows",
+        "license": "Per-paper row rights; wrapper ignored",
+        "stages": ["license", "extract", "classify", "route"],
+    },
+    {
+        "name": "seed:HuggingFaceFW/fineweb-edu",
+        "component": "seed-loader",
+        "seed_component": "fineweb-edu",
+        "kind": "job",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu",
+        "quality": "FineWeb / DataTrove web policy",
+        "license": "Per-page row rights; wrapper ignored",
+        "stages": ["license", "classify", "route"],
+    },
+    {
+        "name": "seed:HuggingFaceTB/stack-edu",
+        "component": "seed-loader",
+        "seed_component": "stack-edu",
+        "kind": "job",
+        "protocol": "rest-json",
+        "endpoint": "https://huggingface.co/datasets/HuggingFaceTB/stack-edu",
+        "quality": "Stack v2 / Dolma code rules",
+        "license": "Per-file detected SPDX at pinned blob; wrapper ignored",
+        "stages": ["license", "fetch", "classify", "route"],
+    },
+    {
+        "name": "seed:wayback",
+        "component": "seed-loader",
+        "seed_component": "wayback",
+        "kind": "job",
+        "protocol": "rest-json",
+        "endpoint": "https://web.archive.org",
+        "quality": "Original-source scientific, web, or code policy",
+        "license": "Archived item rights; archive presence is not a grant",
+        "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
+    },
+)
+
+
+def _builtin_source_status(
+    descriptor: dict[str, Any],
+    *,
+    deployments: dict[str, Any],
+    cronjobs: dict[str, Any],
+    jobs: list[Any],
+) -> dict[str, Any]:
+    """Describe a chart-managed source from its real Kubernetes workload."""
+    component = str(descriptor["component"])
+    component_jobs = [
+        job
+        for job in jobs
+        if (getattr(getattr(job, "metadata", None), "labels", None) or {}).get(
+            "app.kubernetes.io/component"
+        )
+        == component
+    ]
+    if descriptor["kind"] == "deployment":
+        workload = deployments.get(component)
+    elif descriptor["kind"] == "cronjob":
+        workload = cronjobs.get(component)
+    else:
+        workload = max(
+            component_jobs,
+            key=lambda job: str(
+                getattr(getattr(job, "metadata", None), "creation_timestamp", "")
+            ),
+            default=None,
+        )
+    seed_component = descriptor.get("seed_component")
+    if workload is not None and seed_component:
+        annotations = getattr(getattr(workload, "metadata", None), "annotations", None) or {}
+        configured_components = {
+            item.strip()
+            for item in str(annotations.get("stream2pretrain.io/seed-components", "")).split(",")
+            if item.strip()
+        }
+        if seed_component not in configured_components:
+            workload = None
+    enabled = workload is not None
+    poll_state = "idle"
+    last_attempt = None
+    last_success = None
+    last_error = None
+    if workload is not None and descriptor["kind"] == "deployment":
+        status = getattr(workload, "status", None)
+        desired = int(getattr(getattr(workload, "spec", None), "replicas", None) or 0)
+        ready = int(getattr(status, "ready_replicas", None) or 0)
+        if desired > 0 and ready < desired:
+            poll_state = "error"
+            last_error = "Deployment is not ready"
+    elif workload is not None and descriptor["kind"] == "cronjob":
+        status = getattr(workload, "status", None)
+        active = list(getattr(status, "active", None) or [])
+        poll_state = "polling" if active else "idle"
+        last_attempt = _as_utc_iso(getattr(status, "last_schedule_time", None))
+        succeeded = [
+            job
+            for job in component_jobs
+            if int(getattr(getattr(job, "status", None), "succeeded", None) or 0) > 0
+        ]
+        failed = [
+            job
+            for job in component_jobs
+            if int(getattr(getattr(job, "status", None), "failed", None) or 0) > 0
+        ]
+        if succeeded:
+            latest = max(
+                succeeded,
+                key=lambda job: getattr(getattr(job, "metadata", None), "creation_timestamp", None),
+            )
+            last_success = _as_utc_iso(
+                getattr(getattr(latest, "status", None), "completion_time", None)
+            )
+        if failed and not active:
+            latest_failed = max(
+                failed,
+                key=lambda job: str(
+                    getattr(getattr(job, "metadata", None), "creation_timestamp", "")
+                ),
+            )
+            latest_failed_key = str(
+                getattr(getattr(latest_failed, "metadata", None), "creation_timestamp", "")
+            )
+            latest_success_key = max(
+                (
+                    str(getattr(getattr(job, "metadata", None), "creation_timestamp", ""))
+                    for job in succeeded
+                ),
+                default="",
+            )
+            if latest_failed_key > latest_success_key:
+                poll_state = "error"
+                last_error = "Latest scheduled ingest job failed"
+    elif workload is not None:
+        status = getattr(workload, "status", None)
+        last_attempt = _as_utc_iso(
+            getattr(getattr(workload, "metadata", None), "creation_timestamp", None)
+        )
+        if int(getattr(status, "active", None) or 0) > 0:
+            poll_state = "polling"
+        elif int(getattr(status, "succeeded", None) or 0) > 0:
+            last_success = _as_utc_iso(getattr(status, "completion_time", None))
+        elif int(getattr(status, "failed", None) or 0) > 0:
+            poll_state = "error"
+            last_error = "Backfill ingest job failed"
+    spec = SourceFeedSpec(
+        name=str(descriptor["name"]),
+        protocol=str(descriptor["protocol"]),  # type: ignore[arg-type]
+        endpoint=str(descriptor["endpoint"]),  # type: ignore[arg-type]
+        enabled=enabled,
+        poll_interval_seconds=60,
+        rate_limit={"requests_per_second": 1.0, "burst": 1},
+        license_default="per-record",
+    )
+    return {
+        "name": descriptor["name"],
+        "spec": spec.model_dump(mode="json"),
+        "last_success_at": last_success,
+        "last_attempt_at": last_attempt,
+        "last_error": last_error,
+        "documents_24h": 0,
+        "error_rate_24h": 0.0,
+        "poll_state": poll_state,
+        "management": "builtin",
+        "quality_policy": descriptor["quality"],
+        "license_resolver": descriptor["license"],
+        "stages": descriptor["stages"],
+        "supports_run": False,
     }
 
 
@@ -522,6 +845,7 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
     namespace = os.environ.get("S2P_NAMESPACE", "stream2pretrain")
     api = _kube_custom_objects_api()
     batch_api = client.BatchV1Api()
+    apps_api = client.AppsV1Api()
     core_api = client.CoreV1Api()
     background_tasks: set[asyncio.Task[None]] = set()
 
@@ -565,20 +889,35 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
             namespace=namespace,
             plural="sourcefeeds",
         )
-        jobs = batch_api.list_namespaced_job(
-            namespace,
-            label_selector="stream2pretrain.io/source-feed",
-        )
+        jobs = batch_api.list_namespaced_job(namespace)
         runtime = _source_job_runtime(list(jobs.items or []))
-        return web.json_response(
-            [
+        crd_sources = [
                 _sourcefeed_status(
                     item,
                     runtime=runtime.get(str(item.get("metadata", {}).get("name", ""))),
                 )
                 for item in resp.get("items", [])
-            ]
-        )
+        ]
+        known = {str(source["name"]) for source in crd_sources}
+        deployments = {
+            str((deployment.metadata.labels or {}).get("app.kubernetes.io/component")): deployment
+            for deployment in apps_api.list_namespaced_deployment(namespace).items
+        }
+        cronjobs = {
+            str((cron.metadata.labels or {}).get("app.kubernetes.io/component")): cron
+            for cron in batch_api.list_namespaced_cron_job(namespace).items
+        }
+        builtins = [
+            _builtin_source_status(
+                descriptor,
+                deployments=deployments,
+                cronjobs=cronjobs,
+                jobs=list(jobs.items or []),
+            )
+            for descriptor in _BUILTIN_SOURCES
+            if descriptor["name"] not in known
+        ]
+        return web.json_response(sorted([*crd_sources, *builtins], key=lambda row: row["name"]))
 
     async def create_source(request: web.Request) -> web.Response:
         body = await request.json()
@@ -687,7 +1026,12 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
 
         job_spec = cron.spec.job_template.spec
         job_spec.ttl_seconds_after_finished = 3600
-        _bind_source_config(job_spec, config_name=config_name, source_name=name)
+        _bind_source_config(
+            job_spec,
+            config_name=config_name,
+            source_name=name,
+            egress_class=_source_egress_class(source),
+        )
         job = batch_api.create_namespaced_job(
             namespace,
             client.V1Job(

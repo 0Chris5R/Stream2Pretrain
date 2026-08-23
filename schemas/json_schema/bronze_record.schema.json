@@ -122,10 +122,17 @@
       "description": "Where the SPDX id was read from.",
       "enum": [
         "github_api",
+        "file_header",
+        "http_link",
         "html_meta",
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
+        "openreview_note",
+        "openreview_terms",
+        "hf_card",
+        "archived_page",
+        "source_terms",
         "dataset_metadata",
         "manual_override",
         "unknown"

@@ -18,7 +18,7 @@ from opentelemetry import trace
 from ingest.common.hashing import canonical_url, doc_id_for_url
 from ingest.common.license_admission import decide_license_admission
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
-from schemas.bronze import BronzeRecord, SpdxLicenseSource
+from schemas.bronze import BronzeRecord, SourceFormat, SpdxLicenseSource
 
 if TYPE_CHECKING:
     from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
@@ -54,6 +54,12 @@ async def fetch_and_publish(
     seen: set[str] | None = None,
     license_value: str | None = None,
     license_source: str = "unknown",
+    license_resolver: str | None = None,
+    license_evidence_url: str | None = None,
+    license_evidence_revision: str | None = None,
+    license_evidence_scope: str | None = None,
+    source_format: SourceFormat = "html",
+    extraction_pipeline: str = "raw-fetch",
     admission_producer: LicenseAdmissionProducer,
 ) -> BronzeRecord | None:
     """Fetch ``url``, store to MinIO bronze, emit BronzeRecord. Returns the record.
@@ -75,6 +81,11 @@ async def fetch_and_publish(
         source_feed=source_feed,
         license_value=license_value,
         license_source=license_source,
+        source_format=source_format,
+        resolver=license_resolver,
+        evidence_url=license_evidence_url,
+        evidence_revision=license_evidence_revision,
+        evidence_scope=license_evidence_scope,
     )
     # The decision must be durably published before a content request starts.
     # A Kafka failure therefore fails the ingest attempt closed.
@@ -145,8 +156,10 @@ async def fetch_and_publish(
             trace_id=trace_id_hex,
             etag=resp.headers.get("etag"),
             bytes_size=stored,
+            source_format=source_format,
+            extraction_pipeline=extraction_pipeline,
             spdx_license=admission.license_id,
-            spdx_license_source=cast(SpdxLicenseSource, license_source),
+            spdx_license_source=cast(SpdxLicenseSource, admission.decision.license_source),
             training_usage=admission.training_usage,  # type: ignore[arg-type]
         )
         with tracer.start_as_current_span("kafka.produce"):

@@ -1,11 +1,15 @@
 """Hugging Face Hub REST poller (CronJob).
 
-Two endpoints:
+Four Hub catalogue endpoints:
 
 - ``GET /api/models?sort=lastModified&direction=-1&limit=100`` - new/updated
   models. Dedup by ``(id, lastModified)``.
 - ``GET /api/daily_papers?sort=publishedAt&limit=100`` - community-curated
   daily papers. Authentication is optional.
+
+The list responses are discovery metadata. Model, dataset, and Space prose is
+retrieved only from ``README.md`` at the exact commit SHA returned by the Hub
+API and only after the card-level licence decision has been published.
 
 Politeness: HF Hub anonymous quota is 500 req / 5-min window; with the
 optional ``HF_TOKEN`` it bumps to 1000-2500. We poll once per CronJob run so
@@ -19,6 +23,7 @@ import asyncio
 import json
 import os
 from datetime import UTC, datetime
+from typing import Literal
 
 from ingest.common.arxiv_license import fetch_arxiv_license_with_source
 from ingest.common.config import IngestConfig, load_config
@@ -26,7 +31,7 @@ from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
 from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
 from ingest.common.license_admission import (
-    PERMISSIVE_TRAINING_LICENSES,
+    AdmissionResult,
     decide_license_admission,
     normalize_license,
 )
@@ -44,9 +49,15 @@ log = get_logger(__name__)
 
 HF_API_BASE = "https://huggingface.co"
 MODELS_ENDPOINT = "/api/models"
+DATASETS_ENDPOINT = "/api/datasets"
+SPACES_ENDPOINT = "/api/spaces"
 DAILY_PAPERS_ENDPOINT = "/api/daily_papers"
 SOURCE_FEED_MODELS = "hf-models"
+SOURCE_FEED_DATASETS = "hf-datasets"
+SOURCE_FEED_SPACES = "hf-spaces"
 SOURCE_FEED_PAPERS = "hf-daily-papers"
+
+HubCardKind = Literal["dataset", "space"]
 
 
 def _trace_id() -> str:
@@ -68,14 +79,29 @@ async def _emit_payload(
     license_value: str | None = None,
     license_source: str = "dataset_metadata",
     admission_producer: LicenseAdmissionProducer | None = None,
+    source_format: str = "metadata",
+    content_type: str = "application/json",
+    extraction_pipeline: str = "hf-api-json-v1",
+    resolver: str | None = None,
+    evidence_url: str | None = None,
+    evidence_revision: str | None = None,
+    evidence_scope: str | None = None,
+    admission_override: AdmissionResult | None = None,
 ) -> bool:
-    admission = decide_license_admission(
+    admission = admission_override or decide_license_admission(
         source_url=url,
         source_feed=source_feed,
         license_value=license_value,
         license_source=license_source if license_value else "unknown",
+        source_format=source_format,
+        resolver=resolver,
+        evidence_url=evidence_url,
+        evidence_revision=evidence_revision,
+        evidence_scope=evidence_scope,
     )
-    if admission_producer is not None:
+    if admission_override is None and admission_producer is None:
+        raise RuntimeError("licence admission producer is required before HF payload storage")
+    if admission_producer is not None and admission_override is None:
         await admission_producer.send(admission.decision)
     if not admission.fetch_allowed:
         return False
@@ -93,7 +119,7 @@ async def _emit_payload(
     stored = await minio.put_bronze(
         key=key,
         payload=payload,
-        content_type="application/json",
+        content_type=content_type,
         gzip_compress=True,
         metadata=metadata,
     )
@@ -102,7 +128,7 @@ async def _emit_payload(
         url=url,  # type: ignore[arg-type]
         fetched_at=fetched_at,
         http_status=200,
-        content_type="application/json",
+        content_type=content_type,
         raw_html_s3_uri=bronze_s3_uri(
             bucket=cfg.minio_bronze_bucket,
             source_feed=source_feed,
@@ -113,8 +139,8 @@ async def _emit_payload(
         source_feed=source_feed,
         trace_id=admission.decision.trace_id,
         bytes_size=stored,
-        source_format="metadata",
-        extraction_pipeline="hf-api-json-v1",
+        source_format=source_format,  # type: ignore[arg-type]
+        extraction_pipeline=extraction_pipeline,
         spdx_license=admission.license_id,
         spdx_license_source=license_source if license_value else "unknown",  # type: ignore[arg-type]
         training_usage=admission.training_usage,
@@ -128,116 +154,268 @@ async def poll_models(
     *,
     producer: BronzeProducer,
     minio: MinioWriter,
-    admission_producer: LicenseAdmissionProducer | None = None,
+    admission_producer: LicenseAdmissionProducer,
     limit: int = 100,
 ) -> int:
-    """Fetch the most recently modified models. Dedup by id+lastModified."""
-    state = FeedStateStore(
+    """Fetch versioned, licensed model-card prose rather than list API JSON."""
+    state_store = FeedStateStore(
         "/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf"
-    ).get(SOURCE_FEED_MODELS)
-    seen: dict[str, str] = state.get("seen", {})
-
-    headers_extra: dict[str, str] = {}
-    if cfg.hf_token:
-        headers_extra["Authorization"] = f"Bearer {cfg.hf_token}"
+    )
+    seen: dict[str, str] = state_store.get(SOURCE_FEED_MODELS).get("seen", {})
+    headers_extra = {"Authorization": f"Bearer {cfg.hf_token}"} if cfg.hf_token else {}
     headers = build_headers(cfg, accept="application/json", extra=headers_extra)
 
     emitted = 0
+    emit_failures: list[str] = []
     async with build_async_client(cfg, headers=headers) as client:
-        # The unfiltered newest-model page is commonly dominated by unlicensed
-        # uploads and the list response exposes licenses as ``license:*`` tags,
-        # not ``cardData.license``. Query each admitted SPDX tag explicitly,
-        # merge by model id, and retain a bounded newest-first result.
-        per_license_limit = max(
-            1, (limit + len(PERMISSIVE_TRAINING_LICENSES) - 1) // len(PERMISSIVE_TRAINING_LICENSES)
-        )
-        by_model: dict[str, dict[str, object]] = {}
-        successful_requests = 0
-        failed_requests = 0
-        for license_id in sorted(PERMISSIVE_TRAINING_LICENSES):
-            params = {
+        response = await client.get(
+            f"{HF_API_BASE}{MODELS_ENDPOINT}",
+            params={
                 "sort": "lastModified",
                 "direction": "-1",
-                "limit": str(per_license_limit),
-                "filter": f"license:{license_id.lower()}",
+                "limit": str(limit),
                 "full": "true",
-            }
-            resp = await client.get(f"{HF_API_BASE}{MODELS_ENDPOINT}", params=params)
-            if resp.status_code >= 400:
-                log.warning(
-                    "hf_models.bad_status",
-                    status=resp.status_code,
-                    license=license_id,
-                )
-                failed_requests += 1
-                continue
-            payload = resp.json()
-            if not isinstance(payload, list):
-                failed_requests += 1
-                continue
-            successful_requests += 1
-            for item in payload:
-                if not isinstance(item, dict):
-                    continue
-                model_id = item.get("id") or item.get("modelId")
-                if isinstance(model_id, str):
-                    by_model[model_id] = item
-        if not successful_requests:
+                "cardData": "true",
+            },
+        )
+        if response.status_code >= 400:
             INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
-            raise RuntimeError("all Hugging Face model API requests failed")
+            response.raise_for_status()
+        items = response.json()
+        if not isinstance(items, list):
+            INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
+            raise ValueError("Hugging Face models response must be a JSON list")
         INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="success")
-        items = sorted(
-            by_model.values(),
-            key=lambda item: str(item.get("lastModified") or ""),
-            reverse=True,
-        )[:limit]
-        emit_failures: list[str] = []
-        for item in items:
+
+        for item in items[:limit]:
+            if not isinstance(item, dict):
+                continue
             model_id = item.get("id") or item.get("modelId")
             last_modified = item.get("lastModified")
             if not isinstance(model_id, str) or not isinstance(last_modified, str):
                 continue
             if seen.get(model_id) == last_modified:
                 continue
-            url = f"https://huggingface.co/{model_id}"
-            payload = json.dumps(item, sort_keys=True).encode("utf-8")
+            revision = item.get("sha")
+            revision_value = revision if isinstance(revision, str) and revision else None
+            revision_path = revision_value or "unresolved"
+            card_url = f"https://huggingface.co/{model_id}/blob/{revision_path}/README.md"
             license_value = _model_license(item)
+            exact_license = license_value if revision_value is not None else None
+            admission = decide_license_admission(
+                source_url=card_url,
+                source_feed=SOURCE_FEED_MODELS,
+                license_value=exact_license,
+                license_source="hf_card" if exact_license else "unknown",
+                source_format="web",
+                resolver="hf-model-card-metadata",
+                evidence_url=card_url,
+                evidence_revision=revision_value,
+                evidence_scope="item" if revision_value and exact_license else "unknown",
+            )
+            if admission_producer is not None:
+                await admission_producer.send(admission.decision)
+            if not admission.fetch_allowed:
+                # Retry unresolved catalogue rows: a later response may add
+                # the immutable SHA without changing ``lastModified``.
+                if revision_value is not None:
+                    seen[model_id] = last_modified
+                continue
+            card_response = await client.get(
+                f"https://huggingface.co/{model_id}/resolve/{revision_path}/README.md"
+            )
+            if card_response.status_code >= 400:
+                log.warning(
+                    "hf_models.card_fetch_failed",
+                    model=model_id,
+                    revision=revision_value,
+                    status=card_response.status_code,
+                )
+                emit_failures.append(model_id)
+                continue
             try:
-                accepted = await _emit_payload(
-                    payload=payload,
-                    url=url,
+                await _emit_payload(
+                    payload=card_response.content,
+                    url=card_url,
                     source_feed=SOURCE_FEED_MODELS,
-                    extension="model.json.gz",
+                    extension="README.md.gz",
                     cfg=cfg,
                     producer=producer,
                     minio=minio,
-                    extra_meta={"hf_model_id": model_id, "hf_last_modified": last_modified},
-                    license_value=license_value if isinstance(license_value, str) else None,
-                    admission_producer=admission_producer,
+                    extra_meta={
+                        "hf_model_id": model_id,
+                        "hf_last_modified": last_modified,
+                        "hf_revision": revision_value or "unresolved",
+                    },
+                    license_value=exact_license,
+                    license_source="hf_card",
+                    source_format="web",
+                    content_type="text/markdown; charset=utf-8",
+                    extraction_pipeline="hf-model-card-markdown-v1",
+                    admission_override=admission,
                 )
             except Exception as exc:
                 log.warning("hf_models.emit_failed", model=model_id, err=str(exc))
                 emit_failures.append(model_id)
                 continue
-            if not accepted:
-                seen[model_id] = last_modified
-                continue
             seen[model_id] = last_modified
             emitted += 1
 
-    # Persist state.
     if len(seen) > 5000:
-        recent_state_items = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:2500]
-        seen = dict(recent_state_items)
-    FeedStateStore("/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf").put(
-        SOURCE_FEED_MODELS, {"seen": seen}
-    )
-    if failed_requests or emit_failures:
+        seen = dict(sorted(seen.items(), key=lambda pair: pair[1], reverse=True)[:2500])
+    state_store.put(SOURCE_FEED_MODELS, {"seen": seen})
+    if emit_failures:
         INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
         raise RuntimeError(
-            "incomplete Hugging Face model pass: "
-            f"request_failures={failed_requests}, emit_failures={len(emit_failures)}"
+            f"incomplete Hugging Face model-card pass: emit_failures={len(emit_failures)}"
         )
+    return emitted
+
+
+async def poll_hub_cards(
+    cfg: IngestConfig,
+    *,
+    kind: HubCardKind,
+    producer: BronzeProducer,
+    minio: MinioWriter,
+    admission_producer: LicenseAdmissionProducer,
+    limit: int = 100,
+) -> int:
+    """Fetch immutable, licensed dataset or Space card prose.
+
+    The list response is discovery metadata only. The emitted corpus item is
+    the README at the exact Hub commit returned by the API.
+    """
+    endpoint = DATASETS_ENDPOINT if kind == "dataset" else SPACES_ENDPOINT
+    source_feed = SOURCE_FEED_DATASETS if kind == "dataset" else SOURCE_FEED_SPACES
+    route_prefix = "datasets" if kind == "dataset" else "spaces"
+    pipeline = f"hf-{kind}-card-markdown-v1"
+    state_store = FeedStateStore(
+        "/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf"
+    )
+    seen: dict[str, str] = state_store.get(source_feed).get("seen", {})
+    headers_extra = {"Authorization": f"Bearer {cfg.hf_token}"} if cfg.hf_token else {}
+    headers = build_headers(cfg, accept="application/json", extra=headers_extra)
+
+    emitted = 0
+    failures: list[str] = []
+    async with build_async_client(cfg, headers=headers) as client:
+        response = await client.get(
+            f"{HF_API_BASE}{endpoint}",
+            params={
+                "sort": "lastModified",
+                "direction": "-1",
+                "limit": str(limit),
+                "full": "true",
+            },
+        )
+        if response.status_code >= 400:
+            INGEST_METRICS.record_feed_poll(source_feed=source_feed, outcome="error")
+            response.raise_for_status()
+        items = response.json()
+        if not isinstance(items, list):
+            INGEST_METRICS.record_feed_poll(source_feed=source_feed, outcome="error")
+            raise ValueError(f"Hugging Face {kind} response must be a JSON list")
+        INGEST_METRICS.record_feed_poll(source_feed=source_feed, outcome="success")
+
+        for item in items[:limit]:
+            if not isinstance(item, dict):
+                continue
+            repo_id = item.get("id")
+            last_modified = item.get("lastModified")
+            revision = item.get("sha")
+            if not all(isinstance(value, str) and value for value in (repo_id, last_modified, revision)):
+                # An unresolved branch is mutable and cannot meet the corpus
+                # provenance contract. Record the fail-closed outcome before
+                # waiting for a later API response with an immutable SHA.
+                if isinstance(repo_id, str) and repo_id and isinstance(last_modified, str):
+                    unresolved_url = (
+                        f"https://huggingface.co/{route_prefix}/{repo_id}/blob/unresolved/README.md"
+                    )
+                    unresolved = decide_license_admission(
+                        source_url=unresolved_url,
+                        source_feed=source_feed,
+                        license_value=None,
+                        license_source="unknown",
+                        source_format="web",
+                        resolver=f"hf-{kind}-card-metadata",
+                        evidence_url=unresolved_url,
+                        evidence_revision=None,
+                        evidence_scope="unknown",
+                    )
+                    if admission_producer is not None:
+                        await admission_producer.send(unresolved.decision)
+                continue
+            assert isinstance(repo_id, str)
+            assert isinstance(last_modified, str)
+            assert isinstance(revision, str)
+            if seen.get(repo_id) == last_modified:
+                continue
+            card_url = f"https://huggingface.co/{route_prefix}/{repo_id}/blob/{revision}/README.md"
+            license_value = _model_license(item)
+            admission = decide_license_admission(
+                source_url=card_url,
+                source_feed=source_feed,
+                license_value=license_value,
+                license_source="hf_card" if license_value else "unknown",
+                source_format="web",
+                resolver=f"hf-{kind}-card-metadata",
+                evidence_url=card_url,
+                evidence_revision=revision,
+                evidence_scope="item" if license_value else "unknown",
+            )
+            if admission_producer is not None:
+                await admission_producer.send(admission.decision)
+            if not admission.fetch_allowed:
+                seen[repo_id] = last_modified
+                continue
+            card_response = await client.get(
+                f"https://huggingface.co/{route_prefix}/{repo_id}/resolve/{revision}/README.md"
+            )
+            if card_response.status_code >= 400:
+                log.warning(
+                    "hf_cards.card_fetch_failed",
+                    kind=kind,
+                    repo=repo_id,
+                    revision=revision,
+                    status=card_response.status_code,
+                )
+                failures.append(repo_id)
+                continue
+            try:
+                await _emit_payload(
+                    payload=card_response.content,
+                    url=card_url,
+                    source_feed=source_feed,
+                    extension="README.md.gz",
+                    cfg=cfg,
+                    producer=producer,
+                    minio=minio,
+                    extra_meta={
+                        f"hf_{kind}_id": repo_id,
+                        "hf_last_modified": last_modified,
+                        "hf_revision": revision,
+                    },
+                    license_value=license_value,
+                    license_source="hf_card",
+                    source_format="web",
+                    content_type="text/markdown; charset=utf-8",
+                    extraction_pipeline=pipeline,
+                    admission_override=admission,
+                )
+            except Exception as exc:
+                log.warning("hf_cards.emit_failed", kind=kind, repo=repo_id, err=str(exc))
+                failures.append(repo_id)
+                continue
+            seen[repo_id] = last_modified
+            emitted += 1
+
+    if len(seen) > 5000:
+        seen = dict(sorted(seen.items(), key=lambda pair: pair[1], reverse=True)[:2500])
+    state_store.put(source_feed, {"seen": seen})
+    if failures:
+        INGEST_METRICS.record_feed_poll(source_feed=source_feed, outcome="error")
+        raise RuntimeError(f"incomplete Hugging Face {kind}-card pass: failures={len(failures)}")
     return emitted
 
 
@@ -246,7 +424,7 @@ async def poll_daily_papers(
     *,
     producer: BronzeProducer,
     minio: MinioWriter,
-    admission_producer: LicenseAdmissionProducer | None = None,
+    admission_producer: LicenseAdmissionProducer,
     limit: int = 100,
 ) -> int:
     """Poll HF Daily Papers and resolve each paper's arXiv license."""
@@ -282,7 +460,7 @@ async def poll_daily_papers(
                 continue
             if arxiv_id in seen_ids:
                 continue
-            url = f"https://huggingface.co/papers/{arxiv_id}"
+            url = f"https://arxiv.org/abs/{arxiv_id}"
             payload = json.dumps(item, sort_keys=True).encode("utf-8")
             license_value = (
                 paper.get("license")
@@ -290,12 +468,16 @@ async def poll_daily_papers(
                 else None
             )
             license_source = "dataset_metadata"
+            resolver = "hf-daily-paper-item-field"
+            evidence_url = f"https://huggingface.co/papers/{arxiv_id}"
             if normalize_license(license_value) == "unknown":
                 license_value, license_source = await fetch_arxiv_license_with_source(
                     arxiv_id,
                     client,
                     bucket=license_bucket,
                 )
+                resolver = f"arxiv:{license_source}"
+                evidence_url = f"https://arxiv.org/abs/{arxiv_id}"
             try:
                 accepted = await _emit_payload(
                     payload=payload,
@@ -309,6 +491,11 @@ async def poll_daily_papers(
                     license_value=license_value,
                     license_source=license_source,
                     admission_producer=admission_producer,
+                    source_format="metadata",
+                    resolver=resolver,
+                    evidence_url=evidence_url,
+                    evidence_revision=arxiv_id,
+                    evidence_scope="item",
                 )
             except Exception as exc:
                 log.warning("hf_papers.emit_failed", paper=arxiv_id, err=str(exc))
@@ -345,14 +532,14 @@ def _model_license(item: dict[str, object]) -> str | None:
     return None
 
 
-async def run_pass(cfg: IngestConfig, *, mode: str = "all") -> tuple[int, int]:
+async def run_pass(cfg: IngestConfig, *, mode: str = "all") -> tuple[int, int, int, int]:
     """Run exactly the source selected by the Helm workload.
 
-    The models Deployment is long-lived, while daily papers are a CronJob.
+    The Hub-card Deployment is long-lived, while daily papers are a CronJob.
     Keeping selection here prevents either workload from silently polling the
     other source (the old CLI accepted ``--mode`` but ignored it).
     """
-    if mode not in {"all", "models", "daily-papers"}:
+    if mode not in {"all", "hub-cards", "models", "datasets", "spaces", "daily-papers"}:
         raise ValueError(f"unsupported Hugging Face poll mode: {mode}")
     async with (
         BronzeProducer(
@@ -371,35 +558,75 @@ async def run_pass(cfg: IngestConfig, *, mode: str = "all") -> tuple[int, int]:
         ) as minio,
     ):
         models = 0
+        datasets = 0
+        spaces = 0
         papers = 0
-        if mode in {"all", "models"}:
+        if mode in {"all", "hub-cards", "models"}:
             models = await poll_models(
                 cfg, producer=producer, minio=minio, admission_producer=admission_producer
+            )
+        if mode in {"all", "hub-cards", "datasets"}:
+            datasets = await poll_hub_cards(
+                cfg,
+                kind="dataset",
+                producer=producer,
+                minio=minio,
+                admission_producer=admission_producer,
+            )
+        if mode in {"all", "hub-cards", "spaces"}:
+            spaces = await poll_hub_cards(
+                cfg,
+                kind="space",
+                producer=producer,
+                minio=minio,
+                admission_producer=admission_producer,
             )
         if mode in {"all", "daily-papers"}:
             papers = await poll_daily_papers(
                 cfg, producer=producer, minio=minio, admission_producer=admission_producer
             )
-        return models, papers
+        return models, datasets, spaces, papers
 
 
-async def run_models_forever(cfg: IngestConfig, *, poll_interval_seconds: int) -> None:
-    """Continuously poll model metadata without turning success into CrashLoopBackOff."""
+async def run_hub_cards_forever(cfg: IngestConfig, *, poll_interval_seconds: int) -> None:
+    """Continuously poll licensed Hub cards without turning success into CrashLoopBackOff."""
     interval = max(60, poll_interval_seconds)
     while True:
         try:
-            models, _ = await run_pass(cfg, mode="models")
-            log.info("hf_poller.pass_done", mode="models", models=models)
+            models, datasets, spaces, _ = await run_pass(cfg, mode="hub-cards")
+            log.info(
+                "hf_poller.pass_done",
+                mode="hub-cards",
+                models=models,
+                datasets=datasets,
+                spaces=spaces,
+            )
         except Exception as exc:
             # A transient upstream/Kafka/MinIO failure must not terminate a
             # continuously supervised Deployment. The next bounded pass retries.
+            log.exception("hf_poller.pass_failed", mode="hub-cards", err=str(exc))
+        await asyncio.sleep(interval)
+
+
+async def run_models_forever(cfg: IngestConfig, *, poll_interval_seconds: int) -> None:
+    """Compatibility wrapper for the pre-card-catalog command name."""
+    interval = max(60, poll_interval_seconds)
+    while True:
+        try:
+            models, _, _, _ = await run_pass(cfg, mode="models")
+            log.info("hf_poller.pass_done", mode="models", models=models)
+        except Exception as exc:
             log.exception("hf_poller.pass_failed", mode="models", err=str(exc))
         await asyncio.sleep(interval)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Poll Hugging Face metadata")
-    parser.add_argument("--mode", choices=("all", "models", "daily-papers"), default="all")
+    parser = argparse.ArgumentParser(description="Poll licensed Hugging Face card prose")
+    parser.add_argument(
+        "--mode",
+        choices=("all", "hub-cards", "models", "datasets", "spaces", "daily-papers"),
+        default="all",
+    )
     # Retained for chart/CLI compatibility; feed configuration is supplied by
     # validated Helm values and IngestConfig environment variables today.
     parser.add_argument("--config", default=None)
@@ -414,11 +641,20 @@ def main() -> None:
     init_tracer("ingest.hf_poller", cfg)
     log.info("hf_poller.start", mode=args.mode)
     start_probe_server()
+    if args.mode == "hub-cards":
+        asyncio.run(run_hub_cards_forever(cfg, poll_interval_seconds=args.poll_interval_seconds))
+        return
     if args.mode == "models":
         asyncio.run(run_models_forever(cfg, poll_interval_seconds=args.poll_interval_seconds))
         return
-    models, papers = asyncio.run(run_pass(cfg, mode=args.mode))
-    log.info("hf_poller.done", models=models, papers=papers)
+    models, datasets, spaces, papers = asyncio.run(run_pass(cfg, mode=args.mode))
+    log.info(
+        "hf_poller.done",
+        models=models,
+        datasets=datasets,
+        spaces=spaces,
+        papers=papers,
+    )
 
 
 if __name__ == "__main__":

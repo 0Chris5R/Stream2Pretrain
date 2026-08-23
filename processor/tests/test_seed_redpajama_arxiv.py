@@ -65,6 +65,9 @@ def test_to_seed_document_arxiv_url() -> None:
     assert doc.extraction_pipeline == "redpajama-arxiv-2023-04"
     assert doc.spdx_license is None
     assert doc.spdx_license_source == "unknown"
+    assert doc.license_resolver == "redpajama-arxiv-paper-item-field"
+    assert doc.license_evidence_revision == f"{rpa.DATASET_REVISION}:2308.05670"
+    assert doc.license_evidence_scope == "unknown"
     assert doc.valid_from == datetime(2023, 8, 10, tzinfo=UTC)
 
 

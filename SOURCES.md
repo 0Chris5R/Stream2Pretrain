@@ -10,15 +10,17 @@ These are the locked-in sources for the first deliverable. Picked for: free, no-
 
 | # | Source | Endpoint | Protocol | Auth | Poll interval | Est. docs/day | Why |
 |---|---|---|---|---|---|---|---|
-| 1 | arXiv OAI-PMH (set=cs) | `https://oaipmh.arxiv.org/oai` | OAI-PMH 2.0 XML | none | every 2h via `from=<last>`+resumption tokens | ~400-500 | Workhorse: structured metadata + abstracts for all cs.* papers |
+| 1 | arXiv OAI-PMH (set=cs) | `https://oaipmh.arxiv.org/oai` | OAI-PMH 2.0 XML | none | every 2h via `from=<last>`+resumption tokens | ~400-500 | Discovery metadata for all cs.* papers; schedules the separately licensed full-text item |
 | 2 | arXiv RSS cs.CL | `https://rss.arxiv.org/rss/cs.CL` | RSS 2.0 | none | every 2h | ~65 | NLP/LLM papers, RSS-shape coverage, dedup test fodder vs OAI |
 | 3 | arXiv RSS cs.LG | `https://rss.arxiv.org/rss/cs.LG` | RSS 2.0 | none | every 2h | ~126 | Core ML methods |
 | 4 | arXiv RSS cs.AI | `https://rss.arxiv.org/rss/cs.AI` | RSS 2.0 | none | every 2h | ~125 | General AI/agents |
 | 5 | arXiv RSS cs.CV | `https://rss.arxiv.org/rss/cs.CV` | RSS 2.0 | none | every 2h | needs-measurement (~150) | Vision research |
-| 6 | GitHub Public Events (AI-filtered) | `https://api.github.com/events` | REST/JSON | personal token (5000 req/h) | obey `X-Poll-Interval` (~60s); 304s do not count | needs-measurement (hundreds-low-thousands after filter) | Live signal of new code/PRs/releases on AI repos |
-| 7 | GitHub Releases Atom (~30 curated repos) | `https://github.com/<org>/<repo>/releases.atom` | Atom | none | every 2h with ETag/`If-None-Match` | 10-50 | High-signal release-note text |
-| 8 | Hugging Face Hub models | `https://huggingface.co/api/models?sort=lastModified&direction=-1&limit=100` | REST/JSON | optional bearer (token raises 5-min quota from 500 -> 1000-2500) | every 10-15 min, dedup on `id`+`lastModified` | needs-measurement (hundreds-thousands) | Model cards = engineering artifacts + metadata |
-| 9 | HF Daily Papers | `https://huggingface.co/api/daily_papers?sort=publishedAt&limit=100` | REST/JSON | bearer required | every 6h | ~20-50 | Curated frontier papers w/ community signal |
+| 6 | GitHub Public Events (AI-filtered) | `https://api.github.com/events` | REST/JSON | personal token (5000 req/h) | obey `X-Poll-Interval` (~60s); 304s do not count | needs-measurement (hundreds-low-thousands after filter) | Discovery-only signal that schedules exact release tarballs; event JSON is not training text |
+| 7 | GitHub Releases Atom (~30 curated repos) | `https://github.com/<org>/<repo>/releases.atom` | Atom | none | every 2h with ETag/`If-None-Match` | 10-50 | Discovery-only release-ref signal; release envelopes are not training text |
+| 8a | Hugging Face model cards | `https://huggingface.co/api/models?sort=lastModified&direction=-1&limit=100` + exact-revision `README.md` | REST/JSON + Markdown | optional bearer | every 10-15 min, dedup on `id`+`lastModified` | needs-measurement | Exact-version, licence-admitted model-card prose; list API JSON is discovery-only |
+| 8b | Hugging Face dataset cards | `https://huggingface.co/api/datasets?sort=lastModified&direction=-1&limit=100` + exact-revision `README.md` | REST/JSON + Markdown | optional bearer | every 10-15 min, dedup on `id`+`lastModified` | needs-measurement | Exact-version, licence-admitted dataset-card prose; card rights do not grant rights in dataset rows |
+| 8c | Hugging Face Space cards | `https://huggingface.co/api/spaces?sort=lastModified&direction=-1&limit=100` + exact-revision `README.md` | REST/JSON + Markdown | optional bearer | every 10-15 min, dedup on `id`+`lastModified` | needs-measurement | Exact-version, licence-admitted Space-card prose; repository code is not fetched by this adapter |
+| 9 | HF Daily Papers | `https://huggingface.co/api/daily_papers?sort=publishedAt&limit=100` | REST/JSON | bearer required | every 6h | ~20-50 | Discovery-only curated arXiv signal; the arXiv full-text worker fetches the trainable paper |
 | 10 | AI-lab blog RSS bundle | OpenAI News, DeepMind, HF Blog, BAIR, EleutherAI | RSS | none | every 6h | ~5-10 total | Long-form lab writeups |
 | ~~11~~ | ~~FastAPI submit~~ | ~~`POST /submit`~~ | ~~HTTP/JSON~~ | ~~none~~ | ~~on-demand~~ | ~~ad-hoc~~ | **DELETED in v0.2.0** - manual URL submit endpoint removed; the live pollers and seed loader cover demo needs without the abuse surface |
 
@@ -40,7 +42,7 @@ These four sources land in v0.2.0 alongside the existing Phase-1 pollers. They t
 |---|---|---|---|---|---|---|---|
 | 12 | arXiv native HTML | `https://arxiv.org/html/<arxiv_id>` (fallback `https://ar5iv.labs.arxiv.org/html/<id>` on 404) | HTTPS HTML | none | fan-out from #1 / #2-5; fetch each new id once, conditional-GET via ETag thereafter | ~700-900 (paper bodies, equals Phase-1 abstract count) | Replaces PDF parsing for the fresh tier; ~97% of new submissions covered, ~75% LaTeXML-clean per arxiv.org/pdf/2605.16562 |
 | 13 | OpenReview API v2 | `https://api2.openreview.net/notes?invitation=<venue>/-/Submission` + per-note PDF over HTTPS | REST/JSON + HTTPS PDF | none for reads | every 6h between deadlines, every 30 min during ICLR/NeurIPS/ICML/COLM submission windows | needs-measurement (bursty: thousands during conference deadlines) | Peer-review prose + rebuttals. Full review texts unavailable elsewhere |
-| 14 | ReviewArena HF dataset | `anonymousNeurIPS2026submission4281/reviewarena` at revision `c2978add17c2099219eaddbc2599974d69d4d09b` | HF datasets streaming | public; optional HF token | one-shot backfill | bounded by `maxRows` | 51,529 papers across seven conference splits; OCR Markdown + structured reviews + rebuttals + decisions, admitted only for derived post-training unless a per-record content license says otherwise |
+| 14 | ReviewArena HF dataset | `anonymousNeurIPS2026submission4281/reviewarena` at revision `c2978add17c2099219eaddbc2599974d69d4d09b` | HF datasets streaming | public; optional HF token | one-shot backfill | bounded by `maxRows` | OCR Markdown and review artifacts are admitted independently: papers require per-item rights; substantive public review prose may use a per-item licence or the versioned OpenReview public-comment terms |
 | 15 | GitHub release tarballs | `https://api.github.com/repos/{o}/{r}/tarball/{tag}` | REST/binary | personal token (5000 req/h shared with #6) | fan-out from #7 (Releases Atom) on every new release | needs-measurement (~30 repos x mean ~5 releases/day x ~50-200 files/release after path+license filter) | Per-file source records under SPDX-permissive license; lands as `source_format=code` on the existing topics |
 
 Notes on rate-limit budget:
@@ -50,15 +52,15 @@ Notes on rate-limit budget:
 
 ## Seed corpus (v0.2.0)
 
-One-shot Bytewax `seed-loader` Job that evaluates a 5-component HF mixture before `docs.normalized`. Dataset wrapper licences do not qualify. Only rows with an explicit allowlisted paper, page, or file licence proceed; every other row is written to the licence quarantine ledger. Per-document `valid_from` is populated from each dataset's native publication-date column so the validity-interval N2 novelty has data to query on day 1.
+One-shot Bytewax `seed-loader` Job that evaluates a 5-component HF mixture before `docs.normalized`. Dataset wrapper licences do not qualify. Each row needs immutable item evidence: permissive items enter both routes, reviewed NC or arXiv non-exclusive items enter the transform-only post-training route, and unresolved or ND items become pre-body quarantine decisions in the corpus routes ledger. Per-document `valid_from` is populated from each dataset's native publication-date column so the validity-interval N2 novelty has data to query on day 1.
 
 | # | Component | HF id / source | Bronze GB target | Tokens (B) target | License | Role |
 |---|---|---|---|---|---|---|
-| S1 | peS2o v3 filtered to cs.* | `allenai/peS2o` (`data/v3/`) | ~50 | needs-measurement (~12-15B; v2 baseline 42.01B at cutoff 2023-01-03) | ODC-By wrapper; per-paper required | AI2 academic backbone; rows without paper rights are quarantined |
-| S2 | RedPajama v1 arxiv | `togethercomputer/RedPajama-Data-1T` config `arxiv` | ~92 | ~28 | Apache-2.0 wrapper; per-paper required | LaTeX view; rows without an allowlisted paper licence are quarantined |
-| S3 | FineWeb-Edu URL-filtered | `HuggingFaceFW/fineweb-edu` (URL allowlist for arxiv.org / openai.com / deepmind.google / huggingface.co/blog / eleuther.ai / bair.berkeley.edu / lilianweng.github.io / sebastianraschka.com / etc.) | ~50 | needs-measurement (~5-10B post-filter) | ODC-By wrapper; per-page required | Rows without explicit page rights are quarantined |
-| S4 | Stack-Edu Python+ML | `HuggingFaceTB/stack-edu` filtered to Python + AI/ML repos | ~80 | needs-measurement (~8-12B; OLMo-3 used ~410B from this dataset) | ODC-By wrapper; per-file SPDX required | Only allowlisted per-file code licences proceed |
-| S5 | Custom Wayback backfill | arXiv OAI `from=2024-06-01`, GitHub Releases Atom history, HF Daily Papers `before=...`, AI-lab blogs via Wayback Machine | ~5-10 | ~1 | explicit per-source or per-record licence required | Validates streaming backfill time semantics; unlicensed archive rows are quarantined |
+| S1 | peS2o v3 filtered to cs.* | `allenai/peS2o` (`data/v3/`) | ~50 | needs-measurement (~12-15B; v2 baseline 42.01B at cutoff 2023-01-03) | ODC-By wrapper ignored; per-paper required | AI2 academic backbone; each paper follows the shared three-outcome route |
+| S2 | RedPajama v1 arxiv | `togethercomputer/RedPajama-Data-1T` config `arxiv` | ~92 | ~28 | Apache-2.0 wrapper ignored; per-paper required | LaTeX view; each paper follows the shared three-outcome route |
+| S3 | FineWeb-Edu URL-filtered | `HuggingFaceFW/fineweb-edu` (URL allowlist for arxiv.org / openai.com / deepmind.google / huggingface.co/blog / eleuther.ai / bair.berkeley.edu / lilianweng.github.io / sebastianraschka.com / etc.) | ~50 | needs-measurement (~5-10B post-filter) | ODC-By wrapper ignored; per-page required | Each page follows the shared three-outcome route |
+| S4 | Stack-Edu Python+ML | `HuggingFaceTB/stack-edu` filtered to Python + AI/ML repos | ~80 | needs-measurement (~8-12B; OLMo-3 used ~410B from this dataset) | ODC-By wrapper ignored; unambiguous per-file SPDX required | Each file follows the shared three-outcome route; ambiguous SPDX evidence quarantines |
+| S5 | Custom Wayback backfill | Nine Phase-1 arXiv/blog RSS feeds via Wayback Machine | ~5-10 | ~1 | archived item rights or immutable captured-page evidence required | Archived feeds are discovery only; admitted item pages are fetched and extracted only after the admission record is durable |
 
 The original discovery target was ~275-280 GB and ~55-65B tokens. Retained
 volume after strict per-record licence admission is `needs-measurement`. The
@@ -71,8 +73,6 @@ parallel policy path.
 | Source | Endpoint | Notes |
 |---|---|---|
 | Remaining arXiv categories | `rss.arxiv.org/rss/<cat>` | stat.ML, cs.IR, cs.CR, cs.DC, cs.CY, cs.MA, cs.RO |
-| HF Datasets | `huggingface.co/api/datasets?sort=lastModified` | Same envelope as models |
-| HF Spaces | `huggingface.co/api/spaces?sort=lastModified` | Mostly UI code, lower training-token value |
 | OpenReview API v2 | `https://api2.openreview.net/notes?invitation=<venue>/-/Submission` | Bursty during ICLR/NeurIPS/ICML/COLM windows; thousands during deadlines |
 | Semantic Scholar Graph | `https://api.semanticscholar.org/graph/v1/paper/search/bulk` | API key recommended; baseline 1 RPS authed |
 | Papers With Code | `https://paperswithcode.com/api/v1/papers/` | ~50-200 new entries/day; verify uptime |
@@ -91,7 +91,7 @@ parallel policy path.
 | Twitter/X | Free API tier removed |
 | Reddit r/MachineLearning | Reddit API paywalled for high volume |
 | Substack scraping past paywall | Stick to first-party RSS only |
-| Full arXiv PDF fetching | Bandwidth + parsing latency exceeds 2-worker demo; in Phase 2 do it on-demand for a quality-filtered subset only |
+| Unbounded arXiv PDF crawling | The live path uses native HTML first and only a bounded CPU PDF fallback; a separate full-corpus PDF crawl would exceed the demo budget |
 | Closed-access proceedings (IEEE, Springer) | Paid APIs |
 | Anthropic / Meta AI first-party RSS | Confirmed not to exist; use community feeds in Phase 2 with caveat |
 
@@ -101,11 +101,11 @@ parallel policy path.
 
 **Velocity**: cadences span four orders of magnitude. GitHub events at the 60s `X-Poll-Interval` floor; HF Hub at 10 min; arXiv OAI/RSS at 2h (bound by arXiv's once-daily rebuild); curated blog feeds at 6-24h. Single Redpanda topology must handle bursty + slow polling simultaneously.
 
-**Variety**: protocol mix covers OAI-PMH XML with resumption tokens, RSS 2.0/Atom, REST/JSON, and HTML. Content shapes cover paper abstracts, model cards, code release notes, blog long-form, and event metadata - exactly the heterogeneity a curation pipeline must demonstrate.
+**Variety**: protocol mix covers OAI-PMH XML with resumption tokens, RSS 2.0/Atom, REST/JSON, HTML, Markdown, PDF, and code archives. Discovery envelopes schedule trainable artifacts but are not themselves training text. Content shapes cover full papers, model/dataset/Space cards, repository documentation, source code, public peer reviews, and blog prose.
 
 **Veracity**: arXiv, OpenReview, Semantic Scholar, and major-lab blogs are high-trust. GitHub events and HF Hub are noisy (typo-fixes, auto-bumps, low-effort spaces) and need quality scoring + dedup. LessWrong/Alignment Forum (Phase 2) is the deliberate noisy-input case to demonstrate the quality classifier earning its keep.
 
-**Value**: highest training-token value comes from arXiv abstracts/PDFs (peer-adjacent dense technical prose), curated lab blog posts, GitHub READMEs/release-notes for OSI-licensed AI repos, and OpenReview rebuttals (unique critical discourse not available elsewhere).
+**Value**: highest training-token value comes from licence-admitted full scientific papers, curated lab blog posts, GitHub code and repository documentation for permissively licensed AI repos, exact-version Hugging Face cards, and OpenReview rebuttals and reviews. Source discovery metadata remains operational evidence rather than training content.
 
 ## Rate-Limit + Politeness Cheatsheet
 

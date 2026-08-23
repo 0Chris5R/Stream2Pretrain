@@ -65,6 +65,10 @@ def test_to_seed_document_keeps_arxiv_url() -> None:
     assert doc.url == "https://arxiv.org/abs/2402.01234"
     assert doc.source_format == "html"
     assert doc.spdx_license == "CC-BY-4.0"
+    assert doc.license_resolver == "fineweb-page-item-field"
+    assert ff.DATASET_REVISION in (doc.license_evidence_url or "")
+    assert (doc.license_evidence_revision or "").startswith(ff.DATASET_REVISION)
+    assert doc.license_evidence_scope == "item"
     assert doc.extra["fineweb_edu_score"] == "4.200"
 
 
@@ -81,6 +85,7 @@ def test_to_seed_document_does_not_inherit_dataset_wrapper_license() -> None:
     assert doc is not None
     assert doc.spdx_license is None
     assert doc.spdx_license_source == "unknown"
+    assert doc.license_evidence_scope == "unknown"
 
 
 def test_to_seed_document_drops_offdomain_url() -> None:

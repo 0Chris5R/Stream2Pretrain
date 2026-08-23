@@ -1,8 +1,8 @@
 {{- /*
-Curate and Iceberg still store Bytewax offsets in their recovery databases, so
-they cannot use Kafka-lag scaling safely. The stateless fetcher and independent
-ingest consumers render their own ScaledObjects; this template supplies their
-optional shared Redpanda authentication.
+Fetcher and curate store Bytewax source progress in recovery databases, so
+standard Kafka-lag scaling cannot observe or safely rescale either core
+execution. Independent ingest consumers may still use this shared Redpanda
+authentication for their own ScaledObjects.
 */ -}}
 {{- if and .Values.keda.enabled .Values.keda.auth.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}

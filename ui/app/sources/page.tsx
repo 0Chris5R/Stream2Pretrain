@@ -153,8 +153,11 @@ export default function SourcesPage() {
                   <TableCell>
                     <div className="flex flex-col items-start gap-1">
                       <Badge variant="outline">{qualityPolicyFor(source)}</Badge>
-                      <span className="text-xs text-muted-foreground">
-                        {licensePolicyFor(source.spec.license_default)}
+                      <span
+                        className="text-xs text-muted-foreground"
+                        title={licenseProvenanceSummary(source)}
+                      >
+                        {licenseSummary(source)}
                       </span>
                     </div>
                   </TableCell>
@@ -176,7 +179,7 @@ export default function SourcesPage() {
                   <TableCell className="text-sm">{relativeTime(source.last_attempt_at)}</TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-1">
-                      <Button
+                      {source.management === 'sourcefeed' ? <Button
                         title={source.spec.enabled ? 'Disable' : 'Enable'}
                         variant="ghost"
                         size="sm"
@@ -185,31 +188,32 @@ export default function SourcesPage() {
                         }
                       >
                         {source.spec.enabled ? 'Disable' : 'Enable'}
-                      </Button>
-                      <Button
+                      </Button> : null}
+                      {source.management === 'sourcefeed' ? <Button
                         title="Run once"
                         variant="ghost"
                         size="icon"
                         disabled={
                           !source.spec.enabled ||
                           source.poll_state === 'polling' ||
-                          !runnableProtocols.includes(
-                            source.spec.protocol as (typeof runnableProtocols)[number],
-                          )
+                          !source.supports_run
                         }
                         onClick={() => run.mutate(source.name)}
                       >
                         <Play className="h-4 w-4" />
-                      </Button>
-                      <Button
+                      </Button> : null}
+                      {source.management === 'sourcefeed' ? <Button
                         title="Edit"
                         variant="ghost"
                         size="icon"
                         onClick={() => setEditing(source.spec)}
                       >
                         <Edit3 className="h-4 w-4" />
-                      </Button>
-                      <Button
+                      </Button> : null}
+                      {source.management === 'builtin' ? (
+                        <Badge variant="secondary">Helm managed</Badge>
+                      ) : null}
+                      {source.management === 'sourcefeed' ? <Button
                         title="Delete"
                         variant="ghost"
                         size="icon"
@@ -219,7 +223,7 @@ export default function SourcesPage() {
                         }}
                       >
                         <Trash2 className="h-4 w-4" />
-                      </Button>
+                      </Button> : null}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -278,7 +282,6 @@ function SourceForm({
     poll_interval_seconds: String(initial?.poll_interval_seconds ?? 7200),
     requests_per_second: String(initial?.rate_limit.requests_per_second ?? 1),
     burst: String(initial?.rate_limit.burst ?? 2),
-    license_default: initial?.license_default ?? 'unknown',
   });
   const [error, setError] = useState<string | null>(null);
   const update = (key: keyof typeof form, value: string) =>
@@ -301,7 +304,9 @@ function SourceForm({
       auth: { type: 'none' },
       accept_content_types: initial?.accept_content_types ?? [],
       egress_allow: initial?.egress_allow ?? [safeHost(endpoint)].filter(Boolean),
-      license_default: form.license_default.trim(),
+      // Source configuration never grants content rights. Every item is
+      // resolved and admitted independently before its body is fetched.
+      license_default: initial?.license_default ?? 'per-record',
     });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? 'Invalid source');
@@ -341,30 +346,6 @@ function SourceForm({
           onChange={(event) => update('endpoint', event.target.value)}
           required
         />
-      </Field>
-      <Field label="Default license">
-        <Input
-          list="source-license-defaults"
-          value={form.license_default}
-          onChange={(event) => update('license_default', event.target.value)}
-          required
-        />
-        <datalist id="source-license-defaults">
-          <option value="unknown" />
-          <option value="per-record" />
-          <option value="arxiv-non-exclusive-distribution" />
-          <option value="CC-BY-4.0" />
-          <option value="CC-BY-SA-4.0" />
-          <option value="CC0-1.0" />
-          <option value="Apache-2.0" />
-          <option value="MIT" />
-          <option value="BSD-3-Clause" />
-          <option value="ODC-By-1.0" />
-        </datalist>
-        <p className="text-xs text-muted-foreground">
-          Unknown, arXiv distribution-only, and ODC-By sources are retained for transformed
-          post-training but excluded from verbatim pretraining.
-        </p>
       </Field>
       <div className="grid gap-3 sm:grid-cols-3">
         <Field label="Poll interval">
@@ -424,18 +405,21 @@ function safeHost(value: string): string {
   }
 }
 function qualityPolicyFor(source: SourceFeedStatus): string {
-  const host = new URL(source.spec.endpoint).hostname;
-  if (source.spec.protocol === 'oai-pmh' || source.spec.protocol === 'rest-json') {
-    return 'Structured metadata';
-  }
-  return host.endsWith('arxiv.org') ? 'FinePDFs scientific' : 'FineWeb web';
+  return source.quality_policy;
 }
-function licensePolicyFor(value: string | null | undefined): string {
-  if (!value || ['unknown', 'arxiv-non-exclusive-distribution', 'ODC-By-1.0'].includes(value)) {
-    return 'Posttrain transform only';
-  }
-  if (value === 'per-record') return 'Per-record admission';
-  return `Pretrain allowlist: ${value}`;
+function licenseSummary(source: SourceFeedStatus): string {
+  if (source.license_distribution.length === 0) return source.license_resolver;
+  const values = source.license_distribution
+    .slice(0, 3)
+    .map((entry) => `${entry.license_id} ${formatInt(entry.count)}`);
+  const remaining = source.license_distribution.length - values.length;
+  return remaining > 0 ? `${values.join(' · ')} · +${remaining}` : values.join(' · ');
+}
+function licenseProvenanceSummary(source: SourceFeedStatus): string {
+  if (source.license_provenance.length === 0) return source.license_resolver;
+  return source.license_provenance
+    .map((entry) => `${entry.license_source}: ${formatInt(entry.count)}`)
+    .join(' · ');
 }
 function StatusBadge({ source }: { source: SourceFeedStatus }) {
   if (!source.spec.enabled) return <Badge variant="secondary">Disabled</Badge>;

@@ -1,1 +1,1 @@
-"""Hugging Face Hub REST poller (models + daily papers)."""
+"""Hugging Face exact-version card poller and Daily Papers discovery adapter."""

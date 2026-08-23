@@ -106,6 +106,23 @@ def _is_missing_catalog_table(exc: Exception) -> bool:
     return "nosuchtable" in name or "not found" in message or "does not exist" in message
 
 
+def _ensure_optional_columns(table: Table, columns: tuple[tuple[str, object], ...]) -> None:
+    """Evolve an existing Iceberg table with backward-compatible columns."""
+    missing: list[tuple[str, object]] = []
+    schema = table.schema()
+    for name, field_type in columns:
+        try:
+            schema.find_field(name)
+        except ValueError:
+            missing.append((name, field_type))
+    if not missing:
+        return
+    update = table.update_schema()
+    for name, field_type in missing:
+        update.add_column(name, field_type, required=False)
+    update.commit()
+
+
 class LicenseAdmissionWriter:
     """Append deduplicated pre-fetch licence decisions in Iceberg batches."""
 
@@ -152,11 +169,29 @@ class LicenseAdmissionWriter:
             os.environ.get("S2P_ICEBERG_NAMESPACE", DEFAULT_GOLD_NAMESPACE),
             os.environ.get("S2P_ICEBERG_LICENSE_ADMISSIONS_TABLE", "license_admissions"),
         )
+        from pyiceberg.types import StringType, TimestamptzType
+
         try:
-            return self._catalog.load_table(identifier)
+            table = self._catalog.load_table(identifier)
         except Exception as exc:
             if not _is_missing_catalog_table(exc):
                 raise
+        else:
+            _ensure_optional_columns(
+                table,
+                (
+                    ("raw_license", StringType()),
+                    ("normalized_license", StringType()),
+                    ("resolver", StringType()),
+                    ("evidence_url", StringType()),
+                    ("evidence_revision", StringType()),
+                    ("evidence_scope", StringType()),
+                    ("policy_revision", StringType()),
+                    ("resolved_at", TimestamptzType()),
+                    ("source_format", StringType()),
+                ),
+            )
+            return table
         from pyiceberg.partitioning import PartitionField, PartitionSpec
         from pyiceberg.schema import Schema
         from pyiceberg.transforms import IdentityTransform, MonthTransform
@@ -176,6 +211,15 @@ class LicenseAdmissionWriter:
             NestedField(9, "reason", StringType(), required=True),
             NestedField(10, "trace_id", StringType(), required=True),
             NestedField(11, "content_fetch_started", BooleanType(), required=True),
+            NestedField(12, "raw_license", StringType(), required=False),
+            NestedField(13, "normalized_license", StringType(), required=False),
+            NestedField(14, "resolver", StringType(), required=False),
+            NestedField(15, "evidence_url", StringType(), required=False),
+            NestedField(16, "evidence_revision", StringType(), required=False),
+            NestedField(17, "evidence_scope", StringType(), required=False),
+            NestedField(18, "policy_revision", StringType(), required=False),
+            NestedField(19, "resolved_at", TimestamptzType(), required=False),
+            NestedField(20, "source_format", StringType(), required=False),
         )
         spec = PartitionSpec(
             PartitionField(3, 1000, IdentityTransform(), "source_feed"),
@@ -206,6 +250,15 @@ class LicenseAdmissionWriter:
                 pa.field("reason", pa.string(), nullable=False),
                 pa.field("trace_id", pa.string(), nullable=False),
                 pa.field("content_fetch_started", pa.bool_(), nullable=False),
+                pa.field("raw_license", pa.string(), nullable=True),
+                pa.field("normalized_license", pa.string(), nullable=True),
+                pa.field("resolver", pa.string(), nullable=True),
+                pa.field("evidence_url", pa.string(), nullable=True),
+                pa.field("evidence_revision", pa.string(), nullable=True),
+                pa.field("evidence_scope", pa.string(), nullable=True),
+                pa.field("policy_revision", pa.string(), nullable=True),
+                pa.field("resolved_at", pa.timestamp("us", tz="UTC"), nullable=True),
+                pa.field("source_format", pa.string(), nullable=True),
             ]
         )
         return pa.Table.from_pydict(
@@ -221,6 +274,18 @@ class LicenseAdmissionWriter:
                 "reason": [decision.reason for decision in decisions],
                 "trace_id": [decision.trace_id for decision in decisions],
                 "content_fetch_started": [decision.content_fetch_started for decision in decisions],
+                "raw_license": [decision.raw_license for decision in decisions],
+                "normalized_license": [decision.normalized_license for decision in decisions],
+                "resolver": [decision.resolver for decision in decisions],
+                "evidence_url": [
+                    str(decision.evidence_url) if decision.evidence_url is not None else None
+                    for decision in decisions
+                ],
+                "evidence_revision": [decision.evidence_revision for decision in decisions],
+                "evidence_scope": [decision.evidence_scope for decision in decisions],
+                "policy_revision": [decision.policy_revision for decision in decisions],
+                "resolved_at": [decision.resolved_at for decision in decisions],
+                "source_format": [decision.source_format for decision in decisions],
             },
             schema=schema,
         )
@@ -535,9 +600,13 @@ class IcebergWriter:
         )
 
         try:
-            return self._catalog.load_table(identifier)
-        except Exception:
-            pass
+            table = self._catalog.load_table(identifier)
+        except Exception as exc:
+            if not _is_missing_catalog_table(exc):
+                raise
+        else:
+            _ensure_optional_columns(table, (("training_usage", StringType()),))
+            return table
         # Bring up an empty namespace if it does not yet exist.
         with suppress(Exception):
             self._catalog.create_namespace((identifier[0],))
@@ -681,6 +750,7 @@ class IcebergWriter:
             NestedField(89, "decon_embedding_revision", StringType(), required=True),
             NestedField(90, "benchmark_set_version", StringType(), required=True),
             NestedField(91, "classifier_backend", StringType(), required=True),
+            NestedField(92, "training_usage", StringType(), required=False),
         )
         partition_spec = PartitionSpec(
             PartitionField(source_id=3, field_id=1000, transform=IdentityTransform(), name="lang"),
@@ -790,6 +860,7 @@ class IcebergWriter:
             "decon_embedding_revision": [r.decon_embedding_revision for r in rows],
             "benchmark_set_version": [r.benchmark_set_version for r in rows],
             "classifier_backend": [r.classifier_backend for r in rows],
+            "training_usage": [r.training_usage for r in rows],
         }
         # PyIceberg validates Arrow nullability and timestamp timezone against
         # the declared table schema.  Inferred Arrow schemas mark every field
@@ -876,6 +947,7 @@ class IcebergWriter:
                 pa.field("decon_embedding_revision", pa.string(), nullable=False),
                 pa.field("benchmark_set_version", pa.string(), nullable=False),
                 pa.field("classifier_backend", pa.string(), nullable=False),
+                pa.field("training_usage", pa.string(), nullable=True),
             ]
         )
         return pa.table(cols, schema=arrow_schema)
@@ -1073,10 +1145,13 @@ def _is_trainable_gold(record: GoldRecord) -> bool:
     )
 
 
-def build_dataflow(cfg: common.ProcessorConfig) -> object:
+def build_dataflow(
+    cfg: common.ProcessorConfig,
+    *,
+    runtime_status: common.BytewaxRuntimeStatus | None = None,
+) -> object:
     """Persist the authoritative decision stream and accepted Gold subset."""
     from bytewax import operators as op
-    from bytewax.connectors.kafka import KafkaSource
     from bytewax.dataflow import Dataflow
 
     tracer = common.init_tracer("s2p-iceberg-writer", cfg)
@@ -1085,6 +1160,7 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     from processor.iceberg_catalog import load_runtime_catalog
 
     admission_writer = LicenseAdmissionWriter(load_runtime_catalog(cfg))
+    failure_writer = common.DurableProcessingFailureWriter.from_config(cfg)
     flush_records = _positive_int_env("S2P_FLUSH_RECORDS", DEFAULT_BATCH_SIZE)
     flush_interval = timedelta(
         seconds=_positive_int_env(
@@ -1093,10 +1169,12 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
         )
     )
     flow = Dataflow("s2p-iceberg-writer")
-    # ``beginning`` keeps the writer at-least-once across restarts (the
-    # consumer group offset advances from there). See processor/curate.py.
+    # The configured offset is only the bootstrap frontier for a new recovery
+    # database. Once snapshots exist, Bytewax recovery owns progress.
     start_offset = common.kafka_starting_offset()
-    source = KafkaSource(
+    source = common.tracked_kafka_source(
+        runtime_status=runtime_status,
+        source_name="curation_decisions",
         brokers=cfg.redpanda_brokers.split(","),
         topics=[cfg.decisions_topic],
         starting_offset=start_offset,
@@ -1107,12 +1185,20 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     def _decode_gold(msg: object) -> GoldRecord | None:
         payload = getattr(msg, "value", None)
         if payload is None:
+            failure_writer.record(stage="iceberg-gold", message=msg, reason="kafka_tombstone")
+            PROCESSOR_METRICS.record_failure(stage="iceberg", reason="kafka_tombstone")
             return None
         try:
             return common.gold_loads(payload)
         except Exception as exc:
             with tracer.start_as_current_span("iceberg.decode") as span:
                 span.record_exception(exc)
+            failure_writer.record(
+                stage="iceberg-gold",
+                message=msg,
+                reason=type(exc).__name__,
+            )
+            PROCESSOR_METRICS.record_failure(stage="iceberg", reason=type(exc).__name__)
             return None
 
     def _ingest(batch: tuple[str, list[GoldRecord]]) -> None:
@@ -1146,7 +1232,9 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     )
     op.inspect("iceberg_write", batches, lambda _step, batch: _ingest(batch))
 
-    admission_source = KafkaSource(
+    admission_source = common.tracked_kafka_source(
+        runtime_status=runtime_status,
+        source_name="license_admissions",
         brokers=cfg.redpanda_brokers.split(","),
         topics=[cfg.license_admissions_topic],
         starting_offset=start_offset,
@@ -1154,11 +1242,26 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     )
     admission_inp = op.input("license_admissions", flow, admission_source)
 
-    def _decode_admission(msg: object) -> LicenseAdmissionDecision:
+    def _decode_admission(msg: object) -> LicenseAdmissionDecision | None:
         payload = getattr(msg, "value", None)
         if payload is None:
-            raise ValueError("license admission message has no payload")
-        return LicenseAdmissionDecision.model_validate_json(payload)
+            failure_writer.record(
+                stage="iceberg-license-admission",
+                message=msg,
+                reason="kafka_tombstone",
+            )
+            PROCESSOR_METRICS.record_failure(stage="iceberg", reason="kafka_tombstone")
+            return None
+        try:
+            return LicenseAdmissionDecision.model_validate_json(payload)
+        except ValueError as exc:
+            failure_writer.record(
+                stage="iceberg-license-admission",
+                message=msg,
+                reason=type(exc).__name__,
+            )
+            PROCESSOR_METRICS.record_failure(stage="iceberg", reason=type(exc).__name__)
+            return None
 
     def _ingest_admission(batch: tuple[str, list[LicenseAdmissionDecision]]) -> None:
         with tracer.start_as_current_span("iceberg.license_admission") as span:
@@ -1173,7 +1276,9 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
                 # reach the durable ledger. Bytewax must retry it.
                 raise
 
-    decoded_admissions = op.map("decode_license_admissions", admission_inp, _decode_admission)
+    decoded_admissions = op.filter_map(
+        "decode_license_admissions", admission_inp, _decode_admission
+    )
     keyed_admissions = op.key_on(
         "key_license_admissions",
         decoded_admissions,
@@ -1203,6 +1308,15 @@ def main() -> None:
         decisions_topic=cfg.decisions_topic,
         license_admissions_topic=cfg.license_admissions_topic,
     )
-    flow = build_dataflow(cfg)
-    start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
-    common.run_bytewax_flow(flow, cfg, "iceberg-writer")
+    runtime_status = common.BytewaxRuntimeStatus()
+    flow = build_dataflow(cfg, runtime_status=runtime_status)
+    start_probe_server(
+        metrics_provider=PROCESSOR_METRICS.render_prometheus,
+        readiness_provider=runtime_status.is_ready,
+    )
+    common.run_bytewax_flow(
+        flow,
+        cfg,
+        "iceberg-writer",
+        runtime_status=runtime_status,
+    )

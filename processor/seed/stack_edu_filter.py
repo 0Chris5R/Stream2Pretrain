@@ -17,14 +17,21 @@ shard; the keyword list is conservative on purpose.
 
 from __future__ import annotations
 
+import gzip
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from typing import Any
+
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
 
 from processor.seed.cursor import SeedCursor
 from processor.seed.types import SeedDocument
 
 REPO_ID: str = "HuggingFaceTB/stack-edu"
+DATASET_REVISION: str = "eeec5caac5cc3758a18f1d3ba4416837a9ba814c"
+SOFTWARE_HERITAGE_BUCKET: str = "softwareheritage"
 LANGUAGES: frozenset[str] = frozenset({"python"})
 
 # Curated ML / inference / training repositories. Subset of SOURCES.md
@@ -172,7 +179,38 @@ def license_for(row: dict[str, Any]) -> tuple[str | None, str]:
     raw = row.get("license") or row.get("license_spdx")
     if isinstance(raw, str) and raw.strip():
         return raw.strip(), "dataset_metadata"
+    for key in ("detected_licenses", "detected_licenses_right"):
+        detected = row.get(key)
+        if not isinstance(detected, list):
+            continue
+        unique = sorted(
+            {
+                value.strip()
+                for value in detected
+                if isinstance(value, str) and value.strip()
+            }
+        )
+        # Multiple distinct detectors are ambiguous without an SPDX AND/OR
+        # expression in the source row. Fail closed instead of guessing.
+        if len(unique) == 1:
+            return unique[0], "dataset_metadata"
     return None, "unknown"
+
+
+def fetch_software_heritage_blob(blob_id: str) -> str:
+    """Fetch one exact Stack-Edu blob from the public SWH S3 bucket.
+
+    Stack-Edu intentionally contains identifiers and licence metadata only.
+    This callable is attached lazily to :class:`SeedDocument` so the S3 body
+    request cannot start until the item admission has been acknowledged.
+    """
+    client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    response = client.get_object(
+        Bucket=SOFTWARE_HERITAGE_BUCKET,
+        Key=f"content/{blob_id}",
+    )
+    with gzip.GzipFile(fileobj=response["Body"]) as stream:
+        return stream.read().decode("utf-8", errors="replace")
 
 
 def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
@@ -181,18 +219,25 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         return None
     if not is_ml_relevant(row):
         return None
-    text = row.get("content") or row.get("text") or row.get("source")
-    if not isinstance(text, str) or not text.strip():
-        return None
     nid = native_id_for(row)
     if not nid:
         return None
+    raw_text = row.get("content") or row.get("text") or row.get("source")
+    text = raw_text if isinstance(raw_text, str) and raw_text.strip() else ""
     repo = row.get("repository_name") or row.get("repo_name") or ""
     path = row.get("path") or ""
     valid_from = derive_valid_from(row)
     spdx, spdx_source = license_for(row)
+    revision_raw = (
+        row.get("commit_hash")
+        or row.get("commit_sha")
+        or row.get("hexsha")
+        or row.get("blob_id")
+        or nid
+    )
+    revision = str(revision_raw)
     if isinstance(repo, str) and isinstance(path, str) and repo and path:
-        url = f"https://github.com/{repo}/blob/HEAD/{path}"
+        url = f"https://github.com/{repo}/blob/{revision}/{path}"
     else:
         url = f"hf://{REPO_ID}/{nid}"
     extra: dict[str, str] = {"language": "Python"}
@@ -210,6 +255,13 @@ def to_seed_document(row: dict[str, Any]) -> SeedDocument | None:
         extraction_pipeline="stack-edu-2024",
         spdx_license=spdx,
         spdx_license_source=spdx_source,  # type: ignore[arg-type]
+        license_resolver="stack-edu-file-item-field",
+        license_evidence_url=(
+            f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}/Python"
+        ),
+        license_evidence_revision=f"{DATASET_REVISION}:{revision}",
+        license_evidence_scope="file" if spdx else "unknown",
+        body_loader=(None if text else lambda blob_id=nid: fetch_software_heritage_blob(blob_id)),
         extra=extra,
     )
 
@@ -240,30 +292,25 @@ def load_hf_stream() -> Iterable[dict[str, Any]]:
     """Construct the streaming iterator. Stack-Edu is sharded by language."""
     from datasets import load_dataset
 
-    # The ``stack-edu`` repo exposes a ``python`` config on Hub. If it
-    # disappears we fall back to the default config and rely on the
-    # ``language`` filter inside :func:`is_python`.
-    try:
-        return load_dataset(  # type: ignore[return-value]
-            REPO_ID,
-            name="python",
-            split="train",
-            streaming=True,
-        )
-    except Exception:
-        return load_dataset(  # type: ignore[return-value]
-            REPO_ID,
-            split="train",
-            streaming=True,
-        )
+    # The pinned repository exposes a capitalized ``Python`` config and no
+    # content column. Retained bodies are resolved lazily from SWH by blob id.
+    return load_dataset(  # type: ignore[return-value]
+        REPO_ID,
+        name="Python",
+        split="train",
+        streaming=True,
+        revision=DATASET_REVISION,
+    )
 
 
 __all__ = [
+    "DATASET_REVISION",
     "LANGUAGES",
     "ML_KEYWORDS",
     "ML_REPOS",
     "REPO_ID",
     "derive_valid_from",
+    "fetch_software_heritage_blob",
     "is_ml_relevant",
     "is_python",
     "iter_documents",

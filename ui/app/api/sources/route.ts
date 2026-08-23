@@ -27,6 +27,19 @@ const SourceActivitySchema = z.object({
       posttrain_transform_only: z.number().int().nonnegative(),
       quarantined: z.number().int().nonnegative(),
       last_observed_at: z.string().nullable(),
+      license_distribution: z.array(
+        z.object({
+          license_id: z.string(),
+          status: z.enum(['admitted', 'posttrain_transform_only', 'quarantined']),
+          count: z.number().int().nonnegative(),
+        }),
+      ),
+      license_provenance: z.array(
+        z.object({
+          license_source: z.string(),
+          count: z.number().int().nonnegative(),
+        }),
+      ),
     }),
   ),
 });
@@ -65,10 +78,14 @@ export async function GET(): Promise<NextResponse> {
         const observed = activity.get(source.name);
         return {
           ...source,
+          last_success_at: observed?.last_observed_at ?? source.last_success_at,
+          last_attempt_at: observed?.last_observed_at ?? source.last_attempt_at,
           documents_24h: observed?.documents ?? source.documents_24h,
           pretrain_documents_24h: observed?.admitted ?? 0,
           posttrain_only_documents_24h: observed?.posttrain_transform_only ?? 0,
           quarantined_documents_24h: observed?.quarantined ?? 0,
+          license_distribution: observed?.license_distribution ?? [],
+          license_provenance: observed?.license_provenance ?? [],
         };
       }),
     );

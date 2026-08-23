@@ -95,6 +95,109 @@ jobs:
             echo "Rendered Kafka message limit is not an integer string: $message_limits" >&2
             exit 1
           fi
+          uv run python - "$rendered_chart" <<'PY'
+          import sys
+
+          import yaml
+
+          resources = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+          by_name = {
+              (item.get("kind"), item.get("metadata", {}).get("name")): item
+              for item in resources
+          }
+          for name in (
+              "stream2pretrain-ingest-rss",
+              "stream2pretrain-ingest-oaipmh",
+              "stream2pretrain-ingest-sitemap",
+          ):
+              resource = by_name.get(("CronJob", name))
+              if resource is None:
+                  raise SystemExit(f"SourceFeed clone template must be rendered: {name}")
+              if resource.get("spec", {}).get("suspend") is not True:
+                  raise SystemExit(f"SourceFeed clone template must be suspended: {name}")
+          if ("CronJob", "stream2pretrain-ingest-blogs") in by_name:
+              raise SystemExit("aggregate ingest-blogs CronJob must not be rendered")
+          for kind, name in (
+              ("Deployment", "stream2pretrain-processor-fetcher"),
+              ("StatefulSet", "stream2pretrain-processor-curate"),
+              ("Deployment", "stream2pretrain-processor-iceberg-writer"),
+              ("Deployment", "stream2pretrain-ingest-arxiv-html"),
+          ):
+              resource = by_name.get((kind, name))
+              if resource is None or resource.get("spec", {}).get("replicas") != 1:
+                  raise SystemExit(f"core workload must render exactly one replica: {name}")
+
+          def container_env(kind, workload_name, container_name):
+              resource = by_name[(kind, workload_name)]
+              containers = resource["spec"]["template"]["spec"]["containers"]
+              container = next(
+                  item for item in containers if item.get("name") == container_name
+              )
+              return {
+                  item["name"]: item.get("value")
+                  for item in container.get("env", [])
+                  if "name" in item and "value" in item
+              }
+
+          runtime_contracts = (
+              (
+                  "Deployment",
+                  "stream2pretrain-processor-fetcher",
+                  "fetcher",
+                  {
+                      "S2P_KAFKA_START_OFFSET": "stored",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-v2",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-v2",
+                      "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
+                  },
+              ),
+              (
+                  "StatefulSet",
+                  "stream2pretrain-processor-curate",
+                  "curate",
+                  {
+                      "S2P_KAFKA_START_OFFSET": "stored",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-v2",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-v2",
+                      "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
+                  },
+              ),
+              (
+                  "Deployment",
+                  "stream2pretrain-processor-iceberg-writer",
+                  "iceberg-writer",
+                  {
+                      "S2P_KAFKA_START_OFFSET": "stored",
+                      "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
+                  },
+              ),
+          )
+          for kind, workload_name, container_name, expected in runtime_contracts:
+              env = container_env(kind, workload_name, container_name)
+              mismatches = {
+                  key: {"expected": value, "rendered": env.get(key)}
+                  for key, value in expected.items()
+                  if env.get(key) != value
+              }
+              if mismatches:
+                  raise SystemExit(
+                      f"Bytewax runtime contract drift for {workload_name}: {mismatches}"
+                  )
+          forbidden_scalers = {
+              "stream2pretrain-processor-fetcher",
+              "stream2pretrain-processor-curate",
+              "stream2pretrain-processor-iceberg-writer",
+              "stream2pretrain-ingest-arxiv-html",
+          }
+          rendered_scalers = {
+              item.get("metadata", {}).get("name")
+              for item in resources
+              if item.get("kind") == "ScaledObject"
+          }
+          overlap = sorted(forbidden_scalers & rendered_scalers)
+          if overlap:
+              raise SystemExit(f"invalid Kafka-lag ScaledObject rendered: {overlap}")
+          PY
           helmfile \
             --helm-binary "$(command -v helm)" \
             --file helmfile.yaml \
@@ -897,7 +1000,7 @@ jobs:
             kubectl -n stream2pretrain rollout status \
               deployment/stream2pretrain-ingest-github-tarball-fetcher --timeout=180s
             kubectl -n stream2pretrain rollout status \
-              deployment/stream2pretrain-ingest-hf-models --timeout=180s
+              deployment/stream2pretrain-ingest-hf-cards --timeout=180s
             kubectl -n stream2pretrain rollout status \
               deployment/stream2pretrain-ingest-arxiv-html --timeout=180s
 
@@ -1003,7 +1106,7 @@ jobs:
 
             hf_logs="$(
               kubectl -n stream2pretrain logs \
-                deployment/stream2pretrain-ingest-hf-models --tail=240
+                deployment/stream2pretrain-ingest-hf-cards --tail=240
             )"
             printf '%s\n' "$hf_logs"
             grep -Eq 'hf_poller.pass_done.*models=[1-9][0-9]*' <<<"$hf_logs" || {
@@ -1410,8 +1513,11 @@ jobs:
               docs.normalized \
               docs.normalized.smoke \
               docs.curated \
+              docs.curated.smoke \
               curation.decisions \
-              license.admissions; do
+              curation.decisions.smoke \
+              license.admissions \
+              license.admissions.smoke; do
               kubectl -n redpanda exec statefulset/redpanda -- \
                 rpk topic describe "$topic" -p || true
             done
@@ -1419,7 +1525,6 @@ jobs:
               s2p-fetcher \
               s2p-fetcher-canary \
               s2p-curate \
-              s2p-curate-canary \
               s2p-iceberg-writer \
               s2p-iceberg-writer-licenses \
               s2p-arxiv-html-fetcher; do
@@ -1429,7 +1534,7 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::Processor recovery and metrics"
-            for component in processor-fetcher processor-curate; do
+            for component in processor-fetcher processor-curate processor-iceberg-writer; do
               pod="$(
                 kubectl -n stream2pretrain get pod \
                   -l "app.kubernetes.io/component=${component}" \
@@ -1656,15 +1761,11 @@ jobs:
             exit 1
           fi
 
-          # The observed Phase-1 burst proved one partition is insufficient.
-          # Four is a bounded DHBW dev setting that removes head-of-line
-          # blocking and permits coordinated workers; prod remains
-          # needs-measurement through the capacity benchmark.
-          S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh
-
-          # One-time, lossless handoff from the legacy Bytewax/PVC source
-          # checkpoint to the broker-owned consumer group. Existing native
-          # commits always win, so this remains safe on a retried deployment.
+          # Preserve any pre-native Bytewax progress in the broker group before
+          # the native-consumer-to-Bytewax cutback. The durable marker makes
+          # this a one-time handoff even when the workflow or Helm deployment
+          # is retried. Marker identity must match the stable v2 flow and
+          # recovery names or the release fails closed.
           legacy_fetcher_checkpoint="$(
             kubectl -n stream2pretrain get deployment \
               stream2pretrain-processor-fetcher -o json 2>/dev/null \
@@ -1676,7 +1777,23 @@ jobs:
                 ' \
               || true
           )"
-          if [[ "$legacy_fetcher_checkpoint" == "true" ]]; then
+          existing_fetcher_flow="$(
+            kubectl -n stream2pretrain get deployment \
+              stream2pretrain-processor-fetcher -o json 2>/dev/null \
+              | jq -r '
+                  first(
+                    .spec.template.spec.containers[]?
+                    | select(.name == "fetcher")
+                    | .env[]?
+                    | select(.name == "S2P_BYTEWAX_FLOW_NAME")
+                    | .value
+                  ) // empty
+                ' \
+              || true
+          )"
+          if [[ "$existing_fetcher_flow" == "s2p-fetcher-v2" ]]; then
+            echo "Fetcher already declares the stable Bytewax v2 identity."
+          elif [[ "$legacy_fetcher_checkpoint" == "true" ]]; then
             fetcher_pod="$(
               kubectl -n stream2pretrain get pod \
                 -l app.kubernetes.io/component=processor-fetcher \
@@ -1693,17 +1810,65 @@ jobs:
               echo "Legacy fetcher checkpoint exists but no running Pod can read it." >&2
               exit 1
             fi
-            echo "Migrating legacy fetcher recovery offsets from $fetcher_pod"
+            fetcher_cutover_env=(
+              S2P_STATE_DIR=/var/lib/s2p/checkpoint
+              S2P_KAFKA_START_OFFSET=stored
+              S2P_CUTOVER_COMPONENT=fetcher
+              S2P_CUTOVER_TOPIC=raw.fetched
+              S2P_CONSUMER_GROUP=s2p-fetcher
+              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-v2
+              S2P_BYTEWAX_RECOVERY_NAME=fetcher-v2
+              S2P_BYTEWAX_RECOVERY_PARTITIONS=4
+            )
+            set +e
             kubectl -n stream2pretrain exec -i "$fetcher_pod" -- \
-              python - < scripts/migrate_fetcher_offsets.py
+              env "${fetcher_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=check \
+              python - < scripts/bytewax_cutover_marker.py
+            fetcher_marker_status=$?
+            set -e
+            if [[ "$fetcher_marker_status" -eq 0 ]]; then
+              echo "Fetcher cutover marker already exists; offset migration is complete."
+            elif [[ "$fetcher_marker_status" -eq 3 ]]; then
+              echo "Migrating legacy fetcher recovery offsets from $fetcher_pod"
+              kubectl -n stream2pretrain exec -i "$fetcher_pod" -- \
+                env \
+                  S2P_STATE_DIR=/var/lib/s2p/checkpoint \
+                  S2P_RAW_TOPIC=raw.fetched \
+                  S2P_CONSUMER_GROUP=s2p-fetcher \
+                  S2P_BYTEWAX_STEP_ID=s2p-fetcher.raw_fetched \
+                python - < scripts/migrate_fetcher_offsets.py
+              kubectl -n stream2pretrain exec -i "$fetcher_pod" -- \
+                env "${fetcher_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=ensure \
+                python - < scripts/bytewax_cutover_marker.py
+            else
+              echo "Fetcher cutover marker validation failed; refusing migration." >&2
+              exit "$fetcher_marker_status"
+            fi
             kubectl -n redpanda exec statefulset/redpanda -- \
               rpk group describe s2p-fetcher
           fi
 
-          # The curator now commits broker-owned offsets as well. Advance its
-          # group monotonically to the authoritative Bytewax recovery state
-          # before replacing the old Pod. Retaining the PVC keeps the global
-          # dedup index and deterministic decision cache intact.
+          # Advance the broker bridge to any legacy curator recovery progress
+          # before replacing the native consumer. Retaining the PVC preserves
+          # the global dedup index and deterministic decision cache.
+          curator_exists="$(
+            kubectl -n stream2pretrain get statefulset \
+              stream2pretrain-processor-curate -o name 2>/dev/null || true
+          )"
+          existing_curator_flow="$(
+            kubectl -n stream2pretrain get statefulset \
+              stream2pretrain-processor-curate -o json 2>/dev/null \
+              | jq -r '
+                  first(
+                    .spec.template.spec.containers[]?
+                    | select(.name == "curate")
+                    | .env[]?
+                    | select(.name == "S2P_BYTEWAX_FLOW_NAME")
+                    | .value
+                  ) // empty
+                ' \
+              || true
+          )"
           curator_pod="$(
             kubectl -n stream2pretrain get pod \
               -l app.kubernetes.io/component=processor-curate \
@@ -1721,21 +1886,58 @@ jobs:
                 ' \
               || true
           )"
-          if [[ -n "$curator_pod" ]]; then
-            echo "Migrating legacy curator recovery offsets from $curator_pod"
-            if ! kubectl -n stream2pretrain exec -i "$curator_pod" -- \
+          if [[ "$existing_curator_flow" == "s2p-curate-v2" ]]; then
+            echo "Curator already declares the stable Bytewax v2 identity."
+          elif [[ -n "$curator_exists" && -z "$curator_pod" ]]; then
+            echo "Legacy curator state exists but no Ready Pod can read its retained PVC." >&2
+            exit 1
+          elif [[ -n "$curator_pod" ]]; then
+            curator_cutover_env=(
+              S2P_STATE_DIR=/var/lib/s2p/checkpoint
+              S2P_KAFKA_START_OFFSET=stored
+              S2P_CUTOVER_COMPONENT=curate
+              S2P_CUTOVER_TOPIC=docs.normalized
+              S2P_CONSUMER_GROUP=s2p-curate
+              S2P_BYTEWAX_FLOW_NAME=s2p-curate-v2
+              S2P_BYTEWAX_RECOVERY_NAME=curate-v2
+              S2P_BYTEWAX_RECOVERY_PARTITIONS=4
+            )
+            set +e
+            kubectl -n stream2pretrain exec -i "$curator_pod" -- \
+              env "${curator_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=check \
+              python - < scripts/bytewax_cutover_marker.py
+            curator_marker_status=$?
+            set -e
+            if [[ "$curator_marker_status" -eq 0 ]]; then
+              echo "Curator cutover marker already exists; offset migration is complete."
+            elif [[ "$curator_marker_status" -eq 3 ]]; then
+              echo "Migrating legacy curator recovery offsets from $curator_pod"
+              kubectl -n stream2pretrain exec -i "$curator_pod" -- \
                 env \
+                  S2P_STATE_DIR=/var/lib/s2p/checkpoint \
                   S2P_RAW_TOPIC=docs.normalized \
                   S2P_CONSUMER_GROUP=s2p-curate \
                   S2P_BYTEWAX_STEP_ID=s2p-curate.docs_normalized \
-                python - < scripts/migrate_fetcher_offsets.py; then
-              echo "Curator became unavailable during optional legacy offset migration; continuing with durable broker offsets." >&2
+                python - < scripts/migrate_fetcher_offsets.py
+              kubectl -n stream2pretrain exec -i "$curator_pod" -- \
+                env "${curator_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=ensure \
+                python - < scripts/bytewax_cutover_marker.py
+            else
+              echo "Curator cutover marker validation failed; refusing migration." >&2
+              exit "$curator_marker_status"
             fi
             kubectl -n redpanda exec statefulset/redpanda -- \
               rpk group describe s2p-curate
-          else
-            echo "No ready legacy curator container; continuing with durable broker offsets."
+          elif [[ -z "$curator_exists" ]]; then
+            echo "No legacy curator exists; the first Bytewax execution will use OFFSET_STORED."
           fi
+
+          # Migrate the existing partition set before expanding it. Otherwise a
+          # producer could write a new partition that has neither a legacy
+          # recovery snapshot nor a broker commit, making the one-time bridge
+          # ambiguous. New partitions added here safely bootstrap at earliest.
+          # Four remains a bounded DHBW dev setting; prod is needs-measurement.
+          S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh
 
           : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
           : "${IMAGE_DIGEST_INGEST_OAIPMH:?Missing pinned ingest-oaipmh digest}"
@@ -1842,6 +2044,25 @@ jobs:
             kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
           done < <(kubectl -n stream2pretrain get deployment,statefulset -o name)
 
+          # The running v2 workloads must persist a marker whose identity is
+          # derived from their effective environment. This closes the clean
+          # install path (where there was no legacy PVC to mark) and rejects a
+          # chart/workflow drift away from OFFSET_STORED or the stable names.
+          kubectl -n stream2pretrain exec -i \
+            deployment/stream2pretrain-processor-fetcher -c fetcher -- \
+            env \
+              S2P_CUTOVER_COMPONENT=fetcher \
+              S2P_CUTOVER_TOPIC=raw.fetched \
+              S2P_CUTOVER_MARKER_MODE=ensure \
+            python - < scripts/bytewax_cutover_marker.py
+          kubectl -n stream2pretrain exec -i \
+            statefulset/stream2pretrain-processor-curate -c curate -- \
+            env \
+              S2P_CUTOVER_COMPONENT=curate \
+              S2P_CUTOVER_TOPIC=docs.normalized \
+              S2P_CUTOVER_MARKER_MODE=ensure \
+            python - < scripts/bytewax_cutover_marker.py
+
           # SourceFeed CRs are durable runtime configuration, not Helm-owned
           # templates. Reconcile the complete Phase-1 catalogue on every
           # deployment so a rebuilt namespace cannot silently lose sources.
@@ -1862,8 +2083,8 @@ jobs:
             exit 1
           fi
 
-          # Clone the exact deployed curator Pod spec into a one-record,
-          # short-lived consumer group. This gives the release canary its own
+          # Clone the exact deployed curator Pod spec into a short-lived,
+          # isolated consumer group. This gives the release canary its own
           # bounded execution lane without permanently reserving another GiB
           # of memory or letting production replay lag hide a broken release.
           curator_canary_job="s2p-curate-smoke-${GITHUB_RUN_ID}"
@@ -1914,19 +2135,37 @@ jobs:
                                     | select(
                                         .name != "S2P_COMPONENT"
                                         and .name != "S2P_CONSUMER_GROUP"
+                                        and .name != "S2P_CURATOR_INPUT_TOPIC"
+                                        and .name != "S2P_CURATOR_DECISIONS_TOPIC"
+                                        and .name != "S2P_CURATOR_CURATED_TOPIC"
+                                        and .name != "S2P_KAFKA_START_OFFSET"
+                                        and .name != "S2P_BYTEWAX_FLOW_NAME"
+                                        and .name != "S2P_BYTEWAX_RECOVERY_NAME"
+                                        and .name != "S2P_BYTEWAX_RECOVERY_PARTITIONS"
+                                        and .name != "S2P_PROCESSING_FAILURE_BUCKET"
+                                        and .name != "S2P_PROCESSING_FAILURE_PREFIX"
                                       )
                                   ]
                                   + [
                                       {name: "S2P_COMPONENT", value: "processor-curate-canary"},
                                       {name: "S2P_CONSUMER_GROUP", value: $group},
                                       {name: "S2P_CURATOR_INPUT_TOPIC", value: "docs.normalized.smoke"},
-                                      {name: "S2P_CURATOR_AUTO_OFFSET_RESET", value: "latest"},
-                                      {name: "S2P_CURATOR_MAX_MESSAGES", value: "1"}
+                                      {name: "S2P_CURATOR_DECISIONS_TOPIC", value: "curation.decisions.smoke"},
+                                      {name: "S2P_CURATOR_CURATED_TOPIC", value: "docs.curated.smoke"},
+                                      {name: "S2P_KAFKA_START_OFFSET", value: "beginning"},
+                                      {name: "S2P_BYTEWAX_FLOW_NAME", value: "s2p-curate-smoke-v1"},
+                                      {name: "S2P_BYTEWAX_RECOVERY_NAME", value: "curate-smoke-v1"},
+                                      {name: "S2P_BYTEWAX_RECOVERY_PARTITIONS", value: "1"},
+                                      {name: "S2P_PROCESSING_FAILURE_BUCKET", value: "$(S2P_STATE_BUCKET)"},
+                                      {name: "S2P_PROCESSING_FAILURE_PREFIX", value: "canary-processing-failures/curate"}
                                     ]
                                 )
                             ]
                           | .volumes = (
-                              (.volumes // [])
+                              [
+                                (.volumes // [])[]
+                                | select(.name != "checkpoint")
+                              ]
                               + [{
                                   name: "checkpoint",
                                   emptyDir: {sizeLimit: "2Gi"}
@@ -1939,41 +2178,8 @@ jobs:
               ' \
             | kubectl apply -f -
 
-          canary_group_ready=false
-          for _ in $(seq 1 90); do
-            canary_group_state="$(
-              kubectl -n redpanda exec statefulset/redpanda -- \
-                rpk group describe "$curator_canary_group" 2>/dev/null \
-                || true
-            )"
-            if grep -Eq '^MEMBERS[[:space:]]+1$' <<<"$canary_group_state"; then
-              canary_group_ready=true
-              break
-            fi
-            if [[ "$(
-              kubectl -n stream2pretrain get "job/$curator_canary_job" \
-                -o jsonpath='{.status.failed}' 2>/dev/null || true
-            )" == "1" ]]; then
-              kubectl -n stream2pretrain logs "job/$curator_canary_job" \
-                --all-containers --prefix || true
-              echo "Isolated curator canary failed before joining Kafka." >&2
-              exit 1
-            fi
-            sleep 2
-          done
-          if [[ "$canary_group_ready" != true ]]; then
-            kubectl -n stream2pretrain get pod \
-              -l "job-name=$curator_canary_job" -o wide || true
-            kubectl -n stream2pretrain logs "job/$curator_canary_job" \
-              --all-containers --prefix || true
-            echo "Isolated curator canary did not join Kafka." >&2
-            exit 1
-          fi
-
           kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
             python - < scripts/cluster_smoke.py
-          kubectl -n stream2pretrain wait --for=condition=complete \
-            "job/$curator_canary_job" --timeout=180s
           kubectl -n stream2pretrain logs "job/$curator_canary_job" \
             --all-containers --prefix || true
           kubectl -n stream2pretrain delete "job/$curator_canary_job" \

@@ -196,7 +196,57 @@ async def test_poll_venue_emits_submission_and_reviews(
     assert formats.count("review") == 2
     # State persisted so the next pass skips the same submission.
     persisted = state_store.get(venue.state_key)
-    assert "paperA" in set(persisted.get("seen_note_ids") or [])
+    assert any(
+        value.startswith("paperA:")
+        for value in persisted.get("seen_submission_revisions") or []
+    )
+    assert any(
+        value.startswith("reviewA1:") for value in persisted.get("seen_reply_revisions") or []
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_venue_keeps_review_path_when_paper_license_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    venue = live.VenueSpec("ICLR.cc", 2026)
+    submission = _mk_note(note_id="paperA", forum="paperA")
+    submission["content"].pop("license")
+    review = _mk_note(
+        note_id="reviewA1",
+        forum="paperA",
+        invitation="ICLR.cc/2026/Conference/Paper1/-/Official_Review",
+        pdf=None,
+        extra_content={"review": "Independent public review evidence."},
+    )
+    review["content"].pop("license")
+    or_client = _FakeOR(
+        submissions={venue.submission_invitation: [submission]},
+        replies={"paperA": [submission, review]},
+    )
+    fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
+    fake_minio = FakeMinio()
+    await fake_producer.start()
+    await fake_admissions.start()
+    await fake_minio.start()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_pdf_handler)) as http:
+        submissions, reviews, skipped = await live.poll_venue(
+            venue,
+            cfg=_cfg(),
+            producer=fake_producer,  # type: ignore[arg-type]
+            minio=fake_minio,  # type: ignore[arg-type]
+            http=http,
+            or_client=or_client,
+            state_store=FeedStateStore(tmp_path / "state"),
+            bucket=TokenBucket(rate=100.0, burst=10),
+            admission_producer=fake_admissions,  # type: ignore[arg-type]
+        )
+
+    assert (submissions, reviews, skipped) == (0, 1, 0)
+    assert [message["record"].source_format for message in fake_producer.sent] == ["review"]
 
 
 @pytest.mark.asyncio

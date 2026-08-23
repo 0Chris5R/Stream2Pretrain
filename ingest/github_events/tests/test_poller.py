@@ -48,7 +48,8 @@ def _events_payload() -> list[dict]:
             },
             "payload": {
                 "release": {
-                    "html_url": "https://github.com/huggingface/transformers/releases/v5.0.0"
+                    "html_url": "https://github.com/huggingface/transformers/releases/tag/v5.0.0",
+                    "tag_name": "v5.0.0",
                 }
             },
         },
@@ -115,11 +116,10 @@ async def test_run_loop_emits_for_curated_repos(
     )
 
     total = await evt_module.run_loop(_cfg(tmp_path), max_iterations=1)
-    assert total == 2
-    assert len(fake_producer.sent) == 2
+    assert total == 1
+    assert len(fake_producer.sent) == 1
     sent_urls = {item["record"].url.unicode_string().rstrip("/") for item in fake_producer.sent}
-    assert "https://github.com/huggingface/transformers/releases/v5.0.0" in sent_urls
-    assert "https://github.com/vllm-project/vllm/pull/9001" in sent_urls
+    assert "https://github.com/huggingface/transformers/releases/tag/v5.0.0" in sent_urls
 
 
 def test_event_url_extraction() -> None:
@@ -224,7 +224,10 @@ async def test_configured_org_extends_repository_filter() -> None:
         "type": "ReleaseEvent",
         "repo": {"name": "mistralai/new-model"},
         "payload": {
-            "release": {"html_url": "https://github.com/mistralai/new-model/releases/tag/v1"}
+            "release": {
+                "html_url": "https://github.com/mistralai/new-model/releases/tag/v1",
+                "tag_name": "v1",
+            }
         },
     }
     emitted = await evt_module._process_events(
@@ -257,7 +260,8 @@ async def test_run_loop_polls_configured_org_endpoint(
                     "repo": {"name": "mistralai/new-model"},
                     "payload": {
                         "release": {
-                            "html_url": "https://github.com/mistralai/new-model/releases/tag/v1"
+                            "html_url": "https://github.com/mistralai/new-model/releases/tag/v1",
+                            "tag_name": "v1",
                         }
                     },
                 }

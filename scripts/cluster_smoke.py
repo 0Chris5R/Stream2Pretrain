@@ -135,12 +135,49 @@ def consume_document(
     return None
 
 
+def assert_document_absent(
+    consumers: dict[str, Consumer], doc_id: str, timeout_seconds: float
+) -> None:
+    """Prove that an isolated canary did not emit into production topics."""
+    if timeout_seconds <= 0:
+        raise RuntimeError("S2P_SMOKE_ISOLATION_TIMEOUT_SECONDS must be positive")
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while time.monotonic() < deadline:
+            for topic, consumer in consumers.items():
+                message = consumer.poll(0.1)
+                if message is None or message.error() or message.value() is None:
+                    continue
+                try:
+                    record = json.loads(message.value())
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(record, dict) and record.get("doc_id") == doc_id:
+                    raise RuntimeError(
+                        f"isolated canary document leaked into production topic {topic}: {doc_id}"
+                    )
+    finally:
+        for consumer in consumers.values():
+            consumer.close()
+
+
+def close_consumers(consumers: list[Consumer]) -> None:
+    """Best-effort resource cleanup for every canary exit path."""
+    for consumer in consumers:
+        try:
+            consumer.close()
+        except Exception:
+            # Closing a consumer that an exact-document read already closed is
+            # harmless; cleanup must not mask the data-path or S3 result.
+            pass
+
+
 def main() -> None:
     started = time.monotonic()
     now = datetime.now(UTC)
-    # The fetcher consumes this short-retention lane alongside production raw
-    # data. A health probe therefore exercises the real worker without waiting
-    # behind an arbitrarily large production replay backlog.
+    # A fixed Bytewax canary fetcher owns this short-retention lane with its own
+    # flow identity, outputs, and recovery database. It uses the production
+    # image and models without advancing production recovery or state.
     raw_topic = required_env("S2P_SMOKE_RAW_TOPIC")
     producer = Producer({"bootstrap.servers": required_env("REDPANDA_BROKERS")})
     raw_partition_count = topic_partition_count(producer, raw_topic)
@@ -184,13 +221,27 @@ def main() -> None:
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
     )
     normalized_topic = required_env("S2P_SMOKE_NORMALIZED_TOPIC")
-    decision_topic = required_env("S2P_DECISIONS_TOPIC")
-    curated_topic = required_env("S2P_CURATED_TOPIC")
+    decision_topic = required_env("S2P_SMOKE_DECISIONS_TOPIC")
+    curated_topic = required_env("S2P_SMOKE_CURATED_TOPIC")
     normalized_consumer = tail_consumer(normalized_topic)
     decision_consumer = tail_consumer(decision_topic)
     curated_consumer = tail_consumer(curated_topic)
+    production_consumers = {
+        required_env("S2P_NORMALIZED_TOPIC"): tail_consumer(
+            required_env("S2P_NORMALIZED_TOPIC")
+        ),
+        required_env("S2P_DECISIONS_TOPIC"): tail_consumer(
+            required_env("S2P_DECISIONS_TOPIC")
+        ),
+        required_env("S2P_CURATED_TOPIC"): tail_consumer(
+            required_env("S2P_CURATED_TOPIC")
+        ),
+        required_env("S2P_LICENSE_ADMISSIONS_TOPIC"): tail_consumer(
+            required_env("S2P_LICENSE_ADMISSIONS_TOPIC")
+        ),
+    }
     producer.produce(
-        required_env("S2P_LICENSE_ADMISSIONS_TOPIC"),
+        required_env("S2P_SMOKE_LICENSE_ADMISSIONS_TOPIC"),
         key=admission.decision.decision_id.encode(),
         value=admission.decision.model_dump_json().encode(),
     )
@@ -205,75 +256,105 @@ def main() -> None:
         ContentEncoding="gzip",
     )
 
-    bronze = BronzeRecord(
-        doc_id=doc_id,
-        url=url,
-        fetched_at=now,
-        http_status=200,
-        content_type="text/html",
-        raw_html_s3_uri=f"s3://{bucket}/{key}",
-        source_feed="cluster-smoke",
-        trace_id=admission.decision.trace_id,
-        bytes_size=len(payload),
-        source_format="html",
-        extraction_pipeline="cluster-smoke-1.0",
-        spdx_license="CC0-1.0",
-        spdx_license_source="manual_override",
-    )
-    producer.produce(
-        raw_topic,
-        key=doc_id.encode(),
-        value=json.dumps(bronze.model_dump(mode="json")).encode(),
-        partition=probe_partition,
-    )
-    if producer.flush(10.0):
-        raise RuntimeError("the controlled Bronze record was not delivered")
-
-    normalized = consume_document(normalized_consumer, normalized_topic, doc_id, 90.0)
-    if normalized is None:
-        decision_consumer.close()
-        curated_consumer.close()
-        raise RuntimeError(f"no {normalized_topic} result for {doc_id} within 90 seconds")
-
-    decision = consume_document(decision_consumer, decision_topic, doc_id, 120.0)
-    if decision is None:
-        curated_consumer.close()
-        raise RuntimeError(f"no {decision_topic} result for {doc_id} within 120 seconds")
-
-    trainable = (
-        decision.get("risk_tier") == 1
-        and decision.get("route")
-        in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
-        and not decision.get("reject_reasons")
-        and not decision.get("pii_flags")
-        and not decision.get("contaminated_with")
-    )
-    if not trainable:
-        curated_consumer.close()
-        raise RuntimeError(
-            "controlled permissive canary was rejected instead of exercising docs.curated: "
-            f"route={decision.get('route')} risk={decision.get('risk_tier')} "
-            f"reasons={decision.get('reject_reasons')}"
+    try:
+        bronze = BronzeRecord(
+            doc_id=doc_id,
+            url=url,
+            fetched_at=now,
+            http_status=200,
+            content_type="text/html",
+            raw_html_s3_uri=f"s3://{bucket}/{key}",
+            source_feed="cluster-smoke",
+            trace_id=admission.decision.trace_id,
+            bytes_size=len(payload),
+            source_format="html",
+            extraction_pipeline="cluster-smoke-1.0",
+            spdx_license="CC0-1.0",
+            spdx_license_source="manual_override",
         )
-    curated_seen = consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
-    if not curated_seen:
-        raise RuntimeError(f"training-eligible document missing from docs.curated: {doc_id}")
-
-    print(
-        json.dumps(
-            {
-                "doc_id": doc_id,
-                "bronze_s3_uri": bronze.raw_html_s3_uri,
-                "decision_route": decision.get("route"),
-                "risk_tier": decision.get("risk_tier"),
-                "reject_reasons": decision.get("reject_reasons"),
-                "curated_seen": curated_seen,
-                "probe_partition": probe_partition,
-                "elapsed_seconds": round(time.monotonic() - started, 3),
-            },
-            sort_keys=True,
+        producer.produce(
+            raw_topic,
+            key=doc_id.encode(),
+            value=json.dumps(bronze.model_dump(mode="json")).encode(),
+            partition=probe_partition,
         )
-    )
+        if producer.flush(10.0):
+            raise RuntimeError("the controlled Bronze record was not delivered")
+
+        normalized = consume_document(normalized_consumer, normalized_topic, doc_id, 90.0)
+        if normalized is None:
+            decision_consumer.close()
+            curated_consumer.close()
+            for consumer in production_consumers.values():
+                consumer.close()
+            raise RuntimeError(f"no {normalized_topic} result for {doc_id} within 90 seconds")
+
+        decision = consume_document(decision_consumer, decision_topic, doc_id, 120.0)
+        if decision is None:
+            curated_consumer.close()
+            for consumer in production_consumers.values():
+                consumer.close()
+            raise RuntimeError(f"no {decision_topic} result for {doc_id} within 120 seconds")
+
+        trainable = (
+            decision.get("risk_tier") == 1
+            and decision.get("route")
+            in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
+            and not decision.get("reject_reasons")
+            and not decision.get("pii_flags")
+            and not decision.get("contaminated_with")
+        )
+        if not trainable:
+            curated_consumer.close()
+            for consumer in production_consumers.values():
+                consumer.close()
+            raise RuntimeError(
+                "controlled permissive canary was rejected instead of exercising docs.curated: "
+                f"route={decision.get('route')} risk={decision.get('risk_tier')} "
+                f"reasons={decision.get('reject_reasons')}"
+            )
+        curated_seen = (
+            consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
+        )
+        if not curated_seen:
+            for consumer in production_consumers.values():
+                consumer.close()
+            raise RuntimeError(f"training-eligible document missing from docs.curated: {doc_id}")
+        assert_document_absent(
+            production_consumers,
+            doc_id,
+            float(os.environ.get("S2P_SMOKE_ISOLATION_TIMEOUT_SECONDS", "5")),
+        )
+        result = {
+            "doc_id": doc_id,
+            "bronze_s3_uri": bronze.raw_html_s3_uri,
+            "license_admission_decision_id": admission.decision.decision_id,
+            "license_admission_topic": required_env("S2P_SMOKE_LICENSE_ADMISSIONS_TOPIC"),
+            "normalized_topic": normalized_topic,
+            "decision_topic": decision_topic,
+            "curated_topic": curated_topic,
+            "decision_route": decision.get("route"),
+            "risk_tier": decision.get("risk_tier"),
+            "reject_reasons": decision.get("reject_reasons"),
+            "curated_seen": curated_seen,
+            "probe_partition": probe_partition,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+    finally:
+        # The canary event remains in short-retention smoke topics as release
+        # evidence, but its synthetic source body must not accumulate in the
+        # production Bronze bucket.
+        close_consumers(
+            [
+                normalized_consumer,
+                decision_consumer,
+                curated_consumer,
+                *production_consumers.values(),
+            ]
+        )
+        s3.delete_object(Bucket=bucket, Key=key)
+    result["bronze_object_deleted"] = True
+    print(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":

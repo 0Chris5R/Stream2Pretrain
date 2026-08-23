@@ -51,10 +51,10 @@ Required fields above bronze:
 | `lang` | ISO code | from fastText lid.176 |
 | `lang_score` | float 0..1 | confidence |
 | `extracted_with` | string | e.g. `resiliparse-0.14` |
-| `tags.gopher_pass` | bool | Dolma Gopher rules |
-| `tags.c4_nopunc_pass` | bool | C4 punctuation rule |
-| `tags.perplexity` | float | KenLM perplexity |
-| `tags.perplexity_bucket` | enum | `head` / `middle` / `tail` |
+| `tags.gopher_pass` | bool | FineWeb/Gopher signal; a gate only for ordinary web prose |
+| `tags.c4_nopunc_pass` | bool | FineWeb punctuation signal; a gate only for ordinary web prose |
+| `tags.perplexity` | float | KenLM perplexity for ordinary web prose; consult scorer applicability |
+| `tags.perplexity_bucket` | enum | `head` / `middle` / `tail` for an applicable KenLM result |
 | `minhash_sig` | bytes (112 perms) | Rensa MinHash |
 | `near_dup_cluster_id` | string \| null | populated by LSHBloom |
 | `valid_from` | UTC datetime | populated by enricher (see precedence below) |
@@ -89,12 +89,12 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `text` | string | yes | post-PII-scrubbed |
 | `lang` | ISO code | yes | |
 | `tokens` | int >=0 | yes | GPT-2-tokenizer token count |
-| `edu_score` | float 0..5 | yes | Raw source-aware quality signal: FinePDFs v2, FineWeb-Edu, or code policy |
-| `quality_score` | float 0..5 | yes | Explainable composite of source quality, structure, language, heuristics, and KenLM bucket |
+| `edu_score` | float 0..5 | yes | Raw source-aware quality signal: FinePDFs v2, FineWeb-Edu, Stack/Dolma code rules, or OpenReview schema completeness |
+| `quality_score` | float 0..5 | yes | Explainable composite of source quality, source-appropriate structure, language, and only applicable heuristic/KenLM signals |
 | `lang_score` | float 0..1 | yes | language-confidence signal |
 | `gopher_pass` | bool | yes | Gopher heuristic outcome |
 | `c4_*` | bool/float | yes | individual C4 outcomes and punctuation fraction |
-| `perplexity`, `perplexity_bucket`, `perplexity_scorer` | float/enum/string | yes | KenLM signal and exact scorer provenance |
+| `perplexity`, `perplexity_bucket`, `perplexity_scorer` | float/enum/string | yes | KenLM signal and exact scorer provenance; `perplexity_scorer=not-applicable` for non-web profiles and excludes typicality from the composite |
 | `near_duplicate`, `near_dup_cluster_id` | bool/string \| null | yes/no | stateful deduplication outcome |
 | `minhash_backend`, `minhash_num_perms`, `lsh_backend` | string/int/string | yes | deduplication implementation provenance |
 | `license` | SPDX or `unknown` | yes | |
@@ -104,7 +104,7 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `contaminated_with` | list[string] | no | benchmark ids matched by Decon-Gate |
 | `valid_from` | UTC datetime | yes | inherited |
 | `valid_to` | UTC datetime \| null | no | |
-| `reject_reasons` | list[enum] | no | `language_filter`, `gopher_filter`, `c4_nopunc_filter`, `near_duplicate`, `low_quality_score`, `high_perplexity`, `pii_detected`, `license_excluded`, `decontamination_hit`, `validity_interval_invalid` |
+| `reject_reasons` | list[enum] | no | Includes language, web heuristics, duplicate, source quality, PII/secret, licence, decontamination, validity, incomplete extraction, and `metadata_only` blockers |
 | `scoring_version` | string | yes | recipe version |
 | `classifier_revision` | string | yes | e.g. `fineweb-edu-onnx-int8-2026-05-31` |
 | `policy_revision` | `git:<sha>` | yes | git commit of the policy bundle |

@@ -46,7 +46,7 @@ export const SourceFeedSpecSchema = z.object({
   auth: SourceFeedAuthSchema.optional(),
   accept_content_types: z.array(z.string()).default([]),
   egress_allow: z.array(z.string()).default([]),
-  license_default: z.string().nullable().optional(),
+  license_default: z.literal('per-record').default('per-record'),
 });
 
 export type SourceFeedSpec = z.infer<typeof SourceFeedSpecSchema>;
@@ -61,8 +61,30 @@ export const SourceFeedStatusSchema = z.object({
   pretrain_documents_24h: z.number().int().nonnegative().default(0),
   posttrain_only_documents_24h: z.number().int().nonnegative().default(0),
   quarantined_documents_24h: z.number().int().nonnegative().default(0),
+  license_distribution: z
+    .array(
+      z.object({
+        license_id: z.string(),
+        status: z.enum(['admitted', 'posttrain_transform_only', 'quarantined']),
+        count: z.number().int().nonnegative(),
+      }),
+    )
+    .default([]),
+  license_provenance: z
+    .array(
+      z.object({
+        license_source: z.string(),
+        count: z.number().int().nonnegative(),
+      }),
+    )
+    .default([]),
   error_rate_24h: z.number().min(0).max(1).default(0),
   poll_state: z.enum(['idle', 'polling', 'cooldown', 'error']),
+  management: z.enum(['sourcefeed', 'builtin']).default('sourcefeed'),
+  quality_policy: z.string().default('Source-aware after extraction'),
+  license_resolver: z.string().default('Item evidence required'),
+  stages: z.array(z.string()).default([]),
+  supports_run: z.boolean().default(false),
 });
 
 export type SourceFeedStatus = z.infer<typeof SourceFeedStatusSchema>;
@@ -400,6 +422,8 @@ export const DocumentSummarySchema = z.object({
   perplexity: z.number(),
   risk_tier: z.number().int(),
   route: CorpusRouteSchema,
+  training_usage: z.enum(['pretrain_and_posttrain', 'posttrain_transform_only', 'quarantined']),
+  admission_only: z.boolean().default(false),
   content_tags: z.array(z.string()),
   reject_reasons: z.array(z.string()),
   source_word_count: z.number().int().nonnegative(),
@@ -429,7 +453,23 @@ export const DocumentFacetsSchema = z.object({
   rejection_reasons: z.array(z.string()),
 });
 
+const LicenseAdmissionAuditSchema = z.object({
+  status: z.enum(['admitted', 'posttrain_transform_only', 'quarantined']),
+  license_id: z.string(),
+  license_source: z.string(),
+  reason: z.string(),
+  raw_license: z.string().nullable(),
+  normalized_license: z.string().nullable(),
+  resolver: z.string().nullable(),
+  evidence_url: z.string().nullable(),
+  evidence_revision: z.string().nullable(),
+  evidence_scope: z.string().nullable(),
+  policy_revision: z.string().nullable(),
+  resolved_at: z.string().nullable(),
+});
+
 export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: true }).extend({
+  admission_only: z.literal(false).default(false),
   text: z.string(),
   pii_flags: z.array(z.string()),
   metadata_pii_flags: z.array(z.string()),
@@ -446,6 +486,7 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
   license_source: z.string(),
   spdx_license: z.string().nullable(),
   spdx_license_source: z.string(),
+  license_admission: LicenseAdmissionAuditSchema.nullable(),
   extraction_warnings: z.array(z.string()),
   lang_score: z.number(),
   lang_detector_revision: z.string(),
@@ -484,8 +525,29 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
   scientific_artifact: ScientificDocumentSchema.nullable(),
 });
 
+export const AdmissionOnlyDocumentSchema = z.object({
+  admission_only: z.literal(true),
+  doc_id: z.string(),
+  title: z.string(),
+  source_url: z.string(),
+  source_feed: z.string(),
+  source_format: z.string(),
+  valid_from: z.string(),
+  route: z.literal('quarantine'),
+  training_usage: z.literal('quarantined'),
+  content_tags: z.array(z.string()),
+  reject_reasons: z.array(z.string()),
+  license_admission: LicenseAdmissionAuditSchema,
+});
+
+export const DocumentDetailResponseSchema = z.union([
+  DocumentDetailSchema,
+  AdmissionOnlyDocumentSchema,
+]);
+
 export type DocumentSummary = z.infer<typeof DocumentSummarySchema>;
-export type DocumentDetail = z.infer<typeof DocumentDetailSchema>;
+export type CuratedDocumentDetail = z.infer<typeof DocumentDetailSchema>;
+export type DocumentDetail = z.infer<typeof DocumentDetailResponseSchema>;
 export type DocumentPage = z.infer<typeof DocumentPageSchema>;
 export type DocumentFacets = z.infer<typeof DocumentFacetsSchema>;
 

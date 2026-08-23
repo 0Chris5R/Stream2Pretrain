@@ -160,7 +160,7 @@ async def test_fetch_and_publish_dedups_seen(
 
 
 @pytest.mark.asyncio
-async def test_missing_license_is_fetched_for_transform_only_posttraining(
+async def test_missing_license_is_quarantined_before_fetch(
     fake_producer: FakeProducer, fake_minio: FakeMinio
 ) -> None:
     admissions = FakeProducer()
@@ -184,11 +184,10 @@ async def test_missing_license_is_fetched_for_transform_only_posttraining(
         )
     finally:
         await client.aclose()
-    assert record is not None
-    assert record.training_usage == "posttrain_transform_only"
-    assert calls == 1
-    assert fake_minio.objects
-    assert admissions.sent[0]["record"].status == "posttrain_transform_only"
+    assert record is None
+    assert calls == 0
+    assert not fake_minio.objects
+    assert admissions.sent[0]["record"].status == "quarantined"
 
 
 def test_parse_http_date_handles_none() -> None:

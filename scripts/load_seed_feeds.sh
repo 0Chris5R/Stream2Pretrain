@@ -33,9 +33,11 @@ if [[ ! -f "${CRD_FILE}" ]]; then
 fi
 
 # The controller-supported Phase-1 set, expressed as inline manifests so the
-# script has no Python dependency. Dedicated Deployments/CronJobs retain the
-# REST/JSON and GitHub release sources that cannot be cloned from the generic
-# RSS, Atom, OAI-PMH, or sitemap poller templates.
+# script has no Python dependency. This script installs only sources handled by
+# the generic RSS, Atom, OAI-PMH, or sitemap poller templates. GitHub discovery/tarballs,
+# Hugging Face model/dataset/Space cards and Daily Papers, arXiv full text, and
+# OpenReview remain chart-managed dedicated workloads and are intentionally not
+# duplicated as generic SourceFeed CRDs here.
 read -r -d '' MANIFEST <<'YAML' || true
 ---
 apiVersion: stream2pretrain.io/v1alpha1
@@ -50,7 +52,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: arxiv-non-exclusive-distribution
+  licenseDefault: per-record
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -66,7 +68,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: arxiv-non-exclusive-distribution
+  licenseDefault: per-record
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -82,7 +84,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: arxiv-non-exclusive-distribution
+  licenseDefault: per-record
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -98,7 +100,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 4
-  licenseDefault: arxiv-non-exclusive-distribution
+  licenseDefault: per-record
   egressAllow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -114,7 +116,7 @@ spec:
   rateLimit:
     requestsPerSecond: 4.0
     burst: 4
-  licenseDefault: arxiv-non-exclusive-distribution
+  licenseDefault: per-record
   egressAllow: ["oaipmh.arxiv.org", "export.arxiv.org"]
   enabled: true
 ---
@@ -130,7 +132,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 2
-  licenseDefault: unknown
+  licenseDefault: per-record
   egressAllow: ["openai.com", "cdn.openai.com"]
   enabled: true
 ---
@@ -146,7 +148,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 2
-  licenseDefault: unknown
+  licenseDefault: per-record
   egressAllow: ["deepmind.google"]
   enabled: true
 ---
@@ -162,7 +164,7 @@ spec:
   rateLimit:
     requestsPerSecond: 1.0
     burst: 2
-  licenseDefault: unknown
+  licenseDefault: per-record
   egressAllow: ["huggingface.co", "hf.co"]
   enabled: true
 ---
@@ -178,7 +180,7 @@ spec:
   rateLimit:
     requestsPerSecond: 0.5
     burst: 1
-  licenseDefault: unknown
+  licenseDefault: per-record
   egressAllow: ["bair.berkeley.edu"]
   enabled: true
 ---
@@ -194,7 +196,7 @@ spec:
   rateLimit:
     requestsPerSecond: 0.5
     burst: 1
-  licenseDefault: unknown
+  licenseDefault: per-record
   egressAllow: ["blog.eleuther.ai"]
   enabled: true
 YAML

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Stream2Pretrain - create the four core Redpanda topics on the local dev cluster.
+# Stream2Pretrain - create the managed Redpanda topics on the local dev cluster.
 #
 # Idempotent: rpk returns non-zero on "topic already exists"; we tolerate that.
-# Partition / replication match schemas/topics.py::dev_topic_configs (1 / 1).
+# Partition / replication match schemas/topics.py::dev_topic_configs (4 / 1
+# for document streams, 1 / 1 for control streams).
 #
 # Usage:
 #   bash scripts/seed_topics.sh                 # talks to localhost:9092
@@ -54,9 +55,13 @@ create_topic "raw.fetched"      4 1
 create_topic "raw.smoke"        4 1 "$RETENTION_MS_SMOKE"
 create_topic "github.release.jobs" 4 1
 create_topic "docs.normalized"  4 1
+create_topic "docs.normalized.smoke" 4 1 "$RETENTION_MS_SMOKE"
 create_topic "docs.curated"     4 1
+create_topic "docs.curated.smoke" 4 1 "$RETENTION_MS_SMOKE"
 create_topic "curation.decisions" 4 1
+create_topic "curation.decisions.smoke" 4 1 "$RETENTION_MS_SMOKE"
 create_topic "license.admissions" 1 1
+create_topic "license.admissions.smoke" 4 1 "$RETENTION_MS_SMOKE"
 create_topic "decon.attest"     1 1
 create_topic "foundry.jobs"     1 1
 create_topic "foundry.events"   1 1

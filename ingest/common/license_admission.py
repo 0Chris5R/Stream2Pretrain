@@ -1,10 +1,4 @@
-"""Purpose-aware licence admission shared by every ingest component.
-
-Permissively licensed bodies may enter verbatim pretraining. Sources with
-missing, dataset-wrapper-only, or arXiv non-exclusive terms may be fetched for
-derived post-training generation only. Explicitly restrictive licences remain
-quarantined before content retrieval.
-"""
+"""Purpose-aware, item-scoped licence admission shared by every ingest path."""
 
 from __future__ import annotations
 
@@ -15,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ingest.common.hashing import canonical_url, doc_id_for_url
-from schemas.bronze import TrainingUsage
+from schemas.bronze import SourceFormat, TrainingUsage
 from schemas.license_admission import LicenseAdmissionDecision
 
 PERMISSIVE_TRAINING_LICENSES = frozenset(
@@ -37,11 +31,15 @@ PERMISSIVE_TRAINING_LICENSES = frozenset(
 
 POSTTRAIN_TRANSFORM_LICENSES = frozenset(
     {
-        "unknown",
         "arxiv-non-exclusive-distribution",
-        "ODC-By-1.0",
+        "CC-BY-NC-4.0",
+        "CC-BY-NC-SA-4.0",
+        "CC-BY-NC-3.0",
+        "CC-BY-NC-SA-3.0",
     }
 )
+
+LICENSE_POLICY_REVISION = "license-policy-2026-08-23"
 
 _CC_PATTERN = re.compile(
     r"creativecommons\.org/(?:licenses|publicdomain)/(by(?:-sa|-nc|-nc-sa|-nc-nd|-nd)?|zero)/(\d\.\d)",
@@ -55,7 +53,15 @@ def normalize_license(value: str | None) -> str:
         return "unknown"
     cleaned = value.strip().rstrip("/")
     lowered = cleaned.lower()
-    if lowered in {"unknown", "none", "n/a", "null", "per-record"}:
+    if lowered in {
+        "unknown",
+        "none",
+        "n/a",
+        "null",
+        "per-record",
+        "noassertion",
+        "other",
+    }:
         return "unknown"
     if "arxiv.org/licenses/nonexclusive-distrib" in lowered:
         return "arxiv-non-exclusive-distribution"
@@ -73,9 +79,28 @@ def normalize_license(value: str | None) -> str:
         "bsd-3-clause": "BSD-3-Clause",
         "mpl-2.0": "MPL-2.0",
         "cc-by-4.0": "CC-BY-4.0",
+        "cc by 4.0": "CC-BY-4.0",
         "cc-by-sa-4.0": "CC-BY-SA-4.0",
+        "cc by-sa 4.0": "CC-BY-SA-4.0",
+        "cc by sa 4.0": "CC-BY-SA-4.0",
+        "cc-by-nc-4.0": "CC-BY-NC-4.0",
+        "cc by-nc 4.0": "CC-BY-NC-4.0",
+        "cc by nc 4.0": "CC-BY-NC-4.0",
+        "cc-by-nc-sa-4.0": "CC-BY-NC-SA-4.0",
+        "cc by-nc-sa 4.0": "CC-BY-NC-SA-4.0",
+        "cc by nc sa 4.0": "CC-BY-NC-SA-4.0",
+        "cc-by-nd-4.0": "CC-BY-ND-4.0",
+        "cc by-nd 4.0": "CC-BY-ND-4.0",
+        "cc-by-nc-nd-4.0": "CC-BY-NC-ND-4.0",
+        "cc by-nc-nd 4.0": "CC-BY-NC-ND-4.0",
         "cc-by-3.0": "CC-BY-3.0",
+        "cc by 3.0": "CC-BY-3.0",
         "cc-by-sa-3.0": "CC-BY-SA-3.0",
+        "cc by-sa 3.0": "CC-BY-SA-3.0",
+        "cc-by-nc-3.0": "CC-BY-NC-3.0",
+        "cc by-nc 3.0": "CC-BY-NC-3.0",
+        "cc-by-nc-sa-3.0": "CC-BY-NC-SA-3.0",
+        "cc by-nc-sa 3.0": "CC-BY-NC-SA-3.0",
         "cc0-1.0": "CC0-1.0",
         "isc": "ISC",
         "unlicense": "Unlicense",
@@ -135,9 +160,13 @@ def decide_license_admission(
     source_feed: str,
     license_value: str | None,
     license_source: str,
-    source_format: str = "web",
+    source_format: SourceFormat = "web",
     trace_id: str | None = None,
     observed_at: datetime | None = None,
+    resolver: str | None = None,
+    evidence_url: str | None = None,
+    evidence_revision: str | None = None,
+    evidence_scope: str | None = None,
 ) -> AdmissionResult:
     """Build a deterministic decision before content fetch."""
     canon = canonical_url(source_url)
@@ -156,21 +185,45 @@ def decide_license_admission(
             "for derived post-training generation"
         )
     elif normalized == "unknown":
-        reason = "machine-readable licence is missing"
+        reason = "item-level machine-readable licence is unresolved"
+    elif normalized == "ODC-By-1.0":
+        reason = "dataset wrapper licence does not establish rights in this content item"
     else:
         reason = f"{normalized} is not on the training allowlist"
+    resolved_at = observed_at or datetime.now(UTC)
+    scope = evidence_scope or (
+        "unknown"
+        if normalized == "unknown"
+        else "dataset_wrapper"
+        if normalized == "ODC-By-1.0"
+        else "item"
+    )
+    evidence_resolver = resolver or license_source
     digest = hashlib.sha256(
-        f"{doc_id}\0{source_feed}\0{source_format}\0{normalized}\0{license_source}\0{status}".encode()
+        (
+            f"{doc_id}\0{source_feed}\0{source_format}\0{normalized}\0{license_source}\0"
+            f"{status}\0{evidence_resolver}\0{evidence_url or ''}\0"
+            f"{evidence_revision or ''}\0{scope}\0{LICENSE_POLICY_REVISION}"
+        ).encode()
     ).hexdigest()
     decision = LicenseAdmissionDecision(
         decision_id=f"sha256:{digest}",
         doc_id=doc_id,
         source_feed=source_feed,
         source_url=canon,  # type: ignore[arg-type]
-        observed_at=observed_at or datetime.now(UTC),
+        source_format=source_format,
+        observed_at=resolved_at,
         status=status,
         license_id=normalized,
         license_source=license_source,
+        raw_license=license_value,
+        normalized_license=normalized,
+        resolver=evidence_resolver,
+        evidence_url=evidence_url,  # type: ignore[arg-type]
+        evidence_revision=evidence_revision,
+        evidence_scope=scope,  # type: ignore[arg-type]
+        policy_revision=LICENSE_POLICY_REVISION,
+        resolved_at=resolved_at,
         reason=reason,
         trace_id=trace_id or secrets.token_hex(16),
         content_fetch_started=False,
@@ -182,11 +235,14 @@ def effective_license(
     per_record: str | None,
     source_default: str | None,
 ) -> tuple[str, str]:
-    """Prefer a per-record attestation; use only an explicit feed default."""
+    """Return only item-level feed evidence.
+
+    Source defaults are configuration hints, never rights evidence for an
+    individual training item. Source-wide terms require a dedicated, versioned
+    resolver and must not flow through this compatibility helper.
+    """
     normalized_record = normalize_license(per_record)
     if normalized_record != "unknown":
         return normalized_record, "rss_entry"
-    normalized_default = normalize_license(source_default)
-    if normalized_default != "unknown":
-        return normalized_default, "manual_override"
+    del source_default
     return "unknown", "unknown"
