@@ -71,13 +71,14 @@
         "region": {"type": "string"},
         "buckets": {
           "type": "object",
-          "required": ["bronze", "silver", "gold", "decon", "posttrain"],
+          "required": ["bronze", "silver", "gold", "decon", "posttrain", "state"],
           "properties": {
             "bronze": {"type": "string"},
             "silver": {"type": "string"},
             "gold": {"type": "string"},
             "decon": {"type": "string"},
-            "posttrain": {"type": "string"}
+            "posttrain": {"type": "string"},
+            "state": {"type": "string"}
           }
         },
         "credentialsSecret": {"type": "string", "minLength": 1}
@@ -276,6 +277,18 @@
     "ingest": {
       "type": "object",
       "properties": {
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "prefix", "existingClaim", "storageClass", "size"],
+          "properties": {
+            "backend": {"type": "string", "enum": ["s3", "pvc"]},
+            "prefix": {"type": "string", "minLength": 1},
+            "existingClaim": {"type": "string"},
+            "storageClass": {"type": "string"},
+            "size": {"type": "string", "minLength": 1}
+          }
+        },
         "arxivHtmlFetcher": {
           "type": "object",
           "required": ["image", "replicas", "consumerGroup", "autoOffsetReset", "scaling", "resources"],
@@ -361,8 +374,9 @@
         "live": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["schedule", "activeDeadlineSeconds", "state"],
+          "required": ["enabled", "schedule", "activeDeadlineSeconds", "state"],
           "properties": {
+            "enabled": {"type": "boolean"},
             "schedule": {"type": "string", "minLength": 1},
             "activeDeadlineSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
             "state": {
@@ -381,9 +395,16 @@
         "backfill": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["activeDeadlineSeconds"],
+          "required": ["datasetId", "revision", "splits", "activeDeadlineSeconds"],
           "properties": {
             "datasetId": {"type": "string"},
+            "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "splits": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
             "maxRows": {
               "anyOf": [
                 {"type": "string"},

@@ -94,6 +94,7 @@
         "html",
         "pdf",
         "latex",
+        "markdown",
         "code",
         "web",
         "metadata",

@@ -50,6 +50,7 @@ SourceFormat = Literal[
     "html",
     "pdf",
     "latex",
+    "markdown",
     "code",
     "web",
     "metadata",
@@ -60,6 +61,8 @@ SourceFormat = Literal[
 - ``html``: a rendered HTML page (arXiv ``/html/<id>``, ar5iv, AI-lab blog).
 - ``pdf``: a binary PDF (OpenReview, ACL Anthology, conference proceedings).
 - ``latex``: TeX/LaTeX source from arXiv ``s3://arxiv/src``.
+- ``markdown``: scientific full text already converted to Markdown by a
+  source-side OCR or document extraction pipeline.
 - ``code``: a single source file extracted from a release tarball or
   ``the-stack-v2`` blob.
 - ``web``: an opaque crawled web page (CommonCrawl-derived seeds).

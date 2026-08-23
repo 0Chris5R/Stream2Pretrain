@@ -451,6 +451,10 @@ openreviewPoller:
   tokenSecret: ""
   tokenSecretKey: token
   live:
+    # OpenReview's notes endpoints currently require an authenticated token or
+    # interactive challenge. Keep the live poller absent until tokenSecret is
+    # configured; ReviewArena remains the pinned post-training fallback.
+    enabled: false
     schedule: "17 */6 * * *"
     activeDeadlineSeconds: 3600
     # Used only when ingest.state.backend=pvc. The default S3 backend stores
@@ -461,10 +465,16 @@ openreviewPoller:
       existingClaim: ""
   runBackfill: false
   backfill:
-    # Empty means: resolve the dataset id at runtime via the HF Hub search API
-    # (see ingest/openreview_poller/backfill.py). Set explicitly to pin a
-    # known revision once the operator has confirmed it.
-    datasetId: ""
+    datasetId: anonymousNeurIPS2026submission4281/reviewarena
+    revision: c2978add17c2099219eaddbc2599974d69d4d09b
+    splits:
+      - neurips
+      - iclr
+      - icml
+      - tmlr
+      - emnlp
+      - corl
+      - colm
     # Optional smoke-scale limit. Empty means "no limit".
     maxRows: ""
     activeDeadlineSeconds: 21600

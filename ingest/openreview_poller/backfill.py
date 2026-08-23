@@ -1,23 +1,15 @@
 """REVIEWARENA HuggingFace dataset backfill (one-shot Job).
 
-REVIEWARENA bundles full PDFs + reviews + rebuttals + decisions for a wide
-range of OpenReview venues (ICLR 2020-2026, NeurIPS 2021-2025, ICML 2025,
-COLM 2024-2025; see ``docs/research-fulltext-and-code.md``).
-
-The exact HF dataset id is ``needs-measurement``: the cited research note
-spells the dataset "REVIEWARENA" without a clear ``<owner>/<name>`` repo path,
-and the Hugging Face Hub search must resolve it at runtime. The poller does
-that resolution via ``huggingface_hub.HfApi.list_datasets(search=...)``,
-records the chosen id in the JSON output of ``run_backfill``, and falls back
-to a configurable override (``S2P_REVIEWARENA_DATASET`` env var) so an
-operator can pin a known-good revision.
+ReviewArena bundles OCR Markdown + reviews + rebuttals + decisions for seven
+OpenReview conference families. The default dataset and revision are pinned
+to the snapshot whose schema this adapter implements. Operators may override
+both through environment variables for an audited replacement snapshot.
 
 For every example in the streamed dataset we:
 
-1. Persist the binary PDF (when present) under
-   ``s3://<bronze>/openreview/backfill/<venue>/<note_id>.pdf`` and emit one
-   ``source_format="pdf"`` BronzeRecord with
-   ``extraction_pipeline="reviewarena-pdf-pending-marker"``.
+1. Persist the source-provided OCR Markdown (when present) and emit one
+   ``source_format="markdown"`` BronzeRecord with
+   ``extraction_pipeline="reviewarena-ocr-markdown-v1"``.
 2. Persist the concatenated review/decision/rebuttal text (when present) as
    ``source_format="review"`` with
    ``extraction_pipeline="reviewarena-review-text"``.
@@ -48,9 +40,19 @@ from schemas.bronze import BronzeRecord
 log = get_logger(__name__)
 
 SOURCE_FEED = "openreview-backfill"
-PIPELINE_PDF_BACKFILL = "reviewarena-pdf-pending-marker"
+PIPELINE_MARKDOWN_BACKFILL = "reviewarena-ocr-markdown-v1"
 PIPELINE_REVIEW_BACKFILL = "reviewarena-review-text"
-DEFAULT_REVIEWARENA_QUERY = "REVIEWARENA"
+DEFAULT_REVIEWARENA_DATASET = "anonymousNeurIPS2026submission4281/reviewarena"
+DEFAULT_REVIEWARENA_REVISION = "c2978add17c2099219eaddbc2599974d69d4d09b"
+DEFAULT_REVIEWARENA_SPLITS: tuple[str, ...] = (
+    "neurips",
+    "iclr",
+    "icml",
+    "tmlr",
+    "emnlp",
+    "corl",
+    "colm",
+)
 
 
 @dataclass(slots=True)
@@ -59,66 +61,26 @@ class BackfillStats:
 
     dataset_id: str = ""
     rows_seen: int = 0
-    pdfs_emitted: int = 0
+    papers_emitted: int = 0
     reviews_emitted: int = 0
     skipped: int = 0
 
 
 # ---------------------------------------------------------------------------
-# Dataset id resolution
+# Dataset identity
 # ---------------------------------------------------------------------------
-
-
-def _candidate_score(name: str) -> int:
-    """Tiny heuristic: prefer dataset ids with REVIEWARENA in them."""
-    lower = name.lower()
-    score = 0
-    if "reviewarena" in lower:
-        score += 10
-    if "review" in lower and "arena" in lower:
-        score += 5
-    if "openreview" in lower:
-        score += 2
-    return score
 
 
 def resolve_reviewarena_id(
     *,
     override: str | None,
     search_fn: Any | None = None,
-) -> str | None:
-    """Pick the REVIEWARENA repo id, returning None if nothing matches.
-
-    ``override`` wins. Otherwise we call ``search_fn(search=<query>)`` (which
-    in production is ``HfApi().list_datasets``) and pick the highest-scoring
-    candidate.
-    """
+) -> str:
+    """Return an explicit override or the schema-pinned ReviewArena dataset."""
     if override:
         return override
-    if search_fn is None:
-        try:
-            from huggingface_hub import HfApi
-
-            search_fn = HfApi().list_datasets
-        except Exception as exc:
-            log.warning("reviewarena.search_unavailable", err=str(exc))
-            return None
-    try:
-        candidates = list(search_fn(search=DEFAULT_REVIEWARENA_QUERY))
-    except Exception as exc:
-        log.warning("reviewarena.search_failed", err=str(exc))
-        return None
-    best: tuple[int, str] | None = None
-    for c in candidates:
-        repo_id = getattr(c, "id", None) or getattr(c, "repo_id", None)
-        if not isinstance(repo_id, str):
-            continue
-        score = _candidate_score(repo_id)
-        if score <= 0:
-            continue
-        if best is None or score > best[0]:
-            best = (score, repo_id)
-    return best[1] if best else None
+    del search_fn
+    return DEFAULT_REVIEWARENA_DATASET
 
 
 # ---------------------------------------------------------------------------
@@ -128,20 +90,14 @@ def resolve_reviewarena_id(
 
 @dataclass(slots=True)
 class _RowView:
-    """Adapter over the heterogeneous REVIEWARENA row shape.
-
-    The dataset is community-curated and column names drift between snapshots.
-    We probe a small set of likely keys and degrade gracefully when something
-    is missing. Keys that did not appear in cited research are tagged with
-    ``needs-measurement`` in tests.
-    """
+    """Adapter over the pinned ReviewArena row schema plus legacy aliases."""
 
     note_id: str
     forum_id: str
     venue: str
     year: int | None
     title: str | None
-    pdf_bytes: bytes | None
+    markdown: str | None
     review_text: str | None
     decision: str | None
     cdate: datetime | None
@@ -150,22 +106,22 @@ class _RowView:
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> _RowView:
-        note_id = _first_str(row, ["note_id", "id", "openreview_id", "paper_id"])
-        forum_id = _first_str(row, ["forum", "forum_id", "thread_id"]) or note_id or ""
-        venue = _first_str(row, ["venue", "venue_id", "conference"]) or "unknown"
+        note_id = _first_str(row, ["forum_id", "note_id", "id", "openreview_id", "paper_id"])
+        forum_id = _first_str(row, ["forum_id", "forum", "thread_id"]) or note_id or ""
+        venue = _first_str(row, ["venue_id", "venue", "conference"]) or "unknown"
         year = _first_int(row, ["year", "venue_year"])
         title = _first_str(row, ["title", "paper_title"])
         review_text = _join_review(row)
         decision = _first_str(row, ["decision", "verdict"])
         cdate = _first_datetime(row, ["cdate", "submission_date", "created_at"])
-        pdf_bytes = _first_bytes(row, ["pdf", "pdf_bytes", "pdf_content"])
+        markdown = _first_str(row, ["markdown", "paper_markdown", "full_text"])
         return cls(
             note_id=note_id or "",
             forum_id=forum_id,
             venue=venue,
             year=year,
             title=title,
-            pdf_bytes=pdf_bytes,
+            markdown=markdown,
             review_text=review_text,
             decision=decision,
             cdate=cdate,
@@ -192,20 +148,6 @@ def _first_int(row: dict[str, Any], keys: Iterable[str]) -> int | None:
     return None
 
 
-def _first_bytes(row: dict[str, Any], keys: Iterable[str]) -> bytes | None:
-    for k in keys:
-        v = row.get(k)
-        if isinstance(v, (bytes, bytearray)) and v:
-            return bytes(v)
-        # HuggingFace ``datasets`` returns large binary fields as
-        # ``{"bytes": b"...", "path": ...}``.
-        if isinstance(v, dict):
-            inner = v.get("bytes")
-            if isinstance(inner, (bytes, bytearray)) and inner:
-                return bytes(inner)
-    return None
-
-
 def _first_datetime(row: dict[str, Any], keys: Iterable[str]) -> datetime | None:
     for k in keys:
         v = row.get(k)
@@ -226,8 +168,21 @@ def _first_datetime(row: dict[str, Any], keys: Iterable[str]) -> datetime | None
 
 
 def _join_review(row: dict[str, Any]) -> str | None:
-    """Concatenate review-thread text from any of the likely shapes."""
+    """Concatenate ReviewArena's structured reviews and discussion fields."""
     parts: list[str] = []
+    reviews_json = row.get("reviews_json")
+    if isinstance(reviews_json, str) and reviews_json:
+        try:
+            decoded_reviews = json.loads(reviews_json)
+        except json.JSONDecodeError:
+            log.warning("reviewarena.reviews_json_invalid")
+        else:
+            if isinstance(decoded_reviews, list):
+                for index, item in enumerate(decoded_reviews, start=1):
+                    if isinstance(item, dict):
+                        text = _review_dict_text(item)
+                        if text:
+                            parts.append(f"Review {index}\n{text}")
     for key in ("reviews", "review_texts", "official_reviews"):
         v = row.get(key)
         if isinstance(v, list):
@@ -240,10 +195,34 @@ def _join_review(row: dict[str, Any]) -> str | None:
                         parts.append(text)
         elif isinstance(v, str) and v:
             parts.append(v)
-    rebuttal = row.get("rebuttal") or row.get("author_response")
+    decision_comment = row.get("decision_comment")
+    if isinstance(decision_comment, str) and decision_comment:
+        parts.append(f"Decision comment\n{decision_comment}")
+    rebuttal = row.get("author_rebuttal") or row.get("rebuttal") or row.get("author_response")
     if isinstance(rebuttal, str) and rebuttal:
-        parts.append(rebuttal)
+        parts.append(f"Author rebuttal\n{rebuttal}")
     return "\n\n---\n\n".join(parts) if parts else None
+
+
+def _review_dict_text(review: dict[str, Any]) -> str:
+    """Project one union-schema review into stable human-readable prose."""
+    excluded = {"review_id", "reviewer"}
+    parts: list[str] = []
+    for key, value in review.items():
+        if key in excluded or value is None or value == "" or value == [] or value == {}:
+            continue
+        label = key.replace("_", " ").strip().capitalize()
+        if isinstance(value, (str, int, float, bool)):
+            parts.append(f"{label}: {value}")
+        elif isinstance(value, dict):
+            nested = "; ".join(
+                f"{str(k).replace('_', ' ')}: {v}"
+                for k, v in value.items()
+                if v is not None and v != ""
+            )
+            if nested:
+                parts.append(f"{label}: {nested}")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -261,11 +240,11 @@ def _safe(s: str) -> str:
     return s.replace("/", "_").replace(" ", "_")
 
 
-def _backfill_pdf_key(view: _RowView) -> str:
+def _backfill_markdown_key(view: _RowView) -> str:
     year = f"{view.year:04d}" if view.year else "unknown"
     return (
         f"openreview/backfill/venue={_safe(view.venue)}/year={year}/"
-        f"{_safe(view.note_id) or 'unknown'}.pdf"
+        f"{_safe(view.note_id) or 'unknown'}.md.gz"
     )
 
 
@@ -277,7 +256,7 @@ def _backfill_review_key(view: _RowView) -> str:
     )
 
 
-async def _emit_pdf(
+async def _emit_markdown(
     *,
     view: _RowView,
     cfg: IngestConfig,
@@ -285,21 +264,22 @@ async def _emit_pdf(
     minio: MinioWriter,
     admission_producer: LicenseAdmissionProducer,
 ) -> bool:
-    if not view.pdf_bytes or not view.note_id:
+    if not view.markdown or not view.note_id:
         return False
     url = f"https://openreview.net/pdf?id={view.note_id}"
+    license_source = "dataset_metadata" if view.paper_license else "unknown"
     admission = decide_license_admission(
         source_url=url,
         source_feed=SOURCE_FEED,
         license_value=view.paper_license,
-        license_source="dataset_metadata" if view.paper_license else "unknown",
+        license_source=license_source,
     )
     await admission_producer.send(admission.decision)
     if not admission.fetch_allowed:
         return False
     fetched_at = datetime.now(tz=UTC)
     cdate = view.cdate or fetched_at
-    key = _backfill_pdf_key(view)
+    key = _backfill_markdown_key(view)
     metadata = {
         "doc_id": doc_id_for_url(url),
         "source_feed": SOURCE_FEED,
@@ -310,9 +290,9 @@ async def _emit_pdf(
     }
     bytes_size = await minio.put_bronze(
         key=key,
-        payload=view.pdf_bytes,
-        content_type="application/pdf",
-        gzip_compress=False,
+        payload=view.markdown.encode("utf-8"),
+        content_type="text/markdown; charset=utf-8",
+        gzip_compress=True,
         metadata=metadata,
     )
     record = BronzeRecord(
@@ -320,16 +300,16 @@ async def _emit_pdf(
         url=url,  # type: ignore[arg-type]
         fetched_at=fetched_at,
         http_status=200,
-        content_type="application/pdf",
+        content_type="text/markdown; charset=utf-8",
         raw_html_s3_uri=f"s3://{cfg.minio_bronze_bucket}/{key}",
         source_feed=SOURCE_FEED,
         trace_id=admission.decision.trace_id,
         bytes_size=bytes_size,
-        source_format="pdf",
-        extraction_pipeline=PIPELINE_PDF_BACKFILL,
+        source_format="markdown",
+        extraction_pipeline=PIPELINE_MARKDOWN_BACKFILL,
         spdx_license=admission.license_id,
         training_usage=admission.training_usage,
-        spdx_license_source="dataset_metadata",
+        spdx_license_source=license_source,
     )
     await producer.send(
         record,
@@ -353,11 +333,12 @@ async def _emit_review(
     if not view.review_text or not view.note_id:
         return False
     url = f"https://openreview.net/forum?id={view.note_id}"
+    license_source = "dataset_metadata" if view.review_license else "unknown"
     admission = decide_license_admission(
         source_url=url,
         source_feed=SOURCE_FEED,
         license_value=view.review_license,
-        license_source="dataset_metadata" if view.review_license else "unknown",
+        license_source=license_source,
     )
     await admission_producer.send(admission.decision)
     if not admission.fetch_allowed:
@@ -407,7 +388,7 @@ async def _emit_review(
         extraction_pipeline=PIPELINE_REVIEW_BACKFILL,
         spdx_license=admission.license_id,
         training_usage=admission.training_usage,
-        spdx_license_source="dataset_metadata",
+        spdx_license_source=license_source,
     )
     await producer.send(
         record,
@@ -428,7 +409,8 @@ async def _emit_review(
 def stream_dataset(
     dataset_id: str,
     *,
-    split: str = "train",
+    split: str,
+    revision: str = DEFAULT_REVIEWARENA_REVISION,
     streaming_loader: Any | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield rows from ``dataset_id`` in streaming mode.
@@ -437,11 +419,11 @@ def stream_dataset(
     place of ``datasets.load_dataset``.
     """
     if streaming_loader is not None:
-        yield from streaming_loader(dataset_id, split=split)
+        yield from streaming_loader(dataset_id, revision=revision, split=split)
         return
     from datasets import load_dataset
 
-    ds = load_dataset(dataset_id, split=split, streaming=True)
+    ds = load_dataset(dataset_id, revision=revision, split=split, streaming=True)
     for row in ds:
         if isinstance(row, dict):
             yield row
@@ -454,7 +436,8 @@ async def run_backfill(
     max_rows: int | None = None,
     streaming_loader: Any | None = None,
     search_fn: Any | None = None,
-    split: str = "train",
+    revision: str = DEFAULT_REVIEWARENA_REVISION,
+    splits: Iterable[str] | None = None,
 ) -> BackfillStats:
     """Stream REVIEWARENA into bronze.
 
@@ -465,11 +448,13 @@ async def run_backfill(
         override=os.environ.get("S2P_REVIEWARENA_DATASET"),
         search_fn=search_fn,
     )
-    if not resolved:
-        log.warning("reviewarena.unresolved", note="dataset id is needs-measurement")
-        return BackfillStats(dataset_id="")
-
-    log.info("reviewarena.resolved", dataset_id=resolved)
+    chosen_splits = tuple(splits or DEFAULT_REVIEWARENA_SPLITS)
+    log.info(
+        "reviewarena.resolved",
+        dataset_id=resolved,
+        revision=revision,
+        splits=chosen_splits,
+    )
     stats = BackfillStats(dataset_id=resolved)
     async with (
         BronzeProducer(
@@ -487,33 +472,41 @@ async def run_backfill(
             bucket=cfg.minio_bronze_bucket,
         ) as minio,
     ):
-        for raw in stream_dataset(resolved, split=split, streaming_loader=streaming_loader):
-            stats.rows_seen += 1
-            view = _RowView.from_dict(raw)
-            try:
-                if await _emit_pdf(
-                    view=view,
-                    cfg=cfg,
-                    producer=producer,
-                    minio=minio,
-                    admission_producer=admission_producer,
-                ):
-                    stats.pdfs_emitted += 1
-            except Exception as exc:
-                log.warning("reviewarena.pdf_emit_failed", err=str(exc))
-                stats.skipped += 1
-            try:
-                if await _emit_review(
-                    view=view,
-                    cfg=cfg,
-                    producer=producer,
-                    minio=minio,
-                    admission_producer=admission_producer,
-                ):
-                    stats.reviews_emitted += 1
-            except Exception as exc:
-                log.warning("reviewarena.review_emit_failed", err=str(exc))
-                stats.skipped += 1
+        for split in chosen_splits:
+            for raw in stream_dataset(
+                resolved,
+                split=split,
+                revision=revision,
+                streaming_loader=streaming_loader,
+            ):
+                stats.rows_seen += 1
+                view = _RowView.from_dict(raw)
+                try:
+                    if await _emit_markdown(
+                        view=view,
+                        cfg=cfg,
+                        producer=producer,
+                        minio=minio,
+                        admission_producer=admission_producer,
+                    ):
+                        stats.papers_emitted += 1
+                except Exception as exc:
+                    log.warning("reviewarena.markdown_emit_failed", err=str(exc))
+                    stats.skipped += 1
+                try:
+                    if await _emit_review(
+                        view=view,
+                        cfg=cfg,
+                        producer=producer,
+                        minio=minio,
+                        admission_producer=admission_producer,
+                    ):
+                        stats.reviews_emitted += 1
+                except Exception as exc:
+                    log.warning("reviewarena.review_emit_failed", err=str(exc))
+                    stats.skipped += 1
+                if max_rows is not None and stats.rows_seen >= max_rows:
+                    break
             if max_rows is not None and stats.rows_seen >= max_rows:
                 break
     return stats
@@ -527,12 +520,27 @@ def main() -> None:
     max_rows_env = os.environ.get("S2P_BACKFILL_MAX_ROWS")
     max_rows = int(max_rows_env) if max_rows_env and max_rows_env.isdigit() else None
     dataset_id = os.environ.get("S2P_REVIEWARENA_DATASET") or None
-    stats = asyncio.run(run_backfill(cfg, dataset_id=dataset_id, max_rows=max_rows))
+    revision = os.environ.get("S2P_REVIEWARENA_REVISION", DEFAULT_REVIEWARENA_REVISION)
+    splits_env = os.environ.get("S2P_REVIEWARENA_SPLITS")
+    splits = (
+        tuple(value.strip() for value in splits_env.split(",") if value.strip())
+        if splits_env
+        else None
+    )
+    stats = asyncio.run(
+        run_backfill(
+            cfg,
+            dataset_id=dataset_id,
+            max_rows=max_rows,
+            revision=revision,
+            splits=splits,
+        )
+    )
     log.info(
         "openreview_backfill.done",
         dataset=stats.dataset_id,
         rows_seen=stats.rows_seen,
-        pdfs=stats.pdfs_emitted,
+        papers=stats.papers_emitted,
         reviews=stats.reviews_emitted,
         skipped=stats.skipped,
     )
