@@ -60,8 +60,10 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               mountPath: /var/lib/s2p-state
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -82,9 +84,11 @@ spec:
             name: {{ include "stream2pretrain.fullname" . }}-feeds
         - name: tmp
           emptyDir: {}
+        {{- if eq .Values.ingest.state.backend "pvc" }}
         - name: state
           persistentVolumeClaim:
             claimName: {{ $stateClaim | quote }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

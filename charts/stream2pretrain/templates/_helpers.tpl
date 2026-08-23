@@ -186,6 +186,12 @@ Iceberg + observability).
   value: {{ .Values.minio.buckets.decon | quote }}
 - name: MINIO_POSTTRAIN_BUCKET
   value: {{ .Values.minio.buckets.posttrain | quote }}
+- name: S2P_STATE_BACKEND
+  value: {{ .Values.ingest.state.backend | quote }}
+- name: S2P_STATE_BUCKET
+  value: {{ .Values.minio.buckets.state | quote }}
+- name: S2P_STATE_PREFIX
+  value: {{ .Values.ingest.state.prefix | quote }}
 - name: ICEBERG_CATALOG
   value: {{ .Values.iceberg.catalog | quote }}
 - name: ICEBERG_NAMESPACE
