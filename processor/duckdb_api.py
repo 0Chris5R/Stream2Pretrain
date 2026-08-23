@@ -85,7 +85,9 @@ class DuckDBQueryService:
             decisions_relation=decisions_relation,
             license_admissions_relation=license_admissions_relation,
             refresh_iceberg=True,
-            catalog_refresh_seconds=float(os.environ.get("S2P_DUCKDB_CATALOG_REFRESH_SECONDS", "30")),
+            catalog_refresh_seconds=float(
+                os.environ.get("S2P_DUCKDB_CATALOG_REFRESH_SECONDS", "30")
+            ),
             artifact_store=ScientificArtifactStore.from_env(),
         )
 
@@ -821,10 +823,7 @@ class DuckDBQueryService:
         """
         now = time.monotonic()
         refreshed_at = self._relation_refreshed_at.get(relation)
-        if (
-            refreshed_at is not None
-            and now - refreshed_at < self._catalog_refresh_seconds
-        ):
+        if refreshed_at is not None and now - refreshed_at < self._catalog_refresh_seconds:
             return
         if relation == self._license_admissions:
             _register_license_relation(self._conn, relation)
@@ -876,12 +875,8 @@ def _configure_runtime_limits(conn: DuckDBConnection) -> None:
     settings = {
         "memory_limit": os.environ.get("S2P_DUCKDB_MEMORY_LIMIT", "512MB"),
         "threads": os.environ.get("S2P_DUCKDB_THREADS", "1"),
-        "temp_directory": os.environ.get(
-            "S2P_DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb-spill"
-        ),
-        "max_temp_directory_size": os.environ.get(
-            "S2P_DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "3GB"
-        ),
+        "temp_directory": os.environ.get("S2P_DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb-spill"),
+        "max_temp_directory_size": os.environ.get("S2P_DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "3GB"),
     }
     os.makedirs(settings["temp_directory"], exist_ok=True)
     for key, value in settings.items():
