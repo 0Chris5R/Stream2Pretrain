@@ -142,7 +142,8 @@ def test_fetch_raw_bytes_rejects_oversized_stored_object(
     s3 = _FakeS3(b"x" * 64, gzip_encoded=False)
     state = _state(s3)
 
-    assert fetch_raw_bytes(state, bronze_record) == b""
+    with pytest.raises(ValueError, match="raw object exceeds the configured bound"):
+        fetch_raw_bytes(state, bronze_record)
 
 
 def test_fetch_raw_bytes_rejects_oversized_gzip_expansion(
@@ -153,7 +154,8 @@ def test_fetch_raw_bytes_rejects_oversized_gzip_expansion(
     s3 = _FakeS3(b"x" * 128)
     state = _state(s3)
 
-    assert fetch_raw_bytes(state, bronze_record) == b""
+    with pytest.raises(ValueError, match="expanded raw object exceeds the configured bound"):
+        fetch_raw_bytes(state, bronze_record)
 
 
 def test_normalize_returns_silver(bronze_record: BronzeRecord) -> None:
