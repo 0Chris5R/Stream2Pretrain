@@ -229,7 +229,7 @@ jobs:
             extra: kenlm-service
           - profile: fetcher
             repository: processor-base-fetcher
-            extra: runtime
+            extra: fetcher-service
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -405,7 +405,7 @@ jobs:
           pin_image quality_image "$(resolve_image quality processor-base-quality quality-service)"
           pin_image embedding_image "$(resolve_image embedding processor-base-embedding embedding-service)"
           pin_image kenlm_image "$(resolve_image kenlm processor-base-kenlm kenlm-service)"
-          pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher runtime)"
+          pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher fetcher-service)"
 
   build:
     name: Build ${{ matrix.image }}
@@ -477,8 +477,8 @@ jobs:
             inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-fetcher-model
             context: .
-            dockerfile: processor/Dockerfile.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
+            dockerfile: processor/Dockerfile.fetcher.app
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/source_policy.py
           - image: ui
             context: ui
             dockerfile: Dockerfile

@@ -27,6 +27,32 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The fetcher needs HTML/PDF extraction, MinHash, language identification, and
+# its small figure-classifier only. Keep Iceberg, seed loading, curation,
+# controller, and model-service dependencies out of this worker image.
+fetcher-service = [
+    "bytewax>=0.21",
+    "resiliparse>=0.14",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "pillow>=10.4",
+    "pytesseract>=0.3.13",
+    # fastlangid's bundled FastText wrapper still relies on NumPy 1.x
+    # ``copy=False`` semantics. NumPy 2 raises before real LID inference.
+    "numpy>=1.26,<2",
+    "fastlangid>=1.0",
+    "onnxruntime>=1.18",
+    "transformers>=4.40",
+    "tokenizers>=0.19",
+    "torch>=2.3,<3",
+    "torchvision>=0.18,<1",
+    "safetensors>=0.4",
+    "sentencepiece>=0.2",
+    "tiktoken>=0.7",
+    "datasketch>=1.6",
+    "rensa>=0.2",
+    "docling==2.114.0",
+]
 runtime = [
     # Local SourceFeed execution imports the shared MinIO/Kafka writers.
     # Keep this explicit so processor-only installs are complete as well.
