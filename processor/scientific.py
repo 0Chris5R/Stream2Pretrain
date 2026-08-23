@@ -261,6 +261,27 @@ class ScientificProcessor:
             warning=fallback_warning,
         )
 
+    def process_text(
+        self,
+        *,
+        doc_id: str,
+        source_url: str,
+        text: str,
+        title: str | None,
+        source_format: str,
+        extraction_pipeline: str,
+    ) -> ScientificProcessingResult:
+        """Structure scientific Markdown or LaTeX without treating it as HTML."""
+        document = extract_scientific_text(
+            doc_id=doc_id,
+            source_url=source_url,
+            text=text,
+            title=title,
+            source_format=source_format,
+            extraction_pipeline=extraction_pipeline,
+        )
+        return self._store_document(document=document, plain_text=text)
+
     def _process_pdf_docling(
         self,
         *,
@@ -822,6 +843,226 @@ def extract_scientific_html(
         figures=figures,
         citations=citations,
     )
+
+
+def extract_scientific_text(
+    *,
+    doc_id: str,
+    source_url: str,
+    text: str,
+    title: str | None,
+    source_format: str,
+    extraction_pipeline: str,
+) -> ScientificDocument:
+    """Build section-aware artifacts from native scientific Markdown or LaTeX."""
+    if source_format not in {"markdown", "latex"}:
+        raise ValueError(f"unsupported scientific text format: {source_format}")
+
+    author_metadata: list[str] = []
+    authors: list[str] = []
+    normalized = text
+    detected_title: str | None = None
+    if source_format == "latex":
+        title_match = re.search(r"\\title\s*\{([^{}]+)\}", normalized, re.DOTALL)
+        if title_match:
+            detected_title = _latex_plain(title_match.group(1)) or None
+        author_match = re.search(r"\\author\s*\{([^{}]+)\}", normalized, re.DOTALL)
+        if author_match:
+            raw_author = _clean(author_match.group(1))
+            if raw_author:
+                author_metadata = [raw_author[:32768]]
+                authors = [
+                    value
+                    for value in (
+                        _latex_plain(part) for part in re.split(r"\\and|\\\\|,", raw_author)
+                    )
+                    if value
+                ][:256]
+        normalized = _latex_to_heading_text(normalized)
+
+    blocks, markdown_title = _parse_heading_text(normalized)
+    resolved_title = markdown_title or detected_title or _clean(title or "") or None
+    sections = _scientific_text_sections(blocks)
+    abstract = next(
+        (section.text for section in sections if section.role == "abstract" and section.text),
+        None,
+    )
+    citations: list[ScientificCitation] = []
+    for section in sections:
+        if section.role != "references":
+            continue
+        for paragraph in section.paragraphs:
+            if paragraph.text:
+                citations.append(
+                    ScientificCitation(
+                        citation_id=f"bibliography-{len(citations) + 1}",
+                        text=paragraph.text,
+                    )
+                )
+    equations = _text_equations(text)
+    excluded = [section for section in sections if not section.include_in_training]
+    return ScientificDocument(
+        doc_id=doc_id,
+        source_url=source_url,
+        title=resolved_title,
+        authors=authors,
+        author_metadata=author_metadata,
+        abstract=abstract,
+        text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        extraction_pipeline=extraction_pipeline,
+        source_word_count=_word_count(text),
+        included_section_count=sum(1 for section in sections if section.include_in_training),
+        excluded_section_count=len(excluded),
+        excluded_sections=[
+            f"{section.title}: {section.exclusion_reason or 'policy'}" for section in excluded
+        ],
+        sections=sections,
+        equations=equations,
+        citations=citations,
+    )
+
+
+def _latex_to_heading_text(text: str) -> str:
+    """Expose LaTeX document structure as heading-delimited text."""
+    value = re.sub(r"(?m)(?<!\\)%.*$", "", text)
+    value = re.sub(r"\\title\s*\{[^{}]+\}", "", value, flags=re.DOTALL)
+    value = re.sub(r"\\author\s*\{[^{}]+\}", "", value, flags=re.DOTALL)
+    value = re.sub(r"\\begin\s*\{abstract\}", "\n## Abstract\n", value)
+    value = re.sub(r"\\end\s*\{abstract\}", "\n", value)
+    levels = {"section": 2, "subsection": 3, "subsubsection": 4, "paragraph": 5}
+
+    def heading(match: re.Match[str]) -> str:
+        command = match.group(1).lower()
+        return f"\n{'#' * levels[command]} {_latex_plain(match.group(2))}\n"
+
+    value = re.sub(
+        r"\\(section|subsection|subsubsection|paragraph)\*?\s*\{([^{}]+)\}",
+        heading,
+        value,
+    )
+    value = re.sub(r"\\(?:bibliography|printbibliography)\b[^\n]*", "\n## References\n", value)
+    value = re.sub(r"\\(?:documentclass|usepackage)(?:\[[^\]]*\])?\{[^{}]*\}", "", value)
+    value = re.sub(r"\\(?:begin|end)\s*\{document\}|\\maketitle\b", "", value)
+    return value
+
+
+def _latex_plain(value: str) -> str:
+    """Return bounded readable text for simple LaTeX metadata and headings."""
+    previous = value
+    for _ in range(4):
+        current = re.sub(r"\\[A-Za-z]+\*?(?:\[[^\]]*\])?\{([^{}]*)\}", r"\1", previous)
+        if current == previous:
+            break
+        previous = current
+    return _clean(re.sub(r"[{}]", "", previous.replace("~", " ")))
+
+
+def _parse_heading_text(text: str) -> tuple[list[tuple[int, str, list[str]]], str | None]:
+    """Parse ATX/Setext headings and blank-line-delimited paragraphs."""
+    blocks: list[tuple[int, str, list[str]]] = []
+    level = 2
+    heading_title = "Document body"
+    paragraphs: list[str] = []
+    paragraph_lines: list[str] = []
+    detected_title: str | None = None
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        value = "\n".join(paragraph_lines).strip()
+        if value:
+            paragraphs.append(value)
+        paragraph_lines = []
+
+    def flush_block() -> None:
+        nonlocal paragraphs
+        flush_paragraph()
+        if paragraphs:
+            blocks.append((level, heading_title, paragraphs))
+        paragraphs = []
+
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        raw = lines[index].rstrip()
+        stripped = raw.strip()
+        next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        atx = re.match(r"^(#{1,6})\s+(.+?)\s*#*$", stripped)
+        setext = bool(stripped and re.fullmatch(r"=+|-+", next_line))
+        if atx or setext:
+            flush_block()
+            new_level = len(atx.group(1)) if atx else (1 if next_line.startswith("=") else 2)
+            new_title = _clean(atx.group(2) if atx else stripped)
+            if new_level == 1 and detected_title is None and not blocks:
+                detected_title = new_title or None
+                heading_title = "Document body"
+                level = 2
+            else:
+                heading_title = new_title or f"Section {len(blocks) + 1}"
+                level = new_level
+            index += 2 if setext else 1
+            continue
+        if not stripped:
+            flush_paragraph()
+        else:
+            paragraph_lines.append(raw)
+        index += 1
+    flush_block()
+    return blocks, detected_title
+
+
+def _scientific_text_sections(
+    blocks: list[tuple[int, str, list[str]]],
+) -> list[ScientificSection]:
+    sections: list[ScientificSection] = []
+    for index, (level, title, paragraph_values) in enumerate(blocks):
+        role = _section_role(title)
+        if title == "Document body" and len(blocks) > 1:
+            role = "metadata"
+        reason = _section_exclusion_reason(role, title)
+        include = reason is None
+        paragraphs = [
+            ScientificParagraph(
+                paragraph_id=f"section-{index + 1}-paragraph-{paragraph_index + 1}",
+                text=value,
+                include_in_training=include,
+                exclusion_reason=reason,
+            )
+            for paragraph_index, value in enumerate(paragraph_values)
+            if value
+        ]
+        body = "\n\n".join(paragraph.text for paragraph in paragraphs)
+        sections.append(
+            ScientificSection(
+                section_id=f"section-{index + 1}",
+                level=max(1, min(level, 6)),
+                title=title,
+                text=body,
+                role=role,
+                include_in_training=include,
+                exclusion_reason=reason,
+                word_count=_word_count(body),
+                paragraphs=paragraphs,
+            )
+        )
+    return sections
+
+
+def _text_equations(text: str) -> list[ScientificEquation]:
+    values: list[str] = []
+    patterns = (
+        r"\$\$(.+?)\$\$",
+        r"\\\[(.+?)\\\]",
+        r"\\begin\{equation\*?\}(.+?)\\end\{equation\*?\}",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.DOTALL):
+            value = match.group(1).strip()
+            if value and value not in values:
+                values.append(value)
+    return [
+        ScientificEquation(equation_id=f"equation-{index + 1}", latex=value, display=True)
+        for index, value in enumerate(values[:128])
+    ]
 
 
 _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
