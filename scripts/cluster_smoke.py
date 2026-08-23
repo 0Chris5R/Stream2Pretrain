@@ -18,6 +18,53 @@ from confluent_kafka import Consumer, Producer, TopicPartition
 from ingest.common.license_admission import decide_license_admission
 from schemas.bronze import BronzeRecord
 
+_CANARY_SENTENCES = (
+    "The study evaluates a streaming system under a controlled and repeatable workload.",
+    "Each observation follows the same documented protocol and records its processing time.",
+    "The research question concerns reliable data movement across independent pipeline stages.",
+    "Measurements are collected at the input, transformation, classification, and storage layers.",
+    "A reproducible method allows later runs to be compared with the original experiment.",
+    "The analysis distinguishes temporary service delays from persistent processing failures.",
+    "Results are linked by a stable document identifier throughout the distributed workflow.",
+    "The source material uses ordinary technical prose and an explicitly permissive license.",
+    "Quality checks examine language, structure, duplication, privacy, and statistical typicality.",
+    "The experiment verifies that accepted records reach durable analytical storage.",
+    "A separate decision event explains why the document was accepted or rejected.",
+    "The evaluation preserves enough metadata to support an independent audit of every stage.",
+    "Researchers can repeat the procedure without relying on hidden manual intervention.",
+    "The system processes the sample with the same services used for production documents.",
+    "Structured headings identify the abstract, method, observations, and resulting conclusion.",
+    "The benchmark checks both message delivery and the semantic outcome of classification.",
+    "Consumer offsets are observed only after the corresponding record has been processed.",
+    "The method avoids assumptions about the amount of unrelated work already in the queue.",
+    "Storage verification confirms that the accepted text is available to downstream training jobs.",
+    "Operational metrics provide additional evidence about latency and resource utilization.",
+    "The controlled sample contains no personal information or restricted copyrighted material.",
+    "Failure is reported when any required stage omits the document within its bounded deadline.",
+    "The experiment therefore measures an end to end property rather than a shallow health check.",
+    "Independent consumers observe normalization, policy decisions, and curated output events.",
+    "The final record retains provenance needed to explain its origin and permitted purpose.",
+    "A successful run demonstrates that the deployed components agree on their shared schemas.",
+    "The procedure is intentionally small so it does not distort normal pipeline capacity.",
+    "Repeated trials vary their natural language evidence while preserving the same research goal.",
+    "The reported outcome includes timing information for diagnosing future regressions.",
+    "These observations support a clear conclusion about the readiness of the deployed release.",
+)
+
+
+def canary_body(probe_id: str) -> str:
+    """Return varied natural prose without injecting an out-of-vocabulary nonce.
+
+    The URL already makes every canary unique. Selecting a probe-specific subset
+    prevents MinHash collisions across releases while keeping the language valid
+    for the production KenLM typicality policy.
+    """
+    ranked = sorted(
+        _CANARY_SENTENCES,
+        key=lambda sentence: hashlib.sha256(f"{probe_id}:{sentence}".encode()).digest(),
+    )
+    return " ".join(ranked[:15])
+
 
 def required_env(name: str) -> str:
     value = os.environ.get(name)
@@ -114,13 +161,7 @@ def main() -> None:
     )
     if admission.decision.doc_id != doc_id:
         raise RuntimeError("smoke document identity differs from licence admission identity")
-    body = " ".join(
-        f"Experiment {probe_id}-{index} measures a distinct research signal with "
-        f"reproducible method {hashlib.sha256(f'{probe_id}-{index}'.encode()).hexdigest()[:12]}. "
-        "The observation records extraction, stateful routing, benchmark screening, "
-        "and durable lakehouse storage."
-        for index in range(24)
-    )
+    body = canary_body(probe_id)
     html = (
         "<!doctype html><html><head><title>Cluster smoke research paper.</title></head>"
         "<body><article><h1>Cluster smoke research paper.</h1><h2>Abstract.</h2><p>"
