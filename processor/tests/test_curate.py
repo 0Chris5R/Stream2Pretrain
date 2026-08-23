@@ -161,6 +161,7 @@ def test_scientific_curly_braces_are_a_visible_nonblocking_signal(
         silver = _silver(text, doc_id="sha256:" + "f" * 64).model_copy(
             update={
                 "scientific_artifact_s3_uri": "s3://silver/scientific/f/document.json",
+                "source_feed": "arxiv-html",
                 "model_text": text,
                 "segments": [
                     SilverSegment(
@@ -302,6 +303,77 @@ def test_curate_propagates_source_format_and_spdx(
         assert gold.license == "Apache-2.0"
         assert gold.spdx_license == "Apache-2.0"
         assert gold.spdx_license_source == "github_api"
+    finally:
+        state.close()
+
+
+def test_review_uses_peer_review_policy_even_for_openreview_feed(
+    cfg: ProcessorConfig,
+) -> None:
+    state = build_state(cfg)
+    try:
+        text = " ".join(
+            [
+                "The method has a clear strength because the evaluation compares robust baselines.",
+                "However, the evidence leaves a reproducibility concern and a limitation.",
+                "I suggest the authors report variance and clarify the dataset split.",
+            ]
+            * 4
+        )
+        silver = _silver(text, doc_id="sha256:" + "9" * 64).model_copy(
+            update={
+                "source_format": "review",
+                "source_feed": "openreview-live",
+                # Legacy versions incorrectly created scientific artifacts for
+                # every HTML-like source. Format must still win on replay.
+                "scientific_artifact_s3_uri": "s3://silver/legacy/document.json",
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert gold.classifier_revision == "peer-review-quality-rules-v1"
+        assert gold.segment_scores[0].finepdfs_edu_score is None
+        assert gold.segment_scores[0].fineweb_edu_score is None
+        assert "peer_review" in gold.content_tags
+        assert gold.route == "posttrain_candidate"
+    finally:
+        state.close()
+
+
+def test_metadata_uses_structured_policy_not_web_classifier(cfg: ProcessorConfig) -> None:
+    state = build_state(cfg)
+    try:
+        text = (
+            "model release version 2 benchmark evaluation dataset license Apache 2.0 "
+            "training architecture results repository 2026 task paper abstract"
+        )
+        silver = _silver(text, doc_id="sha256:" + "0" * 64).model_copy(
+            update={"source_format": "metadata", "source_feed": "hf-models"}
+        )
+
+        gold = curate_one(state, silver)
+
+        assert gold.classifier_revision == "metadata-quality-rules-v1"
+        assert gold.segment_scores[0].finepdfs_edu_score is None
+        assert gold.segment_scores[0].fineweb_edu_score is None
+        assert "structured_metadata" in gold.content_tags
+        assert "insufficient_body" not in gold.reject_reasons
+    finally:
+        state.close()
+
+
+def test_short_web_page_is_quarantined_instead_of_retried(cfg: ProcessorConfig) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver("brief page", doc_id="sha256:" + "b" * 64).model_copy(
+            update={"source_format": "html", "source_feed": "rss-openai-news"}
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "insufficient_body" in gold.reject_reasons
+        assert gold.route == "quarantine"
     finally:
         state.close()
 

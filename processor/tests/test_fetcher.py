@@ -17,6 +17,7 @@ from processor.fetcher import (
     process_bronze_payload,
     run_native_fetcher,
     serialize_for_kafka,
+    uses_scientific_extraction,
 )
 from processor.operators.extract import ResiliparseExtractor
 from processor.operators.langid import LangIdentifier
@@ -64,6 +65,32 @@ def test_fetch_raw_bytes_decompresses_gzip(bronze_record: BronzeRecord) -> None:
     raw = fetch_raw_bytes(state, bronze_record)
     assert b"hello world" in raw
     assert s3.calls and s3.calls[0][0] == "bronze"
+
+
+def test_scientific_extraction_is_source_aware(bronze_record: BronzeRecord) -> None:
+    blog = bronze_record.model_copy(
+        update={
+            "source_format": "html",
+            "source_feed": "rss-openai-news",
+            "extraction_pipeline": "resiliparse-html-v1",
+        }
+    )
+    paper = blog.model_copy(
+        update={
+            "source_feed": "arxiv-html",
+            "extraction_pipeline": "arxiv-html-2026-06",
+        }
+    )
+    review = blog.model_copy(
+        update={
+            "source_format": "review",
+            "source_feed": "openreview-live",
+        }
+    )
+
+    assert uses_scientific_extraction(blog) is False
+    assert uses_scientific_extraction(paper) is True
+    assert uses_scientific_extraction(review) is False
 
 
 def test_fetch_raw_bytes_rejects_oversized_stored_object(
