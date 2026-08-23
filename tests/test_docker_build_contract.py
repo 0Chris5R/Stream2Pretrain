@@ -146,6 +146,14 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}" in workflow
     assert "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}" in workflow
     assert "minimum_rootfs_available=$((6 * 1024 * 1024 * 1024))" in workflow
+    assert "Existing unschedulable Pods will be reconciled by this release" in workflow
+    unschedulable_gate = workflow[
+        workflow.index('if [[ -n "$unschedulable_pods" ]]') : workflow.index(
+            'worker_nodes="$(', workflow.index('if [[ -n "$unschedulable_pods" ]]')
+        )
+    ]
+    assert "report_deploy_failure" not in unschedulable_gate
+    assert "exit 1" not in unschedulable_gate
     assert 'contains "@sha256:" .image' in helper
     assert 'printf "%s/%s" $ctx.Values.image.registry .image' in helper
 
