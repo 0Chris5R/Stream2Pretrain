@@ -34,8 +34,8 @@ import boto3
 import orjson
 from botocore.exceptions import BotoCoreError, ClientError
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer, TopicPartition
-from defusedxml import ElementTree as DefusedElementTree
-from defusedxml.common import DefusedXmlException
+from defusedxml import ElementTree as DefusedElementTree  # type: ignore[import-untyped]
+from defusedxml.common import DefusedXmlException  # type: ignore[import-untyped]
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
@@ -162,18 +162,18 @@ def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
             text = payload.decode("utf-8", errors="replace").strip()
             return text, None
 
-        title: str | None = None
-        strings: list[str] = []
+        xml_title: str | None = None
+        xml_strings: list[str] = []
         for element in root.iter():
             local_name = str(element.tag).rsplit("}", 1)[-1].lower()
             value = " ".join(part.strip() for part in element.itertext() if part.strip())
             if not value:
                 continue
-            if title is None and local_name == "title":
-                title = value
+            if xml_title is None and local_name == "title":
+                xml_title = value
             if len(element) == 0 and not value.startswith(("http://", "https://")):
-                strings.append(value)
-        return "\n".join(dict.fromkeys(strings)).strip(), title
+                xml_strings.append(value)
+        return "\n".join(dict.fromkeys(xml_strings)).strip(), xml_title
 
     title: str | None = None
     if isinstance(value, dict):

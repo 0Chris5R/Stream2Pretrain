@@ -32,6 +32,9 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from typing import cast
+
+from schemas.decon import BenchmarkName
 
 EXIT_OK = 0
 EXIT_DRIFT = 1
@@ -114,12 +117,17 @@ def _fetch_attestation(
             msg = consumer.poll(timeout=1.0)
             if msg is None or msg.error():
                 continue
+            value = msg.value()
+            if value is None:
+                continue
             try:
-                payload = json.loads(msg.value())
+                payload = json.loads(value)
             except (TypeError, ValueError):
                 continue
+            if not isinstance(payload, dict):
+                continue
             if int(payload.get("snapshot_id", -1)) == snapshot_id:
-                return payload
+                return cast(dict[str, object], payload)
         return None
     finally:
         consumer.close()
@@ -202,8 +210,11 @@ def _replay_decon(
             msg = consumer.poll(timeout=1.0)
             if msg is None or msg.error():
                 continue
+            value = msg.value()
+            if value is None:
+                continue
             try:
-                rec = common.gold_loads(msg.value())
+                rec = common.gold_loads(value)
             except Exception:
                 continue
             try:
@@ -217,7 +228,7 @@ def _replay_decon(
     return hits
 
 
-def _load_benchmark_corpus(path: str | None) -> dict[str, list[str]] | None:
+def _load_benchmark_corpus(path: str | None) -> dict[BenchmarkName, list[str]] | None:
     """Read benchmark prompts from a JSON file mapping benchmark -> prompts."""
     if not path:
         return None
@@ -232,7 +243,15 @@ def _load_benchmark_corpus(path: str | None) -> dict[str, list[str]] | None:
         return None
     if not isinstance(data, dict):
         return None
-    return {str(k): list(v) for k, v in data.items()}
+    supported: frozenset[str] = frozenset({"MMLU", "GSM8K", "HumanEval", "MATH", "GPQA"})
+    corpus: dict[BenchmarkName, list[str]] = {}
+    for key, prompts in data.items():
+        if key not in supported or not isinstance(prompts, list):
+            return None
+        if not all(isinstance(prompt, str) and prompt.strip() for prompt in prompts):
+            return None
+        corpus[cast(BenchmarkName, key)] = prompts
+    return corpus or None
 
 
 def main(argv: list[str]) -> int:

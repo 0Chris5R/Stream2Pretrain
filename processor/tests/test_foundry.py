@@ -1168,7 +1168,12 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
         finish_daily_run=lambda *_args, **_kwargs: calls.append("daily-finished"),
     )
     runtime._run_manual_snapshot = lambda _run, _log: calls.append("manual")
-    runtime._drain_one = lambda **_kwargs: calls.append("daily") or {"status": "queue_empty"}
+
+    def drain_one(**_kwargs: object) -> dict[str, str]:
+        calls.append("daily")
+        return {"status": "queue_empty"}
+
+    runtime._drain_one = drain_one
 
     runtime._run_daily_snapshot(
         FIXED_TIME.date(),
@@ -1264,7 +1269,9 @@ def test_artifact_human_audits_are_append_only_and_latest_is_inspectable(tmp_pat
     assert [value["audit_id"] for value in history] == [second.audit_id, first.audit_id]
     assert history[1]["decision"] == "approved"
     assert store.artifacts()[0]["human_audit"]["audit_id"] == second.audit_id
-    assert store.artifact("artifact")["human_audit"]["audit_id"] == second.audit_id
+    artifact = store.artifact("artifact")
+    assert artifact is not None
+    assert artifact["human_audit"]["audit_id"] == second.audit_id
     assert store.dashboard()["human_audits"] == {"rejected": 1}
 
 
