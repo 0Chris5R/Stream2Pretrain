@@ -85,7 +85,10 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     )
     assert "$curatorComponent" not in model_service_template[required_index:preferred_index]
     assert "$curatorComponent" in model_service_template[preferred_index:]
-    assert "maxSurge: 0" in model_service_template
+    assert "type: Recreate" in model_service_template
+    assert "maxSurge:" not in model_service_template
+    assert "from docling.document_converter import DocumentConverter" in dockerfile
+    assert "hasattr(torch.ops.torchvision, 'nms')" in dockerfile
     assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 2
 
 
@@ -157,6 +160,18 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "exit 1" not in unschedulable_gate
     assert 'contains "@sha256:" .image' in helper
     assert 'printf "%s/%s" $ctx.Values.image.registry .image' in helper
+    assert 'delete "horizontalpodautoscaler/$model"' in workflow
+    assert 'scale "deployment/$model" --replicas=1' in workflow
+    assert "--field-selector=status.phase=Failed" in workflow
+
+
+def test_fetcher_uses_matching_official_cpu_vision_wheels() -> None:
+    processor_project = (ROOT / "processor" / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+
+    assert '"torchvision>=0.18,<1"' in processor_project
+    assert 'name = "torchvision"\nversion = "0.28.0+cpu"' in lock
+    assert 'source = { registry = "https://download.pytorch.org/whl/cpu" }' in lock
 
 
 def test_scaled_zero_curator_cutover_uses_a_non_processing_pvc_helper() -> None:

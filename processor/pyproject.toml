@@ -50,6 +50,10 @@ runtime = [
     "transformers>=4.40",
     "tokenizers>=0.19",
     "torch>=2.3,<3",
+    # Keep Torchvision as a direct dependency so uv applies the workspace's
+    # official PyTorch CPU index override. Docling imports its compiled vision
+    # operators and cannot use the generic PyPI wheel beside torch+cpu.
+    "torchvision>=0.18,<1",
     "safetensors>=0.4",
     "sentencepiece>=0.2",
     "tiktoken>=0.7",
@@ -113,6 +117,7 @@ local = [
     "transformers>=4.40,<5",
     "tokenizers>=0.19",
     "torch>=2.3,<3",
+    "torchvision>=0.18,<1",
     "safetensors>=0.4",
     "sentencepiece>=0.2",
     "kenlm>=0.2",

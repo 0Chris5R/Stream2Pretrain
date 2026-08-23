@@ -2078,6 +2078,22 @@ jobs:
             echo "GHCR_PULL_TOKEN is empty. The published images must be public."
           fi
 
+          # HPAs can preserve multiple old multi-GiB model Pods while Helm is
+          # replacing their images. Quiesce each stateless service at one Pod,
+          # remove failed/evicted remnants, and let Helm recreate the HPAs only
+          # after the replacement-style Deployment specifications are applied.
+          for profile in quality embedding kenlm; do
+            model="stream2pretrain-processor-model-service-${profile}"
+            kubectl -n stream2pretrain delete "horizontalpodautoscaler/$model" \
+              --ignore-not-found --wait=true
+            if kubectl -n stream2pretrain get "deployment/$model" >/dev/null 2>&1; then
+              kubectl -n stream2pretrain scale "deployment/$model" --replicas=1
+            fi
+          done
+          kubectl -n stream2pretrain delete pod \
+            --field-selector=status.phase=Failed \
+            --ignore-not-found --wait=true
+
           # A single-replica StatefulSet cannot replace a crash-looping Pod
           # during a wait-based Helm upgrade: the unhealthy old Pod keeps the
           # rollout blocked until Helm times out. If Foundry is already down,

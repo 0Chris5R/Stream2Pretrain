@@ -160,10 +160,10 @@ histograms, and safe read-only query routes. The Next.js App Router app exposes:
 
 ### Cross-cutting
 
-- **Autoscaling**: KEDA scales independently committing ingest workers and
-  stateless model services. Core Bytewax flows use durable recovery and
-  coordinated stop-and-start rescaling; ordinary broker-lag KEDA is not safe
-  for their source progress.
+- **Autoscaling**: KEDA scales independently committing ingest workers, while
+  CPU HPA scales stateless model services. Core Bytewax flows use durable
+  recovery and coordinated stop-and-start rescaling; ordinary broker-lag KEDA
+  is not safe for their source progress.
 - **Observability**: kube-prometheus-stack scrapes every `/metrics`, Loki
   picks up structured logs, Tempo records OTel traces. The pollers, fulltext
   fetchers, curator, and Iceberg writer all emit a `trace_id` that is stored

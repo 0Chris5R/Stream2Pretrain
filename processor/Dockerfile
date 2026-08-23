@@ -220,7 +220,8 @@ RUN case "${S2P_MODEL_PROFILE}" in \
       fetcher) \
         test -s /opt/models/figure-classifier/model.onnx; \
         find /opt/models/docling -type f -size +0c -print -quit | grep -q .; \
-        find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q . ;; \
+        find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q .; \
+        python -c "import torch, torchvision; from docling.document_converter import DocumentConverter; from transformers import AutoProcessor; assert hasattr(torch.ops.torchvision, 'nms'); assert DocumentConverter and AutoProcessor" ;; \
       all) \
         test -s /opt/models/finepdfs-edu-v2/model.safetensors; \
         test -s /opt/models/fineweb-edu/model.safetensors; \
