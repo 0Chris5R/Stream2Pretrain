@@ -151,7 +151,11 @@ class _LicenseAdmissionsConnection:
         self.calls.append((sql, params))
         if "GROUP BY status" in sql:
             self.description = [("status",), ("count",)]
-            self.rows = [("admitted", 4), ("quarantined", 6)]
+            self.rows = [
+                ("admitted", 4),
+                ("posttrain_transform_only", 3),
+                ("quarantined", 6),
+            ]
         elif "GROUP BY license_id, status" in sql:
             self.description = [("license_id",), ("status",), ("count",)]
             self.rows = [("CC-BY-4.0", "admitted", 4), ("unknown", "quarantined", 6)]
@@ -187,10 +191,11 @@ class _LicenseAdmissionsConnection:
                 ("source_feed",),
                 ("documents",),
                 ("admitted",),
+                ("posttrain_transform_only",),
                 ("quarantined",),
                 ("last_observed_at",),
             ]
-            self.rows = [("rss-arxiv-cs-ai", 3, 2, 1, "2026-08-22 12:00:00")]
+            self.rows = [("rss-arxiv-cs-ai", 4, 2, 1, 1, "2026-08-22 12:00:00")]
         else:
             raise AssertionError(f"unexpected SQL: {sql}")
         return self
@@ -206,13 +211,15 @@ def test_license_admissions_exposes_durable_24h_source_activity() -> None:
     activity = service.source_activity(window_hours=24)
 
     assert admissions["admitted"] == 4
+    assert admissions["posttrain_transform_only"] == 3
     assert admissions["quarantined"] == 6
     assert activity["window_hours"] == 24
     assert activity["sources"] == [
         {
             "source_feed": "rss-arxiv-cs-ai",
-            "documents": 3,
+            "documents": 4,
             "admitted": 2,
+            "posttrain_transform_only": 1,
             "quarantined": 1,
             "last_observed_at": "2026-08-22 12:00:00",
         }

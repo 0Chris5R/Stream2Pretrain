@@ -106,12 +106,13 @@ until the target report includes:
 
 Only update topic partition defaults after those four values are recorded.
 
-For the Bytewax fetcher, curator, and Iceberg writer, measure throughput from
-the `s2p_*_total` Prometheus counters and the durable checkpoint frontier.
-`rpk group describe` is intentionally not a lag source for these stages,
-because Bytewax stores offsets in its recovery database rather than committing
-them to the broker. Partition count, Bytewax worker count, recovery partition
-count, and CPU allocation must be changed and validated together.
+For the fetcher, record `rpk group describe s2p-fetcher`, KEDA replica count,
+drain rate, output-delivery failures, and per-Pod CPU/memory. Its broker commits
+are the scaling frontier. For curator and Iceberg writer, use the
+`s2p_*_total` Prometheus counters and durable checkpoint frontier; their
+Bytewax groups intentionally do not expose useful broker lag. Partition count,
+Bytewax worker count, recovery partition count, and CPU allocation for those
+stateful stages must be changed and validated together.
 
 ## MinIO Throughput Decision
 

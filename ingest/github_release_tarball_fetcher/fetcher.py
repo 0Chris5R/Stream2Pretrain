@@ -56,7 +56,7 @@ from ingest.github_release_tarball_fetcher.extractor import (
     ExtractedFile,
     iter_tarball_files,
 )
-from schemas.bronze import BronzeRecord
+from schemas.bronze import BronzeRecord, TrainingUsage
 
 if TYPE_CHECKING:
     from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
@@ -321,7 +321,9 @@ async def process_release(
     )
     if admission_producer is not None:
         await admission_producer.send(admission.decision)
-    if not admission.admitted or spdx not in fetcher_cfg.allowed_licenses:
+    if not admission.fetch_allowed or (
+        admission.admitted and spdx not in fetcher_cfg.allowed_licenses
+    ):
         log.info(
             "tarball.skip_license",
             repo=ref.full_name,
@@ -348,6 +350,7 @@ async def process_release(
                 extracted,
                 ref=ref,
                 spdx=spdx,
+                training_usage=admission.training_usage,
                 cfg=cfg,
                 minio=minio,
                 producer=producer,
@@ -378,7 +381,8 @@ async def _emit_one_file(
     extracted: ExtractedFile,
     *,
     ref: ReleaseRef,
-    spdx: str,
+    spdx: str | None,
+    training_usage: TrainingUsage,
     cfg: IngestConfig,
     minio: MinioWriter,
     producer: BronzeProducerProtocol,
@@ -419,7 +423,8 @@ async def _emit_one_file(
         source_format="code",
         extraction_pipeline="github-release-tarball-2026-06",
         spdx_license=spdx,
-        spdx_license_source="github_api",
+        spdx_license_source="github_api" if spdx else "unknown",
+        training_usage=training_usage,
     )
     await producer.send(
         record,

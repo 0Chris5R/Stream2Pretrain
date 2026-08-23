@@ -77,7 +77,7 @@ async def _emit_payload(
     )
     if admission_producer is not None:
         await admission_producer.send(admission.decision)
-    if not admission.admitted:
+    if not admission.fetch_allowed:
         return False
     doc_id = doc_id_for_url(url)
     fetched_at = datetime.now(tz=UTC)
@@ -117,6 +117,7 @@ async def _emit_payload(
         extraction_pipeline="hf-api-json-v1",
         spdx_license=admission.license_id,
         spdx_license_source=license_source if license_value else "unknown",  # type: ignore[arg-type]
+        training_usage=admission.training_usage,
     )
     await producer.send(record)
     return True

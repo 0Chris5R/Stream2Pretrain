@@ -58,6 +58,9 @@ export const SourceFeedStatusSchema = z.object({
   last_attempt_at: z.string().nullable(),
   last_error: z.string().nullable(),
   documents_24h: z.number().int().nonnegative().default(0),
+  pretrain_documents_24h: z.number().int().nonnegative().default(0),
+  posttrain_only_documents_24h: z.number().int().nonnegative().default(0),
+  quarantined_documents_24h: z.number().int().nonnegative().default(0),
   error_rate_24h: z.number().min(0).max(1).default(0),
   poll_state: z.enum(['idle', 'polling', 'cooldown', 'error']),
 });

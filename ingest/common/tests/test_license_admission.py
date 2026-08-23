@@ -12,7 +12,7 @@ def test_normalizes_creative_commons_url() -> None:
     assert normalize_license("https://creativecommons.org/licenses/by/4.0/") == "CC-BY-4.0"
 
 
-def test_unknown_license_is_quarantined_with_provenance() -> None:
+def test_unknown_license_is_posttrain_transform_only_with_provenance() -> None:
     for value in (None, ""):
         result = decide_license_admission(
             source_url="https://arxiv.org/abs/2608.00001",
@@ -21,12 +21,15 @@ def test_unknown_license_is_quarantined_with_provenance() -> None:
             license_source="rss_entry",
         )
         assert result.admitted is False
+        assert result.fetch_allowed is True
+        assert result.decision.status == "posttrain_transform_only"
+        assert result.training_usage == "posttrain_transform_only"
         assert result.license_id == "unknown"
-        assert "machine-readable licence is missing" in result.decision.reason
+        assert "verbatim pretraining" in result.decision.reason
         assert result.decision.content_fetch_started is False
 
 
-def test_unknown_code_and_explicitly_disallowed_licenses_are_quarantined() -> None:
+def test_unknown_code_is_transform_only_and_restrictive_license_is_quarantined() -> None:
     unknown_code = decide_license_admission(
         source_url="https://github.com/example/repo/releases/tag/v1",
         source_feed="github-release-tarball",
@@ -35,8 +38,9 @@ def test_unknown_code_and_explicitly_disallowed_licenses_are_quarantined() -> No
         source_format="code",
     )
     assert unknown_code.admitted is False
+    assert unknown_code.fetch_allowed is True
 
-    for value in ("CC-BY-NC-4.0", "arxiv-non-exclusive-distribution"):
+    for value in ("CC-BY-NC-4.0",):
         result = decide_license_admission(
             source_url="https://arxiv.org/abs/2608.00001",
             source_feed="arxiv-cs-ai",
@@ -44,6 +48,16 @@ def test_unknown_code_and_explicitly_disallowed_licenses_are_quarantined() -> No
             license_source="rss_entry",
         )
         assert result.admitted is False
+        assert result.fetch_allowed is False
+
+    arxiv = decide_license_admission(
+        source_url="https://arxiv.org/abs/2608.00001",
+        source_feed="arxiv-cs-ai",
+        license_value="arxiv-non-exclusive-distribution",
+        license_source="rss_entry",
+    )
+    assert arxiv.decision.status == "posttrain_transform_only"
+    assert arxiv.fetch_allowed is True
 
 
 def test_dataset_wrapper_does_not_admit_document_content() -> None:
@@ -54,8 +68,8 @@ def test_dataset_wrapper_does_not_admit_document_content() -> None:
         license_value="ODC-By-1.0",
         license_source="dataset_metadata",
     )
-    assert result.decision.status == "quarantined"
-    assert "not on the training allowlist" in result.decision.reason
+    assert result.decision.status == "posttrain_transform_only"
+    assert result.fetch_allowed is True
 
 
 def test_per_record_license_beats_explicit_feed_default() -> None:

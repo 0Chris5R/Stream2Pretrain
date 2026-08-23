@@ -30,7 +30,10 @@ from dataclasses import dataclass
 from datetime import UTC
 from typing import Any, cast
 
-from ingest.common.license_admission import is_training_permitted
+from ingest.common.license_admission import (
+    is_posttrain_transform_permitted,
+    is_training_permitted,
+)
 from processor import common
 from processor.decision_cache import DecisionCache
 from processor.decon_gate import DeconGate, _EmbeddingSketch  # type: ignore[attr-defined]
@@ -45,6 +48,7 @@ from processor.operators.pii import PiiScanner
 from processor.operators.quality import QualityClassifier
 from processor.probes import start_probe_server
 from processor.scientific_policy import (
+    RouteDecision,
     aggregate_segment_scores,
     composite_quality_score,
     representative_segments,
@@ -434,6 +438,18 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         reject_reasons=list(reject),
         reasoning_score=structure.reasoning_score,
     )
+    if silver.training_usage == "posttrain_transform_only" and route.route not in {
+        "quarantine",
+        "retry",
+    }:
+        route = RouteDecision(
+            route="posttrain_candidate",
+            eligible_routes=["posttrain_candidate"],
+            reasons=[
+                "source is restricted to derived post-training generation; "
+                "verbatim pretraining export is forbidden"
+            ],
+        )
     risk = _risk_from_reject(reject, pii_flags)
     license_id = silver.spdx_license or "unknown"
     token_count = state.tokenizer.count(text)
@@ -608,7 +624,11 @@ def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFla
 
 
 def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
-    """Apply the fail-closed licence policy to legacy and replay rows."""
+    """Apply the purpose-aware licence policy to legacy and replay rows."""
+    if silver.training_usage == "posttrain_transform_only" and is_posttrain_transform_permitted(
+        silver.spdx_license
+    ):
+        return None
     return (
         None
         if is_training_permitted(silver.spdx_license, source_format=silver.source_format)

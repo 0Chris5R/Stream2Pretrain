@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from schemas.bronze import DocId, TraceId
 
-LicenseAdmissionStatus = Literal["admitted", "quarantined"]
+LicenseAdmissionStatus = Literal["admitted", "posttrain_transform_only", "quarantined"]
 
 
 class LicenseAdmissionDecision(BaseModel):

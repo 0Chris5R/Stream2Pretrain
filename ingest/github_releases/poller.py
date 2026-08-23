@@ -28,7 +28,8 @@ import httpx
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
@@ -78,6 +79,7 @@ async def poll_repo(
     minio: MinioWriter,
     state_store: FeedStateStore,
     bucket: TokenBucket,
+    admission_producer: LicenseAdmissionProducer | None = None,
 ) -> int:
     """One pass over one repo's releases.atom feed."""
     state_key = f"{SOURCE_FEED}:{owner_repo.replace('/', '_')}"
@@ -111,6 +113,17 @@ async def poll_repo(
         if doc_id in seen:
             continue
         seen.add(doc_id)
+        admission = decide_license_admission(
+            source_url=link,
+            source_feed=SOURCE_FEED,
+            license_value=None,
+            license_source="unknown",
+            source_format="metadata",
+        )
+        if admission_producer is not None:
+            await admission_producer.send(admission.decision)
+        if not admission.fetch_allowed:
+            continue
         fetched_at = datetime.now(tz=UTC)
         payload = _entry_xml(entry)
         key = bronze_object_key(
@@ -144,8 +157,13 @@ async def poll_repo(
                 extension="release.atom.xml.gz",
             ),
             source_feed=SOURCE_FEED,
-            trace_id=_trace_id(),
+            trace_id=admission.decision.trace_id,
             bytes_size=stored,
+            source_format="metadata",
+            extraction_pipeline="github-releases-atom-v1",
+            spdx_license=admission.license_id,
+            spdx_license_source="unknown",
+            training_usage=admission.training_usage,
         )
         await producer.send(record, headers={"github_repo": owner_repo})
         emitted += 1
@@ -175,6 +193,11 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-releases"
         ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-github-releases-license-admission",
+        ) as admission_producer,
         MinioWriter(
             cfg.minio_endpoint,
             cfg.minio_access_key,
@@ -192,6 +215,7 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
                     minio=minio,
                     state_store=store,
                     bucket=bucket,
+                    admission_producer=admission_producer,
                 )
             except Exception as exc:
                 log.exception("releases.repo_error", repo=repo, err=str(exc))

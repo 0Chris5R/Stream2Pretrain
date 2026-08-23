@@ -266,13 +266,15 @@ topic_exists() {
 ensure_topics() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local topic
-  for topic in raw.fetched docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
+  for topic in raw.fetched raw.smoke docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
     if ! topic_exists "$topic"; then
+      local retention_ms=604800000
+      [[ "$topic" == "raw.smoke" ]] && retention_ms=86400000
       kubectl -n redpanda exec redpanda-0 -c redpanda -- \
         rpk topic create "$topic" \
           --partitions 1 \
           --replicas 1 \
-          --topic-config retention.ms=604800000 \
+          --topic-config "retention.ms=$retention_ms" \
           --topic-config cleanup.policy=delete \
           --topic-config max.message.bytes=2097152
     fi
@@ -283,7 +285,7 @@ required_topics() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local missing=0
   local topic
-  for topic in raw.fetched docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
+  for topic in raw.fetched raw.smoke docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
     if ! topic_exists "$topic"; then
       printf 'Missing required Redpanda topic: %s\n' "$topic" >&2
       missing=1

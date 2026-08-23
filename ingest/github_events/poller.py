@@ -31,7 +31,8 @@ import httpx
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer
+from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
+from ingest.common.license_admission import decide_license_admission
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.metrics import INGEST_METRICS
 from ingest.common.minio_writer import MinioWriter
@@ -86,6 +87,7 @@ async def _process_events(
     minio: MinioWriter,
     cfg: IngestConfig,
     seen: set[str],
+    admission_producer: LicenseAdmissionProducer | None = None,
     ai_org_filter: frozenset[str] = frozenset(),
 ) -> int:
     emitted = 0
@@ -106,6 +108,17 @@ async def _process_events(
         if doc_id in seen:
             continue
         seen.add(doc_id)
+        admission = decide_license_admission(
+            source_url=url,
+            source_feed=SOURCE_FEED,
+            license_value=None,
+            license_source="unknown",
+            source_format="metadata",
+        )
+        if admission_producer is not None:
+            await admission_producer.send(admission.decision)
+        if not admission.fetch_allowed:
+            continue
         fetched_at = datetime.now(tz=UTC)
         body = json.dumps(evt, sort_keys=True).encode("utf-8")
         key = bronze_object_key(
@@ -140,8 +153,13 @@ async def _process_events(
                 extension="event.json.gz",
             ),
             source_feed=SOURCE_FEED,
-            trace_id=_trace_id(),
+            trace_id=admission.decision.trace_id,
             bytes_size=stored,
+            source_format="metadata",
+            extraction_pipeline="github-events-api-json-v1",
+            spdx_license=admission.license_id,
+            spdx_license_source="unknown",
+            training_usage=admission.training_usage,
         )
         await producer.send(record, headers={"github_event_type": str(evt.get("type", ""))})
         emitted += 1
@@ -210,6 +228,11 @@ async def run_loop(
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-events"
         ) as producer,
+        LicenseAdmissionProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.license_admissions_topic,
+            client_id="s2p-github-events-license-admission",
+        ) as admission_producer,
         MinioWriter(
             cfg.minio_endpoint,
             cfg.minio_access_key,
@@ -251,6 +274,7 @@ async def run_loop(
                         minio=minio,
                         cfg=cfg,
                         seen=seen,
+                        admission_producer=admission_producer,
                         ai_org_filter=ai_org_filter,
                     )
                     total_emitted += emitted

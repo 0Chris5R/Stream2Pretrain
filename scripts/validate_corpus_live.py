@@ -17,7 +17,10 @@ import urllib.request
 from datetime import UTC, datetime
 from typing import Any
 
-from ingest.common.license_admission import PERMISSIVE_TRAINING_LICENSES
+from ingest.common.license_admission import (
+    PERMISSIVE_TRAINING_LICENSES,
+    POSTTRAIN_TRANSFORM_LICENSES,
+)
 
 DEFAULT_BASE_URL = "http://[::1]:8090"
 _NON_PRODUCTION_SOURCE_MARKERS = ("cluster-smoke", "fixture", "local-", "test-")
@@ -47,19 +50,23 @@ def _integer(value: Any, field: str) -> int:
 
 
 def validate_license_admissions(payload: dict[str, Any]) -> None:
-    """Require both sides of the strict pre-fetch licence gate."""
+    """Require pretraining admission plus transform-only grey-source evidence."""
     admitted = _integer(payload.get("admitted"), "license-admissions.admitted")
-    quarantined = _integer(payload.get("quarantined"), "license-admissions.quarantined")
+    transform_only = _integer(
+        payload.get("posttrain_transform_only"),
+        "license-admissions.posttrain_transform_only",
+    )
+    _integer(payload.get("quarantined"), "license-admissions.quarantined")
     if admitted == 0:
         raise ValidationError("the live licence gate has admitted no documents")
-    if quarantined == 0:
-        raise ValidationError("the live licence gate has quarantined no documents")
+    if transform_only == 0:
+        raise ValidationError("the live licence gate has no posttrain-transform-only documents")
 
     by_license = payload.get("by_license")
     if not isinstance(by_license, list) or not by_license:
         raise ValidationError("the live licence ledger has no per-licence rows")
     permitted_seen = False
-    rejected_seen = False
+    transform_seen = False
     for row in by_license:
         if not isinstance(row, dict):
             continue
@@ -70,12 +77,12 @@ def validate_license_admissions(payload: dict[str, Any]) -> None:
         status = row.get("status")
         if status == "admitted" and license_id in PERMISSIVE_TRAINING_LICENSES:
             permitted_seen = True
-        if status == "quarantined" and license_id not in PERMISSIVE_TRAINING_LICENSES:
-            rejected_seen = True
+        if status == "posttrain_transform_only" and license_id in POSTTRAIN_TRANSFORM_LICENSES:
+            transform_seen = True
     if not permitted_seen:
         raise ValidationError("the live licence ledger has no allowlisted admitted licence")
-    if not rejected_seen:
-        raise ValidationError("the live licence ledger has no fail-closed quarantine evidence")
+    if not transform_seen:
+        raise ValidationError("the live licence ledger has no valid transform-only evidence")
 
 
 def _is_production_source(name: str) -> bool:

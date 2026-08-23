@@ -307,7 +307,7 @@ async def emit_submission(
         license_source="dataset_metadata" if raw_license else "unknown",
     )
     await admission_producer.send(admission.decision)
-    if not admission.admitted:
+    if not admission.fetch_allowed:
         log.info(
             "openreview.license_quarantined",
             note=note.id,
@@ -356,6 +356,7 @@ async def emit_submission(
         source_format="pdf",
         extraction_pipeline=PIPELINE_PDF_PENDING,
         spdx_license=admission.license_id,
+        training_usage=admission.training_usage,
         spdx_license_source="dataset_metadata",
     )
     await producer.send(
@@ -400,7 +401,7 @@ async def emit_review_thread(
             license_source="dataset_metadata" if raw_license else "unknown",
         )
         await admission_producer.send(admission.decision)
-        if not admission.admitted:
+        if not admission.fetch_allowed:
             continue
         cdate = _ms_to_dt(note.cdate_ms) or fetched_at
         payload = json.dumps(
@@ -445,6 +446,7 @@ async def emit_review_thread(
             source_format="review",
             extraction_pipeline=PIPELINE_REVIEW,
             spdx_license=admission.license_id,
+            training_usage=admission.training_usage,
             spdx_license_source="dataset_metadata",
         )
         await producer.send(

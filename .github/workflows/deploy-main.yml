@@ -1040,6 +1040,44 @@ jobs:
           # needs-measurement through the capacity benchmark.
           S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh
 
+          # One-time, lossless handoff from the legacy Bytewax/PVC source
+          # checkpoint to the broker-owned consumer group. Existing native
+          # commits always win, so this remains safe on a retried deployment.
+          legacy_fetcher_checkpoint="$(
+            kubectl -n stream2pretrain get deployment \
+              stream2pretrain-processor-fetcher -o json 2>/dev/null \
+              | jq -r '
+                  any(
+                    .spec.template.spec.containers[]?.volumeMounts[]?;
+                    .name == "checkpoint"
+                  )
+                ' \
+              || true
+          )"
+          if [[ "$legacy_fetcher_checkpoint" == "true" ]]; then
+            fetcher_pod="$(
+              kubectl -n stream2pretrain get pod \
+                -l app.kubernetes.io/component=processor-fetcher \
+                -o json \
+                | jq -r '
+                    first(
+                      .items[]
+                      | select(.status.phase == "Running")
+                      | .metadata.name
+                    ) // empty
+                  '
+            )"
+            if [[ -z "$fetcher_pod" ]]; then
+              echo "Legacy fetcher checkpoint exists but no running Pod can read it." >&2
+              exit 1
+            fi
+            echo "Migrating legacy fetcher recovery offsets from $fetcher_pod"
+            kubectl -n stream2pretrain exec -i "$fetcher_pod" -- \
+              python - < scripts/migrate_fetcher_offsets.py
+            kubectl -n redpanda exec statefulset/redpanda -- \
+              rpk group describe s2p-fetcher
+          fi
+
           helm_overrides=(
             --set "image.registry=${registry}"
             --set "image.tag=${GITHUB_SHA}"

@@ -295,7 +295,7 @@ async def _emit_pdf(
         license_source="dataset_metadata" if view.paper_license else "unknown",
     )
     await admission_producer.send(admission.decision)
-    if not admission.admitted:
+    if not admission.fetch_allowed:
         return False
     fetched_at = datetime.now(tz=UTC)
     cdate = view.cdate or fetched_at
@@ -328,6 +328,7 @@ async def _emit_pdf(
         source_format="pdf",
         extraction_pipeline=PIPELINE_PDF_BACKFILL,
         spdx_license=admission.license_id,
+        training_usage=admission.training_usage,
         spdx_license_source="dataset_metadata",
     )
     await producer.send(
@@ -359,7 +360,7 @@ async def _emit_review(
         license_source="dataset_metadata" if view.review_license else "unknown",
     )
     await admission_producer.send(admission.decision)
-    if not admission.admitted:
+    if not admission.fetch_allowed:
         return False
     fetched_at = datetime.now(tz=UTC)
     cdate = view.cdate or fetched_at
@@ -405,6 +406,7 @@ async def _emit_review(
         source_format="review",
         extraction_pipeline=PIPELINE_REVIEW_BACKFILL,
         spdx_license=admission.license_id,
+        training_usage=admission.training_usage,
         spdx_license_source="dataset_metadata",
     )
     await producer.send(

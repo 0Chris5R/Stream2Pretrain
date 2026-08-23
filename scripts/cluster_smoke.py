@@ -91,7 +91,10 @@ def consume_document(
 def main() -> None:
     started = time.monotonic()
     now = datetime.now(UTC)
-    raw_topic = required_env("S2P_RAW_TOPIC")
+    # The fetcher consumes this short-retention lane alongside production raw
+    # data. A health probe therefore exercises the real worker without waiting
+    # behind an arbitrarily large production replay backlog.
+    raw_topic = required_env("S2P_SMOKE_RAW_TOPIC")
     producer = Producer({"bootstrap.servers": required_env("REDPANDA_BROKERS")})
     raw_partition_count = topic_partition_count(producer, raw_topic)
     for _ in range(100):

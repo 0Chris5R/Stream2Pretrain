@@ -344,6 +344,16 @@
       "title": "Trace Id",
       "type": "string"
     },
+    "training_usage": {
+      "default": "pretrain_and_posttrain",
+      "description": "Purpose boundary propagated from the pre-fetch licence decision.",
+      "enum": [
+        "pretrain_and_posttrain",
+        "posttrain_transform_only"
+      ],
+      "title": "Training Usage",
+      "type": "string"
+    },
     "training_word_count": {
       "default": 0,
       "minimum": 0,

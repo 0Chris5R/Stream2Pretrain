@@ -1,8 +1,9 @@
-"""Licence admission shared by every ingest component.
+"""Purpose-aware licence admission shared by every ingest component.
 
-Every content format is fail-closed. Missing or unknown licences remain
-quarantined before content retrieval, while explicitly allowlisted licences
-are admitted and explicitly excluded licences remain quarantined.
+Permissively licensed bodies may enter verbatim pretraining. Sources with
+missing, dataset-wrapper-only, or arXiv non-exclusive terms may be fetched for
+derived post-training generation only. Explicitly restrictive licences remain
+quarantined before content retrieval.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ingest.common.hashing import canonical_url, doc_id_for_url
+from schemas.bronze import TrainingUsage
 from schemas.license_admission import LicenseAdmissionDecision
 
 PERMISSIVE_TRAINING_LICENSES = frozenset(
@@ -30,6 +32,14 @@ PERMISSIVE_TRAINING_LICENSES = frozenset(
         "MPL-2.0",
         "ISC",
         "Unlicense",
+    }
+)
+
+POSTTRAIN_TRANSFORM_LICENSES = frozenset(
+    {
+        "unknown",
+        "arxiv-non-exclusive-distribution",
+        "ODC-By-1.0",
     }
 )
 
@@ -89,6 +99,11 @@ def is_training_permitted(value: str | None, *, source_format: str = "web") -> b
     return normalized in PERMISSIVE_TRAINING_LICENSES
 
 
+def is_posttrain_transform_permitted(value: str | None) -> bool:
+    """Return whether a non-pretraining source may feed derived SFT/RL generation."""
+    return normalize_license(value) in POSTTRAIN_TRANSFORM_LICENSES
+
+
 @dataclass(frozen=True, slots=True)
 class AdmissionResult:
     decision: LicenseAdmissionDecision
@@ -96,6 +111,18 @@ class AdmissionResult:
     @property
     def admitted(self) -> bool:
         return self.decision.status == "admitted"
+
+    @property
+    def fetch_allowed(self) -> bool:
+        return self.decision.status in {"admitted", "posttrain_transform_only"}
+
+    @property
+    def training_usage(self) -> TrainingUsage:
+        return (
+            "posttrain_transform_only"
+            if self.decision.status == "posttrain_transform_only"
+            else "pretrain_and_posttrain"
+        )
 
     @property
     def license_id(self) -> str:
@@ -117,9 +144,17 @@ def decide_license_admission(
     doc_id = doc_id_for_url(canon)
     normalized = normalize_license(license_value)
     admitted = is_training_permitted(normalized, source_format=source_format)
-    status = "admitted" if admitted else "quarantined"
+    transform_only = not admitted and is_posttrain_transform_permitted(normalized)
+    status = (
+        "admitted" if admitted else "posttrain_transform_only" if transform_only else "quarantined"
+    )
     if admitted:
         reason = f"{normalized} is on the training allowlist"
+    elif transform_only:
+        reason = (
+            f"{normalized} is excluded from verbatim pretraining and allowed only "
+            "for derived post-training generation"
+        )
     elif normalized == "unknown":
         reason = "machine-readable licence is missing"
     else:

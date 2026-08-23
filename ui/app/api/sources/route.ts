@@ -24,13 +24,16 @@ const SourceActivitySchema = z.object({
       source_feed: z.string(),
       documents: z.number().int().nonnegative(),
       admitted: z.number().int().nonnegative(),
+      posttrain_transform_only: z.number().int().nonnegative(),
       quarantined: z.number().int().nonnegative(),
       last_observed_at: z.string().nullable(),
     }),
   ),
 });
 
-async function fetchSourceActivity(): Promise<Map<string, number>> {
+type SourceActivity = z.infer<typeof SourceActivitySchema>['sources'][number];
+
+async function fetchSourceActivity(): Promise<Map<string, SourceActivity>> {
   try {
     const response = await fetch(`${UPSTREAM.duckdb}/source-activity?window_hours=24`, {
       cache: 'no-store',
@@ -38,7 +41,7 @@ async function fetchSourceActivity(): Promise<Map<string, number>> {
     if (!response.ok) return new Map();
     const parsed = SourceActivitySchema.safeParse(await response.json());
     if (!parsed.success) return new Map();
-    return new Map(parsed.data.sources.map((row) => [row.source_feed, row.documents]));
+    return new Map(parsed.data.sources.map((row) => [row.source_feed, row]));
   } catch {
     return new Map();
   }
@@ -58,10 +61,16 @@ export async function GET(): Promise<NextResponse> {
     }
     const activity = await fetchSourceActivity();
     return NextResponse.json(
-      parsed.data.map((source) => ({
-        ...source,
-        documents_24h: activity.get(source.name) ?? source.documents_24h,
-      })),
+      parsed.data.map((source) => {
+        const observed = activity.get(source.name);
+        return {
+          ...source,
+          documents_24h: observed?.documents ?? source.documents_24h,
+          pretrain_documents_24h: observed?.admitted ?? 0,
+          posttrain_only_documents_24h: observed?.posttrain_transform_only ?? 0,
+          quarantined_documents_24h: observed?.quarantined ?? 0,
+        };
+      }),
     );
   } catch (err) {
     console.warn('sources GET upstream failed', (err as Error).message);

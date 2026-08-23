@@ -14,10 +14,15 @@ def test_live_corpus_contract_accepts_mixed_production_data() -> None:
     validate_license_admissions(
         {
             "admitted": 7,
+            "posttrain_transform_only": 5,
             "quarantined": 5,
             "by_license": [
                 {"license_id": "CC-BY-4.0", "status": "admitted", "count": 7},
-                {"license_id": "unknown", "status": "quarantined", "count": 5},
+                {
+                    "license_id": "unknown",
+                    "status": "posttrain_transform_only",
+                    "count": 5,
+                },
             ],
         }
     )
@@ -64,18 +69,26 @@ def test_live_corpus_contract_accepts_mixed_production_data() -> None:
         (
             {
                 "admitted": 0,
+                "posttrain_transform_only": 5,
                 "quarantined": 5,
-                "by_license": [{"license_id": "unknown", "status": "quarantined", "count": 5}],
+                "by_license": [
+                    {
+                        "license_id": "unknown",
+                        "status": "posttrain_transform_only",
+                        "count": 5,
+                    }
+                ],
             },
             "admitted no documents",
         ),
         (
             {
                 "admitted": 5,
+                "posttrain_transform_only": 0,
                 "quarantined": 0,
                 "by_license": [{"license_id": "CC-BY-4.0", "status": "admitted", "count": 5}],
             },
-            "quarantined no documents",
+            "no posttrain-transform-only documents",
         ),
     ],
 )

@@ -58,6 +58,7 @@
     "status": {
       "enum": [
         "admitted",
+        "posttrain_transform_only",
         "quarantined"
       ],
       "title": "Status",
