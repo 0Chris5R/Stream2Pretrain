@@ -12,6 +12,7 @@ set -euo pipefail
 
 BROKERS="${RPK_BROKERS:-localhost:9092}"
 RETENTION_MS_DEV=$((7 * 24 * 60 * 60 * 1000))   # 7 days
+RETENTION_MS_SMOKE=$((24 * 60 * 60 * 1000))     # 1 day
 
 # Prefer running rpk inside the dev container if it is up; otherwise fall back
 # to a host-installed rpk binary. This avoids forcing every contributor to
@@ -31,12 +32,13 @@ create_topic() {
   local name="$1"
   local partitions="$2"
   local replicas="$3"
+  local retention_ms="${4:-$RETENTION_MS_DEV}"
 
   echo "creating topic ${name} (partitions=${partitions}, replicas=${replicas})"
   if ! "${RPK[@]}" topic create "$name" \
         --partitions "$partitions" \
         --replicas "$replicas" \
-        --config "retention.ms=${RETENTION_MS_DEV}" \
+        --config "retention.ms=${retention_ms}" \
         --config "cleanup.policy=delete" \
         --config "max.message.bytes=2097152" 2> >(tee /tmp/rpk_err >&2) ; then
     if grep -q 'TOPIC_ALREADY_EXISTS' /tmp/rpk_err 2>/dev/null; then
@@ -49,6 +51,7 @@ create_topic() {
 }
 
 create_topic "raw.fetched"      4 1
+create_topic "raw.smoke"        4 1 "$RETENTION_MS_SMOKE"
 create_topic "docs.normalized"  4 1
 create_topic "docs.curated"     4 1
 create_topic "curation.decisions" 4 1

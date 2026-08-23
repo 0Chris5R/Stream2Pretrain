@@ -1,10 +1,8 @@
 {{- /*
-Bytewax's KafkaSource intentionally stores offsets in its recovery database
-and does not commit broker consumer-group offsets. Kafka-lag KEDA triggers for
-the fetcher, curator, or Iceberg writer would therefore read dead/zero-lag
-groups and could rebalance partitions away from the PVC that owns their
-checkpoint. Only the independently committing ingest consumers render
-ScaledObjects; this template supplies their optional Redpanda authentication.
+Curate and Iceberg still store Bytewax offsets in their recovery databases, so
+they cannot use Kafka-lag scaling safely. The stateless fetcher and independent
+ingest consumers render their own ScaledObjects; this template supplies their
+optional shared Redpanda authentication.
 */ -}}
 {{- if and .Values.keda.enabled .Values.keda.auth.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}

@@ -1,25 +1,5 @@
 {{- $component := "processor-fetcher" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
-{{- $checkpoint := .Values.processor.fetcher.checkpoint }}
-{{- $checkpointClaim := default (printf "%s-checkpoint" $name) $checkpoint.existingClaim }}
-{{- if not $checkpoint.existingClaim }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ $checkpointClaim }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-spec:
-  accessModes: ["ReadWriteOnce"]
-  {{- with $checkpoint.storageClass }}
-  storageClassName: {{ . | quote }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ $checkpoint.size | quote }}
----
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,10 +12,11 @@ spec:
   selector:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
-  # The recovery SQLite files are single-writer state. Recreate guarantees an
-  # old and a new Pod never mount and mutate the checkpoint concurrently.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
@@ -62,10 +43,14 @@ spec:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
-            - name: S2P_STATE_DIR
-              value: /var/lib/s2p/checkpoint
             - name: S2P_CONSUMER_GROUP
               value: s2p-fetcher
+            - name: S2P_FETCHER_COMMIT_BATCH_SIZE
+              value: {{ .Values.processor.fetcher.commitBatchSize | int | quote }}
+            - name: S2P_FETCHER_COMMIT_INTERVAL_SECONDS
+              value: {{ .Values.processor.fetcher.commitIntervalSeconds | quote }}
+            - name: S2P_FETCHER_MAX_POLL_INTERVAL_MS
+              value: {{ .Values.processor.fetcher.maxPollIntervalMs | int | quote }}
             - name: S2P_MAX_RAW_OBJECT_BYTES
               value: "67108864"
             - name: S2P_MAX_EXPANDED_OBJECT_BYTES
@@ -87,14 +72,9 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: checkpoint
-              mountPath: /var/lib/s2p/checkpoint
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: checkpoint
-          persistentVolumeClaim:
-            claimName: {{ $checkpointClaim | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -112,3 +92,44 @@ spec:
       targetPort: metrics
   selector:
     {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+{{- if .Values.keda.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ $name }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.keda.fetcher.minReplicas }}
+  maxReplicaCount: {{ .Values.keda.fetcher.maxReplicas }}
+  fallback:
+    failureThreshold: 3
+    replicas: {{ max 1 .Values.keda.fetcher.minReplicas }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 120
+        scaleUp:
+          stabilizationWindowSeconds: 0
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
+        consumerGroup: "s2p-fetcher"
+        topic: {{ .Values.redpanda.topics.rawFetched | quote }}
+        lagThreshold: {{ .Values.keda.fetcher.lagThreshold | quote }}
+        activationLagThreshold: "1"
+        offsetResetPolicy: earliest
+        allowIdleConsumers: "false"
+      {{- if .Values.keda.auth.enabled }}
+      authenticationRef:
+        name: {{ include "stream2pretrain.fullname" . }}-redpanda
+      {{- end }}
+{{- end }}

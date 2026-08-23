@@ -1,4 +1,4 @@
-"""Bytewax dataflow: ``raw.fetched`` -> ``docs.normalized``.
+"""Horizontally scalable fetcher: ``raw.fetched`` -> ``docs.normalized``.
 
 Per record the dataflow:
 
@@ -11,8 +11,11 @@ Per record the dataflow:
    enricher.
 5. Emits the SilverRecord on ``docs.normalized``.
 
-The dataflow is deterministic per offset, so a Bytewax recovery from the
-last RocksDB checkpoint replays identical SilverRecords.
+The extraction itself is deterministic per Kafka offset.  This stage has no
+cross-record operator state, so broker-committed consumer-group offsets are a
+better ownership boundary than a pod-local Bytewax recovery database: Kafka
+can divide partitions between replicas, KEDA can observe real lag, and a pod
+can move to another node without carrying local source state with it.
 """
 
 from __future__ import annotations
@@ -20,14 +23,22 @@ from __future__ import annotations
 import gzip
 import io
 import os
+import signal
+import socket
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
 import boto3
 import orjson
 from botocore.exceptions import BotoCoreError, ClientError
+from confluent_kafka import Consumer, KafkaError, KafkaException, Producer, TopicPartition
 
-from ingest.common.license_admission import is_training_permitted
+from ingest.common.license_admission import (
+    is_posttrain_transform_permitted,
+    is_training_permitted,
+)
 from processor import common
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.operators.extract import ResiliparseExtractor
@@ -42,10 +53,10 @@ from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
 @dataclass(slots=True)
 class FetcherState:
-    """Per-worker state for the fetcher dataflow.
+    """Per-worker state for extraction and normalization.
 
-    The members are eagerly constructed at module load so each Bytewax
-    worker pays the model-load cost exactly once.
+    The members are eagerly constructed once so each replica pays the
+    model-load cost exactly once.
     """
 
     extractor: ResiliparseExtractor
@@ -341,6 +352,7 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         extraction_pipeline=extraction_pipeline,
         spdx_license=bronze.spdx_license,
         spdx_license_source=bronze.spdx_license_source,
+        training_usage=bronze.training_usage,
         scientific_artifact_s3_uri=artifact_uri,
         figure_count=figure_count,
         table_count=table_count,
@@ -360,7 +372,14 @@ def process_bronze_payload(
     bronze = common.bronze_loads(payload)
     # Defence in depth for legacy producers and replayed topics. This check is
     # intentionally before the MinIO GET, extraction, OCR, and model pipeline.
-    if not is_training_permitted(bronze.spdx_license, source_format=bronze.source_format):
+    pretrain_allowed = is_training_permitted(
+        bronze.spdx_license, source_format=bronze.source_format
+    )
+    transform_allowed = (
+        bronze.training_usage == "posttrain_transform_only"
+        and is_posttrain_transform_permitted(bronze.spdx_license)
+    )
+    if not pretrain_allowed and not transform_allowed:
         return None
     raw_html = fetch_raw_bytes(state, bronze)
     silver = normalize(state, bronze, raw_html)
@@ -369,87 +388,207 @@ def process_bronze_payload(
     return silver
 
 
-def build_dataflow(cfg: common.ProcessorConfig) -> object:
-    """Construct the Bytewax dataflow.
+def native_consumer_config(cfg: common.ProcessorConfig) -> dict[str, object]:
+    """Return a bounded, manually committed Kafka consumer configuration."""
+    reset = "latest" if common.kafka_starting_offset() == -1 else "earliest"
+    config: dict[str, object] = {
+        **common.kafka_consumer_config(cfg.consumer_group),
+        "bootstrap.servers": cfg.redpanda_brokers,
+        "client.id": f"s2p-fetcher-{socket.gethostname()}",
+        "auto.offset.reset": reset,
+        "enable.auto.commit": False,
+        "enable.auto.offset.store": False,
+        # PDF extraction can be intentionally slow. This is a liveness bound,
+        # not an unbounded timeout; poison records are caught below.
+        "max.poll.interval.ms": int(os.environ.get("S2P_FETCHER_MAX_POLL_INTERVAL_MS", "900000")),
+        "session.timeout.ms": 45_000,
+        "partition.assignment.strategy": "cooperative-sticky",
+        "queued.max.messages.kbytes": 65_536,
+    }
+    return config
 
-    Imports of ``bytewax.*`` happen inside this function so unit tests can
-    import :mod:`processor.fetcher` without paying the runtime dependency.
-    Bytewax is only required when actually running the dataflow.
+
+def native_producer_config(cfg: common.ProcessorConfig) -> dict[str, object]:
+    """Return an idempotent producer configuration for normalized records."""
+    return {
+        **common.kafka_producer_config(),
+        "bootstrap.servers": cfg.redpanda_brokers,
+        "client.id": f"s2p-fetcher-{socket.gethostname()}",
+        "enable.idempotence": True,
+        "acks": "all",
+        "compression.type": "zstd",
+        "linger.ms": 20,
+        "message.timeout.ms": 300_000,
+    }
+
+
+def fetcher_input_topics(cfg: common.ProcessorConfig) -> list[str]:
+    """Return production plus the low-retention deployment-canary lane."""
+    smoke_topic = os.environ.get("S2P_SMOKE_RAW_TOPIC", "raw.smoke").strip()
+    return list(dict.fromkeys(topic for topic in (cfg.raw_topic, smoke_topic) if topic))
+
+
+def run_native_fetcher(
+    cfg: common.ProcessorConfig,
+    *,
+    state: FetcherState | None = None,
+    consumer_factory: Callable[[dict[str, object]], Any] = Consumer,
+    producer_factory: Callable[[dict[str, object]], Any] = Producer,
+    should_stop: Callable[[], bool] | None = None,
+    max_messages: int | None = None,
+) -> None:
+    """Consume, normalize, produce, then commit offsets in bounded batches.
+
+    Output delivery is flushed before the corresponding input offsets are
+    synchronously committed. A crash between those operations can duplicate a
+    document, but cannot lose it; all downstream records are keyed by doc id so
+    this is the intended at-least-once contract.
     """
-    from bytewax import operators as op
-    from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage, KafkaSource
-    from bytewax.dataflow import Dataflow
-
+    if max_messages is not None and max_messages < 1:
+        raise ValueError("max_messages must be positive when provided")
+    should_stop = should_stop or (lambda: False)
+    state = state or build_state(cfg, with_wayback=False)
     tracer = common.init_tracer("s2p-fetcher", cfg)
     log = common.get_logger("s2p.fetcher")
-    # A synchronous Wayback HTTP call per record cannot keep up with bursty
-    # ingestion. Keep the optional enrichment available for controlled runs,
-    # while the live streaming path falls back to fetched_at when source dates
-    # are absent.
-    with_wayback = os.environ.get("S2P_WAYBACK_LOOKUP_ENABLED", "0") == "1"
-    state = build_state(cfg, with_wayback=with_wayback)
-    flow = Dataflow("s2p-fetcher")
+    consumer = consumer_factory(native_consumer_config(cfg))
+    producer = producer_factory(native_producer_config(cfg))
+    topics = fetcher_input_topics(cfg)
+
+    batch_size = int(os.environ.get("S2P_FETCHER_COMMIT_BATCH_SIZE", "16"))
+    batch_seconds = float(os.environ.get("S2P_FETCHER_COMMIT_INTERVAL_SECONDS", "2"))
+    flush_timeout = float(os.environ.get("S2P_FETCHER_FLUSH_TIMEOUT_SECONDS", "60"))
+    retry_attempts = int(os.environ.get("S2P_FETCHER_RECORD_ATTEMPTS", "3"))
+    if batch_size < 1 or batch_seconds <= 0 or flush_timeout <= 0 or retry_attempts < 1:
+        raise RuntimeError("fetcher batch, timeout, and retry settings must be positive")
+
     payload_max_bytes = common.kafka_payload_max_bytes()
-    # ``beginning`` ensures a fresh deploy or offset reset replays from the
-    # topic's retention window (at-least-once). Override via env if a debug
-    # run needs to skip backlog: ``S2P_KAFKA_START_OFFSET=end``.
-    start_offset = common.kafka_starting_offset()
-    source = KafkaSource(
-        brokers=cfg.redpanda_brokers.split(","),
-        topics=[cfg.raw_topic],
-        starting_offset=start_offset,
-        add_config=common.kafka_consumer_config(cfg.consumer_group),
-    )
-    inp = op.input("raw_fetched", flow, source)
+    pending_offsets: dict[tuple[str, int], int] = {}
+    pending_records = 0
+    processed_messages = 0
+    last_commit = time.monotonic()
+    delivery_errors: list[str] = []
 
-    def _step(msg: object) -> KafkaSinkMessage | None:
-        with tracer.start_as_current_span("fetcher.process") as span:
-            payload = getattr(msg, "value", None)
-            if payload is None:
-                return None
-            try:
-                silver = process_bronze_payload(state, payload)
-            except Exception as exc:
-                span.record_exception(exc)
-                PROCESSOR_METRICS.record_failure(stage="normalize", reason=type(exc).__name__)
-                log.warning(
-                    "fetcher record failed",
-                    error=str(exc),
-                    exception_type=type(exc).__name__,
-                    exc_info=True,
-                )
-                return None
-            if silver is None:
-                return None
-            encoded = common.silver_dumps(silver)
-            if len(encoded) > payload_max_bytes:
-                PROCESSOR_METRICS.record_failure(stage="normalize", reason="payload_too_large")
-                log.warning(
-                    "normalized payload exceeds bounded Kafka record size",
-                    doc_id=silver.doc_id,
-                    payload_bytes=len(encoded),
-                    payload_max_bytes=payload_max_bytes,
-                    source_feed=silver.source_feed,
-                )
-                return None
-            PROCESSOR_METRICS.record_normalized(source_feed=silver.source_feed)
-            span.set_attribute("doc_id", silver.doc_id)
-            span.set_attribute("lang", silver.lang)
-            return KafkaSinkMessage(
-                key=silver.doc_id.encode("utf-8"),
-                value=encoded,
-                headers=[("trace_id", silver.trace_id.encode("ascii"))],
-            )
+    def on_delivery(error: object | None, message: object) -> None:
+        """Capture asynchronous delivery failures before committing input."""
+        if error is not None:
+            delivery_errors.append(str(error))
 
-    mapped = op.map("fetcher_normalize", inp, _step)
-    filtered = op.filter("fetcher_drop_none", mapped, lambda m: m is not None)
-    sink = KafkaSink(
-        brokers=cfg.redpanda_brokers.split(","),
-        topic=cfg.normalized_topic,
-        add_config=common.kafka_producer_config(),
-    )
-    op.output("fetcher_sink", filtered, sink)
-    return flow
+    def commit_batch() -> None:
+        nonlocal pending_records, last_commit
+        if not pending_offsets:
+            return
+        undelivered = producer.flush(flush_timeout)
+        if undelivered:
+            raise RuntimeError(f"normalized producer still has {undelivered} undelivered records")
+        if delivery_errors:
+            detail = "; ".join(delivery_errors[:3])
+            raise RuntimeError(f"normalized producer delivery failed: {detail}")
+        offsets = [
+            TopicPartition(topic, partition, offset)
+            for (topic, partition), offset in sorted(pending_offsets.items())
+        ]
+        consumer.commit(offsets=offsets, asynchronous=False)
+        log.info(
+            "fetcher batch committed",
+            records=pending_records,
+            partitions=len(offsets),
+        )
+        pending_offsets.clear()
+        pending_records = 0
+        delivery_errors.clear()
+        last_commit = time.monotonic()
+
+    def on_revoke(_consumer: object, _partitions: object) -> None:
+        """Finish the current at-least-once batch before losing ownership."""
+        commit_batch()
+
+    consumer.subscribe(topics, on_revoke=on_revoke)
+
+    try:
+        while not should_stop():
+            message = consumer.poll(1.0)
+            now = time.monotonic()
+            if message is None:
+                if pending_offsets and now - last_commit >= batch_seconds:
+                    commit_batch()
+                if max_messages is not None and processed_messages >= max_messages:
+                    break
+                continue
+            error = message.error()
+            if error is not None:
+                if error.code() == KafkaError._PARTITION_EOF:
+                    continue
+                raise KafkaException(error)
+
+            payload = message.value()
+            silver: SilverRecord | None = None
+            if payload is not None:
+                for attempt in range(1, retry_attempts + 1):
+                    try:
+                        with tracer.start_as_current_span("fetcher.process") as span:
+                            silver = process_bronze_payload(state, payload)
+                            if silver is not None:
+                                span.set_attribute("doc_id", silver.doc_id)
+                                span.set_attribute("lang", silver.lang)
+                        break
+                    except Exception as exc:
+                        PROCESSOR_METRICS.record_failure(
+                            stage="normalize", reason=type(exc).__name__
+                        )
+                        if attempt == retry_attempts:
+                            log.warning(
+                                "fetcher record exhausted retries",
+                                topic=message.topic(),
+                                partition=message.partition(),
+                                offset=message.offset(),
+                                attempts=attempt,
+                                error=str(exc),
+                                exception_type=type(exc).__name__,
+                                exc_info=True,
+                            )
+                        else:
+                            time.sleep(min(2 ** (attempt - 1) * 0.25, 2.0))
+
+            if silver is not None:
+                encoded = common.silver_dumps(silver)
+                if len(encoded) > payload_max_bytes:
+                    PROCESSOR_METRICS.record_failure(stage="normalize", reason="payload_too_large")
+                    log.warning(
+                        "normalized payload exceeds bounded Kafka record size",
+                        doc_id=silver.doc_id,
+                        payload_bytes=len(encoded),
+                        payload_max_bytes=payload_max_bytes,
+                        source_feed=silver.source_feed,
+                    )
+                else:
+                    while True:
+                        try:
+                            producer.produce(
+                                cfg.normalized_topic,
+                                key=silver.doc_id.encode("utf-8"),
+                                value=encoded,
+                                headers=[("trace_id", silver.trace_id.encode("ascii"))],
+                                on_delivery=on_delivery,
+                            )
+                            producer.poll(0)
+                            PROCESSOR_METRICS.record_normalized(source_feed=silver.source_feed)
+                            break
+                        except BufferError:
+                            producer.poll(0.25)
+
+            key = (message.topic(), message.partition())
+            pending_offsets[key] = max(pending_offsets.get(key, 0), message.offset() + 1)
+            pending_records += 1
+            processed_messages += 1
+            if pending_records >= batch_size or now - last_commit >= batch_seconds:
+                commit_batch()
+            if max_messages is not None and processed_messages >= max_messages:
+                break
+    finally:
+        try:
+            commit_batch()
+        finally:
+            consumer.close()
 
 
 def main() -> None:
@@ -457,13 +596,20 @@ def main() -> None:
     cfg = common.load_config()
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.fetcher")
-    log.info("starting fetcher dataflow", brokers=cfg.redpanda_brokers, topic=cfg.raw_topic)
-    flow = build_dataflow(cfg)
-    # Do not publish readiness until heavyweight model and recovery-state
-    # initialization has succeeded. Otherwise Kubernetes can declare a rollout
-    # healthy in the short interval before an initialization OOM kills it.
+    topics = fetcher_input_topics(cfg)
+    log.info("starting scalable fetcher", brokers=cfg.redpanda_brokers, topics=topics)
+    state = build_state(cfg, with_wayback=False)
+    stopping = False
+
+    def _stop(_signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    # Do not publish readiness until heavyweight models have initialized.
     start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
-    common.run_bytewax_flow(flow, cfg, "fetcher")
+    run_native_fetcher(cfg, state=state, should_stop=lambda: stopping)
 
 
 def serialize_for_kafka(record: SilverRecord) -> tuple[bytes, bytes]:

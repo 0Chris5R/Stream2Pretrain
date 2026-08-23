@@ -47,6 +47,7 @@ redpanda:
   authSecret: ""
   topics:
     rawFetched: raw.fetched
+    smokeRaw: raw.smoke
     docsNormalized: docs.normalized
     docsCurated: docs.curated
     curationDecisions: curation.decisions
@@ -475,20 +476,19 @@ processor:
     # Full Docling requires its pinned model bundle. The bounded pypdf path is
     # the resilient default for this streaming worker.
     doclingEnabled: false
-    # Bytewax persists offsets locally rather than committing Kafka consumer
-    # group offsets. Keep one pod attached to one durable checkpoint. Scale
-    # workers/partitions as one measured Bytewax execution, not via HPA/KEDA.
+    # This stateless stage commits source offsets to Redpanda only after its
+    # normalized output batch is delivered, so partitions can move safely
+    # between replicas.
     replicas: 1
+    commitBatchSize: 16
+    commitIntervalSeconds: 2
+    maxPollIntervalMs: 900000
     resources:
       # The extraction process owns the language detector plus Bytewax recovery
       # state. The former 1Gi limit was observed OOM-killing the process during
       # initialization; retain headroom while real peak RSS is measured.
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: 1, memory: 2Gi}
-    checkpoint:
-      existingClaim: ""
-      storageClass: ""
-      size: 2Gi
   curate:
     image: stream2pretrain/processor-curate
     replicas: 1
@@ -696,15 +696,18 @@ ui:
 # KEDA scaling
 # -----------------------------------------------------------------------------
 keda:
-  # Scales independently committing ingest consumers only. Core Bytewax
-  # processors use local durable recovery and must be scaled as a coordinated
-  # execution after partition/capacity measurement; broker group lag is not a
-  # valid signal for those stages.
+  # Fetcher lag is broker-visible and safe for partition-based autoscaling.
+  # Curate and Iceberg remain stateful Bytewax single writers until their
+  # state is moved behind an externally coordinated boundary.
   enabled: false
   pollingInterval: 15
   cooldownPeriod: 60
   prometheus:
     serverAddress: http://kps-prometheus.monitoring.svc:9090
+  fetcher:
+    minReplicas: 1
+    maxReplicas: 4
+    lagThreshold: 250
   triggerAuthSecret: stream2pretrain-keda-redpanda
   # Set ``auth.enabled: true`` only when the Redpanda profile actually has
   # SASL/TLS turned on and the secret named by ``triggerAuthSecret`` exists

@@ -11,16 +11,10 @@ image:
   # hide an incomplete image distribution step behind a remote pull attempt.
   pullPolicy: Never
 
-# Temporary scheduling constraint matching measured image availability. Remove
-# this only after the image-sync or registry step has verified the same digests
-# on every worker.
-nodeSelector:
-  kubernetes.io/hostname: stream2pretrain-master
-
 redpanda:
   bootstrapServers: redpanda.redpanda.svc.cluster.local:9093
   schemaRegistry: http://redpanda.redpanda.svc.cluster.local:8081
-  startingOffset: end
+  startingOffset: beginning
 
 minio:
   endpoint: http://minio.minio.svc.cluster.local:9000
@@ -50,9 +44,12 @@ observability:
   logs:
     lokiEndpoint: ""
 
-# Establish a single working replica before measuring or enabling autoscaling.
 keda:
-  enabled: false
+  enabled: true
+  fetcher:
+    minReplicas: 1
+    maxReplicas: 4
+    lagThreshold: 250
 
 processor:
   fetcher:

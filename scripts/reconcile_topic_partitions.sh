@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reconcile the four core stream topics to a minimum partition count.
+# Reconcile the core streams and short-lived deployment canary topic.
 
 set -euo pipefail
 
@@ -14,7 +14,21 @@ if ! [[ "$max_message_bytes" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-topics=(raw.fetched docs.normalized docs.curated curation.decisions)
+smoke_topic="${S2P_SMOKE_RAW_TOPIC:-raw.smoke}"
+if ! kubectl -n redpanda exec statefulset/redpanda -- rpk topic list \
+  | awk 'NR > 1 {print $1}' \
+  | grep -qx "$smoke_topic"; then
+  echo "Creating deployment canary topic $smoke_topic"
+  kubectl -n redpanda exec statefulset/redpanda -- \
+    rpk topic create "$smoke_topic" \
+      --partitions "$target" \
+      --replicas 1 \
+      --topic-config retention.ms=86400000 \
+      --topic-config cleanup.policy=delete \
+      --topic-config "max.message.bytes=$max_message_bytes"
+fi
+
+topics=(raw.fetched "$smoke_topic" docs.normalized docs.curated curation.decisions)
 for topic in "${topics[@]}"; do
   current="$(
     kubectl -n redpanda exec statefulset/redpanda -- \
@@ -35,4 +49,8 @@ for topic in "${topics[@]}"; do
   fi
   kubectl -n redpanda exec statefulset/redpanda -- \
     rpk topic alter-config "$topic" --set "max.message.bytes=$max_message_bytes"
+  if [[ "$topic" == "$smoke_topic" ]]; then
+    kubectl -n redpanda exec statefulset/redpanda -- \
+      rpk topic alter-config "$topic" --set retention.ms=86400000
+  fi
 done

@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
-from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId
+from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId, TrainingUsage
 from schemas.scientific import SectionRole
 
 ValidFromSource = Literal[
@@ -169,6 +169,10 @@ class SilverRecord(BaseModel):
     spdx_license_source: SpdxLicenseSource = Field(
         default="unknown",
         description="Where the SPDX id was read from.",
+    )
+    training_usage: TrainingUsage = Field(
+        default="pretrain_and_posttrain",
+        description="Purpose boundary propagated from the pre-fetch licence decision.",
     )
 
     # Structured scientific artifact. The full nested object remains in

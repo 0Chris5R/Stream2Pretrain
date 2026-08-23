@@ -5,11 +5,17 @@ from __future__ import annotations
 import gzip
 from typing import Any
 
+import pytest
+
+from processor import common
 from processor.fetcher import (
     FetcherState,
     fetch_raw_bytes,
+    fetcher_input_topics,
+    native_consumer_config,
     normalize,
     process_bronze_payload,
+    run_native_fetcher,
     serialize_for_kafka,
 )
 from processor.operators.extract import ResiliparseExtractor
@@ -192,3 +198,146 @@ def test_serialize_for_kafka_roundtrip(silver_record: Any) -> None:
 
     decoded = orjson.loads(value)
     assert decoded["doc_id"] == silver_record.doc_id
+
+
+class _FakeMessage:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def error(self) -> None:
+        return None
+
+    def value(self) -> bytes:
+        return self._payload
+
+    def topic(self) -> str:
+        return "raw.fetched"
+
+    def partition(self) -> int:
+        return 2
+
+    def offset(self) -> int:
+        return 7
+
+
+class _FakeConsumer:
+    def __init__(self, config: dict[str, object], payload: bytes) -> None:
+        self.config = config
+        self._message = _FakeMessage(payload)
+        self.topics: list[str] = []
+        self.commits: list[tuple[list[Any], bool]] = []
+        self.closed = False
+
+    def subscribe(self, topics: list[str], *, on_revoke: Any = None) -> None:
+        self.topics = topics
+        self.on_revoke = on_revoke
+
+    def poll(self, _timeout: float) -> _FakeMessage | None:
+        message, self._message = self._message, None
+        return message
+
+    def commit(self, *, offsets: list[Any], asynchronous: bool) -> None:
+        self.commits.append((offsets, asynchronous))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeProducer:
+    def __init__(self, config: dict[str, object], *, delivery_error: object = None) -> None:
+        self.config = config
+        self.delivery_error = delivery_error
+        self.records: list[dict[str, Any]] = []
+
+    def produce(self, topic: str, **kwargs: Any) -> None:
+        self.records.append({"topic": topic, **kwargs})
+        callback = kwargs.get("on_delivery")
+        if callback is not None:
+            callback(self.delivery_error, object())
+
+    def poll(self, _timeout: float) -> None:
+        return None
+
+    def flush(self, _timeout: float) -> int:
+        return 0
+
+
+def test_native_fetcher_commits_only_after_output_delivery(
+    bronze_record: BronzeRecord,
+    silver_record: Any,
+    monkeypatch: Any,
+) -> None:
+    cfg = common.load_config()
+    consumer: _FakeConsumer | None = None
+    producer: _FakeProducer | None = None
+
+    def consumer_factory(config: dict[str, object]) -> _FakeConsumer:
+        nonlocal consumer
+        consumer = _FakeConsumer(config, bronze_record.model_dump_json().encode())
+        return consumer
+
+    def producer_factory(config: dict[str, object]) -> _FakeProducer:
+        nonlocal producer
+        producer = _FakeProducer(config)
+        return producer
+
+    monkeypatch.setattr("processor.fetcher.process_bronze_payload", lambda *_: silver_record)
+    monkeypatch.setenv("S2P_SMOKE_RAW_TOPIC", "raw.smoke")
+    run_native_fetcher(
+        cfg,
+        state=_state(_FakeS3(b"")),
+        consumer_factory=consumer_factory,
+        producer_factory=producer_factory,
+        max_messages=1,
+    )
+
+    assert consumer is not None
+    assert producer is not None
+    assert consumer.topics == ["raw.fetched", "raw.smoke"]
+    assert consumer.config["enable.auto.commit"] is False
+    assert consumer.config["enable.auto.offset.store"] is False
+    assert producer.records[0]["topic"] == "docs.normalized"
+    assert consumer.commits[0][0][0].partition == 2
+    assert consumer.commits[0][0][0].offset == 8
+    assert consumer.commits[0][1] is False
+    assert consumer.closed is True
+
+
+def test_native_fetcher_does_not_commit_after_delivery_failure(
+    bronze_record: BronzeRecord,
+    silver_record: Any,
+    monkeypatch: Any,
+) -> None:
+    cfg = common.load_config()
+    consumer: _FakeConsumer | None = None
+
+    def consumer_factory(config: dict[str, object]) -> _FakeConsumer:
+        nonlocal consumer
+        consumer = _FakeConsumer(config, bronze_record.model_dump_json().encode())
+        return consumer
+
+    def producer_factory(config: dict[str, object]) -> _FakeProducer:
+        return _FakeProducer(config, delivery_error=RuntimeError("broker rejected record"))
+
+    monkeypatch.setattr("processor.fetcher.process_bronze_payload", lambda *_: silver_record)
+    with pytest.raises(RuntimeError, match="producer delivery failed"):
+        run_native_fetcher(
+            cfg,
+            state=_state(_FakeS3(b"")),
+            consumer_factory=consumer_factory,
+            producer_factory=producer_factory,
+            max_messages=1,
+        )
+
+    assert consumer is not None
+    assert consumer.commits == []
+    assert consumer.closed is True
+
+
+def test_native_consumer_defaults_to_earliest(monkeypatch: Any) -> None:
+    monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "beginning")
+    monkeypatch.delenv("S2P_SMOKE_RAW_TOPIC", raising=False)
+    cfg = common.load_config()
+
+    assert native_consumer_config(cfg)["auto.offset.reset"] == "earliest"
+    assert fetcher_input_topics(cfg) == ["raw.fetched", "raw.smoke"]

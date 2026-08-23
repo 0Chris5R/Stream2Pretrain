@@ -318,6 +318,7 @@ class DuckDBQueryService:
         counts = {str(row["status"]): int(row["count"]) for row in totals}
         return {
             "admitted": counts.get("admitted", 0),
+            "posttrain_transform_only": counts.get("posttrain_transform_only", 0),
             "quarantined": counts.get("quarantined", 0),
             "by_license": by_license,
             "recent": recent,
@@ -333,6 +334,9 @@ class DuckDBQueryService:
               source_feed,
               CAST(COUNT(*) AS BIGINT) AS documents,
               CAST(COUNT(*) FILTER (WHERE status = 'admitted') AS BIGINT) AS admitted,
+              CAST(COUNT(*) FILTER (
+                WHERE status = 'posttrain_transform_only'
+              ) AS BIGINT) AS posttrain_transform_only,
               CAST(COUNT(*) FILTER (WHERE status = 'quarantined') AS BIGINT) AS quarantined,
               CAST(MAX(observed_at) AS VARCHAR) AS last_observed_at
             FROM {self._license_admissions}

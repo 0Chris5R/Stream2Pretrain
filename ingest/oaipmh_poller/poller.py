@@ -113,7 +113,7 @@ async def poll_feed(
                         trace_id=trace_id,
                     )
                     await admission_producer.send(admission.decision)
-                    if not admission.admitted:
+                    if not admission.fetch_allowed:
                         log.info(
                             "oai.license_quarantined",
                             feed=feed.name,
@@ -155,8 +155,11 @@ async def poll_feed(
                             source_feed=feed.name,
                             trace_id=trace_id,
                             bytes_size=stored,
+                            source_format="metadata",
+                            extraction_pipeline="oai-pmh-metadata-v1",
                             spdx_license=admission.license_id,
                             spdx_license_source=license_source,  # type: ignore[arg-type]
+                            training_usage=admission.training_usage,
                         )
                         await producer.send(br)
                         emitted += 1

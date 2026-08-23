@@ -327,6 +327,7 @@ def make_bronze_record(
     feed_name: str,
     bucket: str,
     license_default: str | None,
+    training_usage: str = "pretrain_and_posttrain",
     bytes_size: int,
 ) -> tuple[BronzeRecord, str, str]:
     """Compose the BronzeRecord (and its MinIO key) for one outcome.
@@ -393,6 +394,7 @@ def make_bronze_record(
         extraction_pipeline=outcome.extraction_pipeline,
         spdx_license=spdx,
         spdx_license_source=spdx_source,  # type: ignore[arg-type]
+        training_usage=training_usage,  # type: ignore[arg-type]
     )
     return record, key, content_type
 
@@ -604,7 +606,7 @@ async def run_for_ids(
                 )
                 if admission_cm is not None:
                     await admission_cm.send(admission.decision)
-                if not admission.admitted:
+                if not admission.fetch_allowed:
                     log.info(
                         "arxiv_html.license_quarantined",
                         arxiv_id=arxiv_id,
@@ -639,6 +641,7 @@ async def run_for_ids(
                     feed_name=feed_name,
                     bucket=cfg.minio_bronze_bucket,
                     license_default=admission.license_id,
+                    training_usage=admission.training_usage,
                     bytes_size=len(payload),
                 )
                 stored = await minio_cm.put_bronze(

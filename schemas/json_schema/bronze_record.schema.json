@@ -138,6 +138,16 @@
       "title": "Trace Id",
       "type": "string"
     },
+    "training_usage": {
+      "default": "pretrain_and_posttrain",
+      "description": "Permitted downstream training purpose for this fetched body.",
+      "enum": [
+        "pretrain_and_posttrain",
+        "posttrain_transform_only"
+      ],
+      "title": "Training Usage",
+      "type": "string"
+    },
     "url": {
       "format": "uri",
       "maxLength": 2083,

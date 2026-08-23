@@ -87,8 +87,18 @@ SpdxLicenseSource = Literal[
   (``the-stack-v2``, ``stack-edu``, etc.).
 - ``manual_override``: a SourceFeed CRD ``license_default`` value applied
   because the source publishes no machine-readable license.
-- ``unknown``: no machine-readable licence was available. The fail-closed
-  admission policy quarantines this record before content processing.
+- ``unknown``: no machine-readable licence was available.
+"""
+
+TrainingUsage = Literal[
+    "pretrain_and_posttrain",
+    "posttrain_transform_only",
+]
+"""Purpose boundary attached before a source body is fetched.
+
+``posttrain_transform_only`` content may be used as grounded input for
+derived SFT/RL generation, but must never be selected by a verbatim
+pretraining export.
 """
 
 
@@ -150,4 +160,8 @@ class BronzeRecord(BaseModel):
     spdx_license_source: SpdxLicenseSource = Field(
         default="unknown",
         description="Where the SPDX id was read from.",
+    )
+    training_usage: TrainingUsage = Field(
+        default="pretrain_and_posttrain",
+        description="Permitted downstream training purpose for this fetched body.",
     )

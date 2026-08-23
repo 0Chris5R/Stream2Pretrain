@@ -125,7 +125,7 @@ export default function SourcesPage() {
 
       <Card>
         <CardContent className="overflow-x-auto p-0">
-          <Table className="min-w-[52rem]">
+          <Table className="min-w-[68rem]">
             <TableHeader>
               <TableRow>
                 <TableHead>Source</TableHead>
@@ -133,6 +133,9 @@ export default function SourcesPage() {
                 <TableHead>Policy</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Observed (24h)</TableHead>
+                <TableHead className="text-right">Pretrain</TableHead>
+                <TableHead className="text-right">Posttrain only</TableHead>
+                <TableHead className="text-right">Quarantined</TableHead>
                 <TableHead>Last poll</TableHead>
                 <TableHead className="w-[190px] text-right">Actions</TableHead>
               </TableRow>
@@ -155,6 +158,15 @@ export default function SourcesPage() {
                   </TableCell>
                   <TableCell className="text-right font-mono">
                     {formatInt(source.documents_24h)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-emerald-700 dark:text-emerald-400">
+                    {formatInt(source.pretrain_documents_24h)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-amber-700 dark:text-amber-400">
+                    {formatInt(source.posttrain_only_documents_24h)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-muted-foreground">
+                    {formatInt(source.quarantined_documents_24h)}
                   </TableCell>
                   <TableCell className="text-sm">{relativeTime(source.last_attempt_at)}</TableCell>
                   <TableCell>

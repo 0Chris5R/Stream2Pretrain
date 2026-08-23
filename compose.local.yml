@@ -13,6 +13,7 @@ x-processor-environment: &processor-environment
   LOG_LEVEL: INFO
   REDPANDA_BROKERS: redpanda:29092
   S2P_RAW_TOPIC: raw.fetched
+  S2P_SMOKE_RAW_TOPIC: raw.smoke
   S2P_NORMALIZED_TOPIC: docs.normalized
   S2P_CURATED_TOPIC: docs.curated
   S2P_DECISIONS_TOPIC: curation.decisions
@@ -133,10 +134,12 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        for topic in raw.fetched docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
+        for topic in raw.fetched raw.smoke docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
+          retention_ms=604800000
+          [ "$${topic}" = raw.smoke ] && retention_ms=86400000
           rpk -X brokers=redpanda:29092 topic create "$${topic}" \
             --partitions 1 --replicas 1 \
-            --config retention.ms=604800000 \
+            --config retention.ms="$${retention_ms}" \
             --config cleanup.policy=delete \
             --config max.message.bytes=2097152 \
           || rpk -X brokers=redpanda:29092 topic alter-config "$${topic}" \
@@ -433,6 +436,7 @@ services:
       LOG_LEVEL: INFO
       REDPANDA_BROKERS: redpanda:29092
       S2P_RAW_TOPIC: raw.fetched
+      S2P_SMOKE_RAW_TOPIC: raw.smoke
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin

@@ -19,6 +19,7 @@ from typing import Final
 # Topic name constants. Kept as module-level finals so they appear verbatim in
 # k8s manifests, rpk scripts, and OpenTelemetry span attributes.
 RAW_FETCHED: Final[str] = "raw.fetched"
+RAW_SMOKE: Final[str] = "raw.smoke"
 DOCS_NORMALIZED: Final[str] = "docs.normalized"
 DOCS_CURATED: Final[str] = "docs.curated"
 DECON_ATTEST: Final[str] = "decon.attest"
@@ -40,6 +41,7 @@ CODE_SOURCE_FORMAT: Final[str] = "code"
 
 ALL_TOPICS: Final[tuple[str, ...]] = (
     RAW_FETCHED,
+    RAW_SMOKE,
     DOCS_NORMALIZED,
     DOCS_CURATED,
     CURATION_DECISIONS,
@@ -81,6 +83,7 @@ class TopicConfig:
 # Dev profile: single-broker Redpanda, light retention, easy to wipe.
 # 7-day retention is enough to replay a full demo cycle.
 _DEV_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+_SMOKE_RETENTION_MS = 24 * 60 * 60 * 1000
 
 # Prod profile: 3-broker target, longer retention so contamination bisect can
 # replay weeks of history. The decon.attest topic is "compact + tombstone-free"
@@ -94,6 +97,9 @@ def dev_topic_configs() -> list[TopicConfig]:
     return [
         TopicConfig(
             RAW_FETCHED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+        ),
+        TopicConfig(
+            RAW_SMOKE, partitions=1, replication_factor=1, retention_ms=_SMOKE_RETENTION_MS
         ),
         TopicConfig(
             DOCS_NORMALIZED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
@@ -131,6 +137,9 @@ def prod_topic_configs() -> list[TopicConfig]:
     return [
         TopicConfig(
             RAW_FETCHED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS
+        ),
+        TopicConfig(
+            RAW_SMOKE, partitions=3, replication_factor=3, retention_ms=_SMOKE_RETENTION_MS
         ),
         TopicConfig(
             DOCS_NORMALIZED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS

@@ -37,17 +37,18 @@ Tempo, and Alloy are not in the measured baseline.
 
 ## 2. Scale the processor
 
-The measured DHBW baseline keeps KEDA disabled. Bytewax's Kafka source does
-not commit Redpanda consumer-group offsets; it snapshots offsets and operator
-state into the stage's recovery database. Consequently Redpanda reports the
-core processor groups as `Dead` with zero lag, and a Kafka-lag ScaledObject is
-not a valid autoscaling signal for fetcher, curator, or Iceberg writer.
+The fetcher is stateless across records and commits Redpanda consumer-group
+offsets only after the corresponding `docs.normalized` batch is confirmed
+delivered. The DHBW profile keeps one replica warm and uses KEDA lag scaling up
+to the four `raw.fetched` partitions. A 24-hour `raw.smoke` topic shares the
+same consumer group so deployment canaries exercise the real worker without
+waiting behind a production replay backlog.
 
-Each core stage therefore runs as one stable, single-writer execution with a
-durable recovery PVC. To scale one, first increase the topic partition count,
-then benchmark a coordinated Bytewax execution with the same number of
-recovery partitions/workers. Do not add independent replicas: a rebalance can
-move a Kafka partition away from the PVC containing its latest offset.
+Curator and Iceberg writer still use Bytewax recovery databases and do not
+commit broker offsets. Redpanda therefore reports those groups as `Dead` with
+zero lag; independent KEDA replicas are unsafe because a rebalance can move a
+partition away from the PVC that owns its latest state. Keep those stages as
+one durable writer until their state is externalized and coordinated.
 
 KEDA remains appropriate for independently committing ingest consumers such
 as the arXiv HTML and GitHub tarball fetchers. Run the target-cluster procedure
@@ -61,8 +62,8 @@ uv run python scripts/capacity_probe.py
 
 ## 3. Debug a stuck stage
 
-Symptom: an ingest consumer's KEDA replica count climbs to the cap, or a core
-processor's throughput counters stop advancing.
+Symptom: fetcher KEDA replicas climb to the cap without reducing broker lag,
+or a stateful processor's throughput counters stop advancing.
 
 ```bash
 # 3.1 Identify the bottleneck.
@@ -79,7 +80,9 @@ kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate | r
 # Then jump to Tempo using the trace_id field on the log line.
 ```
 
-If a Bytewax operator panics: check `kubectl -n stream2pretrain describe pod`
+If the fetcher stalls, inspect `rpk group describe s2p-fetcher`, its delivery
+failure metric, and Pod restarts. A restart resumes from the broker commit. If
+a Bytewax operator panics: check `kubectl -n stream2pretrain describe pod`
 for the exit code, then the named operator in the processor module. Recovery
 is automatic from the stage's SQLite recovery checkpoint. Bytewax deliberately
 has no last committed Redpanda offset to fall back to, so deleting a checkpoint
@@ -87,9 +90,11 @@ is a destructive replay/cutover decision, not a routine restart step.
 
 ## 4. Restart from checkpoint
 
-The fetcher, curator, and Iceberg writer persist Bytewax operator state and
-source offsets on PVCs. Recovery is automatic. The only manual case is a
-**deliberate replay** (for example a contamination bisect).
+The fetcher resumes from broker-owned `s2p-fetcher` offsets; the deployment
+workflow migrates a legacy fetcher PVC once and then removes it. Curator and
+Iceberg writer persist Bytewax state and source offsets on PVCs. Their recovery
+is automatic. The only manual case is a **deliberate replay** (for example a
+contamination bisect).
 
 ```bash
 # 4.1 Stop the curator.

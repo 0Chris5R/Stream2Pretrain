@@ -79,7 +79,7 @@ async def fetch_and_publish(
     # The decision must be durably published before a content request starts.
     # A Kafka failure therefore fails the ingest attempt closed.
     await admission_producer.send(admission.decision)
-    if not admission.admitted:
+    if not admission.fetch_allowed:
         return None
 
     with tracer.start_as_current_span(
@@ -147,6 +147,7 @@ async def fetch_and_publish(
             bytes_size=stored,
             spdx_license=admission.license_id,
             spdx_license_source=cast(SpdxLicenseSource, license_source),
+            training_usage=admission.training_usage,  # type: ignore[arg-type]
         )
         with tracer.start_as_current_span("kafka.produce"):
             await producer.send(record)

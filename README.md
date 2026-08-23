@@ -48,7 +48,7 @@ flowchart LR
     licence --> decisions["Corpus route ledger"]
     licence --> bronze["MinIO Bronze"]
     licence --> raw["Redpanda raw.fetched"]
-    raw --> fetcher["Bytewax fetcher"]
+    raw --> fetcher["Partitioned fetcher consumer group"]
     fetcher --> normalized["Redpanda docs.normalized"]
     normalized --> curate["Bytewax curator"]
     curate --> decisions["Redpanda curation.decisions"]
@@ -210,7 +210,7 @@ The Helm chart parameterizes replica counts, resources, images, topics, endpoint
 
 Horizontal scale was demonstrated on the DHBW cluster. The UI Deployment scaled from one to three ready replicas in 14 measured seconds. The pod screenshot shows all three replicas. A temporary request for twenty replicas left seven unavailable, triggered `Stream2PretrainDeploymentUnavailable`, and the alert cleared after restoring one replica.
 
-The application templates allow replica changes for stateless components. Kafka partitions provide the unit of parallelism for stream workers. Stateful processor scaling needs additional recovery testing before it is enabled in the DHBW profile. KEDA templates exist but automatic scaling is disabled until broker offset tracking and thresholds are measured.
+The fetcher is stateless across records and commits Redpanda consumer-group offsets only after its normalized output is delivered. Kafka partitions are its unit of parallelism, and the DHBW profile uses KEDA to keep one replica warm and scale to four at a measured lag threshold. Curator and Iceberg writer remain durable single-writer Bytewax stages; scaling them requires a separate externally coordinated state design.
 
 ## 9. Deployment Guide
 
@@ -357,8 +357,8 @@ Known limits are:
 
 - The DHBW run uses proxy classifier backends. Full FinePDFs, FineWeb-Edu, KenLM, Presidio, and embedding artifacts need a measured resource profile before activation.
 - The submitted benchmark reserve contains synthetic canaries. It proves coverage and signing mechanics but not full real-benchmark recall. The pinned builder requires an authorized GPQA token.
-- Container images are present only on the control node, so the DHBW override schedules application pods there. The worker nodes need an internal registry or verified image import before cross-node scheduling.
-- Manual UI scaling was verified. Stateful processor scaling and KEDA broker-offset integration are not yet validated.
+- CI publishes immutable images to GHCR and provides the cluster pull secret when required. Cross-node fetcher scheduling still depends on worker egress and registry availability.
+- Fetcher KEDA scaling is bounded to the four `raw.fetched` partitions. Curator and Iceberg writer are deliberately single-writer until their state is externalized.
 - Polaris uses an in-memory catalog backend in the dev profile. MinIO data is persistent, but production catalog recovery needs a relational backend.
 - Ingress, DNS, and TLS use Traefik, ExternalDNS with RFC2136, and the shared wildcard certificate. NetworkPolicy, Gatekeeper enforcement, Tempo, and Loki remain disabled in the measured profile.
 - Production throughput, safe partition counts, and maximum corpus size are `needs-measurement`.
