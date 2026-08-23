@@ -1072,6 +1072,7 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
     assert first["state"] == "running"
     assert first["candidate_count"] == 1
     cutoff = datetime.fromisoformat(str(first["cutoff_at"]))
+    cutoff_ordinal = int(first["cutoff_ordinal"])
     store.enqueue_candidate(
         doc_id="after-cutoff",
         payload=b"after-cutoff",
@@ -1079,8 +1080,11 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
         quality_score=5.0,
         valid_from=FIXED_TIME,
     )
-    assert store.claim_candidate(cutoff_at=cutoff) == ("first", b"first")
-    assert store.claim_candidate(cutoff_at=cutoff) is None
+    assert store.claim_candidate(cutoff_at=cutoff, cutoff_ordinal=cutoff_ordinal) == (
+        "first",
+        b"first",
+    )
+    assert store.claim_candidate(cutoff_at=cutoff, cutoff_ordinal=cutoff_ordinal) is None
     store.finish_candidate("first")
     store.finish_daily_run(run_day, state="completed", reason="test")
     store.enqueue_candidate(
@@ -1154,6 +1158,7 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
     manual = {
         "run_id": "manual-1",
         "cutoff_at": FIXED_TIME.isoformat(),
+        "cutoff_ordinal": 1,
         "max_candidates": 1,
         "processed_count": 0,
     }
@@ -1167,7 +1172,7 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
 
     runtime._run_daily_snapshot(
         FIXED_TIME.date(),
-        {"cutoff_at": FIXED_TIME.isoformat()},
+        {"cutoff_at": FIXED_TIME.isoformat(), "cutoff_ordinal": 1},
         SimpleNamespace(),
     )
 
