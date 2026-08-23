@@ -159,6 +159,21 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert 'printf "%s/%s" $ctx.Values.image.registry .image' in helper
 
 
+def test_scaled_zero_curator_cutover_uses_a_non_processing_pvc_helper() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+    start = workflow.index("# Advance the broker bridge to any legacy curator recovery progress")
+    end = workflow.index("# Migrate the existing partition set before expanding it")
+    cutover = workflow[start:end]
+
+    assert 'curator_claim="checkpoint-stream2pretrain-processor-curate-0"' in cutover
+    assert '"app.kubernetes.io/component": "processor-curate-cutover"' in cutover
+    assert '| del(.initContainers)' in cutover
+    assert '| .command = ["sh", "-ec"]' in cutover
+    assert 'persistentVolumeClaim: {claimName: $claim}' in cutover
+    assert 'python - < scripts/migrate_fetcher_offsets.py' in cutover
+    assert 'delete "pod/$curator_migration_pod" --wait=true' in cutover
+
+
 def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 

@@ -777,6 +777,7 @@ jobs:
           foundry_port_forward_pid=""
           prometheus_port_forward_pid=""
           curator_canary_job=""
+          curator_migration_pod=""
           vpn_args=(
             --protocol=anyconnect
             --user="$CISCO_VPN_USERNAME"
@@ -797,6 +798,10 @@ jobs:
           cleanup() {
             if [[ -n "$curator_canary_job" ]]; then
               kubectl -n stream2pretrain delete "job/$curator_canary_job" \
+                --ignore-not-found --wait=false >/dev/null 2>&1 || true
+            fi
+            if [[ -n "$curator_migration_pod" ]]; then
+              kubectl -n stream2pretrain delete "pod/$curator_migration_pod" \
                 --ignore-not-found --wait=false >/dev/null 2>&1 || true
             fi
             if [[ -n "$ui_port_forward_pid" ]]; then
@@ -1886,11 +1891,83 @@ jobs:
                 ' \
               || true
           )"
+          if [[ "$existing_curator_flow" != "s2p-curate-v2" \
+             && -n "$curator_exists" \
+             && -z "$curator_pod" ]]; then
+            curator_claim="checkpoint-stream2pretrain-processor-curate-0"
+            if ! kubectl -n stream2pretrain get "pvc/$curator_claim" >/dev/null; then
+              echo "Legacy curator exists but its retained recovery PVC is missing." >&2
+              exit 1
+            fi
+            curator_migration_pod="s2p-curate-cutover-${GITHUB_RUN_ID}"
+            kubectl -n stream2pretrain delete "pod/$curator_migration_pod" \
+              --ignore-not-found --wait=true
+            kubectl -n stream2pretrain get \
+              statefulset/stream2pretrain-processor-curate -o json \
+              | jq \
+                --arg name "$curator_migration_pod" \
+                --arg claim "$curator_claim" '
+                  .spec.template as $template
+                  | {
+                      apiVersion: "v1",
+                      kind: "Pod",
+                      metadata: {
+                        name: $name,
+                        namespace: "stream2pretrain",
+                        labels: (
+                          $template.metadata.labels
+                          + {"app.kubernetes.io/component": "processor-curate-cutover"}
+                        )
+                      },
+                      spec: (
+                        $template.spec
+                        | .restartPolicy = "Never"
+                        | del(.initContainers)
+                        | .containers = [
+                            .containers[]
+                            | select(.name == "curate")
+                            | .name = "migration"
+                            | .command = ["sh", "-ec"]
+                            | .args = [
+                                "trap '\''exit 0'\'' TERM INT; while true; do sleep 30; done"
+                              ]
+                            | del(
+                                .ports,
+                                .startupProbe,
+                                .livenessProbe,
+                                .readinessProbe
+                              )
+                            | .resources = {
+                                requests: {cpu: "10m", memory: "128Mi"},
+                                limits: {cpu: "200m", memory: "256Mi"}
+                              }
+                          ]
+                        | .volumes = (
+                            [
+                              (.volumes // [])[]
+                              | select(.name != "checkpoint")
+                            ]
+                            + [{
+                                name: "checkpoint",
+                                persistentVolumeClaim: {claimName: $claim}
+                              }]
+                          )
+                      )
+                    }
+                ' \
+              | kubectl apply -f -
+            if ! kubectl -n stream2pretrain wait \
+              --for=condition=Ready "pod/$curator_migration_pod" --timeout=180s; then
+              kubectl -n stream2pretrain describe "pod/$curator_migration_pod" || true
+              kubectl -n stream2pretrain logs "pod/$curator_migration_pod" \
+                --all-containers --prefix || true
+              exit 1
+            fi
+            curator_pod="$curator_migration_pod"
+            echo "Mounted the scaled-zero curator recovery PVC in $curator_migration_pod."
+          fi
           if [[ "$existing_curator_flow" == "s2p-curate-v2" ]]; then
             echo "Curator already declares the stable Bytewax v2 identity."
-          elif [[ -n "$curator_exists" && -z "$curator_pod" ]]; then
-            echo "Legacy curator state exists but no Ready Pod can read its retained PVC." >&2
-            exit 1
           elif [[ -n "$curator_pod" ]]; then
             curator_cutover_env=(
               S2P_STATE_DIR=/var/lib/s2p/checkpoint
@@ -1928,6 +2005,10 @@ jobs:
             fi
             kubectl -n redpanda exec statefulset/redpanda -- \
               rpk group describe s2p-curate
+            if [[ -n "$curator_migration_pod" ]]; then
+              kubectl -n stream2pretrain delete "pod/$curator_migration_pod" --wait=true
+              curator_migration_pod=""
+            fi
           elif [[ -z "$curator_exists" ]]; then
             echo "No legacy curator exists; the first Bytewax execution will use OFFSET_STORED."
           fi
