@@ -585,6 +585,15 @@ def test_load_backfill_ids_filters_blank_and_invalid(tmp_path: Any) -> None:
 async def test_run_for_ids_emits_one_record_per_id() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
+        if request.url.host == "arxiv.org" and "/abs/" in request.url.path:
+            return httpx.Response(
+                200,
+                text=(
+                    '<div class="abs-license"><a '
+                    'href="https://creativecommons.org/licenses/by/4.0/">'
+                    "view license</a></div>"
+                ),
+            )
         if "arxiv.org/html/" in url and "ar5iv.labs" not in url:
             return httpx.Response(
                 200,

@@ -19,7 +19,7 @@ def test_live_corpus_contract_accepts_mixed_production_data() -> None:
             "by_license": [
                 {"license_id": "CC-BY-4.0", "status": "admitted", "count": 7},
                 {
-                    "license_id": "unknown",
+                    "license_id": "arxiv-non-exclusive-distribution",
                     "status": "posttrain_transform_only",
                     "count": 5,
                 },

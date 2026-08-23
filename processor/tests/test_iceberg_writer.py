@@ -187,9 +187,14 @@ class _AdmissionCatalog:
         return self.table
 
 
+class _MemoryLicenseAdmissionWriter(LicenseAdmissionWriter):
+    def _ensure_table(self) -> _MemoryTable:
+        return self._catalog.table  # type: ignore[attr-defined]
+
+
 def test_license_admission_writer_batches_and_deduplicates_decisions() -> None:
     catalog = _AdmissionCatalog()
-    writer = LicenseAdmissionWriter(catalog)  # type: ignore[arg-type]
+    writer = _MemoryLicenseAdmissionWriter(catalog)  # type: ignore[arg-type]
     decision = LicenseAdmissionDecision(
         decision_id="sha256:" + "b" * 64,
         doc_id="sha256:" + "a" * 64,

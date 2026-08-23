@@ -13,11 +13,6 @@ from ingest.common.tests.conftest import FakeMinio, FakeProducer  # type: ignore
 from ingest.github_events import poller as evt_module
 
 
-@pytest.fixture(autouse=True)
-def _fake_license_admission_producer(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(evt_module, "LicenseAdmissionProducer", lambda *a, **kw: FakeProducer())
-
-
 def _cfg(state_dir: Path) -> IngestConfig:
     return IngestConfig(
         env="dev",

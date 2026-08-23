@@ -187,7 +187,7 @@ class _LicenseAdmissionsConnection:
                     False,
                 )
             ]
-        elif "GROUP BY source_feed, license_id, status" in sql:
+        elif "GROUP BY 1, license_id, status" in sql:
             self.description = [
                 ("source_feed",),
                 ("license_id",),
@@ -195,10 +195,10 @@ class _LicenseAdmissionsConnection:
                 ("count",),
             ]
             self.rows = [("rss-arxiv-cs-ai", "CC-BY-4.0", "admitted", 2)]
-        elif "GROUP BY source_feed, license_source" in sql:
+        elif "GROUP BY 1, license_source" in sql:
             self.description = [("source_feed",), ("license_source",), ("count",)]
             self.rows = [("rss-arxiv-cs-ai", "rss_entry", 4)]
-        elif "GROUP BY source_feed" in sql:
+        elif "GROUP BY 1" in sql:
             self.description = [
                 ("source_feed",),
                 ("documents",),
@@ -297,7 +297,9 @@ def test_license_admissions_exposes_durable_24h_source_activity() -> None:
         }
     ]
     activity_sql, activity_params = next(
-        (sql, params) for sql, params in service._conn.calls if "GROUP BY source_feed" in sql
+        (sql, params)
+        for sql, params in service._conn.calls
+        if "GROUP BY 1" in sql and "last_observed_at" in sql
     )
     assert "FROM license_admissions" in activity_sql
     assert len(activity_params) == 1
