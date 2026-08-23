@@ -2178,8 +2178,31 @@ jobs:
           # derived from their effective environment. This closes the clean
           # install path (where there was no legacy PVC to mark) and rejects a
           # chart/workflow drift away from OFFSET_STORED or the stable names.
+          fetcher_ready_pod="$(
+            kubectl -n stream2pretrain get pod \
+              -l app.kubernetes.io/component=processor-fetcher -o json \
+              | jq -r '
+                  [
+                    .items[]
+                    | select(.metadata.deletionTimestamp == null)
+                    | select(.status.phase == "Running")
+                    | select(any(
+                        .status.conditions[]?;
+                        .type == "Ready" and .status == "True"
+                      ))
+                  ]
+                  | sort_by(.metadata.creationTimestamp)
+                  | last
+                  | .metadata.name // empty
+                '
+          )"
+          if [[ -z "$fetcher_ready_pod" ]]; then
+            echo "No Ready production fetcher Pod is available for cutover marking." >&2
+            report_deploy_failure
+            exit 1
+          fi
           kubectl -n stream2pretrain exec -i \
-            deployment/stream2pretrain-processor-fetcher -c fetcher -- \
+            "pod/$fetcher_ready_pod" -c fetcher -- \
             env \
               S2P_CUTOVER_COMPONENT=fetcher \
               S2P_CUTOVER_TOPIC=raw.fetched \
