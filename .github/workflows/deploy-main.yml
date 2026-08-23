@@ -735,8 +735,15 @@ jobs:
               echo "HF model source completed but admitted no licensed model" >&2
               exit 1
             }
-            kubectl -n stream2pretrain logs \
-              deployment/stream2pretrain-ingest-github-events --tail=240
+            github_events_logs="$(
+              kubectl -n stream2pretrain logs \
+                deployment/stream2pretrain-ingest-github-events --tail=240
+            )"
+            printf '%s\n' "$github_events_logs"
+            grep -Eq 'github_events\.(batch|not_modified)' <<<"$github_events_logs" || {
+              echo "GitHub Events has no verified successful upstream poll in recent logs" >&2
+              exit 1
+            }
             kubectl -n stream2pretrain logs \
               deployment/stream2pretrain-ingest-github-tarball-fetcher --tail=240
             kubectl -n stream2pretrain logs \
