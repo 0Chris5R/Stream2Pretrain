@@ -5407,6 +5407,16 @@ local = [
     { name = "transformers" },
     { name = "zstandard" },
 ]
+model-service = [
+    { name = "kenlm" },
+    { name = "onnxruntime" },
+    { name = "safetensors" },
+    { name = "sentencepiece" },
+    { name = "tokenizers" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
+    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux'" },
+    { name = "transformers" },
+]
 runtime = [
     { name = "aiohttp" },
     { name = "beautifulsoup4" },
@@ -5481,6 +5491,7 @@ requires-dist = [
     { name = "feedparser", marker = "extra == 'runtime'", specifier = ">=6.0.11" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "kenlm", marker = "extra == 'local'", specifier = ">=0.2" },
+    { name = "kenlm", marker = "extra == 'model-service'", specifier = ">=0.2" },
     { name = "kenlm", marker = "extra == 'runtime'", specifier = ">=0.2" },
     { name = "kopf", marker = "extra == 'runtime'", specifier = ">=1.37" },
     { name = "kubernetes", marker = "extra == 'runtime'", specifier = ">=29.0" },
@@ -5490,6 +5501,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'local'", specifier = ">=1.26,<2" },
     { name = "numpy", marker = "extra == 'runtime'", specifier = ">=1.26,<2" },
     { name = "onnxruntime", marker = "extra == 'local'", specifier = ">=1.18,<2" },
+    { name = "onnxruntime", marker = "extra == 'model-service'", specifier = ">=1.18" },
     { name = "onnxruntime", marker = "extra == 'runtime'", specifier = ">=1.18" },
     { name = "opentelemetry-api", specifier = ">=1.27" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.27" },
@@ -5520,8 +5532,10 @@ requires-dist = [
     { name = "resiliparse", marker = "extra == 'runtime'", specifier = ">=0.14" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "safetensors", marker = "extra == 'local'", specifier = ">=0.4" },
+    { name = "safetensors", marker = "extra == 'model-service'", specifier = ">=0.4" },
     { name = "safetensors", marker = "extra == 'runtime'", specifier = ">=0.4" },
     { name = "sentencepiece", marker = "extra == 'local'", specifier = ">=0.2" },
+    { name = "sentencepiece", marker = "extra == 'model-service'", specifier = ">=0.2" },
     { name = "sentencepiece", marker = "extra == 'runtime'", specifier = ">=0.2" },
     { name = "spacy", marker = "extra == 'local'", specifier = ">=3.8,<3.9" },
     { name = "spacy", marker = "extra == 'runtime'", specifier = ">=3.8,<3.9" },
@@ -5537,17 +5551,21 @@ requires-dist = [
     { name = "tiktoken", marker = "extra == 'local'", specifier = ">=0.7" },
     { name = "tiktoken", marker = "extra == 'runtime'", specifier = ">=0.7" },
     { name = "tokenizers", marker = "extra == 'local'", specifier = ">=0.19" },
+    { name = "tokenizers", marker = "extra == 'model-service'", specifier = ">=0.19" },
     { name = "tokenizers", marker = "extra == 'runtime'", specifier = ">=0.19" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'local'", specifier = ">=2.3,<3", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", marker = "sys_platform == 'linux' and extra == 'model-service'", specifier = ">=2.3,<3", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'runtime'", specifier = ">=2.3,<3", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'local'", specifier = ">=2.3,<3" },
+    { name = "torch", marker = "sys_platform != 'linux' and extra == 'model-service'", specifier = ">=2.3,<3" },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'runtime'", specifier = ">=2.3,<3" },
     { name = "transformers", marker = "extra == 'local'", specifier = ">=4.40,<5" },
+    { name = "transformers", marker = "extra == 'model-service'", specifier = ">=4.40" },
     { name = "transformers", marker = "extra == 'runtime'", specifier = ">=4.40" },
     { name = "zstandard", marker = "extra == 'local'", specifier = ">=0.23" },
     { name = "zstandard", marker = "extra == 'runtime'", specifier = ">=0.23" },
 ]
-provides-extras = ["runtime", "local", "dev"]
+provides-extras = ["runtime", "model-service", "local", "dev"]
 
 [[package]]
 name = "stream2pretrain-rss-poller"

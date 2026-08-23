@@ -155,23 +155,26 @@ RUN case "${S2P_MODEL_PROFILE}" in curate|all) \
 # the Hub cache in the same layer so the 4.44 GB binary is stored only once.
 RUN mkdir -p /opt/models/kenlm \
  && case "${S2P_MODEL_PROFILE}" in curate|all) \
-      python -c "from huggingface_hub import hf_hub_download; import shutil; \
+      python -c "from huggingface_hub import hf_hub_download; import os, shutil; \
         repo='edugp/kenlm'; rev='${KENLM_REVISION}'; \
-        binary=hf_hub_download(repo_id=repo, filename='wikipedia/en.arpa.bin', revision=rev); \
-        tokenizer=hf_hub_download(repo_id=repo, filename='wikipedia/en.sp.model', revision=rev); \
-        shutil.copy2(binary, '/opt/models/kenlm/en.arpa.bin'); \
-        shutil.copy2(tokenizer, '/opt/models/kenlm/en.sp.model')"; \
-      rm -rf /root/.cache/huggingface ;; \
+        binary=hf_hub_download(repo_id=repo, filename='wikipedia/en.arpa.bin', revision=rev, local_dir='/opt/models/kenlm'); \
+        tokenizer=hf_hub_download(repo_id=repo, filename='wikipedia/en.sp.model', revision=rev, local_dir='/opt/models/kenlm'); \
+        os.replace(binary, '/opt/models/kenlm/en.arpa.bin'); \
+        os.replace(tokenizer, '/opt/models/kenlm/en.sp.model'); \
+        shutil.rmtree('/opt/models/kenlm/.cache', ignore_errors=True); \
+        shutil.rmtree('/opt/models/kenlm/wikipedia', ignore_errors=True)"; \
+      rm -rf /root/.cache/huggingface /opt/models/kenlm/.cache ;; \
     none|fetcher) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
-# Pre-cache the exact BPE vocabulary in every profile. Token counting remains
+# Pre-cache the exact BPE vocabulary in worker profiles. Token counting remains
 # local to the lightweight curator and this vocabulary is only a few MiB.
 RUN mkdir -p /opt/models/tiktoken \
- && case "${S2P_MODEL_PROFILE}" in none|curate|fetcher|all) \
+ && case "${S2P_MODEL_PROFILE}" in none|fetcher|all) \
       TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
         python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" ;; \
+    curate) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -209,8 +212,7 @@ RUN case "${S2P_MODEL_PROFILE}" in \
         test -s /opt/models/e5-small/model.onnx; \
         test -s /opt/models/e5-small/tokenizer.json; \
         test -s /opt/models/kenlm/en.arpa.bin; \
-        test -s /opt/models/kenlm/en.sp.model; \
-        find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q . ;; \
+        test -s /opt/models/kenlm/en.sp.model ;; \
       fetcher) \
         test -s /opt/models/figure-classifier/model.onnx; \
         find /opt/models/docling -type f -size +0c -print -quit | grep -q .; \

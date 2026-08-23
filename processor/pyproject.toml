@@ -73,6 +73,18 @@ runtime = [
     # v0.2.0 seed loader: streaming HuggingFace dataset reader.
     "datasets>=2.20",
 ]
+# Stateless curator inference service. Keep this separate from ``runtime`` so
+# its already-large model image does not also contain Docling, PyArrow,
+# Kubernetes clients, Iceberg, OCR, and unrelated worker dependencies.
+model-service = [
+    "onnxruntime>=1.18",
+    "transformers>=4.40",
+    "tokenizers>=0.19",
+    "torch>=2.3,<3",
+    "safetensors>=0.4",
+    "sentencepiece>=0.2",
+    "kenlm>=0.2",
+]
 # Containerized laptop pilot profile. It includes every classifier used in the
 # curate path while omitting only Kubernetes controller dependencies and the
 # production-only alternative state backends.

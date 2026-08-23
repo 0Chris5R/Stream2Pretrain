@@ -113,10 +113,13 @@ jobs:
         include:
           - profile: none
             repository: processor-base
+            extra: runtime
           - profile: curate
             repository: processor-base-curate
+            extra: model-service
           - profile: fetcher
             repository: processor-base-fetcher
+            extra: runtime
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -147,7 +150,7 @@ jobs:
             uv export \
               --frozen \
               --package stream2pretrain-processor \
-              --extra runtime \
+              --extra "${{ matrix.extra }}" \
               --no-dev \
               --no-header \
               --no-annotate \
@@ -159,6 +162,7 @@ jobs:
               sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
               printf '%s\n' "resolved-dependencies=$dependency_key"
               printf '%s\n' "model-profile=${{ matrix.profile }}"
+              printf '%s\n' "install-extra=${{ matrix.extra }}"
             } | sha256sum | cut -c1-24
           )"
           image="ghcr.io/${owner}/stream2pretrain/${{ matrix.repository }}:${base_key}"
@@ -199,7 +203,9 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.base.outputs.image }}
-          build-args: S2P_MODEL_PROFILE=${{ matrix.profile }}
+          build-args: |
+            S2P_MODEL_PROFILE=${{ matrix.profile }}
+            S2P_INSTALL_EXTRA=${{ matrix.extra }}
           cache-from: type=gha,scope=processor-base
 
   processor-base-pin:
@@ -241,26 +247,29 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          dependency_key="$(
-            uv export \
-              --frozen \
-              --package stream2pretrain-processor \
-              --extra runtime \
-              --no-dev \
-              --no-header \
-              --no-annotate \
-              --no-emit-workspace \
-              | sha256sum | cut -c1-24
-          )"
           resolve_image() {
             local profile="$1"
             local repository="$2"
+            local extra="$3"
             local base_key
+            local dependency_key
+            dependency_key="$(
+              uv export \
+                --frozen \
+                --package stream2pretrain-processor \
+                --extra "$extra" \
+                --no-dev \
+                --no-header \
+                --no-annotate \
+                --no-emit-workspace \
+                | sha256sum | cut -c1-24
+            )"
             base_key="$(
               {
                 sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
                 printf '%s\n' "resolved-dependencies=$dependency_key"
                 printf '%s\n' "model-profile=$profile"
+                printf '%s\n' "install-extra=$extra"
               } | sha256sum | cut -c1-24
             )"
             printf 'ghcr.io/%s/stream2pretrain/%s:%s' "$owner" "$repository" "$base_key"
@@ -280,9 +289,9 @@ jobs:
             echo "${output_name}=${image}@${digest}" >> "$GITHUB_OUTPUT"
             echo "Pinned processor base ${image}@${digest}"
           }
-          pin_image image "$(resolve_image none processor-base)"
-          pin_image curate_image "$(resolve_image curate processor-base-curate)"
-          pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher)"
+          pin_image image "$(resolve_image none processor-base runtime)"
+          pin_image curate_image "$(resolve_image curate processor-base-curate model-service)"
+          pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher runtime)"
 
   build:
     name: Build ${{ matrix.image }}
@@ -339,7 +348,7 @@ jobs:
             inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
           - image: processor-curate-model
             context: .
-            dockerfile: processor/Dockerfile.app
+            dockerfile: processor/Dockerfile.model-service.app
             inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
           - image: processor-fetcher-model
             context: .
