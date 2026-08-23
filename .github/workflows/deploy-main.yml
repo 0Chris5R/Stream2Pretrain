@@ -1655,6 +1655,10 @@ jobs:
                   first(
                     .items[]
                     | select(.status.phase == "Running")
+                    | select(any(
+                        .status.containerStatuses[]?;
+                        .name == "curate" and .ready == true
+                      ))
                     | .metadata.name
                   ) // empty
                 ' \
@@ -1662,14 +1666,18 @@ jobs:
           )"
           if [[ -n "$curator_pod" ]]; then
             echo "Migrating legacy curator recovery offsets from $curator_pod"
-            kubectl -n stream2pretrain exec -i "$curator_pod" -- \
-              env \
-                S2P_RAW_TOPIC=docs.normalized \
-                S2P_CONSUMER_GROUP=s2p-curate \
-                S2P_BYTEWAX_STEP_ID=s2p-curate.docs_normalized \
-              python - < scripts/migrate_fetcher_offsets.py
+            if ! kubectl -n stream2pretrain exec -i "$curator_pod" -- \
+                env \
+                  S2P_RAW_TOPIC=docs.normalized \
+                  S2P_CONSUMER_GROUP=s2p-curate \
+                  S2P_BYTEWAX_STEP_ID=s2p-curate.docs_normalized \
+                python - < scripts/migrate_fetcher_offsets.py; then
+              echo "Curator became unavailable during optional legacy offset migration; continuing with durable broker offsets." >&2
+            fi
             kubectl -n redpanda exec statefulset/redpanda -- \
               rpk group describe s2p-curate
+          else
+            echo "No ready legacy curator container; continuing with durable broker offsets."
           fi
 
           : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
