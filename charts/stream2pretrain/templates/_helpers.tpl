@@ -156,6 +156,8 @@ Iceberg + observability).
   value: {{ .Values.redpanda.topics.smokeRaw | quote }}
 - name: S2P_NORMALIZED_TOPIC
   value: {{ .Values.redpanda.topics.docsNormalized | quote }}
+- name: S2P_SMOKE_NORMALIZED_TOPIC
+  value: {{ .Values.redpanda.topics.docsNormalizedSmoke | quote }}
 - name: S2P_CURATED_TOPIC
   value: {{ .Values.redpanda.topics.docsCurated | quote }}
 - name: S2P_DECISIONS_TOPIC

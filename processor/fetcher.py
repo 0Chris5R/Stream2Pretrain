@@ -486,6 +486,9 @@ def run_native_fetcher(
     consumer = consumer_factory(native_consumer_config(cfg))
     producer = producer_factory(native_producer_config(cfg))
     topics = fetcher_input_topics(cfg)
+    output_topic = os.environ.get("S2P_FETCHER_OUTPUT_TOPIC", cfg.normalized_topic).strip()
+    if not output_topic:
+        raise RuntimeError("S2P_FETCHER_OUTPUT_TOPIC must not be empty")
 
     batch_size = int(os.environ.get("S2P_FETCHER_COMMIT_BATCH_SIZE", "16"))
     batch_seconds = float(os.environ.get("S2P_FETCHER_COMMIT_INTERVAL_SECONDS", "2"))
@@ -597,7 +600,7 @@ def run_native_fetcher(
                     while True:
                         try:
                             producer.produce(
-                                cfg.normalized_topic,
+                                output_topic,
                                 key=silver.doc_id.encode("utf-8"),
                                 value=encoded,
                                 headers=[("trace_id", silver.trace_id.encode("ascii"))],

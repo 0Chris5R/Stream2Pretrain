@@ -10,8 +10,11 @@ State backend
 Primary: ``plyvel`` (LevelDB) - constant memory, append-only, fast on
 small VMs. Falls back to ``sqlitedict`` if plyvel is unavailable in the
 container (its build chain pulls in libleveldb-dev which is not always
-worth the image size). The fallback is documented in the operator's
-``backend`` field for forensic replay.
+worth the image size). Cluster keys are persisted incrementally in one
+transaction per document. Older releases rewrote the complete cluster map
+and every multi-megabyte Bloom band for every document, making write work
+grow quadratically with corpus size. The fallback is documented in the
+operator's ``backend`` field for forensic replay.
 
 This operator is the stateful core of Stream2Pretrain's near-dup pass. It
 is deterministic: given the same insertion order it produces the same
@@ -105,8 +108,16 @@ class LSHBloomIndex:
         self._state_path = Path(state_dir) if state_dir else None
         self._cluster_counter = 0
         self._memory_bands: list[_BitArray] = [_BitArray(bits_per_band) for _ in range(num_bands)]
+        # These maps contain only the legacy monolithic snapshot, if present.
+        # New entries remain in the KV backend and are never accumulated into
+        # another unbounded JSON value.
         self._cluster_map: dict[str, str] = {}
         self._cluster_anchors: dict[str, str] = {}
+        self._dirty_bands: set[int] = set()
+        self._observations_since_bloom_checkpoint = 0
+        self._bloom_checkpoint_interval = max(
+            1, int(os.environ.get("S2P_LSH_BLOOM_CHECKPOINT_INTERVAL", "2048"))
+        )
         self._db, self._backend = self._open_state(backend)
 
     @property
@@ -138,7 +149,7 @@ class LSHBloomIndex:
 
                 db = SqliteDict(
                     filename=str(self._state_path / "lshbloom.sqlite"),
-                    autocommit=True,
+                    autocommit=False,
                     journal_mode="WAL",
                 )
                 self._restore_from(db)
@@ -171,8 +182,8 @@ class LSHBloomIndex:
 
     @staticmethod
     def _db_get(db: object, key: bytes) -> bytes | None:
-        if hasattr(db, "get") and not hasattr(db, "execute"):
-            # plyvel / dict-like with bytes
+        if hasattr(db, "put"):
+            # plyvel uses byte keys and values.
             res = db.get(key)  # type: ignore[union-attr]
             return bytes(res) if res is not None else None
         try:
@@ -184,34 +195,72 @@ class LSHBloomIndex:
         except KeyError:
             return None
 
-    @staticmethod
-    def _db_put(db: object, key: bytes, value: bytes) -> None:
-        if hasattr(db, "put"):
-            db.put(key, value)  # plyvel  # type: ignore[union-attr]
-        else:
-            db[key.decode("ascii")] = value  # type: ignore[index]
+    def _db_put_many(self, items: Iterable[tuple[bytes, bytes]]) -> None:
+        """Persist one document's state as one backend transaction."""
+        if self._db is None:
+            return
+        materialized = list(items)
+        if hasattr(self._db, "write_batch"):
+            with self._db.write_batch(transaction=True) as batch:  # type: ignore[union-attr]
+                for key, value in materialized:
+                    batch.put(key, value)
+            return
+        for key, value in materialized:
+            self._db[key.decode("ascii")] = value  # type: ignore[index]
+        if hasattr(self._db, "commit"):
+            self._db.commit()  # type: ignore[union-attr]
 
     @staticmethod
     def _band_key(band_idx: int) -> bytes:
         return f"band:{band_idx:04d}".encode("ascii")
 
-    def _persist_band(self, band_idx: int) -> None:
-        if self._db is None:
-            return
-        self._db_put(self._db, self._band_key(band_idx), self._memory_bands[band_idx].to_bytes())
+    @staticmethod
+    def _cluster_state_key(cluster_key: str) -> bytes:
+        return f"cluster:{cluster_key}".encode("ascii")
 
-    def _persist_cluster_map(self) -> None:
-        if self._db is None:
-            return
-        import orjson
+    @staticmethod
+    def _anchor_state_key(cluster_id: str) -> bytes:
+        return f"anchor:{cluster_id}".encode("ascii")
 
-        self._db_put(self._db, b"__clusters__", orjson.dumps(self._cluster_map))
-        self._db_put(
-            self._db,
-            b"__cluster_anchors__",
-            orjson.dumps(self._cluster_anchors),
+    def _lookup_cluster(self, cluster_key: str) -> str | None:
+        legacy = self._cluster_map.get(cluster_key)
+        if legacy is not None:
+            return legacy
+        if self._db is None:
+            return None
+        value = self._db_get(self._db, self._cluster_state_key(cluster_key))
+        return value.decode("ascii") if value is not None else None
+
+    def _lookup_anchor(self, cluster_id: str) -> str | None:
+        legacy = self._cluster_anchors.get(cluster_id)
+        if legacy is not None:
+            return legacy
+        if self._db is None:
+            return None
+        value = self._db_get(self._db, self._anchor_state_key(cluster_id))
+        return value.decode("utf-8") if value is not None else None
+
+    def _checkpoint_dirty_bands(self, *, force: bool = False) -> None:
+        """Amortize large Bloom bitmap writes across many observations.
+
+        Exact cluster-key rows are the authoritative crash-consistent index.
+        The bitmaps are a compact acceleration/provenance structure and may
+        lag until this bounded checkpoint; they are never used to skip an
+        authoritative KV lookup.
+        """
+        if not self._dirty_bands:
+            return
+        if (
+            not force
+            and self._observations_since_bloom_checkpoint < self._bloom_checkpoint_interval
+        ):
+            return
+        self._db_put_many(
+            (self._band_key(index), self._memory_bands[index].to_bytes())
+            for index in sorted(self._dirty_bands)
         )
-        self._db_put(self._db, b"__counter__", str(self._cluster_counter).encode("ascii"))
+        self._dirty_bands.clear()
+        self._observations_since_bloom_checkpoint = 0
 
     def observe(self, doc_id: str, sig: MinHashSignature) -> NearDupResult:
         """Insert a doc's signature; report whether it is a near-duplicate.
@@ -226,7 +275,7 @@ class LSHBloomIndex:
         all_seen = True
         existing_cluster: str | None = None
         for ck in cluster_keys:
-            cid = self._cluster_map.get(ck)
+            cid = self._lookup_cluster(ck)
             if cid is None:
                 all_seen = False
                 break
@@ -236,19 +285,30 @@ class LSHBloomIndex:
             # its expensive curation completed but before the source offset
             # checkpoint committed. A document is never a near-duplicate of
             # itself; only a different doc_id colliding with the anchor is.
-            if self._cluster_anchors.get(existing_cluster) == doc_id:
+            if self._lookup_anchor(existing_cluster) == doc_id:
                 return NearDupResult(is_near_duplicate=False, cluster_id=existing_cluster)
             return NearDupResult(is_near_duplicate=True, cluster_id=existing_cluster)
         # Otherwise: register doc as the anchor of a new cluster (if no
         # band claimed one) and update the band Blooms.
         cluster_id = existing_cluster or self._mint_cluster_id(doc_id)
-        self._cluster_anchors.setdefault(cluster_id, doc_id)
+        writes: list[tuple[bytes, bytes]] = []
+        if self._lookup_anchor(cluster_id) is None:
+            writes.append((self._anchor_state_key(cluster_id), doc_id.encode("utf-8")))
         for i, ck in enumerate(cluster_keys):
             for h in self._hashes(ck.encode("utf-8")):
                 self._memory_bands[i].set(h)
-            self._cluster_map.setdefault(ck, cluster_id)
-            self._persist_band(i)
-        self._persist_cluster_map()
+            self._dirty_bands.add(i)
+            if self._lookup_cluster(ck) is None:
+                writes.append((self._cluster_state_key(ck), cluster_id.encode("ascii")))
+        writes.append((b"__counter__", str(self._cluster_counter).encode("ascii")))
+        self._db_put_many(writes)
+        # An in-memory test backend still needs current-process lookup state.
+        if self._db is None:
+            self._cluster_anchors.setdefault(cluster_id, doc_id)
+            for ck in cluster_keys:
+                self._cluster_map.setdefault(ck, cluster_id)
+        self._observations_since_bloom_checkpoint += 1
+        self._checkpoint_dirty_bands()
         return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
 
     def _mint_cluster_id(self, doc_id: str) -> str:
@@ -270,7 +330,7 @@ class LSHBloomIndex:
         """Flush durable state and release file handles."""
         if self._db is None:
             return
-        self._persist_cluster_map()
+        self._checkpoint_dirty_bands(force=True)
         try:
             if hasattr(self._db, "close"):
                 self._db.close()  # type: ignore[union-attr]

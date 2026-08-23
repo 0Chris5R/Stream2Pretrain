@@ -49,6 +49,7 @@ redpanda:
     rawFetched: raw.fetched
     smokeRaw: raw.smoke
     docsNormalized: docs.normalized
+    docsNormalizedSmoke: docs.normalized.smoke
     docsCurated: docs.curated
     curationDecisions: curation.decisions
     licenseAdmissions: license.admissions

@@ -1,7 +1,7 @@
 # stream2pretrain Helm chart
 
 The single Helm chart that deploys every Stream2Pretrain component on a
-Kubernetes cluster: ingest CronJobs/Deployments, the Bytewax curate StatefulSet,
+Kubernetes cluster: ingest CronJobs/Deployments, the stateful Kafka curator,
 the iceberg-writer Deployment, the DuckDB query API, the Decon-Gate attestation
 API, the post-training foundry StatefulSet/API, the Next.js UI, the
 kopf mixture-controller plus its SourceFeed REST API,

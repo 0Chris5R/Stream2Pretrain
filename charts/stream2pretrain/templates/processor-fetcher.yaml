@@ -186,6 +186,8 @@ spec:
               value: {{ .Values.processor.fetcher.canary.consumerGroup | quote }}
             - name: S2P_FETCHER_INPUT_TOPICS
               value: {{ .Values.redpanda.topics.smokeRaw | quote }}
+            - name: S2P_FETCHER_OUTPUT_TOPIC
+              value: {{ .Values.redpanda.topics.docsNormalizedSmoke | quote }}
             - name: S2P_FETCHER_COMMIT_BATCH_SIZE
               value: "1"
             - name: S2P_FETCHER_COMMIT_INTERVAL_SECONDS

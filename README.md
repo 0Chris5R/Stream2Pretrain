@@ -50,7 +50,7 @@ flowchart LR
     licence --> raw["Redpanda raw.fetched"]
     raw --> fetcher["Partitioned fetcher consumer group"]
     fetcher --> normalized["Redpanda docs.normalized"]
-    normalized --> curate["Bytewax curator"]
+    normalized --> curate["Priority-aware stateful curator"]
     curate --> decisions["Redpanda curation.decisions"]
     curate --> clean["Redpanda docs.curated"]
     decisions --> writer["Iceberg writer"]
@@ -79,7 +79,7 @@ These choices support the use case directly. They are not included only to incre
 | Bronze writer | MinIO | Preserve immutable compressed source material before transformation. |
 | Event bus | Redpanda | Decouple ingestion, curation, storage, and replay through named topics. |
 | Fetcher | Bytewax and Resiliparse | Load Bronze bytes, extract text and scientific structure, then emit normalized records. |
-| Curator | Bytewax StatefulSet | Apply language, quality, PII, duplication, routing, and decontamination policies. |
+| Curator | Stateful Kafka consumer | Apply language, quality, PII, duplication, routing, and decontamination policies with broker-owned progress and durable global dedup state. |
 | Iceberg writer | PyIceberg | Persist all decisions and the accepted subset as Parquet-backed Iceberg tables. |
 | Catalog | Apache Polaris | Resolve table metadata and snapshots through the Iceberg REST protocol. |
 | Query service | DuckDB API | Read exact Iceberg metadata versions and expose typed read-only endpoints. |
@@ -131,7 +131,7 @@ quarantined before body retrieval. The curator also applies language confidence,
 
 ### Stateful processing
 
-Near-duplicate detection maintains state across documents. Bytewax stores recovery snapshots so a curator restart can resume without discarding its checkpoint PVC. The Iceberg writer uses the stable key `doc_id`, scoring version, classifier revision, and policy revision to suppress deterministic replay duplicates.
+Near-duplicate detection maintains state across documents. The curator commits its Redpanda offset only after outputs are delivered and retains the global dedup index on its checkpoint PVC. The Iceberg writer uses the stable key `doc_id`, scoring version, classifier revision, and policy revision to suppress deterministic replay duplicates.
 
 ### Experimental post-training extension
 
@@ -198,7 +198,7 @@ The API and document screenshots in section 11 use the same live cluster data sh
 | Kubernetes object | Components |
 |---|---|
 | Deployment | Fetcher, Iceberg writer, DuckDB API, decon API, mixture controller, GitHub event poller, and UI. |
-| StatefulSet | Curator with a persistent Bytewax checkpoint; single-writer foundry with its durable queue, call cache, and append-only artifact audits. |
+| StatefulSet | Curator with a persistent global dedup index and decision cache; single-writer foundry with its durable queue, call cache, and append-only artifact audits. |
 | CronJob | Periodic RSS, OAI-PMH, Hugging Face, and GitHub release polls. |
 | Job | Optional historical seed loader. |
 | ConfigMap | Feed definitions and synthetic benchmark canaries. |
@@ -210,7 +210,7 @@ The Helm chart parameterizes replica counts, resources, images, topics, endpoint
 
 Horizontal scale was demonstrated on the DHBW cluster. The UI Deployment scaled from one to three ready replicas in 14 measured seconds. The pod screenshot shows all three replicas. A temporary request for twenty replicas left seven unavailable, triggered `Stream2PretrainDeploymentUnavailable`, and the alert cleared after restoring one replica.
 
-The fetcher is stateless across records and commits Redpanda consumer-group offsets only after its normalized output is delivered. Kafka partitions are its unit of parallelism, and the DHBW profile uses KEDA to keep one replica warm and scale to four at a measured lag threshold. Curator and Iceberg writer remain durable single-writer Bytewax stages; scaling them requires a separate externally coordinated state design.
+The fetcher is stateless across records and commits Redpanda consumer-group offsets only after its normalized output is delivered. Kafka partitions are its unit of parallelism, and the DHBW profile uses KEDA to keep one replica warm and scale to four at a measured lag threshold. The curator also exposes authoritative broker lag and prioritizes a separate deployment-health lane, but its global near-duplicate state remains single-writer. Horizontal curator scaling requires splitting stateless scoring from that externally coordinated dedup state.
 
 ## 9. Deployment Guide
 

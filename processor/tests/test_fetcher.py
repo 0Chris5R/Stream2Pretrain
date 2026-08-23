@@ -376,3 +376,34 @@ def test_fetcher_input_topics_support_isolated_traffic_class(monkeypatch: Any) -
     monkeypatch.setenv("S2P_FETCHER_INPUT_TOPICS", " raw.smoke, raw.smoke ")
 
     assert fetcher_input_topics(cfg) == ["raw.smoke"]
+
+
+def test_native_fetcher_supports_isolated_output_lane(
+    bronze_record: BronzeRecord,
+    silver_record: Any,
+    monkeypatch: Any,
+) -> None:
+    cfg = common.load_config()
+    producer: _FakeProducer | None = None
+
+    def consumer_factory(config: dict[str, object]) -> _FakeConsumer:
+        return _FakeConsumer(config, bronze_record.model_dump_json().encode())
+
+    def producer_factory(config: dict[str, object]) -> _FakeProducer:
+        nonlocal producer
+        producer = _FakeProducer(config)
+        return producer
+
+    monkeypatch.setattr("processor.fetcher.process_bronze_payload", lambda *_: silver_record)
+    monkeypatch.setenv("S2P_FETCHER_INPUT_TOPICS", "raw.smoke")
+    monkeypatch.setenv("S2P_FETCHER_OUTPUT_TOPIC", "docs.normalized.smoke")
+    run_native_fetcher(
+        cfg,
+        state=_state(_FakeS3(b"")),
+        consumer_factory=consumer_factory,
+        producer_factory=producer_factory,
+        max_messages=1,
+    )
+
+    assert producer is not None
+    assert producer.records[0]["topic"] == "docs.normalized.smoke"

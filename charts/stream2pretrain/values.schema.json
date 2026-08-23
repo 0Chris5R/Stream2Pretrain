@@ -46,11 +46,12 @@
         "authSecret": {"type": "string"},
         "topics": {
           "type": "object",
-          "required": ["rawFetched", "smokeRaw", "docsNormalized", "docsCurated", "curationDecisions", "licenseAdmissions", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
+          "required": ["rawFetched", "smokeRaw", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "curationDecisions", "licenseAdmissions", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
           "properties": {
             "rawFetched": {"type": "string"},
             "smokeRaw": {"type": "string"},
             "docsNormalized": {"type": "string"},
+            "docsNormalizedSmoke": {"type": "string"},
             "docsCurated": {"type": "string"},
             "curationDecisions": {"type": "string"},
             "licenseAdmissions": {"type": "string"},

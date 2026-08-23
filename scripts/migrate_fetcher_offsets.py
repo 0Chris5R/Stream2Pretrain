@@ -1,8 +1,9 @@
-"""Migrate the legacy Bytewax fetcher checkpoint into Kafka group offsets.
+"""Migrate a legacy Bytewax source checkpoint into Kafka group offsets.
 
-The migration is intentionally monotonic and idempotent: an existing broker
-offset always wins, and a retained Bytewax offset is only used for a partition
-that has never been committed by the native fetcher group.
+The migration is intentionally monotonic and idempotent: the furthest valid
+broker or Bytewax offset wins. This also handles Bytewax Kafka groups that
+expose a stale broker offset while their authoritative progress lives in the
+pod-local recovery database.
 """
 
 from __future__ import annotations
@@ -17,7 +18,12 @@ from typing import Any
 from confluent_kafka import Consumer, TopicPartition
 
 
-def read_bytewax_offsets(state_dir: Path, topic: str) -> dict[int, int]:
+def read_bytewax_offsets(
+    state_dir: Path,
+    topic: str,
+    *,
+    step_id: str = "s2p-fetcher.raw_fetched",
+) -> dict[int, int]:
     """Read the newest recoverable source offset for each topic partition."""
     offsets: dict[int, tuple[int, int]] = {}
     for database in sorted(state_dir.rglob("part-*.sqlite3")):
@@ -32,7 +38,7 @@ def read_bytewax_offsets(state_dir: Path, topic: str) -> dict[int, int]:
             rows = connection.execute(
                 "SELECT state_key, snap_epoch, ser_change FROM snaps "
                 "WHERE step_id = ? ORDER BY snap_epoch DESC",
-                ("s2p-fetcher.raw_fetched",),
+                (step_id,),
             )
             for state_key, epoch, serialized in rows:
                 suffix = f"-{topic}"
@@ -72,13 +78,10 @@ def migrate_offsets(
     commits: list[TopicPartition] = []
     decisions: dict[int, dict[str, int | str]] = {}
     for partition in partitions:
-        current = int(existing_by_partition.get(partition.partition, -1))
-        if current >= 0:
-            decisions[partition.partition] = {"action": "preserved", "offset": current}
-            continue
         candidate = recovered.get(partition.partition)
         low, high = consumer.get_watermark_offsets(partition, timeout=10.0)
-        if candidate is None:
+        current = int(existing_by_partition.get(partition.partition, -1))
+        if current < 0 and candidate is None:
             if high == low:
                 decisions[partition.partition] = {"action": "empty", "offset": high}
                 continue
@@ -86,9 +89,13 @@ def migrate_offsets(
                 f"partition {topic}[{partition.partition}] has retained data but no "
                 "broker or Bytewax checkpoint offset"
             )
-        bounded = min(max(candidate, low), high)
-        commits.append(TopicPartition(topic, partition.partition, bounded))
-        decisions[partition.partition] = {"action": "migrated", "offset": bounded}
+        furthest = max(current, candidate if candidate is not None else -1)
+        bounded = min(max(furthest, low), high)
+        if current == bounded:
+            decisions[partition.partition] = {"action": "preserved", "offset": bounded}
+        else:
+            commits.append(TopicPartition(topic, partition.partition, bounded))
+            decisions[partition.partition] = {"action": "migrated", "offset": bounded}
     if commits:
         consumer.commit(offsets=commits, asynchronous=False)
     return {
@@ -104,8 +111,9 @@ def main() -> None:
         raise RuntimeError("REDPANDA_BROKERS is required")
     topic = os.environ.get("S2P_RAW_TOPIC", "raw.fetched")
     group = os.environ.get("S2P_CONSUMER_GROUP", "s2p-fetcher")
+    step_id = os.environ.get("S2P_BYTEWAX_STEP_ID", "s2p-fetcher.raw_fetched")
     state_dir = Path(os.environ.get("S2P_STATE_DIR", "/var/lib/s2p"))
-    recovered = read_bytewax_offsets(state_dir, topic)
+    recovered = read_bytewax_offsets(state_dir, topic, step_id=step_id)
     consumer = Consumer(
         {
             "bootstrap.servers": brokers,
@@ -119,6 +127,7 @@ def main() -> None:
     finally:
         consumer.close()
     result["group"] = group
+    result["step_id"] = step_id
     result["recovery_offsets_found"] = len(recovered)
     print(json.dumps(result, sort_keys=True))
 

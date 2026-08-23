@@ -40,15 +40,13 @@ Tempo, and Alloy are not in the measured baseline.
 The fetcher is stateless across records and commits Redpanda consumer-group
 offsets only after the corresponding `docs.normalized` batch is confirmed
 delivered. The DHBW profile keeps one replica warm and uses KEDA lag scaling up
-to the four `raw.fetched` partitions. A 24-hour `raw.smoke` topic shares the
-same consumer group so deployment canaries exercise the real worker without
-waiting behind a production replay backlog.
+to the four `raw.fetched` partitions.
 
-Curator and Iceberg writer still use Bytewax recovery databases and do not
-commit broker offsets. Redpanda therefore reports those groups as `Dead` with
-zero lag; independent KEDA replicas are unsafe because a rebalance can move a
-partition away from the PVC that owns its latest state. Keep those stages as
-one durable writer until their state is externalized and coordinated.
+The curator commits broker-owned offsets after its decision outputs are
+delivered. Its classifier cache and global near-duplicate index remain on one
+durable PVC, so independent curator replicas are unsafe until scoring is split
+from that globally coordinated dedup state. Redpanda lag is now authoritative
+for capacity planning rather than being hidden in a Bytewax recovery database.
 
 KEDA remains appropriate for independently committing ingest consumers such
 as the arXiv HTML and GitHub tarball fetchers. Run the target-cluster procedure
@@ -57,9 +55,12 @@ scalers.
 
 The production fetcher consumes only `raw.fetched` and scales on that group's
 lag. A fixed canary worker consumes the short-retention `raw.smoke` traffic
-class with the same image and normalization code. This keeps a multi-minute
-production PDF from starving the bounded deployment check; the canary is not
-production capacity and is never included in the KEDA replica count.
+class with the same image and normalization code, then writes
+`docs.normalized.smoke`. The curator polls that health lane before every
+production record while sharing the real model and dedup state. This standard
+traffic-class isolation keeps a multi-minute PDF or historical replay from
+starving the bounded deployment check; the canary is not production capacity
+and is never included in the KEDA replica count.
 
 ```bash
 uv run python scripts/capacity_probe.py
@@ -86,29 +87,27 @@ kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate | r
 # Then jump to Tempo using the trace_id field on the log line.
 ```
 
-If the fetcher stalls, inspect `rpk group describe s2p-fetcher`, its delivery
-failure metric, and Pod restarts. A restart resumes from the broker commit. If
-a Bytewax operator panics: check `kubectl -n stream2pretrain describe pod`
-for the exit code, then the named operator in the processor module. Recovery
-is automatic from the stage's SQLite recovery checkpoint. Bytewax deliberately
-has no last committed Redpanda offset to fall back to, so deleting a checkpoint
-is a destructive replay/cutover decision, not a routine restart step.
+If the fetcher or curator stalls, inspect `rpk group describe s2p-fetcher` or
+`rpk group describe s2p-curate`, its delivery-failure metric, and Pod restarts.
+Both stages resume from broker commits. The curator PVC owns classifier replay
+decisions and near-duplicate state, so deleting it is still a destructive
+semantic reset rather than a routine restart step.
 
 ## 4. Restart from checkpoint
 
-The fetcher resumes from broker-owned `s2p-fetcher` offsets; the deployment
-workflow migrates a legacy fetcher PVC once and then removes it. Curator and
-Iceberg writer persist Bytewax state and source offsets on PVCs. Their recovery
-is automatic. The only manual case is a **deliberate replay** (for example a
-contamination bisect).
+The fetcher and curator resume from broker-owned `s2p-fetcher` and `s2p-curate`
+offsets. The deployment workflow monotonically migrates legacy Bytewax source
+offsets before the native consumers start. The curator retains its PVC for the
+global near-duplicate index and deterministic decision cache. The only manual
+case is a **deliberate replay** (for example a contamination bisect).
 
 ```bash
 # 4.1 Stop the curator.
 kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=0
 
 # 4.2 Back up the checkpoint PVC and record the intended replay offset.
-# Bytewax does not use `rpk group seek`; set S2P_KAFKA_START_OFFSET for the
-# cold-start release after the checkpoint is removed.
+# Record both the intended `rpk group seek` offset and a snapshot of the
+# matching curator state. Offsets and near-duplicate state form one boundary.
 
 # 4.3 Destructive cold start, only after a snapshot and explicit approval.
 kubectl -n stream2pretrain delete pvc \
