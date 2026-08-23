@@ -4,7 +4,7 @@
   "private": true,
   "description": "Stream2Pretrain cockpit - Next.js 16 App Router with shadcn/ui + TanStack Query + DuckDB-WASM.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint .",

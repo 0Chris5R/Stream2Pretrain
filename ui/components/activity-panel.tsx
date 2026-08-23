@@ -127,7 +127,11 @@ function StageChart({
       </div>
       <div className="mt-2 h-24">
         {data ? (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer
+            width="100%"
+            height="100%"
+            initialDimension={{ width: 480, height: 96 }}
+          >
             <LineChart data={data.points} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
               <CartesianGrid vertical={false} strokeDasharray="3 3" className="stroke-border" />
               <XAxis dataKey="ts" hide />
