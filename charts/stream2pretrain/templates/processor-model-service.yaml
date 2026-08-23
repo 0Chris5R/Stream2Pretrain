@@ -1,0 +1,134 @@
+{{- if .Values.processor.modelService.enabled }}
+{{- $component := "processor-model-service" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $curatorComponent := "processor-curate" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  {{- if not .Values.processor.modelService.autoscaling.enabled }}
+  replicas: {{ .Values.processor.modelService.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Required node spreading means no third model Pod fits when both
+      # workers are occupied. Replace in place instead of deadlocking a roll.
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      # The stateful curator is pinned by its local checkpoint. Keep every
+      # large-model replica on a different node and spread replicas so model
+      # memory and image layers never compete with that stateful process.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $curatorComponent) | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+            - labelSelector:
+                matchLabels:
+                  {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: model-service
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.modelService.image "tag" .Values.processor.modelService.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["s2p-curator-model-service"]
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.processor.modelService.port }}
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $component | quote }}
+            - name: S2P_MODEL_SERVICE_PORT
+              value: {{ .Values.processor.modelService.port | quote }}
+            - name: S2P_FINEPDFS_EDU_REVISION
+              value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
+            - name: S2P_FINEWEB_EDU_REVISION
+              value: "fineweb-edu@284663cbb2dabf9bda30d8f8cc49601251ee1631"
+            - name: E5_SMALL_REVISION
+              value: "intfloat/e5-small-v2@ffb93f3bd4047442299a41ebb6fa998a38507c52"
+          startupProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 90
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 30
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.processor.modelService.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.processor.modelService.port }}
+      targetPort: http
+  selector:
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+{{- if .Values.processor.modelService.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  minReplicas: {{ .Values.processor.modelService.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.processor.modelService.autoscaling.maxReplicas }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.processor.modelService.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

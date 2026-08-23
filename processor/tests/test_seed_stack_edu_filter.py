@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+
+import yaml
 
 from processor.seed import stack_edu_filter as se
 from processor.seed.cursor import SeedCursor
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_is_python_case_insensitive() -> None:
@@ -29,6 +34,15 @@ def test_is_ml_relevant_via_path_keyword() -> None:
 def test_is_ml_relevant_neither_matches() -> None:
     row = {"repository_name": "user/web", "path": "src/index.py"}
     assert not se.is_ml_relevant(row)
+
+
+def test_stack_edu_filter_covers_every_live_ai_repository() -> None:
+    values = yaml.safe_load(
+        (ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text(encoding="utf-8")
+    )
+    release_repos = set(values["sources"]["github"]["releases"]["repos"])
+
+    assert release_repos <= se.ML_REPOS
 
 
 def test_derive_valid_from_iso() -> None:

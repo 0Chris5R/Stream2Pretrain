@@ -2,6 +2,7 @@
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
 {{- $signingMount := "/var/run/secrets/stream2pretrain/decon-signing" }}
+{{- $externalModels := or .Values.processor.curate.modelBundle.bootstrap (ne .Values.processor.curate.modelBundle.url "") }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -29,6 +30,31 @@ spec:
       {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       terminationGracePeriodSeconds: 60
+      {{- if and .Values.processor.modelService.enabled (not $externalModels) }}
+      initContainers:
+        - name: wait-model-service
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image "tag" .Values.processor.curate.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import time
+              import urllib.request
+
+              url = "http://{{ printf "%s-processor-model-service" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz"
+              deadline = time.monotonic() + 900
+              while True:
+                  try:
+                      with urllib.request.urlopen(url, timeout=3) as response:
+                          if response.status == 200:
+                              break
+                  except Exception:
+                      pass
+                  if time.monotonic() >= deadline:
+                      raise SystemExit("model service did not become ready within 900 seconds")
+                  time.sleep(5)
+      {{- else }}
       {{- if .Values.processor.curate.modelBundle.bootstrap }}
       initContainers:
         - name: model-bootstrap
@@ -38,7 +64,7 @@ spec:
           command: ["python", "-m", "processor.model_bootstrap"]
           env:
             - name: S2P_MODELS_DIR
-              value: /models
+              value: {{ ternary "/models" "/opt/models" $externalModels | quote }}
             - name: HF_HUB_DISABLE_XET
               value: "1"
             - name: HF_HUB_DISABLE_TELEMETRY
@@ -89,6 +115,7 @@ spec:
             - name: models
               mountPath: /models
       {{- end }}
+      {{- end }}
       containers:
         - name: curate
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.curate.image "tag" .Values.processor.curate.tag) | quote }}
@@ -105,10 +132,12 @@ spec:
               value: /var/lib/s2p/checkpoint
             - name: S2P_STATE_DIR
               value: /var/lib/s2p/checkpoint
-            - name: S2P_ONNX_MODEL
-              value: {{ .Values.processor.curate.onnxModel | quote }}
             - name: S2P_MODELS_DIR
-              value: /models
+              value: {{ ternary "/models" "/opt/models" $externalModels | quote }}
+            {{- if and .Values.processor.modelService.enabled (not $externalModels) }}
+            - name: S2P_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            {{- end }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.curate.requireRealModels | quote }}
             - name: S2P_FINEPDFS_EDU_REVISION
@@ -152,9 +181,11 @@ spec:
               mountPath: /var/lib/s2p/checkpoint
             - name: tmp
               mountPath: /tmp
+            {{- if $externalModels }}
             - name: models
               mountPath: /models
               readOnly: true
+            {{- end }}
             - name: decon-signing
               mountPath: {{ $signingMount | quote }}
               readOnly: true
@@ -164,9 +195,11 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if $externalModels }}
         - name: models
           emptyDir:
             sizeLimit: {{ printf "%dMi" (int .Values.processor.curate.modelBundle.sizeMi) | quote }}
+        {{- end }}
         - name: decon-signing
           secret:
             secretName: {{ .Values.processor.deconGate.signingKeySecret | quote }}

@@ -109,6 +109,8 @@ jobs:
       packages: write
     outputs:
       image: ${{ steps.pin.outputs.image }}
+      curate_image: ${{ steps.pin.outputs.curate_image }}
+      fetcher_image: ${{ steps.pin.outputs.fetcher_image }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -146,40 +148,36 @@ jobs:
               --no-emit-workspace \
               | sha256sum | cut -c1-24
           )"
-          base_key="$(
-            {
-              sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
-              printf '%s\n' "resolved-dependencies=$dependency_key"
-            } | sha256sum | cut -c1-24
-          )"
-          image="ghcr.io/${owner}/stream2pretrain/processor-base:${base_key}"
-          legacy_key="$(
-            {
-              sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
-              printf '%s\n' '--- dependency manifests ---'
-              find . -name pyproject.toml -not -path './.git/*' -print0 \
-                | sort -z \
-                | xargs -0 sha256sum
-              sha256sum uv.lock
-            } | sha256sum | cut -c1-24
-          )"
-          legacy_image="ghcr.io/${owner}/stream2pretrain/processor-base:${legacy_key}"
           echo "registry=ghcr.io/${owner}" >> "$GITHUB_OUTPUT"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Reusing immutable processor base $image"
-          elif docker buildx imagetools inspect "$legacy_image" >/dev/null 2>&1; then
-            docker buildx imagetools create --tag "$image" "$legacy_image"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Migrated matching legacy processor base $legacy_image to $image"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Building new immutable processor base $image"
-          fi
+          resolve_profile() {
+            local output_prefix="$1"
+            local profile="$2"
+            local repository="$3"
+            local base_key image exists
+            base_key="$(
+              {
+                sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
+                printf '%s\n' "resolved-dependencies=$dependency_key"
+                printf '%s\n' "model-profile=$profile"
+              } | sha256sum | cut -c1-24
+            )"
+            image="ghcr.io/${owner}/stream2pretrain/${repository}:${base_key}"
+            exists=false
+            if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+              exists=true
+              echo "Reusing immutable $profile processor base $image"
+            else
+              echo "Building new immutable $profile processor base $image"
+            fi
+            echo "${output_prefix}_image=$image" >> "$GITHUB_OUTPUT"
+            echo "${output_prefix}_exists=$exists" >> "$GITHUB_OUTPUT"
+          }
+          resolve_profile base none processor-base
+          resolve_profile curate curate processor-base-curate
+          resolve_profile fetcher fetcher processor-base-fetcher
 
       - name: Build and publish dependency base
-        if: steps.base.outputs.exists != 'true'
+        if: steps.base.outputs.base_exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -187,29 +185,66 @@ jobs:
           target: runtime-base
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.base.outputs.image }}
+          tags: ${{ steps.base.outputs.base_image }}
+          build-args: S2P_MODEL_PROFILE=none
           cache-from: |
             type=gha,scope=processor-base
             type=registry,ref=${{ steps.base.outputs.registry }}/stream2pretrain/processor:buildcache
           cache-to: type=gha,scope=processor-base,mode=max
 
-      - name: Pin dependency base by digest
+      - name: Build and publish curator model base
+        if: steps.base.outputs.curate_exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: processor/Dockerfile
+          target: runtime-base
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.base.outputs.curate_image }}
+          build-args: S2P_MODEL_PROFILE=curate
+          cache-from: type=gha,scope=processor-base
+
+      - name: Build and publish fetcher model base
+        if: steps.base.outputs.fetcher_exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: processor/Dockerfile
+          target: runtime-base
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.base.outputs.fetcher_image }}
+          build-args: S2P_MODEL_PROFILE=fetcher
+          cache-from: type=gha,scope=processor-base
+
+      - name: Pin dependency and model bases by digest
         id: pin
         shell: bash
         env:
-          BASE_IMAGE: ${{ steps.base.outputs.image }}
+          BASE_IMAGE: ${{ steps.base.outputs.base_image }}
+          CURATE_IMAGE: ${{ steps.base.outputs.curate_image }}
+          FETCHER_IMAGE: ${{ steps.base.outputs.fetcher_image }}
         run: |
           set -euo pipefail
-          digest="sha256:$(
-            docker buildx imagetools inspect "$BASE_IMAGE" --raw \
-              | sha256sum | cut -d ' ' -f1
-          )"
-          [[ "$digest" == sha256:* ]] || {
-            echo "Could not resolve the processor base digest" >&2
-            exit 1
+          pin_image() {
+            local output_name="$1"
+            local image="$2"
+            local digest
+            digest="sha256:$(
+              docker buildx imagetools inspect "$image" --raw \
+                | sha256sum | cut -d ' ' -f1
+            )"
+            [[ "$digest" == sha256:* ]] || {
+              echo "Could not resolve the processor base digest for $image" >&2
+              exit 1
+            }
+            echo "${output_name}=${image}@${digest}" >> "$GITHUB_OUTPUT"
+            echo "Pinned processor base ${image}@${digest}"
           }
-          echo "image=${BASE_IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
-          echo "Pinned processor base ${BASE_IMAGE}@${digest}"
+          pin_image image "$BASE_IMAGE"
+          pin_image curate_image "$CURATE_IMAGE"
+          pin_image fetcher_image "$FETCHER_IMAGE"
 
   build:
     name: Build ${{ matrix.image }}
@@ -264,6 +299,14 @@ jobs:
             context: .
             dockerfile: processor/Dockerfile.app
             inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
+          - image: processor-curate-model
+            context: .
+            dockerfile: processor/Dockerfile.app
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
+          - image: processor-fetcher-model
+            context: .
+            dockerfile: processor/Dockerfile.app
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
           - image: ui
             context: ui
             dockerfile: Dockerfile
@@ -290,16 +333,23 @@ jobs:
         env:
           IMAGE_INPUTS: ${{ matrix.inputs }}
           PROCESSOR_BASE_IMAGE: ${{ needs.processor-base.outputs.image }}
+          PROCESSOR_CURATE_IMAGE: ${{ needs.processor-base.outputs.curate_image }}
+          PROCESSOR_FETCHER_IMAGE: ${{ needs.processor-base.outputs.fetcher_image }}
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           registry="ghcr.io/${owner}"
+          selected_processor_base="$PROCESSOR_BASE_IMAGE"
+          case "${{ matrix.image }}" in
+            processor-curate-model) selected_processor_base="$PROCESSOR_CURATE_IMAGE" ;;
+            processor-fetcher-model) selected_processor_base="$PROCESSOR_FETCHER_IMAGE" ;;
+          esac
           component_tree_hash() {
             local revision="$1"
             {
               git ls-tree -r -z "$revision" -- $IMAGE_INPUTS | sort -z
-              if [[ "${{ matrix.image }}" == "processor" ]]; then
-                printf '%s\n' "processor-base=$PROCESSOR_BASE_IMAGE"
+              if [[ "${{ matrix.image }}" == processor* ]]; then
+                printf '%s\n' "processor-base=$selected_processor_base"
               fi
             } | sha256sum | cut -c1-24
           }
@@ -332,6 +382,7 @@ jobs:
           echo "exists=$exists" >> "$GITHUB_OUTPUT"
           echo "validated=$validated" >> "$GITHUB_OUTPUT"
           echo "reuse_ref=$reuse_ref" >> "$GITHUB_OUTPUT"
+          echo "processor_base=$selected_processor_base" >> "$GITHUB_OUTPUT"
 
       - name: Reuse unchanged component image
         if: steps.image.outputs.exists == 'true'
@@ -351,7 +402,7 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.revision_ref }}
           build-args: |
-            PROCESSOR_BASE_IMAGE=${{ needs.processor-base.outputs.image }}
+            PROCESSOR_BASE_IMAGE=${{ steps.image.outputs.processor_base }}
           # GHCR can garbage-collect blobs referenced only by a mutable
           # BuildKit cache manifest. GitHub's cache backend keeps ordinary
           # component layers; the processor's large dependencies live in the
@@ -1258,10 +1309,12 @@ jobs:
             --set "image.pullPolicy=IfNotPresent"
             --set "processor.fetcher.tag=${GITHUB_SHA}"
             --set "processor.curate.tag=${GITHUB_SHA}"
+            --set "processor.modelService.tag=${GITHUB_SHA}"
             --set "ingest.arxivHtmlFetcher.tag=${GITHUB_SHA}"
             --set "mixtureController.tag=${GITHUB_SHA}"
-            --set "processor.fetcher.image=stream2pretrain/processor"
+            --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model"
             --set "processor.curate.image=stream2pretrain/processor"
+            --set "processor.modelService.image=stream2pretrain/processor-curate-model"
             --set "processor.iceberg.image=stream2pretrain/processor"
             --set "processor.duckdbApi.image=stream2pretrain/processor"
             --set "processor.deconGate.image=stream2pretrain/processor"

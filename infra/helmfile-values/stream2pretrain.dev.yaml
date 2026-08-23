@@ -55,17 +55,32 @@ processor:
   fetcher:
     replicas: 1
     tag: "0.2.0-1f4cf19"
+    requireRealModels: true
+    doclingEnabled: true
   curate:
     replicas: 1
     tag: "0.2.0-619290f"
-    requireRealModels: false
+    requireRealModels: true
     doclingEnabled: false
-    usePresidio: false
+    usePresidio: true
     resources:
       requests: {cpu: 500m, memory: 1Gi}
       limits: {cpu: 2, memory: 2Gi}
     modelBundle:
       bootstrap: false
+  modelService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests: {cpu: 1, memory: 3Gi}
+      limits: {cpu: 3, memory: 5Gi}
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      # Three 8 GB nodes were measured on 2026-08-23. The stateful curator
+      # occupies one node, leaving one strict model replica per worker.
+      maxReplicas: 2
+      targetCPUUtilizationPercentage: 80
   iceberg:
     replicas: 1
   duckdbApi:

@@ -5,6 +5,7 @@ command_name="$(basename "$0")"
 case "$command_name" in
   s2p-fetcher) module="processor.fetcher" ;;
   s2p-curate) module="processor.curate" ;;
+  s2p-curator-model-service) module="processor.model_service" ;;
   s2p-iceberg-writer) module="processor.iceberg_writer" ;;
   s2p-iceberg-maintenance) module="processor.iceberg_maintenance" ;;
   s2p-decon-api) module="processor.decon_api" ;;
