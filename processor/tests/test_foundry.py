@@ -1264,6 +1264,13 @@ def test_artifact_human_audits_are_append_only_and_latest_is_inspectable(tmp_pat
         reviewer="Second Reviewer",
         reason="Manual evidence mismatch",
     )
+    # SQLite timestamps can legitimately tie on hosts whose wall-clock
+    # resolution is coarser than two consecutive review writes. The latest
+    # audit must still follow append order, not the random UUID ordering.
+    store._conn.execute(
+        "UPDATE artifact_audits SET created_at=? WHERE artifact_id=?",
+        (FIXED_TIME.isoformat(), "artifact"),
+    )
 
     history = store.artifact_audits(artifact_id="artifact")
     assert [value["audit_id"] for value in history] == [second.audit_id, first.audit_id]

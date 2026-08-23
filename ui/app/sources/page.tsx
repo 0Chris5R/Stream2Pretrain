@@ -130,7 +130,7 @@ export default function SourcesPage() {
               <TableRow>
                 <TableHead>Source</TableHead>
                 <TableHead>Protocol</TableHead>
-                <TableHead>Policy</TableHead>
+                <TableHead>Classifier / license</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Observed (24h)</TableHead>
                 <TableHead className="text-right">Pretrain</TableHead>
@@ -151,7 +151,12 @@ export default function SourcesPage() {
                   </TableCell>
                   <TableCell className="font-mono text-xs">{source.spec.protocol}</TableCell>
                   <TableCell>
-                    <Badge variant="outline">{policyFor(source)}</Badge>
+                    <div className="flex flex-col items-start gap-1">
+                      <Badge variant="outline">{qualityPolicyFor(source)}</Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {licensePolicyFor(source.spec.license_default)}
+                      </span>
+                    </div>
                   </TableCell>
                   <TableCell>
                     <StatusBadge source={source} />
@@ -273,6 +278,7 @@ function SourceForm({
     poll_interval_seconds: String(initial?.poll_interval_seconds ?? 7200),
     requests_per_second: String(initial?.rate_limit.requests_per_second ?? 1),
     burst: String(initial?.rate_limit.burst ?? 2),
+    license_default: initial?.license_default ?? 'unknown',
   });
   const [error, setError] = useState<string | null>(null);
   const update = (key: keyof typeof form, value: string) =>
@@ -295,9 +301,7 @@ function SourceForm({
       auth: { type: 'none' },
       accept_content_types: initial?.accept_content_types ?? [],
       egress_allow: initial?.egress_allow ?? [safeHost(endpoint)].filter(Boolean),
-      license_default:
-        initial?.license_default ??
-        (safeHost(endpoint).endsWith('arxiv.org') ? 'arxiv-non-exclusive-distribution' : 'unknown'),
+      license_default: form.license_default.trim(),
     });
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? 'Invalid source');
@@ -337,6 +341,30 @@ function SourceForm({
           onChange={(event) => update('endpoint', event.target.value)}
           required
         />
+      </Field>
+      <Field label="Default license">
+        <Input
+          list="source-license-defaults"
+          value={form.license_default}
+          onChange={(event) => update('license_default', event.target.value)}
+          required
+        />
+        <datalist id="source-license-defaults">
+          <option value="unknown" />
+          <option value="per-record" />
+          <option value="arxiv-non-exclusive-distribution" />
+          <option value="CC-BY-4.0" />
+          <option value="CC-BY-SA-4.0" />
+          <option value="CC0-1.0" />
+          <option value="Apache-2.0" />
+          <option value="MIT" />
+          <option value="BSD-3-Clause" />
+          <option value="ODC-By-1.0" />
+        </datalist>
+        <p className="text-xs text-muted-foreground">
+          Unknown, arXiv distribution-only, and ODC-By sources are retained for transformed
+          post-training but excluded from verbatim pretraining.
+        </p>
       </Field>
       <div className="grid gap-3 sm:grid-cols-3">
         <Field label="Poll interval">
@@ -395,9 +423,19 @@ function safeHost(value: string): string {
     return '';
   }
 }
-function policyFor(source: SourceFeedStatus): string {
+function qualityPolicyFor(source: SourceFeedStatus): string {
   const host = new URL(source.spec.endpoint).hostname;
-  return host.endsWith('arxiv.org') || source.spec.protocol === 'oai-pmh' ? 'scientific' : 'web';
+  if (source.spec.protocol === 'oai-pmh' || source.spec.protocol === 'rest-json') {
+    return 'Structured metadata';
+  }
+  return host.endsWith('arxiv.org') ? 'FinePDFs scientific' : 'FineWeb web';
+}
+function licensePolicyFor(value: string | null | undefined): string {
+  if (!value || ['unknown', 'arxiv-non-exclusive-distribution', 'ODC-By-1.0'].includes(value)) {
+    return 'Posttrain transform only';
+  }
+  if (value === 'per-record') return 'Per-record admission';
+  return `Pretrain allowlist: ${value}`;
 }
 function StatusBadge({ source }: { source: SourceFeedStatus }) {
   if (!source.spec.enabled) return <Badge variant="secondary">Disabled</Badge>;
