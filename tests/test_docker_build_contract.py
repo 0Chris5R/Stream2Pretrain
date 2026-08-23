@@ -79,6 +79,21 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 2
 
 
+def test_curator_startup_probe_guards_slow_model_initialization() -> None:
+    template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "processor-curate.yaml"
+    ).read_text(encoding="utf-8")
+
+    startup_probe = """          startupProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 90"""
+    assert startup_probe in template
+    assert template.index("startupProbe:") < template.index("livenessProbe:")
+    assert "initialDelaySeconds: 60" not in template
+
+
 def test_github_tarball_scaler_uses_a_non_amplifying_job_topic() -> None:
     values = (ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text(encoding="utf-8")
     template = (

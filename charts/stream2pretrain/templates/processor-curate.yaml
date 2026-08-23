@@ -175,14 +175,19 @@ spec:
               value: {{ .Values.processor.deconGate.bloomBits | quote }}
             - name: S2P_DECON_BLOOM_HASHES
               value: {{ .Values.processor.deconGate.bloomHashes | quote }}
+          startupProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 90
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
-            initialDelaySeconds: 60
             periodSeconds: 30
+            timeoutSeconds: 3
           readinessProbe:
             httpGet: {path: /readyz, port: metrics}
-            initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.processor.curate.resources | nindent 12 }}
           volumeMounts:
