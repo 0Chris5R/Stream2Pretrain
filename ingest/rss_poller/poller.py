@@ -149,9 +149,7 @@ async def poll_feed(
                 resolver=f"arxiv:{license_source}",
                 evidence_url=f"https://arxiv.org/abs/{arxiv_id}",
                 evidence_revision=arxiv_id,
-                evidence_scope=(
-                    "item" if normalize_license(resolved) != "unknown" else "unknown"
-                ),
+                evidence_scope=("item" if normalize_license(resolved) != "unknown" else "unknown"),
             )
         else:
             evidence = await resolve_page_license(

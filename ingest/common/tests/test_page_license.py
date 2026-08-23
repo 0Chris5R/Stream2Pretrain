@@ -22,18 +22,27 @@ def test_link_header_requires_license_relation() -> None:
 
 
 def test_html_head_supports_link_meta_and_json_ld() -> None:
-    assert license_from_html_head(
-        b'<html><head><link rel="license" href="/terms/cc-by"></head>',
-        base_url="https://example.org/paper",
-    ) == "https://example.org/terms/cc-by"
-    assert license_from_html_head(
-        b'<meta name="dcterms.license" content="CC-BY-SA-4.0">',
-        base_url="https://example.org/paper",
-    ) == "CC-BY-SA-4.0"
-    assert license_from_html_head(
-        b'<script type="application/ld+json">{"license":"CC-BY-4.0"}</script>',
-        base_url="https://example.org/paper",
-    ) == "CC-BY-4.0"
+    assert (
+        license_from_html_head(
+            b'<html><head><link rel="license" href="/terms/cc-by"></head>',
+            base_url="https://example.org/paper",
+        )
+        == "https://example.org/terms/cc-by"
+    )
+    assert (
+        license_from_html_head(
+            b'<meta name="dcterms.license" content="CC-BY-SA-4.0">',
+            base_url="https://example.org/paper",
+        )
+        == "CC-BY-SA-4.0"
+    )
+    assert (
+        license_from_html_head(
+            b'<script type="application/ld+json">{"license":"CC-BY-4.0"}</script>',
+            base_url="https://example.org/paper",
+        )
+        == "CC-BY-4.0"
+    )
 
 
 @pytest.mark.asyncio

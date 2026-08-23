@@ -84,9 +84,7 @@ def ensure_marker(path: Path, expected: dict[str, object]) -> dict[str, object]:
         # Exclusive creation makes this a true one-time marker. A concurrent
         # deployment may validate the winner, but it can never overwrite it.
         with path.open("x", encoding="utf-8") as marker_file:
-            serialized = (
-                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
-            )
+            serialized = json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
             marker_file.write(serialized)
             marker_file.flush()
             os.fsync(marker_file.fileno())

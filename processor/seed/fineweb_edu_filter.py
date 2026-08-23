@@ -150,9 +150,7 @@ def to_seed_document(
         spdx_license=content_license,
         spdx_license_source="dataset_metadata" if content_license else "unknown",
         license_resolver="fineweb-page-item-field",
-        license_evidence_url=(
-            f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}"
-        ),
+        license_evidence_url=(f"https://huggingface.co/datasets/{REPO_ID}/tree/{DATASET_REVISION}"),
         license_evidence_revision=f"{DATASET_REVISION}:{evidence_revision}",
         license_evidence_scope="item" if content_license else "unknown",
         extra=extra,

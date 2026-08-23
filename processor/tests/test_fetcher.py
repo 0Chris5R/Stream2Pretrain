@@ -115,7 +115,7 @@ SECRET = "not training prose"
 
 
 def test_openreview_projection_separates_labels_from_review_prose() -> None:
-    payload = b'''{
+    payload = b"""{
       "id": "note-1",
       "forum": "paper-1",
       "invitation": "ICLR.cc/2026/Conference/-/Official_Review",
@@ -125,7 +125,7 @@ def test_openreview_projection_separates_labels_from_review_prose() -> None:
         "rating": {"value": "8: accept"},
         "confidence": {"value": "4: high"}
       }
-    }'''
+    }"""
 
     text, _, metadata = _review_payload_text(payload)
 

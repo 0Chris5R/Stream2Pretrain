@@ -611,16 +611,12 @@ def build_dataflow(
     tracer = common.init_tracer("s2p-fetcher", cfg)
     input_topics = fetcher_input_topics(cfg)
     if len(input_topics) != 1:
-        raise RuntimeError(
-            "one Bytewax fetcher execution must own exactly one traffic-class topic"
-        )
+        raise RuntimeError("one Bytewax fetcher execution must own exactly one traffic-class topic")
     output_topic = os.environ.get("S2P_FETCHER_OUTPUT_TOPIC", cfg.normalized_topic).strip()
     if not output_topic:
         raise RuntimeError("S2P_FETCHER_OUTPUT_TOPIC must not be empty")
     smoke_input = os.environ.get("S2P_SMOKE_RAW_TOPIC", "raw.smoke").strip()
-    smoke_output = os.environ.get(
-        "S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke"
-    ).strip()
+    smoke_output = os.environ.get("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke").strip()
     is_smoke_execution = input_topics[0] == smoke_input
     if (input_topics[0] == smoke_input) != (output_topic == smoke_output):
         raise RuntimeError("fetcher smoke input and output must use the isolated smoke lane")

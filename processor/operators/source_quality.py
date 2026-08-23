@@ -59,9 +59,7 @@ class PeerReviewQualityPolicy:
     backend: str = "schema-rules"
 
     def score(self, text: str) -> QualityScore:
-        field_names = {
-            value.strip().lower().replace(" ", "_") for value in _FIELD.findall(text)
-        }
+        field_names = {value.strip().lower().replace(" ", "_") for value in _FIELD.findall(text)}
         represented = sum(
             any(alias in field_name for field_name in field_names for alias in family)
             for family in _FIELD_FAMILIES
@@ -80,9 +78,7 @@ def is_substantive_review(text: str, source_metadata_text: str) -> bool:
     """
     if not text.strip():
         return False
-    field_names = {
-        value.strip().lower().replace(" ", "_") for value in _FIELD.findall(text)
-    }
+    field_names = {value.strip().lower().replace(" ", "_") for value in _FIELD.findall(text)}
     if any(
         alias in field_name
         for field_name in field_names

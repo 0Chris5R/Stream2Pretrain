@@ -324,7 +324,9 @@ async def poll_hub_cards(
             repo_id = item.get("id")
             last_modified = item.get("lastModified")
             revision = item.get("sha")
-            if not all(isinstance(value, str) and value for value in (repo_id, last_modified, revision)):
+            if not all(
+                isinstance(value, str) and value for value in (repo_id, last_modified, revision)
+            ):
                 # An unresolved branch is mutable and cannot meet the corpus
                 # provenance contract. Record the fail-closed outcome before
                 # waiting for a later API response with an immutable SHA.

@@ -118,9 +118,7 @@ async def poll_feed(
                         resolver = f"arxiv:{license_source}"
                         evidence_url = f"https://arxiv.org/abs/{arxiv_id}"
                         evidence_revision = arxiv_id
-                        evidence_scope = (
-                            "item" if per_record_license != "unknown" else "unknown"
-                        )
+                        evidence_scope = "item" if per_record_license != "unknown" else "unknown"
                     elif per_record_license == "unknown":
                         # A SourceFeed default is not evidence for this OAI
                         # record. Non-arXiv records therefore fail closed.

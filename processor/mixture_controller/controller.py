@@ -728,9 +728,7 @@ def _builtin_source_status(
     else:
         workload = max(
             component_jobs,
-            key=lambda job: str(
-                getattr(getattr(job, "metadata", None), "creation_timestamp", "")
-            ),
+            key=lambda job: str(getattr(getattr(job, "metadata", None), "creation_timestamp", "")),
             default=None,
         )
     seed_component = descriptor.get("seed_component")
@@ -892,11 +890,11 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
         jobs = batch_api.list_namespaced_job(namespace)
         runtime = _source_job_runtime(list(jobs.items or []))
         crd_sources = [
-                _sourcefeed_status(
-                    item,
-                    runtime=runtime.get(str(item.get("metadata", {}).get("name", ""))),
-                )
-                for item in resp.get("items", [])
+            _sourcefeed_status(
+                item,
+                runtime=runtime.get(str(item.get("metadata", {}).get("name", ""))),
+            )
+            for item in resp.get("items", [])
         ]
         known = {str(source["name"]) for source in crd_sources}
         deployments = {

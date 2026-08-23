@@ -83,6 +83,8 @@ _DEFAULT_MIN_SLEEP_S = 1.0
 # wait forever. Process one complete paper at a time and commit only after its
 # admission/body/output path has finished.
 _STREAM_BATCH_SIZE = 1
+
+
 @dataclass(frozen=True, slots=True)
 class ArxivCandidate:
     arxiv_id: str
@@ -485,10 +487,12 @@ def _is_arxiv_source_feed(source: str, sources_filter: Iterable[str] | None) -> 
     """Match current SourceFeed names while retaining the older aliases."""
     if sources_filter is not None:
         return source in set(sources_filter)
-    return (
-        source in {"oai-arxiv-cs", "arxiv-oai-cs", "arxiv-rss-cs", "hf-daily-papers"}
-        or source.startswith("rss-arxiv-cs-")
-    )
+    return source in {
+        "oai-arxiv-cs",
+        "arxiv-oai-cs",
+        "arxiv-rss-cs",
+        "hf-daily-papers",
+    } or source.startswith("rss-arxiv-cs-")
 
 
 _ARXIV_URL_RE = re.compile(
@@ -629,17 +633,14 @@ async def run_for_ids(
                     continue
 
                 fetched_license = (
-                    outcome.extracted.spdx_license
-                    if outcome.extracted is not None
-                    else None
+                    outcome.extracted.spdx_license if outcome.extracted is not None else None
                 )
                 if fetched_license and normalize_license(fetched_license) != admission.license_id:
                     conflict = decide_license_admission(
                         source_url=canonical_arxiv_url(arxiv_id, mirror="arxiv"),
                         source_feed=feed_name,
                         license_value=(
-                            f"conflict:{admission.license_id}|"
-                            f"{normalize_license(fetched_license)}"
+                            f"conflict:{admission.license_id}|{normalize_license(fetched_license)}"
                         ),
                         license_source="html_meta",
                         resolver="arxiv:preflight-html-reconciliation",

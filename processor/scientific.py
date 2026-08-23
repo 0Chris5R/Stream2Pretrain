@@ -230,9 +230,7 @@ class ScientificProcessor:
             except Exception as exc:
                 warning = f"figure_enrichment_failed:{figure.figure_id}:{type(exc).__name__}"
                 warnings.append(warning)
-                figures.append(
-                    figure.model_copy(update={"warnings": [*figure.warnings, warning]})
-                )
+                figures.append(figure.model_copy(update={"warnings": [*figure.warnings, warning]}))
         if self._max_figures and len(document.figures) > self._max_figures:
             warnings.append("figure_limit_reached")
         document = document.model_copy(update={"figures": figures, "warnings": warnings})

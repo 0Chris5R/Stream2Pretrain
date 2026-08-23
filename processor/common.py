@@ -224,9 +224,7 @@ class DurableProcessingFailureWriter:
         topic = str(getattr(message, "topic", None) or "unknown")
         partition = int(getattr(message, "partition", -1) or 0)
         offset = int(getattr(message, "offset", -1) or 0)
-        safe_stage = (
-            re.sub(r"[^a-z0-9_.-]+", "-", stage.lower()).strip("-") or "unknown"
-        )
+        safe_stage = re.sub(r"[^a-z0-9_.-]+", "-", stage.lower()).strip("-") or "unknown"
         safe_topic = re.sub(r"[^A-Za-z0-9_.-]+", "-", topic).strip("-") or "unknown"
         safe_prefix = "/".join(
             re.sub(r"[^A-Za-z0-9_.-]+", "-", part).strip("-")
