@@ -78,6 +78,17 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert "S2P_EMBEDDING_MODEL_SERVICE_URL" in curate_template
     assert "kind: HorizontalPodAutoscaler" in model_service_template
     assert "requiredDuringSchedulingIgnoredDuringExecution" in model_service_template
+    assert "preferredDuringSchedulingIgnoredDuringExecution" in model_service_template
+    required_index = model_service_template.index(
+        "requiredDuringSchedulingIgnoredDuringExecution"
+    )
+    preferred_index = model_service_template.index(
+        "preferredDuringSchedulingIgnoredDuringExecution"
+    )
+    assert "$curatorComponent" not in model_service_template[
+        required_index:preferred_index
+    ]
+    assert "$curatorComponent" in model_service_template[preferred_index:]
     assert "maxSurge: 0" in model_service_template
     assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 2
 
