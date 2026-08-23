@@ -207,6 +207,7 @@ class WorkerRuntime:
         *,
         run_day: date | None,
         cutoff_at: datetime,
+        cutoff_ordinal: int,
         fallback_doc_id: str = "queued",
         manual_run_id: str | None = None,
     ) -> dict[str, Any]:
@@ -214,6 +215,7 @@ class WorkerRuntime:
             return self._drain_one_locked(
                 run_day=run_day,
                 cutoff_at=cutoff_at,
+                cutoff_ordinal=cutoff_ordinal,
                 fallback_doc_id=fallback_doc_id,
                 manual_run_id=manual_run_id,
             )
@@ -223,10 +225,14 @@ class WorkerRuntime:
         *,
         run_day: date | None,
         cutoff_at: datetime,
+        cutoff_ordinal: int,
         fallback_doc_id: str,
         manual_run_id: str | None,
     ) -> dict[str, Any]:
-        claimed = self.store.claim_candidate(cutoff_at=cutoff_at)
+        claimed = self.store.claim_candidate(
+            cutoff_at=cutoff_at,
+            cutoff_ordinal=cutoff_ordinal,
+        )
         if claimed is None:
             return {"doc_id": fallback_doc_id, "status": "queue_empty"}
         claimed_doc_id, claimed_payload = claimed
@@ -303,6 +309,7 @@ class WorkerRuntime:
 
     def _run_daily_snapshot(self, run_day: date, run: dict[str, Any], log: Any) -> None:
         cutoff_at = datetime.fromisoformat(str(run["cutoff_at"]))
+        cutoff_ordinal = int(run["cutoff_ordinal"])
         while not self._drain_stop.is_set():
             # Provider calls are not interrupted, but a bounded manual run must
             # not wait behind the rest of a potentially large daily snapshot.
@@ -314,6 +321,7 @@ class WorkerRuntime:
                 result = self._drain_one(
                     run_day=run_day,
                     cutoff_at=cutoff_at,
+                    cutoff_ordinal=cutoff_ordinal,
                 )
             except ProviderBudgetExhaustedError as exc:
                 self.store.finish_daily_run(
@@ -360,6 +368,7 @@ class WorkerRuntime:
     def _run_manual_snapshot(self, run: dict[str, Any], log: Any) -> None:
         run_id = str(run["run_id"])
         cutoff_at = datetime.fromisoformat(str(run["cutoff_at"]))
+        cutoff_ordinal = int(run["cutoff_ordinal"])
         while not self._drain_stop.is_set():
             current = next(
                 (value for value in self.store.manual_runs() if value["run_id"] == run_id),
@@ -379,6 +388,7 @@ class WorkerRuntime:
                 result = self._drain_one(
                     run_day=None,
                     cutoff_at=cutoff_at,
+                    cutoff_ordinal=cutoff_ordinal,
                     fallback_doc_id="manual-run",
                     manual_run_id=run_id,
                 )

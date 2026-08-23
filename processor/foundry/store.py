@@ -143,6 +143,7 @@ class FoundryStore:
               quality_score REAL NOT NULL DEFAULT 0,
               benchmark_score REAL NOT NULL DEFAULT 0,
               valid_from TEXT NOT NULL DEFAULT '',
+              enqueue_ordinal INTEGER NOT NULL DEFAULT 0,
               enqueued_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -150,6 +151,7 @@ class FoundryStore:
               run_date TEXT PRIMARY KEY,
               state TEXT NOT NULL,
               cutoff_at TEXT NOT NULL,
+              cutoff_ordinal INTEGER NOT NULL DEFAULT 0,
               started_at TEXT NOT NULL,
               completed_at TEXT,
               candidate_count INTEGER NOT NULL,
@@ -160,6 +162,7 @@ class FoundryStore:
               run_id TEXT PRIMARY KEY,
               state TEXT NOT NULL,
               cutoff_at TEXT NOT NULL,
+              cutoff_ordinal INTEGER NOT NULL DEFAULT 0,
               requested_at TEXT NOT NULL,
               started_at TEXT,
               completed_at TEXT,
@@ -176,14 +179,20 @@ class FoundryStore:
               assigned_at TEXT NOT NULL,
               UNIQUE(pool, ordinal)
             );
+            CREATE TABLE IF NOT EXISTS control_sequences (
+              name TEXT PRIMARY KEY,
+              value INTEGER NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(state, updated_at DESC);
             CREATE INDEX IF NOT EXISTS artifacts_created_idx ON artifacts(created_at DESC);
             CREATE INDEX IF NOT EXISTS traces_provider_idx ON provider_traces(provider, completed_at DESC);
             """
         )
         self._ensure_candidate_queue_columns()
+        self._ensure_daily_run_columns()
         self._ensure_manual_run_columns()
         self._ensure_pool_assignment_columns()
+        self._initialize_candidate_sequence()
         if recover_processing:
             self._conn.execute("UPDATE candidate_queue SET state='queued' WHERE state='processing'")
 
@@ -197,10 +206,43 @@ class FoundryStore:
             "quality_score": "REAL NOT NULL DEFAULT 0",
             "benchmark_score": "REAL NOT NULL DEFAULT 0",
             "valid_from": "TEXT NOT NULL DEFAULT ''",
+            "enqueue_ordinal": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, declaration in additions.items():
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE candidate_queue ADD COLUMN {name} {declaration}")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS candidate_queue_snapshot_idx "
+            "ON candidate_queue(state,enqueue_ordinal)"
+        )
+
+    def _ensure_daily_run_columns(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(daily_runs)").fetchall()
+        }
+        if "cutoff_ordinal" not in existing:
+            self._conn.execute(
+                "ALTER TABLE daily_runs ADD COLUMN cutoff_ordinal INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def _initialize_candidate_sequence(self) -> None:
+        """Migrate existing candidates and initialize a transaction-safe sequence."""
+        self._conn.execute(
+            "UPDATE candidate_queue SET enqueue_ordinal=rowid WHERE enqueue_ordinal=0"
+        )
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(enqueue_ordinal), 0) AS value FROM candidate_queue"
+        ).fetchone()
+        highest = int(row["value"])
+        self._conn.execute(
+            "INSERT OR IGNORE INTO control_sequences(name,value) VALUES ('candidate_enqueue', ?)",
+            (highest,),
+        )
+        self._conn.execute(
+            "UPDATE control_sequences SET value=MAX(value, ?) WHERE name='candidate_enqueue'",
+            (highest,),
+        )
 
     def _ensure_pool_assignment_columns(self) -> None:
         existing = {
@@ -219,6 +261,10 @@ class FoundryStore:
         }
         if "max_candidates" not in existing:
             self._conn.execute("ALTER TABLE manual_runs ADD COLUMN max_candidates INTEGER")
+        if "cutoff_ordinal" not in existing:
+            self._conn.execute(
+                "ALTER TABLE manual_runs ADD COLUMN cutoff_ordinal INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -583,46 +629,71 @@ class FoundryStore:
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO candidate_queue
-                (doc_id,payload,state,reasoning_score,quality_score,benchmark_score,
-                 valid_from,enqueued_at,updated_at)
-                VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?)
-                ON CONFLICT(doc_id) DO UPDATE SET
-                  payload=excluded.payload,
-                  reasoning_score=excluded.reasoning_score,
-                  quality_score=excluded.quality_score,
-                  valid_from=excluded.valid_from,
-                  enqueued_at=excluded.enqueued_at,
-                  updated_at=excluded.updated_at
-                WHERE candidate_queue.state='queued'
-                  AND candidate_queue.payload<>excluded.payload
-                """,
-                (
-                    doc_id,
-                    payload,
-                    reasoning_score,
-                    quality_score,
-                    valid_from.isoformat(),
-                    now,
-                    now,
-                ),
-            )
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "UPDATE control_sequences SET value=value+1 WHERE name='candidate_enqueue'"
+                )
+                sequence = int(
+                    self._conn.execute(
+                        "SELECT value FROM control_sequences WHERE name='candidate_enqueue'"
+                    ).fetchone()["value"]
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO candidate_queue
+                    (doc_id,payload,state,reasoning_score,quality_score,benchmark_score,
+                     valid_from,enqueue_ordinal,enqueued_at,updated_at)
+                    VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?)
+                    ON CONFLICT(doc_id) DO UPDATE SET
+                      payload=excluded.payload,
+                      reasoning_score=excluded.reasoning_score,
+                      quality_score=excluded.quality_score,
+                      valid_from=excluded.valid_from,
+                      enqueue_ordinal=excluded.enqueue_ordinal,
+                      enqueued_at=excluded.enqueued_at,
+                      updated_at=excluded.updated_at
+                    WHERE candidate_queue.state='queued'
+                      AND candidate_queue.payload<>excluded.payload
+                    """,
+                    (
+                        doc_id,
+                        payload,
+                        reasoning_score,
+                        quality_score,
+                        valid_from.isoformat(),
+                        sequence,
+                        now,
+                        now,
+                    ),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
-    def claim_candidate(self, *, cutoff_at: datetime) -> tuple[str, bytes] | None:
+    def claim_candidate(
+        self,
+        *,
+        cutoff_at: datetime,
+        cutoff_ordinal: int | None = None,
+    ) -> tuple[str, bytes] | None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                boundary = "enqueue_ordinal<=?" if cutoff_ordinal is not None else "enqueued_at<=?"
+                boundary_value: int | str = (
+                    cutoff_ordinal if cutoff_ordinal is not None else cutoff_at.isoformat()
+                )
                 row = self._conn.execute(
-                    """
+                    f"""
                     SELECT doc_id,payload FROM candidate_queue
-                    WHERE state='queued' AND enqueued_at<=?
+                    WHERE state='queued' AND {boundary}
                     ORDER BY reasoning_score DESC, quality_score DESC,
                              valid_from DESC, doc_id ASC
                     LIMIT 1
                     """,
-                    (cutoff_at.isoformat(),),
+                    (boundary_value,),
                 ).fetchone()
                 if row is None:
                     self._conn.rollback()
@@ -660,9 +731,13 @@ class FoundryStore:
                     return dict(existing)
                 candidate_count = int(
                     self._conn.execute(
-                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued' AND enqueued_at<=?",
-                        (now.isoformat(),),
+                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
                     ).fetchone()["n"]
+                )
+                cutoff_ordinal = int(
+                    self._conn.execute(
+                        "SELECT value FROM control_sequences WHERE name='candidate_enqueue'"
+                    ).fetchone()["value"]
                 )
                 if candidate_count == 0:
                     self._conn.commit()
@@ -670,6 +745,7 @@ class FoundryStore:
                         "run_date": day_text,
                         "state": "waiting",
                         "cutoff_at": now.isoformat(),
+                        "cutoff_ordinal": cutoff_ordinal,
                         "started_at": now.isoformat(),
                         "completed_at": None,
                         "candidate_count": 0,
@@ -679,10 +755,16 @@ class FoundryStore:
                 self._conn.execute(
                     """
                     INSERT OR IGNORE INTO daily_runs(
-                      run_date,state,cutoff_at,started_at,candidate_count
-                    ) VALUES (?, 'running', ?, ?, ?)
+                      run_date,state,cutoff_at,cutoff_ordinal,started_at,candidate_count
+                    ) VALUES (?, 'running', ?, ?, ?, ?)
                     """,
-                    (day_text, now.isoformat(), now.isoformat(), candidate_count),
+                    (
+                        day_text,
+                        now.isoformat(),
+                        cutoff_ordinal,
+                        now.isoformat(),
+                        candidate_count,
+                    ),
                 )
                 row = self._conn.execute(
                     "SELECT * FROM daily_runs WHERE run_date=?", (day_text,)
@@ -748,9 +830,13 @@ class FoundryStore:
                     return dict(active), False
                 queued_count = int(
                     self._conn.execute(
-                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued' AND enqueued_at<=?",
-                        (now.isoformat(),),
+                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
                     ).fetchone()["n"]
+                )
+                cutoff_ordinal = int(
+                    self._conn.execute(
+                        "SELECT value FROM control_sequences WHERE name='candidate_enqueue'"
+                    ).fetchone()["value"]
                 )
                 candidate_count = (
                     min(queued_count, max_candidates)
@@ -764,14 +850,15 @@ class FoundryStore:
                 self._conn.execute(
                     """
                     INSERT INTO manual_runs(
-                      run_id,state,cutoff_at,requested_at,completed_at,
+                      run_id,state,cutoff_at,cutoff_ordinal,requested_at,completed_at,
                       candidate_count,max_candidates,stop_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
                         state,
                         now.isoformat(),
+                        cutoff_ordinal,
                         now.isoformat(),
                         completed_at,
                         candidate_count,
