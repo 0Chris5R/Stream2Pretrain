@@ -271,14 +271,24 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         citation_count = len(scientific_result.document.citations)
         extraction_warnings = list(scientific_result.document.warnings)
     elif uses_scientific_extraction(bronze) and state.scientific is not None:
-        scientific_result = state.scientific.process(
-            doc_id=bronze.doc_id,
-            source_url=str(bronze.url),
-            html=raw_html,
-            plain_text=text,
-            title=title,
-            extraction_pipeline=extraction_pipeline,
-        )
+        if bronze.source_format in {"latex", "markdown"}:
+            scientific_result = state.scientific.process_text(
+                doc_id=bronze.doc_id,
+                source_url=str(bronze.url),
+                text=text,
+                title=title,
+                source_format=bronze.source_format,
+                extraction_pipeline=extraction_pipeline,
+            )
+        else:
+            scientific_result = state.scientific.process(
+                doc_id=bronze.doc_id,
+                source_url=str(bronze.url),
+                html=raw_html,
+                plain_text=text,
+                title=title,
+                extraction_pipeline=extraction_pipeline,
+            )
         text = scientific_result.text
         model_text = scientific_result.model_text
         source_metadata_text = scientific_result.source_metadata_text
