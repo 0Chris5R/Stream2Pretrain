@@ -53,6 +53,14 @@ broker commits are not the authoritative Bytewax progress boundary. A core
 rescale is a coordinated stop, worker-count change, and restart using the
 pre-created recovery partitions. Quality, KenLM, and E5 remain stateless
 `processor-model-service-*` deployments with CPU HPA and cross-node spreading.
+Their deployment strategy is `Recreate`: the DHBW nodes cannot hold two
+generations of the multi-GiB model images at once. The release workflow removes
+the model HPAs, scales each service to one Pod, and lets Helm recreate the HPAs
+after applying the replacement specification.
+
+The single Iceberg writer retains one Bytewax recovery partition. That state
+shard count is independent of the four Kafka topic partitions and deliberately
+matches the existing cloud checkpoint.
 
 KEDA remains appropriate for independently committing ingest consumers with a
 dedicated input topic, such as the GitHub tarball fetcher. It is disabled for

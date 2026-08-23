@@ -610,7 +610,10 @@ processor:
       existingClaim: ""
       storageClass: ""
       size: 2Gi
-      recoveryPartitions: 4
+      # This single coordinated writer has one retained Bytewax recovery
+      # partition. Kafka topic partitioning is independent of this state-shard
+      # count, so expanding it would invalidate the durable cloud checkpoint.
+      recoveryPartitions: 1
       snapshotSeconds: 1
     maintenance:
       enabled: true

@@ -20,11 +20,10 @@ spec:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" $component) | nindent 6 }}
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      # Required node spreading can leave no surge capacity on a small cluster.
-      maxUnavailable: 1
-      maxSurge: 0
+    # Model images are several GiB and the DHBW cluster has no capacity for an
+    # old and a new generation at once. These services are stateless, while
+    # callers retry across the short replacement window.
+    type: Recreate
   template:
     metadata:
       labels:
