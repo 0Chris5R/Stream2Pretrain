@@ -153,6 +153,7 @@ async def poll_models(
         )
         by_model: dict[str, dict[str, object]] = {}
         successful_requests = 0
+        failed_requests = 0
         for license_id in sorted(PERMISSIVE_TRAINING_LICENSES):
             params = {
                 "sort": "lastModified",
@@ -168,9 +169,11 @@ async def poll_models(
                     status=resp.status_code,
                     license=license_id,
                 )
+                failed_requests += 1
                 continue
             payload = resp.json()
             if not isinstance(payload, list):
+                failed_requests += 1
                 continue
             successful_requests += 1
             for item in payload:
@@ -181,13 +184,14 @@ async def poll_models(
                     by_model[model_id] = item
         if not successful_requests:
             INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
-            return 0
+            raise RuntimeError("all Hugging Face model API requests failed")
         INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="success")
         items = sorted(
             by_model.values(),
             key=lambda item: str(item.get("lastModified") or ""),
             reverse=True,
         )[:limit]
+        emit_failures: list[str] = []
         for item in items:
             model_id = item.get("id") or item.get("modelId")
             last_modified = item.get("lastModified")
@@ -213,6 +217,7 @@ async def poll_models(
                 )
             except Exception as exc:
                 log.warning("hf_models.emit_failed", model=model_id, err=str(exc))
+                emit_failures.append(model_id)
                 continue
             if not accepted:
                 seen[model_id] = last_modified
@@ -227,6 +232,12 @@ async def poll_models(
     FeedStateStore("/var/lib/s2p-state/hf_poller" if not cfg.is_dev else "./.s2p-state/hf").put(
         SOURCE_FEED_MODELS, {"seen": seen}
     )
+    if failed_requests or emit_failures:
+        INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_MODELS, outcome="error")
+        raise RuntimeError(
+            "incomplete Hugging Face model pass: "
+            f"request_failures={failed_requests}, emit_failures={len(emit_failures)}"
+        )
     return emitted
 
 
@@ -255,12 +266,13 @@ async def poll_daily_papers(
         if resp.status_code >= 400:
             log.warning("hf_papers.bad_status", status=resp.status_code)
             INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="error")
-            return 0
+            resp.raise_for_status()
         INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="success")
         items = resp.json()
         if not isinstance(items, list):
             INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="error")
-            return 0
+            raise ValueError("Hugging Face daily papers response must be a JSON list")
+        emit_failures: list[str] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -300,6 +312,7 @@ async def poll_daily_papers(
                 )
             except Exception as exc:
                 log.warning("hf_papers.emit_failed", paper=arxiv_id, err=str(exc))
+                emit_failures.append(arxiv_id)
                 continue
             if not accepted:
                 seen_ids.add(arxiv_id)
@@ -310,6 +323,9 @@ async def poll_daily_papers(
     if len(seen_ids) > 5000:
         seen_ids = set(list(seen_ids)[-2500:])
     state_store.put(SOURCE_FEED_PAPERS, {"seen_ids": sorted(seen_ids)})
+    if emit_failures:
+        INGEST_METRICS.record_feed_poll(source_feed=SOURCE_FEED_PAPERS, outcome="error")
+        raise RuntimeError(f"failed to emit {len(emit_failures)} Hugging Face daily papers")
     return emitted
 
 

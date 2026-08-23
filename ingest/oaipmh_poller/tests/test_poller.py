@@ -128,3 +128,22 @@ async def test_poll_feed_resumes_the_same_window_from_checkpoint(
     assert calls[1]["from_"] == "2024-01-01"
     assert calls[1]["until"] == "2026-08-22"
     assert store.get("oai-test") == {"until": "2026-08-22"}
+
+
+@pytest.mark.asyncio
+async def test_run_reports_feed_failure_after_attempting_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempted: list[str] = []
+    feeds = [_feed(), _feed().model_copy(update={"name": "oai-test-2"})]
+
+    async def failing_poll(feed: SourceFeedSpec, *_: object, **__: object) -> int:
+        attempted.append(feed.name)
+        raise RuntimeError("upstream unavailable")
+
+    monkeypatch.setattr(poller, "poll_feed", failing_poll)
+
+    with pytest.raises(RuntimeError, match="oai-test, oai-test-2"):
+        await poller._run(_cfg(), feeds)
+
+    assert attempted == ["oai-test", "oai-test-2"]

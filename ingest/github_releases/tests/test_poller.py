@@ -168,3 +168,50 @@ async def test_poll_repo_handles_304(tmp_path: Path) -> None:
     finally:
         await client.aclose()
     assert emitted == 0
+
+
+@pytest.mark.asyncio
+async def test_poll_repo_raises_when_feed_is_unavailable(tmp_path: Path) -> None:
+    state = FeedStateStore(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    bucket = TokenBucket(rate=10.0, burst=4)
+    fake_producer = FakeProducer()
+    fake_minio = FakeMinio()
+    try:
+        with pytest.raises(RuntimeError, match="HTTP 503"):
+            await poll_repo(
+                "huggingface/transformers",
+                cfg=_cfg(),
+                client=client,
+                producer=fake_producer,  # type: ignore[arg-type]
+                minio=fake_minio,  # type: ignore[arg-type]
+                state_store=state,
+                bucket=bucket,
+            )
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_poll_repo_rejects_non_atom_success_response(tmp_path: Path) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>challenge</body></html>")
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ValueError, match="invalid GitHub releases Atom payload"):
+            await poll_repo(
+                "huggingface/transformers",
+                cfg=_cfg(),
+                client=client,
+                producer=FakeProducer(),  # type: ignore[arg-type]
+                minio=FakeMinio(),  # type: ignore[arg-type]
+                state_store=FeedStateStore(tmp_path),
+                bucket=TokenBucket(rate=10.0, burst=4),
+            )
+    finally:
+        await client.aclose()

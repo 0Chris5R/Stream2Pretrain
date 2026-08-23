@@ -56,6 +56,11 @@ def discover_entry_urls(feed_text: str) -> list[str]:
 def discover_entries(feed_text: str) -> list[FeedEntry]:
     """Return de-duplicated URLs plus entry-level licence metadata."""
     parsed: Any = feedparser.parse(feed_text)
+    return _entries_from_parsed(parsed)
+
+
+def _entries_from_parsed(parsed: Any) -> list[FeedEntry]:
+    """Extract normalized entries from a feedparser result."""
     seen: set[str] = set()
     entries: list[FeedEntry] = []
     for entry in parsed.get("entries", []):
@@ -110,7 +115,7 @@ async def poll_feed(
             feed=feed.name,
             status=resp.status_code,
         )
-        return 0
+        resp.raise_for_status()
 
     new_state: dict[str, Any] = {}
     if et := resp.headers.get("etag"):
@@ -118,11 +123,15 @@ async def poll_feed(
     if lm := resp.headers.get("last-modified"):
         new_state["last_modified"] = lm
 
-    entries = discover_entries(resp.text)
+    parsed: Any = feedparser.parse(resp.text)
+    entries = _entries_from_parsed(parsed)
+    if not parsed.get("version"):
+        raise ValueError(f"invalid RSS/Atom payload for feed {feed.name}")
     log.info("feed.parsed", feed=feed.name, entries=len(entries))
 
     seen_in_pass: set[str] = set()
     emitted = 0
+    entry_failures: list[str] = []
     for entry in entries:
         url = entry.url
         license_id, license_source = effective_license(
@@ -146,9 +155,13 @@ async def poll_feed(
             )
         except httpx.HTTPError as exc:
             log.warning("entry.fetch_failed", feed=feed.name, url=url, err=str(exc))
+            entry_failures.append(url)
             continue
         if rec is not None:
             emitted += 1
+
+    if entries and len(entry_failures) == len(entries):
+        raise RuntimeError(f"all {len(entries)} entries failed for RSS feed {feed.name}")
 
     state_store.put(feed.name, new_state)
     return emitted
@@ -159,6 +172,7 @@ async def run_pass(cfg: IngestConfig, feeds: Iterable[SourceFeedSpec]) -> int:
     state_root = "/var/lib/s2p-state/rss_poller" if not cfg.is_dev else "./.s2p-state/rss"
     state_store = FeedStateStore(state_root)
     total = 0
+    failures: list[str] = []
     async with (
         build_async_client(cfg) as client,
         BronzeProducer(
@@ -189,6 +203,9 @@ async def run_pass(cfg: IngestConfig, feeds: Iterable[SourceFeedSpec]) -> int:
                 )
             except Exception as exc:
                 log.exception("feed.unhandled_error", feed=feed.name, err=str(exc))
+                failures.append(feed.name)
+    if failures:
+        raise RuntimeError(f"RSS feed polling failed: {', '.join(failures)}")
     return total
 
 

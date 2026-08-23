@@ -88,6 +88,36 @@ async def test_fetch_and_publish_skips_304(
 
 
 @pytest.mark.asyncio
+async def test_fetch_and_publish_raises_on_upstream_http_error(
+    fake_producer: FakeProducer, fake_minio: FakeMinio
+) -> None:
+    admissions = FakeProducer()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(httpx.HTTPStatusError, match="503"):
+            await fetch_and_publish(
+                client,
+                "https://example.com/unavailable",
+                source_feed="rss-test",
+                producer=fake_producer,  # type: ignore[arg-type]
+                minio=fake_minio,  # type: ignore[arg-type]
+                bucket="bronze",
+                license_value="CC-BY-4.0",
+                license_source="rss_entry",
+                admission_producer=admissions,  # type: ignore[arg-type]
+            )
+    finally:
+        await client.aclose()
+
+    assert not fake_producer.sent
+    assert not fake_minio.objects
+
+
+@pytest.mark.asyncio
 async def test_fetch_and_publish_dedups_seen(
     fake_producer: FakeProducer, fake_minio: FakeMinio
 ) -> None:
