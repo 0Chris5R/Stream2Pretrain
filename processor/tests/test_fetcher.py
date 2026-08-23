@@ -205,6 +205,36 @@ def test_normalize_structured_metadata_extracts_human_text(bronze_record: Bronze
     assert silver.extracted_with == "hf-api-json-v1"
 
 
+def test_normalize_oai_xml_extracts_text_without_training_on_markup(
+    bronze_record: BronzeRecord,
+) -> None:
+    state = _state(_FakeS3(b""))
+    metadata_bronze = bronze_record.model_copy(
+        update={
+            "source_format": "metadata",
+            "source_feed": "arxiv-oai-cs",
+            "extraction_pipeline": "oai-pmh-metadata-v1",
+            "spdx_license": "CC-BY-4.0",
+            "spdx_license_source": "oai_metadata",
+        }
+    )
+    payload = b"""<record xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <dc:title>A Structured Scientific Record</dc:title>
+      <dc:creator>Ada Researcher</dc:creator>
+      <dc:description>We evaluate a reproducible streaming pipeline.</dc:description>
+      <dc:identifier>https://arxiv.org/abs/2608.00001</dc:identifier>
+    </record>"""
+
+    silver = normalize(state, metadata_bronze, payload)
+
+    assert silver is not None
+    assert silver.title == "A Structured Scientific Record"
+    assert "reproducible streaming pipeline" in silver.text
+    assert "<dc:" not in silver.text
+    assert "https://arxiv.org" not in silver.text
+    assert silver.extracted_with == "oai-pmh-metadata-v1"
+
+
 def test_normalize_returns_none_on_empty_html(bronze_record: BronzeRecord) -> None:
     state = _state(_FakeS3(b""))
     assert normalize(state, bronze_record, b"") is None
