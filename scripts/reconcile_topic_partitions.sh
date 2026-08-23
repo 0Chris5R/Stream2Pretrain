@@ -3,6 +3,24 @@
 
 set -euo pipefail
 
+kubectl_retry() {
+  local attempt=1
+  local max_attempts="${S2P_KUBECTL_MAX_ATTEMPTS:-6}"
+  local delay_seconds="${S2P_KUBECTL_RETRY_DELAY_SECONDS:-2}"
+  while true; do
+    if kubectl --request-timeout=30s "$@"; then
+      return 0
+    fi
+    if [[ "$attempt" -ge "$max_attempts" ]]; then
+      echo "kubectl failed after $attempt attempts: $*" >&2
+      return 1
+    fi
+    echo "kubectl attempt $attempt failed; retrying: $*" >&2
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 target="${S2P_CORE_TOPIC_PARTITIONS:-4}"
 max_message_bytes="${S2P_KAFKA_MESSAGE_MAX_BYTES:-2097152}"
 if ! [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
@@ -18,7 +36,7 @@ smoke_topic="${S2P_SMOKE_RAW_TOPIC:-raw.smoke}"
 smoke_normalized_topic="${S2P_SMOKE_NORMALIZED_TOPIC:-docs.normalized.smoke}"
 github_release_jobs_topic="${S2P_GITHUB_RELEASE_JOBS_TOPIC:-github.release.jobs}"
 for managed_topic in "$smoke_topic" "$smoke_normalized_topic" "$github_release_jobs_topic"; do
-  if ! kubectl -n redpanda exec statefulset/redpanda -- rpk topic list \
+  if ! kubectl_retry -n redpanda exec statefulset/redpanda -- rpk topic list \
     | awk 'NR > 1 {print $1}' \
     | grep -qx "$managed_topic"; then
     retention_ms=604800000
@@ -26,7 +44,7 @@ for managed_topic in "$smoke_topic" "$smoke_normalized_topic" "$github_release_j
       retention_ms=86400000
     fi
     echo "Creating managed topic $managed_topic"
-    kubectl -n redpanda exec statefulset/redpanda -- \
+    kubectl_retry -n redpanda exec statefulset/redpanda -- \
       rpk topic create "$managed_topic" \
         --partitions "$target" \
         --replicas 1 \
@@ -47,7 +65,7 @@ topics=(
 )
 for topic in "${topics[@]}"; do
   current="$(
-    kubectl -n redpanda exec statefulset/redpanda -- \
+    kubectl_retry -n redpanda exec statefulset/redpanda -- \
       rpk topic describe "$topic" -p \
       | awk 'NR > 1 && $1 ~ /^[0-9]+$/ { count++ } END { print count + 0 }'
   )"
@@ -58,15 +76,15 @@ for topic in "${topics[@]}"; do
   if [[ "$current" -lt "$target" ]]; then
     add=$((target - current))
     echo "Expanding $topic from $current to $target partitions"
-    kubectl -n redpanda exec statefulset/redpanda -- \
+    kubectl_retry -n redpanda exec statefulset/redpanda -- \
       rpk topic add-partitions "$topic" --num "$add"
   else
     echo "$topic already has $current partitions"
   fi
-  kubectl -n redpanda exec statefulset/redpanda -- \
+  kubectl_retry -n redpanda exec statefulset/redpanda -- \
     rpk topic alter-config "$topic" --set "max.message.bytes=$max_message_bytes"
   if [[ "$topic" == "$smoke_topic" || "$topic" == "$smoke_normalized_topic" ]]; then
-    kubectl -n redpanda exec statefulset/redpanda -- \
+    kubectl_retry -n redpanda exec statefulset/redpanda -- \
       rpk topic alter-config "$topic" --set retention.ms=86400000
   fi
 done
