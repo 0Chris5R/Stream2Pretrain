@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
+
+import pytest
 
 from processor import common
 from processor.common import ProcessorConfig, gold_loads, silver_dumps
@@ -12,6 +15,7 @@ from processor.curate import (
     is_trainable_gold,
     process_silver_decision_payload,
     process_silver_payload,
+    run_native_curator,
 )
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
@@ -454,3 +458,146 @@ def test_code_license_must_be_permissive_whitelist(
         assert not is_trainable_gold(gold)
     finally:
         state.close()
+
+
+class _NativeMessage:
+    def __init__(self, topic: str) -> None:
+        self._topic = topic
+
+    def error(self) -> None:
+        return None
+
+    def value(self) -> bytes:
+        return b"silver"
+
+    def key(self) -> bytes:
+        return b"document"
+
+    def topic(self) -> str:
+        return self._topic
+
+    def partition(self) -> int:
+        return 1
+
+    def offset(self) -> int:
+        return 7
+
+
+class _NativeConsumer:
+    def __init__(self, config: dict[str, object], message: _NativeMessage | None) -> None:
+        self.config = config
+        self.message = message
+        self.topics: list[str] = []
+        self.commits: list[_NativeMessage] = []
+        self.closed = False
+
+    def subscribe(self, topics: list[str]) -> None:
+        self.topics = topics
+
+    def poll(self, _timeout: float) -> _NativeMessage | None:
+        message, self.message = self.message, None
+        return message
+
+    def commit(self, *, message: _NativeMessage, asynchronous: bool) -> None:
+        assert asynchronous is False
+        self.commits.append(message)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _NativeProducer:
+    def __init__(self, config: dict[str, object], delivery_error: object | None = None) -> None:
+        self.config = config
+        self.delivery_error = delivery_error
+        self.records: list[dict[str, Any]] = []
+
+    def produce(self, topic: str, **kwargs: Any) -> None:
+        self.records.append({"topic": topic, **kwargs})
+        callback = kwargs.get("on_delivery")
+        if callback is not None:
+            callback(self.delivery_error, object())
+
+    def flush(self, _timeout: float) -> int:
+        return 0
+
+
+def test_native_curator_prioritizes_canary_and_commits_after_outputs(
+    cfg: ProcessorConfig,
+    monkeypatch: Any,
+) -> None:
+    consumers: list[_NativeConsumer] = []
+    producer: _NativeProducer | None = None
+
+    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
+        topic = (
+            "docs.normalized.smoke"
+            if config["group.id"] == "s2p-curate-canary"
+            else "docs.normalized"
+        )
+        consumer = _NativeConsumer(config, _NativeMessage(topic))
+        consumers.append(consumer)
+        return consumer
+
+    def producer_factory(config: dict[str, object]) -> _NativeProducer:
+        nonlocal producer
+        producer = _NativeProducer(config)
+        return producer
+
+    monkeypatch.setattr(
+        "processor.curate.process_silver_decision_payload",
+        lambda *_args, **_kwargs: (b"decision", True),
+    )
+    run_native_curator(
+        cfg,
+        state=object(),  # type: ignore[arg-type]
+        consumer_factory=consumer_factory,
+        producer_factory=producer_factory,
+        max_messages=1,
+    )
+
+    production, canary = consumers
+    assert production.topics == ["docs.normalized"]
+    assert canary.topics == ["docs.normalized.smoke"]
+    assert production.commits == []
+    assert canary.commits and canary.commits[0].topic() == "docs.normalized.smoke"
+    assert producer is not None
+    assert [record["topic"] for record in producer.records] == [
+        "curation.decisions",
+        "docs.curated",
+    ]
+    assert all(consumer.closed for consumer in consumers)
+
+
+def test_native_curator_does_not_commit_failed_delivery(
+    cfg: ProcessorConfig,
+    monkeypatch: Any,
+) -> None:
+    consumers: list[_NativeConsumer] = []
+
+    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
+        message = (
+            _NativeMessage("docs.normalized.smoke")
+            if config["group.id"] == "s2p-curate-canary"
+            else None
+        )
+        consumer = _NativeConsumer(config, message)
+        consumers.append(consumer)
+        return consumer
+
+    monkeypatch.setattr(
+        "processor.curate.process_silver_decision_payload",
+        lambda *_args, **_kwargs: (b"decision", False),
+    )
+    with pytest.raises(RuntimeError, match="producer delivery failed"):
+        run_native_curator(
+            cfg,
+            state=object(),  # type: ignore[arg-type]
+            consumer_factory=consumer_factory,
+            producer_factory=lambda config: _NativeProducer(
+                config, delivery_error=RuntimeError("broker rejected record")
+            ),
+            max_messages=1,
+        )
+
+    assert all(consumer.commits == [] for consumer in consumers)

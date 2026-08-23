@@ -142,7 +142,7 @@ def main() -> None:
         aws_secret_access_key=required_env("MINIO_SECRET_KEY"),
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
     )
-    normalized_topic = required_env("S2P_NORMALIZED_TOPIC")
+    normalized_topic = required_env("S2P_SMOKE_NORMALIZED_TOPIC")
     decision_topic = required_env("S2P_DECISIONS_TOPIC")
     curated_topic = required_env("S2P_CURATED_TOPIC")
     normalized_consumer = tail_consumer(normalized_topic)

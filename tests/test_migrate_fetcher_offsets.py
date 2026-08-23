@@ -37,6 +37,12 @@ def test_read_bytewax_offsets_uses_latest_epoch(tmp_path: Path) -> None:
 
     assert read_bytewax_offsets(tmp_path, "raw.fetched") == {0: 125, 1: 30}
 
+    assert read_bytewax_offsets(
+        tmp_path,
+        "raw.fetched",
+        step_id="other.step",
+    ) == {2: 99}
+
 
 class _FakeConsumer:
     def __init__(self, existing: dict[int, int], watermarks: dict[int, tuple[int, int]]):
@@ -87,6 +93,19 @@ def test_migrate_offsets_preserves_native_and_bounds_recovery() -> None:
         0: {"action": "preserved", "offset": 140},
         1: {"action": "migrated", "offset": 50},
     }
+
+
+def test_migrate_offsets_advances_stale_bytewax_broker_offset() -> None:
+    consumer = _FakeConsumer(existing={0: 120}, watermarks={0: (100, 200)})
+
+    result = migrate_offsets(
+        consumer=consumer,
+        topic="docs.normalized",
+        recovered={0: 175},
+    )
+
+    assert consumer.commits[0][0].offset == 175
+    assert result["partitions"] == {0: {"action": "migrated", "offset": 175}}
 
 
 def test_migrate_offsets_refuses_uncheckpointed_retained_partition() -> None:

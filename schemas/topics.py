@@ -21,6 +21,7 @@ from typing import Final
 RAW_FETCHED: Final[str] = "raw.fetched"
 RAW_SMOKE: Final[str] = "raw.smoke"
 DOCS_NORMALIZED: Final[str] = "docs.normalized"
+DOCS_NORMALIZED_SMOKE: Final[str] = "docs.normalized.smoke"
 DOCS_CURATED: Final[str] = "docs.curated"
 DECON_ATTEST: Final[str] = "decon.attest"
 CURATION_DECISIONS: Final[str] = "curation.decisions"
@@ -43,6 +44,7 @@ ALL_TOPICS: Final[tuple[str, ...]] = (
     RAW_FETCHED,
     RAW_SMOKE,
     DOCS_NORMALIZED,
+    DOCS_NORMALIZED_SMOKE,
     DOCS_CURATED,
     CURATION_DECISIONS,
     LICENSE_ADMISSIONS,
@@ -105,6 +107,12 @@ def dev_topic_configs() -> list[TopicConfig]:
             DOCS_NORMALIZED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
+            DOCS_NORMALIZED_SMOKE,
+            partitions=1,
+            replication_factor=1,
+            retention_ms=_SMOKE_RETENTION_MS,
+        ),
+        TopicConfig(
             DOCS_CURATED, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
@@ -143,6 +151,12 @@ def prod_topic_configs() -> list[TopicConfig]:
         ),
         TopicConfig(
             DOCS_NORMALIZED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS
+        ),
+        TopicConfig(
+            DOCS_NORMALIZED_SMOKE,
+            partitions=3,
+            replication_factor=3,
+            retention_ms=_SMOKE_RETENTION_MS,
         ),
         TopicConfig(
             DOCS_CURATED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS

@@ -1,6 +1,6 @@
-"""Bytewax dataflow: ``docs.normalized`` -> ``docs.curated``.
+"""Stateful curation worker: ``docs.normalized`` -> ``docs.curated``.
 
-End-to-end source-aware curation. The dataflow:
+End-to-end source-aware curation. The worker:
 
 1. Consumes :class:`SilverRecord` payloads from ``docs.normalized``.
 2. Runs the Gopher heuristic gate.
@@ -26,10 +26,15 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from collections.abc import Sequence
+import signal
+import socket
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any, Literal, cast
+
+from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
@@ -842,19 +847,209 @@ def build_dataflow(cfg: common.ProcessorConfig) -> object:
     return flow
 
 
+def native_curator_consumer_config(
+    cfg: common.ProcessorConfig,
+    *,
+    group_id: str,
+    traffic_class: str,
+) -> dict[str, object]:
+    """Return the broker-owned offset configuration for one curation lane."""
+    reset = "latest" if common.kafka_starting_offset() == -1 else "earliest"
+    return {
+        **common.kafka_consumer_config(group_id),
+        "bootstrap.servers": cfg.redpanda_brokers,
+        "client.id": f"s2p-curate-{traffic_class}-{socket.gethostname()}",
+        "auto.offset.reset": reset,
+        "enable.auto.commit": False,
+        "enable.auto.offset.store": False,
+        "max.poll.interval.ms": int(os.environ.get("S2P_CURATOR_MAX_POLL_INTERVAL_MS", "900000")),
+        "session.timeout.ms": 45_000,
+        "partition.assignment.strategy": "cooperative-sticky",
+        "queued.max.messages.kbytes": 65_536,
+    }
+
+
+def native_curator_producer_config(cfg: common.ProcessorConfig) -> dict[str, object]:
+    """Return an idempotent configuration for decisions and curated rows."""
+    return {
+        **common.kafka_producer_config(),
+        "bootstrap.servers": cfg.redpanda_brokers,
+        "client.id": f"s2p-curate-{socket.gethostname()}",
+        "enable.idempotence": True,
+        "acks": "all",
+        "compression.type": "zstd",
+        "linger.ms": 10,
+        "message.timeout.ms": 300_000,
+    }
+
+
+def run_native_curator(
+    cfg: common.ProcessorConfig,
+    *,
+    state: CurateState | None = None,
+    consumer_factory: Callable[[dict[str, object]], Any] = Consumer,
+    producer_factory: Callable[[dict[str, object]], Any] = Producer,
+    should_stop: Callable[[], bool] | None = None,
+    max_messages: int | None = None,
+) -> None:
+    """Curate production traffic while giving the bounded canary lane priority.
+
+    Both lanes share the exact same model and durable dedup state. The canary
+    consumer is polled before every production record, so a large replay burst
+    cannot hide a broken deployment for hours. Output delivery completes before
+    the corresponding broker offset is committed, preserving at-least-once
+    processing without a pod-local source-offset checkpoint.
+    """
+    if max_messages is not None and max_messages < 1:
+        raise ValueError("max_messages must be positive when provided")
+    should_stop = should_stop or (lambda: False)
+    state = state or build_state(cfg)
+    log = common.get_logger("s2p.curate")
+    smoke_topic = os.environ.get("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke").strip()
+    if not smoke_topic:
+        raise RuntimeError("S2P_SMOKE_NORMALIZED_TOPIC must not be empty")
+    smoke_group = os.environ.get("S2P_CURATOR_SMOKE_GROUP", "s2p-curate-canary").strip()
+    if not smoke_group:
+        raise RuntimeError("S2P_CURATOR_SMOKE_GROUP must not be empty")
+
+    production_consumer = consumer_factory(
+        native_curator_consumer_config(cfg, group_id=cfg.consumer_group, traffic_class="production")
+    )
+    smoke_consumer = consumer_factory(
+        native_curator_consumer_config(cfg, group_id=smoke_group, traffic_class="canary")
+    )
+    producer = producer_factory(native_curator_producer_config(cfg))
+    production_consumer.subscribe([cfg.normalized_topic])
+    smoke_consumer.subscribe([smoke_topic])
+    payload_max_bytes = common.kafka_payload_max_bytes()
+    flush_timeout = float(os.environ.get("S2P_CURATOR_FLUSH_TIMEOUT_SECONDS", "60"))
+    retry_attempts = int(os.environ.get("S2P_CURATOR_RECORD_ATTEMPTS", "2"))
+    if flush_timeout <= 0 or retry_attempts < 1:
+        raise RuntimeError("curator timeout and retry settings must be positive")
+    processed_messages = 0
+    delivery_errors: list[str] = []
+
+    def on_delivery(error: object | None, _message: object) -> None:
+        if error is not None:
+            delivery_errors.append(str(error))
+
+    try:
+        while not should_stop():
+            owner = smoke_consumer
+            message = smoke_consumer.poll(0)
+            if message is None:
+                owner = production_consumer
+                message = production_consumer.poll(1.0)
+            if message is None:
+                if max_messages is not None and processed_messages >= max_messages:
+                    break
+                continue
+            error = message.error()
+            if error is not None:
+                if error.code() == KafkaError._PARTITION_EOF:
+                    continue
+                raise KafkaException(error)
+
+            payload = message.value()
+            result: tuple[bytes, bool] | None = None
+            if payload is not None:
+                for attempt in range(1, retry_attempts + 1):
+                    try:
+                        result = process_silver_decision_payload(
+                            state, payload, metrics=PROCESSOR_METRICS
+                        )
+                        break
+                    except Exception as exc:
+                        PROCESSOR_METRICS.record_failure(stage="curate", reason=type(exc).__name__)
+                        if attempt == retry_attempts:
+                            log.warning(
+                                "curation record exhausted retries",
+                                topic=message.topic(),
+                                partition=message.partition(),
+                                offset=message.offset(),
+                                attempts=attempt,
+                                error=str(exc),
+                                exception_type=type(exc).__name__,
+                                exc_info=True,
+                            )
+                        else:
+                            time.sleep(min(2 ** (attempt - 1) * 0.25, 2.0))
+
+            if result is not None:
+                decision, trainable = result
+                if len(decision) > payload_max_bytes:
+                    PROCESSOR_METRICS.record_failure(stage="curate", reason="payload_too_large")
+                    log.warning(
+                        "curation payload exceeds bounded Kafka record size",
+                        payload_bytes=len(decision),
+                        payload_max_bytes=payload_max_bytes,
+                    )
+                else:
+                    key = message.key() or b""
+                    producer.produce(
+                        cfg.decisions_topic,
+                        key=key,
+                        value=decision,
+                        on_delivery=on_delivery,
+                    )
+                    if trainable:
+                        producer.produce(
+                            cfg.curated_topic,
+                            key=key,
+                            value=decision,
+                            on_delivery=on_delivery,
+                        )
+                    undelivered = producer.flush(flush_timeout)
+                    if undelivered:
+                        raise RuntimeError(
+                            f"curator producer still has {undelivered} undelivered records"
+                        )
+                    if delivery_errors:
+                        detail = "; ".join(delivery_errors[:3])
+                        raise RuntimeError(f"curator producer delivery failed: {detail}")
+                    delivery_errors.clear()
+
+            # Poison records are observable above but must not deadlock a
+            # partition forever. Successful records reach both output topics
+            # before this synchronous source commit.
+            owner.commit(message=message, asynchronous=False)
+            processed_messages += 1
+            if max_messages is not None and processed_messages >= max_messages:
+                break
+    finally:
+        try:
+            producer.flush(flush_timeout)
+        finally:
+            smoke_consumer.close()
+            production_consumer.close()
+
+
 def main() -> None:
     """Entrypoint for the ``s2p-curate`` console script."""
     cfg = common.load_config()
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     log = common.get_logger("s2p.curate")
+    smoke_topic = os.environ.get("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke")
     log.info(
-        "starting curate dataflow",
+        "starting scalable curator",
         brokers=cfg.redpanda_brokers,
-        topic=cfg.normalized_topic,
+        production_topic=cfg.normalized_topic,
+        canary_topic=smoke_topic,
     )
-    flow = build_dataflow(cfg)
+    state = build_state(cfg)
+    stopping = False
+
+    def _stop(_signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
     start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
-    common.run_bytewax_flow(flow, cfg, "curate")
+    try:
+        run_native_curator(cfg, state=state, should_stop=lambda: stopping)
+    finally:
+        state.close()
 
 
 def now_utc() -> Any:

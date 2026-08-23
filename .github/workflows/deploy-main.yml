@@ -893,7 +893,9 @@ jobs:
             kubectl -n redpanda get pod,statefulset -o wide || true
             for topic in \
               raw.fetched \
+              raw.smoke \
               docs.normalized \
+              docs.normalized.smoke \
               docs.curated \
               curation.decisions \
               license.admissions; do
@@ -902,7 +904,9 @@ jobs:
             done
             for group in \
               s2p-fetcher \
+              s2p-fetcher-canary \
               s2p-curate \
+              s2p-curate-canary \
               s2p-iceberg-writer \
               s2p-iceberg-writer-licenses \
               s2p-arxiv-html-fetcher; do
@@ -1076,6 +1080,35 @@ jobs:
               python - < scripts/migrate_fetcher_offsets.py
             kubectl -n redpanda exec statefulset/redpanda -- \
               rpk group describe s2p-fetcher
+          fi
+
+          # The curator now commits broker-owned offsets as well. Advance its
+          # group monotonically to the authoritative Bytewax recovery state
+          # before replacing the old Pod. Retaining the PVC keeps the global
+          # dedup index and deterministic decision cache intact.
+          curator_pod="$(
+            kubectl -n stream2pretrain get pod \
+              -l app.kubernetes.io/component=processor-curate \
+              -o json 2>/dev/null \
+              | jq -r '
+                  first(
+                    .items[]
+                    | select(.status.phase == "Running")
+                    | .metadata.name
+                  ) // empty
+                ' \
+              || true
+          )"
+          if [[ -n "$curator_pod" ]]; then
+            echo "Migrating legacy curator recovery offsets from $curator_pod"
+            kubectl -n stream2pretrain exec -i "$curator_pod" -- \
+              env \
+                S2P_RAW_TOPIC=docs.normalized \
+                S2P_CONSUMER_GROUP=s2p-curate \
+                S2P_BYTEWAX_STEP_ID=s2p-curate.docs_normalized \
+              python - < scripts/migrate_fetcher_offsets.py
+            kubectl -n redpanda exec statefulset/redpanda -- \
+              rpk group describe s2p-curate
           fi
 
           helm_overrides=(

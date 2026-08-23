@@ -15,20 +15,30 @@ if ! [[ "$max_message_bytes" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 smoke_topic="${S2P_SMOKE_RAW_TOPIC:-raw.smoke}"
-if ! kubectl -n redpanda exec statefulset/redpanda -- rpk topic list \
-  | awk 'NR > 1 {print $1}' \
-  | grep -qx "$smoke_topic"; then
-  echo "Creating deployment canary topic $smoke_topic"
-  kubectl -n redpanda exec statefulset/redpanda -- \
-    rpk topic create "$smoke_topic" \
-      --partitions "$target" \
-      --replicas 1 \
-      --topic-config retention.ms=86400000 \
-      --topic-config cleanup.policy=delete \
-      --topic-config "max.message.bytes=$max_message_bytes"
-fi
+smoke_normalized_topic="${S2P_SMOKE_NORMALIZED_TOPIC:-docs.normalized.smoke}"
+for smoke_lane_topic in "$smoke_topic" "$smoke_normalized_topic"; do
+  if ! kubectl -n redpanda exec statefulset/redpanda -- rpk topic list \
+    | awk 'NR > 1 {print $1}' \
+    | grep -qx "$smoke_lane_topic"; then
+    echo "Creating deployment canary topic $smoke_lane_topic"
+    kubectl -n redpanda exec statefulset/redpanda -- \
+      rpk topic create "$smoke_lane_topic" \
+        --partitions "$target" \
+        --replicas 1 \
+        --topic-config retention.ms=86400000 \
+        --topic-config cleanup.policy=delete \
+        --topic-config "max.message.bytes=$max_message_bytes"
+  fi
+done
 
-topics=(raw.fetched "$smoke_topic" docs.normalized docs.curated curation.decisions)
+topics=(
+  raw.fetched
+  "$smoke_topic"
+  docs.normalized
+  "$smoke_normalized_topic"
+  docs.curated
+  curation.decisions
+)
 for topic in "${topics[@]}"; do
   current="$(
     kubectl -n redpanda exec statefulset/redpanda -- \
@@ -49,7 +59,7 @@ for topic in "${topics[@]}"; do
   fi
   kubectl -n redpanda exec statefulset/redpanda -- \
     rpk topic alter-config "$topic" --set "max.message.bytes=$max_message_bytes"
-  if [[ "$topic" == "$smoke_topic" ]]; then
+  if [[ "$topic" == "$smoke_topic" || "$topic" == "$smoke_normalized_topic" ]]; then
     kubectl -n redpanda exec statefulset/redpanda -- \
       rpk topic alter-config "$topic" --set retention.ms=86400000
   fi
