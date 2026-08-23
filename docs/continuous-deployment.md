@@ -1,9 +1,12 @@
 # Continuous deployment
 
-`.github/workflows/deploy-main.yml` validates the repository, builds every
-application image for `linux/amd64`, publishes the images to GitHub Container
-Registry with the commit SHA as an immutable tag, and applies the complete
-Stream2Pretrain application Helm release after a push to `main`.
+`.github/workflows/deploy-main.yml` validates the repository, resolves an
+immutable content key for each application component, and builds only content
+that is not already present in GitHub Container Registry. Unchanged images are
+retagged server-side with the new commit SHA without downloading layers or
+rerunning Docker. New images target `linux/amd64`; every deployed revision
+still uses a traceable commit-SHA tag. The complete application Helm release is
+then applied after a push to `main`.
 
 The workflow uses OpenConnect in Cisco AnyConnect-compatible mode. It does not
 disable TLS certificate verification. If the VPN server uses a certificate
