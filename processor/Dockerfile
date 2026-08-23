@@ -1,10 +1,9 @@
 # Multi-stage Dockerfile for the Stream2Pretrain processor.
 #
 # Stage 1 (builder):  install uv + Python deps from the workspace root.
-# Stage 2 (models):   download pinned CPU classifier artifacts into /opt/models.
-# Stage 3 (runtime):  python:3.11-slim, non-root, no compilers, models copied in.
+# Stage 2 (runtime):  install only the selected immutable CPU model profile.
 ARG PYTHON_VERSION=3.11
-ARG S2P_BAKE_MODELS=0
+ARG S2P_MODEL_PROFILE=none
 ARG S2P_INSTALL_EXTRA=runtime
 ARG FINEPDFS_EDU_V2_REVISION=90ddef285f67230389057c14b2f6bbfeb70d40ea
 ARG FINEWEB_EDU_REVISION=284663cbb2dabf9bda30d8f8cc49601251ee1631
@@ -17,7 +16,6 @@ ARG FIGURE_CLASSIFIER_REVISION=f859dfbff5c9916cd996942d4b0db7fa25808220
 # ---------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS builder
 ARG S2P_INSTALL_EXTRA
-ARG S2P_BAKE_MODELS
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -66,109 +64,16 @@ RUN uv sync \
         --no-dev \
         --no-install-workspace
 
-# Docling's standard CPU pipeline needs layout, TableFormer, and formula
-# artifacts. Download them with the exact runtime version and keep the model
-# cache in the final image so PDF fallback never needs runtime egress.
-RUN mkdir -p /opt/models/docling \
- && if [ "${S2P_BAKE_MODELS}" = "1" ]; then \
-      docling-tools models download layout tableformer code_formula \
-        --output-dir /opt/models/docling; \
-    fi
-
 # ---------------------------------------------------------------------------
-# Stage 2: models
+# Stage 2: immutable runtime dependency and model base
 # ---------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim AS models
-ARG S2P_BAKE_MODELS
+FROM python:${PYTHON_VERSION}-slim AS runtime-base
+ARG S2P_MODEL_PROFILE
 ARG FINEPDFS_EDU_V2_REVISION
 ARG FINEWEB_EDU_REVISION
 ARG E5_SMALL_REVISION
 ARG KENLM_REVISION
 ARG FIGURE_CLASSIFIER_REVISION
-
-ENV PIP_NO_CACHE_DIR=1
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/* \
- && pip install --no-cache-dir huggingface_hub==0.24.6 "tiktoken>=0.7,<1"
-
-WORKDIR /opt/models
-# Official FinePDFs Edu v2 scientific-quality checkpoint.
-RUN if [ "${S2P_BAKE_MODELS}" = "1" ]; then \
-      python -c "from huggingface_hub import snapshot_download; \
-        snapshot_download(repo_id='HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn', \
-          revision='${FINEPDFS_EDU_V2_REVISION}', \
-          local_dir='/opt/models/finepdfs-edu-v2', \
-          allow_patterns=['*.json', '*.txt', '*.safetensors'])"; \
-    else \
-      mkdir -p /opt/models/finepdfs-edu-v2; \
-    fi
-
-# Official FineWeb-Edu Safetensors checkpoint. It runs through Transformers on
-# CPU unless a separately verified model.onnx is mounted in this directory.
-RUN if [ "${S2P_BAKE_MODELS}" = "1" ]; then \
-      python -c "from huggingface_hub import snapshot_download; \
-        snapshot_download(repo_id='HuggingFaceFW/fineweb-edu-classifier', \
-          revision='${FINEWEB_EDU_REVISION}', \
-          local_dir='/opt/models/fineweb-edu', \
-          allow_patterns=['*.json', '*.txt', '*.safetensors'])"; \
-    else \
-      mkdir -p /opt/models/fineweb-edu; \
-    fi
-
-# Small CPU ONNX router for 26 document-figure categories.
-RUN if [ "${S2P_BAKE_MODELS}" = "1" ]; then \
-      python -c "from huggingface_hub import snapshot_download; \
-        snapshot_download(repo_id='docling-project/DocumentFigureClassifier-v2.5', \
-          revision='${FIGURE_CLASSIFIER_REVISION}', \
-          local_dir='/opt/models/figure-classifier', \
-          allow_patterns=['model.onnx', '*.json'])"; \
-    else \
-      mkdir -p /opt/models/figure-classifier; \
-    fi
-
-# E5-small for the Decon-Gate embedding sketch
-RUN if [ "${S2P_BAKE_MODELS}" = "1" ]; then \
-      python -c "from huggingface_hub import snapshot_download; \
-        snapshot_download(repo_id='intfloat/e5-small-v2', \
-          revision='${E5_SMALL_REVISION}', \
-          local_dir='/opt/models/e5-small', \
-          allow_patterns=['model.onnx', '*.json', '*.txt'])"; \
-    else \
-      mkdir -p /opt/models/e5-small; \
-    fi
-
-# KenLM English Wikipedia binary plus the exact SentencePiece tokenizer used by
-# the publisher's scorer. The binary is roughly 4.44 GB and is mmap-friendly.
-RUN mkdir -p /opt/models/kenlm \
- && if [ "${S2P_BAKE_MODELS}" = "1" ]; then \
-      python -c "from huggingface_hub import hf_hub_download; import shutil; \
-        repo='edugp/kenlm'; rev='${KENLM_REVISION}'; \
-        binary=hf_hub_download(repo_id=repo, filename='wikipedia/en.arpa.bin', revision=rev); \
-        tokenizer=hf_hub_download(repo_id=repo, filename='wikipedia/en.sp.model', revision=rev); \
-        shutil.copy2(binary, '/opt/models/kenlm/en.arpa.bin'); \
-        shutil.copy2(tokenizer, '/opt/models/kenlm/en.sp.model')"; \
-    fi
-
-# Pre-cache the exact BPE vocabulary so strict mode never needs runtime egress.
-RUN mkdir -p /opt/models/tiktoken \
- && if [ "${S2P_BAKE_MODELS}" = "1" ]; then \
-      TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
-        python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"; \
-    fi
-
-RUN python -c "import json; json.dump({ \
-      'finepdfs_edu_v2': '${FINEPDFS_EDU_V2_REVISION}', \
-      'fineweb_edu': '${FINEWEB_EDU_REVISION}', \
-      'e5_small_v2': '${E5_SMALL_REVISION}', \
-      'kenlm': '${KENLM_REVISION}', \
-      'figure_classifier': '${FIGURE_CLASSIFIER_REVISION}'}, \
-      open('/opt/models/revisions.json', 'w'), sort_keys=True)"
-
-# ---------------------------------------------------------------------------
-# Stage 3: immutable runtime dependency base
-# ---------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim AS runtime-base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -194,11 +99,134 @@ RUN groupadd --system --gid 65532 nonroot \
  && chown -R nonroot:nonroot ${S2P_STATE_DIR}
 
 COPY --from=builder /src/.venv                         /src/.venv
-COPY --from=models  /opt/models                         /opt/models
-COPY --from=builder /opt/models/docling                 /opt/models/docling
+
+WORKDIR /opt/models
+
+# Official FinePDFs Edu v2 scientific-quality checkpoint.
+RUN case "${S2P_MODEL_PROFILE}" in curate|all) \
+      python -c "from huggingface_hub import snapshot_download; \
+        snapshot_download(repo_id='HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn', \
+          revision='${FINEPDFS_EDU_V2_REVISION}', \
+          local_dir='/opt/models/finepdfs-edu-v2', \
+          allow_patterns=['*.json', '*.txt', '*.safetensors'])"; \
+      rm -rf /opt/models/finepdfs-edu-v2/.cache /root/.cache/huggingface ;; \
+    none|fetcher) mkdir -p /opt/models/finepdfs-edu-v2 ;; \
+    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
+
+# Official FineWeb-Edu Safetensors checkpoint. It runs through Transformers on
+# CPU unless a separately verified model.onnx is mounted in this directory.
+RUN case "${S2P_MODEL_PROFILE}" in curate|all) \
+      python -c "from huggingface_hub import snapshot_download; \
+        snapshot_download(repo_id='HuggingFaceFW/fineweb-edu-classifier', \
+          revision='${FINEWEB_EDU_REVISION}', \
+          local_dir='/opt/models/fineweb-edu', \
+          allow_patterns=['*.json', '*.txt', '*.safetensors'])"; \
+      rm -rf /opt/models/fineweb-edu/.cache /root/.cache/huggingface ;; \
+    none|fetcher) mkdir -p /opt/models/fineweb-edu ;; \
+    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
+
+# Small CPU ONNX router for 26 document-figure categories.
+RUN case "${S2P_MODEL_PROFILE}" in fetcher|all) \
+      python -c "from huggingface_hub import snapshot_download; \
+        snapshot_download(repo_id='docling-project/DocumentFigureClassifier-v2.5', \
+          revision='${FIGURE_CLASSIFIER_REVISION}', \
+          local_dir='/opt/models/figure-classifier', \
+          allow_patterns=['model.onnx', '*.json'])"; \
+      rm -rf /opt/models/figure-classifier/.cache /root/.cache/huggingface ;; \
+    none|curate) mkdir -p /opt/models/figure-classifier ;; \
+    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
+
+# E5-small ONNX embedding model for the Decon-Gate semantic sketch.
+RUN case "${S2P_MODEL_PROFILE}" in curate|all) \
+      python -c "from huggingface_hub import snapshot_download; \
+        snapshot_download(repo_id='intfloat/e5-small-v2', \
+          revision='${E5_SMALL_REVISION}', \
+          local_dir='/opt/models/e5-small', \
+          allow_patterns=['model.onnx', '*.json', '*.txt'])"; \
+      rm -rf /opt/models/e5-small/.cache /root/.cache/huggingface ;; \
+    none|fetcher) mkdir -p /opt/models/e5-small ;; \
+    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
+
+# KenLM English Wikipedia binary plus its exact SentencePiece tokenizer. Delete
+# the Hub cache in the same layer so the 4.44 GB binary is stored only once.
+RUN mkdir -p /opt/models/kenlm \
+ && case "${S2P_MODEL_PROFILE}" in curate|all) \
+      python -c "from huggingface_hub import hf_hub_download; import shutil; \
+        repo='edugp/kenlm'; rev='${KENLM_REVISION}'; \
+        binary=hf_hub_download(repo_id=repo, filename='wikipedia/en.arpa.bin', revision=rev); \
+        tokenizer=hf_hub_download(repo_id=repo, filename='wikipedia/en.sp.model', revision=rev); \
+        shutil.copy2(binary, '/opt/models/kenlm/en.arpa.bin'); \
+        shutil.copy2(tokenizer, '/opt/models/kenlm/en.sp.model')"; \
+      rm -rf /root/.cache/huggingface ;; \
+    none|fetcher) ;; \
+    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
+
+# Pre-cache the exact BPE vocabulary in every profile. Token counting remains
+# local to the lightweight curator and this vocabulary is only a few MiB.
+RUN mkdir -p /opt/models/tiktoken \
+ && case "${S2P_MODEL_PROFILE}" in none|curate|fetcher|all) \
+      TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
+        python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" ;; \
+    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
+
+# Docling's CPU pipeline needs layout, TableFormer, and formula artifacts.
+RUN mkdir -p /opt/models/docling \
+ && case "${S2P_MODEL_PROFILE}" in fetcher|all) \
+      HF_HOME=/tmp/huggingface \
+        docling-tools models download layout tableformer code_formula \
+          --output-dir /opt/models/docling; \
+      rm -rf /tmp/huggingface ;; \
+    none|curate) ;; \
+    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
+
+RUN python -c "import json; json.dump({ \
+      'profile': '${S2P_MODEL_PROFILE}', \
+      'finepdfs_edu_v2': '${FINEPDFS_EDU_V2_REVISION}', \
+      'fineweb_edu': '${FINEWEB_EDU_REVISION}', \
+      'e5_small_v2': '${E5_SMALL_REVISION}', \
+      'kenlm': '${KENLM_REVISION}', \
+      'figure_classifier': '${FIGURE_CLASSIFIER_REVISION}'}, \
+      open('/opt/models/revisions.json', 'w'), sort_keys=True)"
+
+# Make an immutable model image fail during its one-time build, not when a
+# scaled worker first lands on a new node. The profile-specific images share
+# the dependency layers, while containerd stores only the model blobs each
+# component actually needs.
+RUN case "${S2P_MODEL_PROFILE}" in \
+      none) find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q . ;; \
+      curate) \
+        test -s /opt/models/finepdfs-edu-v2/model.safetensors; \
+        test -s /opt/models/finepdfs-edu-v2/tokenizer.json; \
+        test -s /opt/models/fineweb-edu/model.safetensors; \
+        test -s /opt/models/fineweb-edu/tokenizer.json; \
+        test -s /opt/models/e5-small/model.onnx; \
+        test -s /opt/models/e5-small/tokenizer.json; \
+        test -s /opt/models/kenlm/en.arpa.bin; \
+        test -s /opt/models/kenlm/en.sp.model; \
+        find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q . ;; \
+      fetcher) \
+        test -s /opt/models/figure-classifier/model.onnx; \
+        find /opt/models/docling -type f -size +0c -print -quit | grep -q .; \
+        find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q . ;; \
+      all) \
+        test -s /opt/models/finepdfs-edu-v2/model.safetensors; \
+        test -s /opt/models/fineweb-edu/model.safetensors; \
+        test -s /opt/models/e5-small/model.onnx; \
+        test -s /opt/models/kenlm/en.arpa.bin; \
+        test -s /opt/models/figure-classifier/model.onnx; \
+        find /opt/models/docling -type f -size +0c -print -quit | grep -q . ;; \
+      *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
+    esac
 
 # ---------------------------------------------------------------------------
-# Stage 4: application source
+# Stage 3: application source
 #
 # CI also builds runtime-base as an immutable, lockfile-keyed image and uses
 # processor/Dockerfile.app for ordinary source revisions. Keeping this final
@@ -222,6 +250,7 @@ COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entry
 RUN for command in \
       s2p-fetcher \
       s2p-curate \
+      s2p-curator-model-service \
       s2p-iceberg-writer \
       s2p-iceberg-maintenance \
       s2p-decon-api \
@@ -239,7 +268,7 @@ RUN for command in \
 # Import every module reached by a container command while the image is still
 # being built. This catches omitted workspace source or runtime dependencies
 # before Helm can roll a healthy Pod onto a broken image.
-RUN python -c "from processor.curate import main as curate; from processor.decon_api import main as decon; from processor.duckdb_api import main as duckdb; from processor.fetcher import main as fetcher; from processor.iceberg_maintenance import main as maintenance; from processor.iceberg_writer import main as writer; from processor.local_sources_api import main as sources; from processor.mixture_controller.controller import main as mixture; from processor.seed_loader import main as seed; from processor.foundry.api import main as foundry_api; from processor.foundry.export_replay import main as replay; from processor.foundry.oracle_build import main as oracle; from processor.foundry.worker import main as foundry; assert all(callable(value) for value in (curate, decon, duckdb, fetcher, maintenance, writer, sources, mixture, seed, foundry_api, replay, oracle, foundry))"
+RUN python -c "from processor.curate import main as curate; from processor.model_service import main as model_service; from processor.decon_api import main as decon; from processor.duckdb_api import main as duckdb; from processor.fetcher import main as fetcher; from processor.iceberg_maintenance import main as maintenance; from processor.iceberg_writer import main as writer; from processor.local_sources_api import main as sources; from processor.mixture_controller.controller import main as mixture; from processor.seed_loader import main as seed; from processor.foundry.api import main as foundry_api; from processor.foundry.export_replay import main as replay; from processor.foundry.oracle_build import main as oracle; from processor.foundry.worker import main as foundry; assert all(callable(value) for value in (curate, model_service, decon, duckdb, fetcher, maintenance, writer, sources, mixture, seed, foundry_api, replay, oracle, foundry))"
 
 WORKDIR /app
 USER nonroot

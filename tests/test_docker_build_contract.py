@@ -21,6 +21,7 @@ LOCAL_PACKAGE_PATHS = {
 def test_processor_ci_image_uses_an_immutable_dependency_base() -> None:
     full = (ROOT / "processor" / "Dockerfile").read_text(encoding="utf-8")
     app = (ROOT / "processor" / "Dockerfile.app").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "processor" / "container_entrypoint.sh").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 
     assert "AS runtime-base" in full
@@ -32,6 +33,38 @@ def test_processor_ci_image_uses_an_immutable_dependency_base() -> None:
     assert "target: runtime-base" in workflow
     assert "dockerfile: processor/Dockerfile.app" in workflow
     assert "type=gha,scope=${{ matrix.image }}" in workflow
+    assert 's2p-curator-model-service) module="processor.model_service"' in entrypoint
+
+
+def test_processor_model_images_are_component_specific_and_immutable() -> None:
+    dockerfile = (ROOT / "processor" / "Dockerfile").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+    values = (ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text(encoding="utf-8")
+    curate_template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "processor-curate.yaml"
+    ).read_text(encoding="utf-8")
+    model_service_template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "processor-model-service.yaml"
+    ).read_text(encoding="utf-8")
+    fetcher_template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "processor-fetcher.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert "ARG S2P_MODEL_PROFILE=none" in dockerfile
+    assert 'case "${S2P_MODEL_PROFILE}"' in dockerfile
+    assert "processor-base-curate" in workflow
+    assert "processor-base-fetcher" in workflow
+    assert "processor-curate-model" in workflow
+    assert "processor-fetcher-model" in workflow
+    assert "image: stream2pretrain/processor-curate-model" in values
+    assert "image: stream2pretrain/processor-fetcher-model" in values
+    assert "bootstrap: false" in values
+    assert 'ternary "/models" "/opt/models" $externalModels' in curate_template
+    assert "S2P_MODEL_SERVICE_URL" in curate_template
+    assert "kind: HorizontalPodAutoscaler" in model_service_template
+    assert "requiredDuringSchedulingIgnoredDuringExecution" in model_service_template
+    assert "maxSurge: 0" in model_service_template
+    assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 2
 
 
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)

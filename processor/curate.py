@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
@@ -42,16 +42,27 @@ from ingest.common.license_admission import (
 )
 from processor import common
 from processor.decision_cache import DecisionCache
-from processor.decon_gate import DeconGate, _EmbeddingSketch  # type: ignore[attr-defined]
+from processor.decon_gate import (  # type: ignore[attr-defined]
+    DeconGate,
+    EmbeddingSketch,
+    _EmbeddingSketch,
+)
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
+from processor.model_client import (
+    CuratorModelClient,
+    ModelServiceError,
+    RemoteEmbeddingSketch,
+    RemoteKenLMScorer,
+    RemoteQualityClassifier,
+)
 from processor.operators.c4 import C4Filter
 from processor.operators.code_quality import CodeQualityPolicy
 from processor.operators.gopher import GopherFilter
-from processor.operators.kenlm_score import KenLMScorer
+from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
 from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiScanner
-from processor.operators.quality import QualityClassifier
+from processor.operators.quality import QualityClassifier, QualityScore
 from processor.operators.source_quality import (
     MetadataQualityPolicy,
     PeerReviewQualityPolicy,
@@ -74,17 +85,34 @@ POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
 
 
+class QualityScorer(Protocol):
+    @property
+    def revision(self) -> str: ...
+
+    @property
+    def backend(self) -> str: ...
+
+    def score(self, text: str) -> QualityScore: ...
+
+
+class PerplexityScorer(Protocol):
+    @property
+    def scorer(self) -> str: ...
+
+    def score(self, text: str) -> PerplexityResult: ...
+
+
 @dataclass(slots=True)
 class CurateState:
     """Per-worker state for the curation dataflow."""
 
     gopher: GopherFilter
     c4: C4Filter
-    kenlm: KenLMScorer
+    kenlm: PerplexityScorer
     minhasher: MinHasher
     lsh: LSHBloomIndex
-    finepdfs_quality: QualityClassifier
-    fineweb_quality: QualityClassifier
+    finepdfs_quality: QualityScorer
+    fineweb_quality: QualityScorer
     code_quality: CodeQualityPolicy
     metadata_quality: MetadataQualityPolicy
     review_quality: PeerReviewQualityPolicy
@@ -94,43 +122,59 @@ class CurateState:
     policy_revision: str
     scoring_version: str
     decision_cache: DecisionCache
+    model_client: CuratorModelClient | None = None
 
     def close(self) -> None:
         self.decision_cache.close()
         self.lsh.close()
+        if self.model_client is not None:
+            self.model_client.close()
 
 
 def build_state(cfg: common.ProcessorConfig) -> CurateState:
     """Construct a :class:`CurateState` from the runtime config."""
     models = cfg.models_dir
     require_real_models = os.environ.get("S2P_REQUIRE_REAL_MODELS") == "1"
+    model_service_url = os.environ.get("S2P_MODEL_SERVICE_URL", "").strip()
     kenlm_path = os.path.join(models, "kenlm", "en.arpa.bin")
     kenlm_sentencepiece_path = os.path.join(models, "kenlm", "en.sp.model")
     finepdfs_quality_dir = os.path.join(models, "finepdfs-edu-v2")
     fineweb_quality_dir = os.path.join(models, "fineweb-edu")
     e5_dir = os.path.join(models, "e5-small")
-    embedding = _EmbeddingSketch(
-        e5_dir if os.path.isdir(e5_dir) else None,
-        revision=os.environ.get("E5_SMALL_REVISION"),
-        allow_fallback=not require_real_models,
-    )
-    kenlm = KenLMScorer(
-        kenlm_path if os.path.isfile(kenlm_path) else None,
-        kenlm_sentencepiece_path if os.path.isfile(kenlm_sentencepiece_path) else None,
-        allow_fallback=not require_real_models,
-    )
-    finepdfs_quality = QualityClassifier(
-        finepdfs_quality_dir if os.path.isdir(finepdfs_quality_dir) else None,
-        revision=os.environ.get("S2P_FINEPDFS_EDU_REVISION"),
-        model_family="finepdfs-edu-v2",
-        allow_fallback=not require_real_models,
-    )
-    fineweb_quality = QualityClassifier(
-        fineweb_quality_dir if os.path.isdir(fineweb_quality_dir) else None,
-        revision=os.environ.get("S2P_FINEWEB_EDU_REVISION"),
-        model_family="fineweb-edu",
-        allow_fallback=not require_real_models,
-    )
+    model_client: CuratorModelClient | None = None
+    embedding: EmbeddingSketch
+    kenlm: PerplexityScorer
+    finepdfs_quality: QualityScorer
+    fineweb_quality: QualityScorer
+    if model_service_url:
+        model_client = CuratorModelClient(model_service_url)
+        embedding = RemoteEmbeddingSketch(model_client)
+        kenlm = RemoteKenLMScorer(model_client)
+        finepdfs_quality = RemoteQualityClassifier(model_client, "finepdfs-edu-v2")
+        fineweb_quality = RemoteQualityClassifier(model_client, "fineweb-edu")
+    else:
+        embedding = _EmbeddingSketch(
+            e5_dir if os.path.isdir(e5_dir) else None,
+            revision=os.environ.get("E5_SMALL_REVISION"),
+            allow_fallback=not require_real_models,
+        )
+        kenlm = KenLMScorer(
+            kenlm_path if os.path.isfile(kenlm_path) else None,
+            kenlm_sentencepiece_path if os.path.isfile(kenlm_sentencepiece_path) else None,
+            allow_fallback=not require_real_models,
+        )
+        finepdfs_quality = QualityClassifier(
+            finepdfs_quality_dir if os.path.isdir(finepdfs_quality_dir) else None,
+            revision=os.environ.get("S2P_FINEPDFS_EDU_REVISION"),
+            model_family="finepdfs-edu-v2",
+            allow_fallback=not require_real_models,
+        )
+        fineweb_quality = QualityClassifier(
+            fineweb_quality_dir if os.path.isdir(fineweb_quality_dir) else None,
+            revision=os.environ.get("S2P_FINEWEB_EDU_REVISION"),
+            model_family="fineweb-edu",
+            allow_fallback=not require_real_models,
+        )
     pii = PiiScanner(allow_fallback=not require_real_models)
     minhasher = MinHasher()
     if require_real_models and minhasher.backend == "fallback-pyhash":
@@ -160,6 +204,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         policy_revision=os.environ.get(POLICY_REVISION_ENV, "git:dev"),
         scoring_version=os.environ.get(SCORING_VERSION_ENV, "v0.1.0"),
         decision_cache=DecisionCache(os.path.join(cfg.state_dir, "decision-cache.sqlite3")),
+        model_client=model_client,
     )
 
 
@@ -214,6 +259,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     is_code = quality_profile == "code"
     is_metadata = quality_profile == "metadata"
     is_web = quality_profile == "web"
+    primary_quality: QualityScorer
     if is_code:
         primary_quality = state.code_quality
     elif is_scientific:
@@ -224,7 +270,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         primary_quality = state.metadata_quality
     else:
         primary_quality = state.fineweb_quality
-    comparison_quality = state.fineweb_quality if is_scientific else None
+    comparison_quality: QualityScorer | None = state.fineweb_quality if is_scientific else None
     max_scored_segments = max(1, int(os.environ.get("S2P_MAX_SCORED_SEGMENTS", "10")))
     sampled_ids = {
         segment.segment_id
@@ -972,6 +1018,11 @@ def run_native_curator(
                                 exception_type=type(exc).__name__,
                                 exc_info=True,
                             )
+                            if isinstance(exc, ModelServiceError):
+                                # A transient inference outage must leave the
+                                # broker offset untouched so Kafka replays the
+                                # exact document after service recovery.
+                                raise
                         else:
                             time.sleep(min(2 ** (attempt - 1) * 0.25, 2.0))
 

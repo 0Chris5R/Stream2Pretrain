@@ -23,7 +23,7 @@ These are the locked-in sources for the first deliverable. Picked for: free, no-
 | ~~11~~ | ~~FastAPI submit~~ | ~~`POST /submit`~~ | ~~HTTP/JSON~~ | ~~none~~ | ~~on-demand~~ | ~~ad-hoc~~ | **DELETED in v0.2.0** - manual URL submit endpoint removed; the live pollers and seed loader cover demo needs without the abuse surface |
 
 ### Curated GitHub repos for Releases Atom (Phase 1)
-`huggingface/transformers`, `vllm-project/vllm`, `pytorch/pytorch`, `ggerganov/llama.cpp`, `karpathy/llm.c`, `unslothai/unsloth`, `meta-llama/llama`, `openai/whisper`, `anthropics/courses`, `apple/ml-tic-lm`, `mlfoundations/dclm`, `huggingface/datatrove`, `NVIDIA-NeMo/Curator`, `allenai/dolma`, `bytewax/bytewax`, `redpanda-data/redpanda`, `apache/iceberg`, `MaterializeInc/materialize`, `risingwavelabs/risingwave`, `pathwaycom/pathway`, `unclecode/crawl4ai`, `firecrawl/firecrawl`, plus 8 more to reach ~30. List lives in `charts/stream2pretrain/values.yaml` once code starts.
+The canonical 30-repository allowlist lives in `charts/stream2pretrain/values.yaml`. Deployment validation polls every configured repository and fails on removed or renamed upstreams instead of silently treating a 404 as an empty release feed.
 
 ### AI-lab blog RSS list (Phase 1)
 - `https://openai.com/news/rss.xml`

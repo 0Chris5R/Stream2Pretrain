@@ -61,6 +61,8 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_REQUIRE_REAL_MODELS
+              value: {{ ternary "1" "0" .Values.processor.fetcher.requireRealModels | quote }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
@@ -202,6 +204,8 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_REQUIRE_REAL_MODELS
+              value: {{ ternary "1" "0" .Values.processor.fetcher.requireRealModels | quote }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30

@@ -30,6 +30,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from processor.sign import AttestationSigner
 from schemas.decon import BenchmarkName, DeconAttestation
@@ -42,6 +43,20 @@ DEFAULT_EMBED_THRESHOLD: float = 0.92
 BENCHMARKS: tuple[BenchmarkName, ...] = ("MMLU", "GSM8K", "HumanEval", "MATH", "GPQA")
 
 _WORD = re.compile(r"\w+", re.UNICODE)
+
+
+class EmbeddingSketch(Protocol):
+    """Structural contract for local and remote semantic indexes."""
+
+    @property
+    def revision(self) -> str: ...
+
+    @property
+    def backend(self) -> str: ...
+
+    def add(self, benchmark: BenchmarkName, text: str) -> None: ...
+
+    def query(self, text: str) -> Iterable[tuple[BenchmarkName, float]]: ...
 
 
 def shingle_ngrams(text: str, n: int = DEFAULT_NGRAM) -> Iterator[str]:
@@ -120,7 +135,7 @@ class DeconGate:
         benchmark_corpus: dict[BenchmarkName, list[str]] | None = None,
         signer: AttestationSigner | None = None,
         ngram: int = DEFAULT_NGRAM,
-        embedding: _EmbeddingSketch | None = None,
+        embedding: EmbeddingSketch | None = None,
     ) -> None:
         self._set_version = benchmark_set_version
         self._ngram = ngram
@@ -364,7 +379,7 @@ class _EmbeddingSketch:
     def query(self, text: str) -> Iterable[tuple[BenchmarkName, float]]:
         if not self._index:
             return []
-        q = self._embed(text)
+        q = self.embed(text)
         out: list[tuple[BenchmarkName, float]] = []
         for bench, vecs in self._index.items():
             best = 0.0
@@ -374,6 +389,10 @@ class _EmbeddingSketch:
                     best = sim
             out.append((bench, best))
         return out
+
+    def embed(self, text: str) -> list[float]:
+        """Return the normalized real-model embedding for one text."""
+        return self._embed(text)
 
     def _embed(self, text: str) -> list[float]:
         if self._session is None or self._tokenizer is None:

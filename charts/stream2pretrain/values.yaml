@@ -203,7 +203,7 @@ sources:
         - huggingface/transformers
         - vllm-project/vllm
         - pytorch/pytorch
-        - ggerganov/llama.cpp
+        - ggml-org/llama.cpp
         - karpathy/llm.c
         - unslothai/unsloth
         - meta-llama/llama
@@ -223,12 +223,12 @@ sources:
         - unclecode/crawl4ai
         - firecrawl/firecrawl
         - microsoft/onnxruntime
-        - facebookresearch/llama-stack
-        - openai/triton
-        - google/gemma
-        - mistralai/mistral-src
+        - ogx-ai/ogx
+        - triton-lang/triton
+        - google-deepmind/gemma
+        - mistralai/mistral-inference
         - tinygrad/tinygrad
-        - rwightman/pytorch-image-models
+        - huggingface/pytorch-image-models
         - pytorch/torchtitan
   huggingface:
     enabled: true
@@ -484,10 +484,12 @@ openreviewPoller:
 # -----------------------------------------------------------------------------
 processor:
   fetcher:
-    image: stream2pretrain/processor-fetcher
-    # Full Docling requires its pinned model bundle. The bounded pypdf path is
-    # the resilient default for this streaming worker.
-    doclingEnabled: false
+    image: stream2pretrain/processor-fetcher-model
+    # Production workers use the immutable fetcher model profile. It contains
+    # only Docling and figure-classification artifacts and fails startup when
+    # a real extraction dependency is missing.
+    requireRealModels: true
+    doclingEnabled: true
     # This stateless stage commits source offsets to Redpanda only after its
     # normalized output batch is delivered, so partitions can move safely
     # between replicas.
@@ -512,25 +514,27 @@ processor:
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: 1, memory: 2Gi}
   curate:
-    image: stream2pretrain/processor-curate
+    # Durable deduplication remains in this lightweight stateful worker. Large
+    # immutable classifiers are isolated behind modelService so the local RWO
+    # checkpoint never pins multi-GB model memory or image layers to one node.
+    image: stream2pretrain/processor
     replicas: 1
     requireRealModels: true
-    doclingEnabled: true
+    doclingEnabled: false
     usePresidio: true
     resources:
-      requests: {cpu: 1, memory: 4Gi}
-      limits: {cpu: 2, memory: 8Gi}
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {cpu: 2, memory: 2Gi}
     checkpoint:
       storageClass: ""
       size: 20Gi
     onnxModel: /models/fineweb-edu/model.onnx
     minHashBands: 14
     minHashRowsPerBand: 9
-    # FineWeb-Edu ONNX model bundle. Downloaded by an init container into an
-    # emptyDir mounted at /models. Set ``url`` empty to disable the init
-    # container (e.g. when the model is baked into the curate image).
+    # Immutable component-specific images are the default. Bootstrap or URL
+    # remains an explicit escape hatch for a private external model bundle.
     modelBundle:
-      bootstrap: true
+      bootstrap: false
       url: ""
       sha256: ""
       sizeMi: 10240
@@ -538,6 +542,22 @@ processor:
       resources:
         requests: {cpu: 500m, memory: 512Mi}
         limits: {cpu: 2, memory: 2Gi}
+  modelService:
+    enabled: true
+    image: stream2pretrain/processor-curate-model
+    replicas: 1
+    port: 8094
+    resources:
+      requests: {cpu: 1, memory: 3Gi}
+      limits: {cpu: 3, memory: 5Gi}
+    # The service is stateless and replicas are placed on distinct nodes.
+    # Constrained environments can lower maxReplicas without changing the
+    # curation contract; production clusters scale classifier throughput.
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 75
   iceberg:
     image: stream2pretrain/processor-iceberg-writer
     replicas: 1

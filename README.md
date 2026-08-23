@@ -122,12 +122,22 @@ Quality is source-aware:
 - General web text uses the FineWeb-Edu profile.
 - Code uses a separate versioned code-quality policy.
 
-This prevents a web-education classifier from being treated as a meaningful code classifier. The DHBW deployment uses deterministic proxy backends because the full model bundle is not installed on the measured cluster. Every row records its classifier revision and backend.
+This prevents a web-education classifier from being treated as a meaningful
+code classifier. The DHBW chart fails closed on missing models. FinePDFs,
+FineWeb-Edu, KenLM, and E5 run from a pinned immutable model image behind a
+stateless in-cluster inference service; Presidio, MinHash, and tokenization stay
+with the lightweight stateful curator. Every row records its classifier
+revision and backend.
 
-Before these transformations, the shared licence gate accepts only explicit
-content licences on its strict allowlist. Unknown, arXiv non-exclusive,
-non-commercial, no-derivatives, and dataset-wrapper-only records are logged and
-quarantined before body retrieval. The curator also applies language confidence, Gopher and C4 heuristics, perplexity, PII detection, license policy, and MinHash near-duplicate detection. Clean records are routed to broad pretraining or post-training candidates. Other records are quarantined, retried, or isolated as benchmark candidates.
+Before these transformations, the shared licence gate records both verbatim
+pretraining rights and transform-only post-training rights. Explicit
+permissive content can reach pretraining. Unknown or gray-area sources,
+including arXiv's non-exclusive distribution grant, can reach only the
+transformative post-training route; explicit non-commercial,
+no-derivatives, and provider-prohibited content remains quarantined. The
+curator also applies language confidence, Gopher and C4 heuristics,
+perplexity, PII detection, license policy, and MinHash near-duplicate
+detection.
 
 ### Stateful processing
 
@@ -355,7 +365,7 @@ This is a course prototype, not a production training-data service.
 
 Known limits are:
 
-- The DHBW run uses proxy classifier backends. Full FinePDFs, FineWeb-Edu, KenLM, Presidio, and embedding artifacts need a measured resource profile before activation.
+- Strict classifier replicas are stateless and CPU-autoscaled, but the measured three-node DHBW profile can host at most two replicas while preserving one node for the stateful curator. Larger throughput requires additional worker nodes.
 - The submitted benchmark reserve contains synthetic canaries. It proves coverage and signing mechanics but not full real-benchmark recall. The pinned builder requires an authorized GPQA token.
 - CI publishes immutable images to GHCR and provides the cluster pull secret when required. Cross-node fetcher scheduling still depends on worker egress and registry availability.
 - Fetcher KEDA scaling is bounded to the four `raw.fetched` partitions. Curator and Iceberg writer are deliberately single-writer until their state is externalized.
@@ -365,7 +375,9 @@ Known limits are:
 - Live post-training acceptance yield, provider usage, and foundry cloud resources are `needs-measurement`. The worker requires the Hetzner credential and `Qwen3.8-27B` to be visible through authenticated discovery.
 - License detection is a curation heuristic. It is not legal advice or a compliance guarantee.
 
-The next practical work is to distribute images to worker nodes, enable a persistent Polaris backend, install the real classifier bundle, build the authorized full benchmark reserve, and measure processor scale under controlled backlog.
+The next practical work is to add worker capacity, enable a persistent Polaris
+backend, build the authorized full benchmark reserve, and measure processor
+scale under controlled backlog.
 
 ### Team contribution
 

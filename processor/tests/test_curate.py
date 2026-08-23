@@ -17,6 +17,7 @@ from processor.curate import (
     process_silver_payload,
     run_native_curator,
 )
+from processor.model_client import ModelServiceError
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
 
@@ -597,6 +598,41 @@ def test_native_curator_does_not_commit_failed_delivery(
             producer_factory=lambda config: _NativeProducer(
                 config, delivery_error=RuntimeError("broker rejected record")
             ),
+            max_messages=1,
+        )
+
+    assert all(consumer.commits == [] for consumer in consumers)
+
+
+def test_native_curator_replays_transient_model_service_failure(
+    cfg: ProcessorConfig,
+    monkeypatch: Any,
+) -> None:
+    consumers: list[_NativeConsumer] = []
+
+    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
+        message = (
+            _NativeMessage("docs.normalized.smoke")
+            if config["group.id"] == "s2p-curate-canary"
+            else None
+        )
+        consumer = _NativeConsumer(config, message)
+        consumers.append(consumer)
+        return consumer
+
+    def fail_inference(*_args: object, **_kwargs: object) -> None:
+        raise ModelServiceError("model service rolling")
+
+    monkeypatch.setattr(
+        "processor.curate.process_silver_decision_payload",
+        fail_inference,
+    )
+    with pytest.raises(ModelServiceError, match="model service rolling"):
+        run_native_curator(
+            cfg,
+            state=object(),  # type: ignore[arg-type]
+            consumer_factory=consumer_factory,
+            producer_factory=_NativeProducer,
             max_messages=1,
         )
 
