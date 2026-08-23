@@ -37,13 +37,6 @@ spec:
         violation[{"msg": msg}] {
           input.review.kind.kind == "SourceFeed"
           spec := input.review.object.spec
-          spec.licenseDefault == "unknown"
-          msg := "SourceFeed.spec.licenseDefault must be per-record or a permitted licence; 'unknown' is rejected by policy"
-        }
-
-        violation[{"msg": msg}] {
-          input.review.kind.kind == "SourceFeed"
-          spec := input.review.object.spec
           input.parameters.minPollIntervalSeconds
           spec.pollIntervalSeconds < input.parameters.minPollIntervalSeconds
           msg := sprintf("SourceFeed.spec.pollIntervalSeconds=%d is below policy minimum %d",
@@ -102,4 +95,9 @@ spec:
       - ISC
       - Unlicense
       - per-record
+      # These sources are fetchable only for transformed post-training. The
+      # downstream licence gate still excludes them from verbatim exports.
+      - unknown
+      - arxiv-non-exclusive-distribution
+      - ODC-By-1.0
 {{- end }}

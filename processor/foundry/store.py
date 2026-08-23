@@ -606,12 +606,16 @@ class FoundryStore:
     def artifact_audits(self, *, artifact_id: str | None = None) -> list[dict[str, Any]]:
         if artifact_id:
             rows = self._conn.execute(
-                "SELECT audit_json FROM artifact_audits WHERE artifact_id=? ORDER BY created_at DESC",
+                """
+                SELECT audit_json FROM artifact_audits
+                WHERE artifact_id=?
+                ORDER BY created_at DESC,rowid DESC
+                """,
                 (artifact_id,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT audit_json FROM artifact_audits ORDER BY created_at DESC"
+                "SELECT audit_json FROM artifact_audits ORDER BY created_at DESC,rowid DESC"
             ).fetchall()
         return [
             ArtifactAuditRecord.model_validate_json(row["audit_json"]).model_dump(mode="json")
@@ -1216,7 +1220,7 @@ class FoundryStore:
                   SELECT latest.audit_id
                   FROM artifact_audits AS latest
                   WHERE latest.artifact_id=audit.artifact_id
-                  ORDER BY latest.created_at DESC,latest.audit_id DESC
+                  ORDER BY latest.created_at DESC,latest.rowid DESC
                   LIMIT 1
                 )
                 GROUP BY decision

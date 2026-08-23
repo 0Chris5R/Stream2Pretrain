@@ -83,10 +83,14 @@ apply -f charts/stream2pretrain/crds/`.
 When `gatekeeper.enabled=true`, the chart installs a ConstraintTemplate +
 Constraint that:
 
-- Rejects SourceFeeds with `licenseDefault = unknown`.
+- Allows `unknown`, arXiv distribution-only, and ODC-By source defaults only
+  as purpose-aware inputs; the downstream licence gate restricts their
+  documents to transformed post-training and keeps them out of verbatim
+  pretraining exports.
 - Rejects SourceFeeds with `pollIntervalSeconds` outside
   `[gatekeeper.minPollIntervalSeconds, gatekeeper.maxPollIntervalSeconds]`.
-- Rejects SourceFeeds whose license is not on the SPDX allow-list.
+- Rejects SourceFeeds whose default is neither a pretraining licence,
+  `per-record`, nor an approved transform-only licence class.
 
 ## Grafana dashboard
 
