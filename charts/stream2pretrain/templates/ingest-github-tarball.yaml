@@ -55,6 +55,12 @@ spec:
               value: {{ join "," .Values.ingest.githubTarballFetcher.allowedExtensions | quote }}
             - name: S2P_TARBALL_MAX_FILE_SIZE_BYTES
               value: {{ .Values.ingest.githubTarballFetcher.maxFileSizeBytes | quote }}
+            - name: S2P_TARBALL_MAX_FILES_PER_RELEASE
+              value: {{ .Values.ingest.githubTarballFetcher.maxFilesPerRelease | quote }}
+            - name: S2P_TARBALL_EXCLUDED_TAG_PREFIXES
+              value: {{ join "," .Values.ingest.githubTarballFetcher.excludedTagPrefixes | quote }}
+            - name: S2P_TARBALL_MAX_POLL_INTERVAL_MS
+              value: {{ .Values.ingest.githubTarballFetcher.maxPollIntervalMilliseconds | quote }}
             - name: S2P_TARBALL_ALLOWED_LICENSES
               value: {{ join "," .Values.ingest.githubTarballFetcher.allowedLicenses | quote }}
             - name: S2P_TARBALL_RATE_PER_SECOND

@@ -13,6 +13,7 @@ from processor.curate import (
     build_state,
     curate_one,
     is_trainable_gold,
+    native_curator_consumer_config,
     process_silver_decision_payload,
     process_silver_payload,
     run_native_curator,
@@ -651,6 +652,51 @@ def test_native_curator_prioritizes_canary_and_commits_after_outputs(
         "docs.curated",
     ]
     assert all(consumer.closed for consumer in consumers)
+
+
+def test_native_curator_supports_isolated_canary_job(
+    cfg: ProcessorConfig,
+    monkeypatch: Any,
+) -> None:
+    consumers: list[_NativeConsumer] = []
+
+    def consumer_factory(config: dict[str, object]) -> _NativeConsumer:
+        consumer = _NativeConsumer(config, _NativeMessage("docs.normalized.smoke"))
+        consumers.append(consumer)
+        return consumer
+
+    monkeypatch.setenv("S2P_CURATOR_INPUT_TOPIC", "docs.normalized.smoke")
+    monkeypatch.setenv("S2P_CURATOR_AUTO_OFFSET_RESET", "latest")
+    monkeypatch.setattr(
+        "processor.curate.process_silver_decision_payload",
+        lambda *_args, **_kwargs: (b"decision", False),
+    )
+
+    run_native_curator(
+        cfg,
+        state=object(),  # type: ignore[arg-type]
+        consumer_factory=consumer_factory,
+        producer_factory=_NativeProducer,
+        max_messages=1,
+    )
+
+    assert len(consumers) == 1
+    assert consumers[0].topics == ["docs.normalized.smoke"]
+    assert consumers[0].config["auto.offset.reset"] == "latest"
+    assert len(consumers[0].commits) == 1
+
+
+def test_native_curator_rejects_invalid_offset_reset(
+    cfg: ProcessorConfig,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("S2P_CURATOR_AUTO_OFFSET_RESET", "middle")
+    with pytest.raises(RuntimeError, match="earliest or latest"):
+        native_curator_consumer_config(
+            cfg,
+            group_id="s2p-curate-canary-test",
+            traffic_class="canary",
+        )
 
 
 def test_native_curator_does_not_commit_failed_delivery(

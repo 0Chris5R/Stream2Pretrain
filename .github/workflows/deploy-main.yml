@@ -581,6 +581,7 @@ jobs:
           vpn_log="$RUNNER_TEMP/openconnect.log"
           ui_port_forward_pid=""
           foundry_port_forward_pid=""
+          curator_canary_job=""
           vpn_args=(
             --protocol=anyconnect
             --user="$CISCO_VPN_USERNAME"
@@ -599,6 +600,10 @@ jobs:
                 >"$vpn_log" 2>&1 &
           vpn_pid=$!
           cleanup() {
+            if [[ -n "$curator_canary_job" ]]; then
+              kubectl -n stream2pretrain delete "job/$curator_canary_job" \
+                --ignore-not-found --wait=false >/dev/null 2>&1 || true
+            fi
             if [[ -n "$ui_port_forward_pid" ]]; then
               kill "$ui_port_forward_pid" 2>/dev/null || true
             fi
@@ -1482,8 +1487,123 @@ jobs:
             exit 1
           fi
 
+          # Clone the exact deployed curator Pod spec into a one-record,
+          # short-lived consumer group. This gives the release canary its own
+          # bounded execution lane without permanently reserving another GiB
+          # of memory or letting production replay lag hide a broken release.
+          curator_canary_job="s2p-curate-smoke-${GITHUB_RUN_ID}"
+          curator_canary_group="s2p-curate-smoke-${GITHUB_RUN_ID}"
+          kubectl -n stream2pretrain get \
+            statefulset/stream2pretrain-processor-curate -o json \
+            | jq \
+              --arg name "$curator_canary_job" \
+              --arg group "$curator_canary_group" '
+                .spec.template as $template
+                | {
+                    apiVersion: "batch/v1",
+                    kind: "Job",
+                    metadata: {
+                      name: $name,
+                      namespace: "stream2pretrain",
+                      labels: (
+                        $template.metadata.labels
+                        + {"app.kubernetes.io/component": "processor-curate-canary"}
+                      )
+                    },
+                    spec: {
+                      backoffLimit: 0,
+                      activeDeadlineSeconds: 600,
+                      ttlSecondsAfterFinished: 300,
+                      template: {
+                        metadata: {
+                          labels: (
+                            $template.metadata.labels
+                            + {"app.kubernetes.io/component": "processor-curate-canary"}
+                          )
+                        },
+                        spec: (
+                          $template.spec
+                          | .restartPolicy = "Never"
+                          | .containers = [
+                              .containers[]
+                              | select(.name == "curate")
+                              | .name = "curate-canary"
+                              | del(
+                                  .startupProbe,
+                                  .livenessProbe,
+                                  .readinessProbe
+                                )
+                              | .env = (
+                                  [
+                                    .env[]
+                                    | select(
+                                        .name != "S2P_COMPONENT"
+                                        and .name != "S2P_CONSUMER_GROUP"
+                                      )
+                                  ]
+                                  + [
+                                      {name: "S2P_COMPONENT", value: "processor-curate-canary"},
+                                      {name: "S2P_CONSUMER_GROUP", value: $group},
+                                      {name: "S2P_CURATOR_INPUT_TOPIC", value: "docs.normalized.smoke"},
+                                      {name: "S2P_CURATOR_AUTO_OFFSET_RESET", value: "latest"},
+                                      {name: "S2P_CURATOR_MAX_MESSAGES", value: "1"}
+                                    ]
+                                )
+                            ]
+                          | .volumes = (
+                              (.volumes // [])
+                              + [{
+                                  name: "checkpoint",
+                                  emptyDir: {sizeLimit: "2Gi"}
+                                }]
+                            )
+                        )
+                      }
+                    }
+                  }
+              ' \
+            | kubectl apply -f -
+
+          canary_group_ready=false
+          for _ in $(seq 1 90); do
+            canary_group_state="$(
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group describe "$curator_canary_group" 2>/dev/null \
+                || true
+            )"
+            if grep -Eq '^MEMBERS[[:space:]]+1$' <<<"$canary_group_state"; then
+              canary_group_ready=true
+              break
+            fi
+            if [[ "$(
+              kubectl -n stream2pretrain get "job/$curator_canary_job" \
+                -o jsonpath='{.status.failed}' 2>/dev/null || true
+            )" == "1" ]]; then
+              kubectl -n stream2pretrain logs "job/$curator_canary_job" \
+                --all-containers --prefix || true
+              echo "Isolated curator canary failed before joining Kafka." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          if [[ "$canary_group_ready" != true ]]; then
+            kubectl -n stream2pretrain get pod \
+              -l "job-name=$curator_canary_job" -o wide || true
+            kubectl -n stream2pretrain logs "job/$curator_canary_job" \
+              --all-containers --prefix || true
+            echo "Isolated curator canary did not join Kafka." >&2
+            exit 1
+          fi
+
           kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
             python - < scripts/cluster_smoke.py
+          kubectl -n stream2pretrain wait --for=condition=complete \
+            "job/$curator_canary_job" --timeout=180s
+          kubectl -n stream2pretrain logs "job/$curator_canary_job" \
+            --all-containers --prefix || true
+          kubectl -n stream2pretrain delete "job/$curator_canary_job" \
+            --wait=true
+          curator_canary_job=""
 
       - name: Upload rendered UI audit
         if: ${{ always() && inputs.mode == 'audit-ui' }}

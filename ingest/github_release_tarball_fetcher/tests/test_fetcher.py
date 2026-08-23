@@ -23,6 +23,7 @@ from ingest.github_release_tarball_fetcher.fetcher import (
     code_s3_uri,
     fetch_repo_license,
     fetch_tarball,
+    is_release_candidate,
     parse_release_url,
     process_release,
 )
@@ -326,6 +327,56 @@ def test_release_ref_tarball_url() -> None:
     ref = ReleaseRef("hf", "transformers", "v5.0.0")
     assert ref.tarball_url == "https://api.github.com/repos/hf/transformers/tarball/v5.0.0"
     assert ref.full_name == "hf/transformers"
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("v5.0.0", True),
+        ("apache-iceberg-1.10.1", True),
+        ("ciflow%2Finductor%2F194479", False),
+        ("trunk%2F52310c5c0b79395d1b8691a1908d0f5b3ccb9992", False),
+    ],
+)
+def test_release_candidate_excludes_observed_ci_refs(tag: str, expected: bool) -> None:
+    assert is_release_candidate(ReleaseRef("pytorch", "pytorch", tag), FetcherConfig()) is expected
+
+
+@pytest.mark.asyncio
+async def test_process_release_bounds_files_per_release() -> None:
+    ref = ReleaseRef("huggingface", "transformers", "v5.0.0")
+    tarball = _build_tarball({f"src/file_{index}.py": b"x = 1\n" for index in range(5)})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/repos/huggingface/transformers"):
+            return httpx.Response(200, json={"license": {"spdx_id": "Apache-2.0"}})
+        return httpx.Response(200, content=tarball)
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    minio = FakeMinio()
+    await minio.start()
+    producer = _FakeCodeProducer()
+    try:
+        emitted = await process_release(
+            ref,
+            cfg=_cfg(),
+            fetcher_cfg=FetcherConfig(max_files_per_release=3),
+            client=client,
+            minio=minio,
+            producer=producer,
+            bucket=TokenBucket(rate=100.0, burst=8),
+        )
+    finally:
+        await client.aclose()
+
+    assert emitted == 3
+    assert len(minio.objects) == 3
+    assert len(producer.sent) == 3
+
+
+def test_fetcher_config_rejects_unbounded_work() -> None:
+    with pytest.raises(ValueError, match="file limits"):
+        FetcherConfig(max_files_per_release=0)
 
 
 def test_tarball_metrics_render_prometheus() -> None:
