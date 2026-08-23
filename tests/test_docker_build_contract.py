@@ -56,19 +56,43 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
 
     assert "ARG S2P_MODEL_PROFILE=none" in dockerfile
     assert 'case "${S2P_MODEL_PROFILE}"' in dockerfile
-    assert "processor-base-curate" in workflow
+    assert "processor-base-quality" in workflow
+    assert "processor-base-embedding" in workflow
+    assert "processor-base-kenlm" in workflow
     assert "processor-base-fetcher" in workflow
-    assert "processor-curate-model" in workflow
+    assert "processor-quality-model" in workflow
+    assert "processor-embedding-model" in workflow
+    assert "processor-kenlm-model" in workflow
     assert "processor-fetcher-model" in workflow
-    assert "image: stream2pretrain/processor-curate-model" in values
+    assert "image: stream2pretrain/processor-quality-model" in values
+    assert "image: stream2pretrain/processor-embedding-model" in values
+    assert "image: stream2pretrain/processor-kenlm-model" in values
     assert "image: stream2pretrain/processor-fetcher-model" in values
     assert "bootstrap: false" in values
     assert 'ternary "/models" "/opt/models" $externalModels' in curate_template
-    assert "S2P_MODEL_SERVICE_URL" in curate_template
+    assert "S2P_QUALITY_MODEL_SERVICE_URL" in curate_template
+    assert "S2P_KENLM_MODEL_SERVICE_URL" in curate_template
+    assert "S2P_EMBEDDING_MODEL_SERVICE_URL" in curate_template
     assert "kind: HorizontalPodAutoscaler" in model_service_template
     assert "requiredDuringSchedulingIgnoredDuringExecution" in model_service_template
     assert "maxSurge: 0" in model_service_template
     assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 2
+
+
+def test_github_tarball_scaler_uses_a_non_amplifying_job_topic() -> None:
+    values = (ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text(encoding="utf-8")
+    template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "ingest-github-tarball.yaml"
+    ).read_text(encoding="utf-8")
+    helper = (ROOT / "charts" / "stream2pretrain" / "templates" / "_helpers.tpl").read_text(
+        encoding="utf-8"
+    )
+
+    assert "githubReleaseJobs: github.release.jobs" in values
+    assert "- type: kafka" in template
+    assert ".Values.redpanda.topics.githubReleaseJobs" in template
+    assert "- type: prometheus" not in template
+    assert "S2P_GITHUB_RELEASE_JOBS_TOPIC" in helper
 
 
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)

@@ -76,6 +76,7 @@ async def poll_repo(
     cfg: IngestConfig,
     client: httpx.AsyncClient,
     producer: BronzeProducer,
+    job_producer: BronzeProducer | None = None,
     minio: MinioWriter,
     state_store: FeedStateStore,
     bucket: TokenBucket,
@@ -167,7 +168,16 @@ async def poll_repo(
             spdx_license_source="unknown",
             training_usage=admission.training_usage,
         )
-        await producer.send(record, headers={"github_repo": owner_repo})
+        # Keep release metadata in the normal Bronze stream, but dispatch
+        # tarball work on its own topic. That makes backlog observable to KEDA
+        # without scaling on raw.fetched, which the tarball workers themselves
+        # amplify with every extracted source file.
+        await producer.send(
+            record,
+            headers={"github_repo": owner_repo, "tarball_job_dispatched": "true"},
+        )
+        if job_producer is not None:
+            await job_producer.send(record, headers={"github_repo": owner_repo})
         emitted += 1
 
     if len(seen) > 2000:
@@ -196,6 +206,11 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-github-releases"
         ) as producer,
+        BronzeProducer(
+            cfg.redpanda_brokers,
+            topic=cfg.github_release_jobs_topic,
+            client_id="s2p-github-release-jobs",
+        ) as job_producer,
         LicenseAdmissionProducer(
             cfg.redpanda_brokers,
             topic=cfg.license_admissions_topic,
@@ -215,6 +230,7 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
                     cfg=cfg,
                     client=client,
                     producer=producer,
+                    job_producer=job_producer,
                     minio=minio,
                     state_store=store,
                     bucket=bucket,

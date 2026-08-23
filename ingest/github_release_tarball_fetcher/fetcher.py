@@ -2,9 +2,10 @@
 
 A long-running consumer that:
 
-1. Subscribes to ``raw.fetched`` (Redpanda) and filters for messages whose
-   ``source_feed`` header is ``github-releases``. Other sources are ignored
-   without commit lag.
+1. Subscribes to the dedicated ``github.release.jobs`` topic. During the
+   rolling migration it also drains legacy ``raw.fetched`` release messages;
+   newly dual-published raw metadata is marked and skipped to avoid duplicate
+   tarball downloads.
 2. For each release event, derives ``(owner/repo, tag)`` from the release
    atom URL embedded in the BronzeRecord and asks the GitHub License API
    for the SPDX id. Non-permissive licenses cause the release to be skipped.
@@ -20,9 +21,8 @@ Rate budget
 -----------
 Worst case is one ``/tarball`` plus one ``/repos/{o}/{r}`` per release. The
 existing ``ingest/common/rate_limit.TokenBucket`` enforces a per-pod ceiling
-configured well below the GitHub REST 5000 req/h threshold (default
-``1.0 req/s`` -> 3600 req/h budget per pod, leaving headroom for the
-``github_releases`` poller running in the same token namespace).
+configured so the maximum four replicas remain below the GitHub REST
+5000 req/h threshold in aggregate (Helm uses ``0.25 req/s`` per pod).
 """
 
 from __future__ import annotations
@@ -534,6 +534,14 @@ def _decode_headers(raw_headers: Iterable[tuple[str, bytes]] | None) -> dict[str
     return out
 
 
+def _is_tarball_job(headers: dict[str, str]) -> bool:
+    """Accept dedicated jobs and unmarked legacy raw release records."""
+    return (
+        headers.get("source_feed") == UPSTREAM_FEED
+        and headers.get("tarball_job_dispatched") != "true"
+    )
+
+
 def _published_at_from_payload(payload: dict[str, Any]) -> datetime | None:
     """Lift ``fetched_at`` from a BronzeRecord JSON payload as the validity-from
     proxy. The upstream ``github_releases`` poller does not currently emit
@@ -590,7 +598,11 @@ async def _consume_loop(
         if stop_event.is_set():
             break
         headers = _decode_headers(msg.headers)
-        if headers.get("source_feed") != UPSTREAM_FEED:
+        # The release poller keeps its metadata record in raw.fetched and
+        # sends a second copy to github.release.jobs. Skip the marked raw copy;
+        # the unmarked job copy is the single tarball work item. Legacy raw
+        # records have no marker and remain processable during migration.
+        if not _is_tarball_job(headers):
             await _commit_safely()
             continue
         try:
@@ -657,6 +669,7 @@ async def run(
     from aiokafka import AIOKafkaConsumer
 
     consumer = AIOKafkaConsumer(
+        cfg.github_release_jobs_topic,
         cfg.raw_topic,
         bootstrap_servers=cfg.redpanda_brokers,
         group_id=fetcher_cfg.consumer_group,
@@ -667,7 +680,7 @@ async def run(
         # success silently drops the release. _consume_loop calls
         # consumer.commit() only after a successful process_release.
         enable_auto_commit=False,
-        auto_offset_reset="latest",
+        auto_offset_reset="earliest",
         client_id="s2p-gh-tarball-consumer",
     )
     extra_headers: dict[str, str] = {}

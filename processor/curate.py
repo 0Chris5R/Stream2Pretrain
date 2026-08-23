@@ -122,13 +122,13 @@ class CurateState:
     policy_revision: str
     scoring_version: str
     decision_cache: DecisionCache
-    model_client: CuratorModelClient | None = None
+    model_clients: tuple[CuratorModelClient, ...] = ()
 
     def close(self) -> None:
         self.decision_cache.close()
         self.lsh.close()
-        if self.model_client is not None:
-            self.model_client.close()
+        for model_client in self.model_clients:
+            model_client.close()
 
 
 def build_state(cfg: common.ProcessorConfig) -> CurateState:
@@ -136,12 +136,15 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     models = cfg.models_dir
     require_real_models = os.environ.get("S2P_REQUIRE_REAL_MODELS") == "1"
     model_service_url = os.environ.get("S2P_MODEL_SERVICE_URL", "").strip()
+    quality_service_url = os.environ.get("S2P_QUALITY_MODEL_SERVICE_URL", "").strip()
+    kenlm_service_url = os.environ.get("S2P_KENLM_MODEL_SERVICE_URL", "").strip()
+    embedding_service_url = os.environ.get("S2P_EMBEDDING_MODEL_SERVICE_URL", "").strip()
     kenlm_path = os.path.join(models, "kenlm", "en.arpa.bin")
     kenlm_sentencepiece_path = os.path.join(models, "kenlm", "en.sp.model")
     finepdfs_quality_dir = os.path.join(models, "finepdfs-edu-v2")
     fineweb_quality_dir = os.path.join(models, "fineweb-edu")
     e5_dir = os.path.join(models, "e5-small")
-    model_client: CuratorModelClient | None = None
+    model_clients: tuple[CuratorModelClient, ...] = ()
     embedding: EmbeddingSketch
     kenlm: PerplexityScorer
     finepdfs_quality: QualityScorer
@@ -152,6 +155,18 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         kenlm = RemoteKenLMScorer(model_client)
         finepdfs_quality = RemoteQualityClassifier(model_client, "finepdfs-edu-v2")
         fineweb_quality = RemoteQualityClassifier(model_client, "fineweb-edu")
+        model_clients = (model_client,)
+    elif any((quality_service_url, kenlm_service_url, embedding_service_url)):
+        if not all((quality_service_url, kenlm_service_url, embedding_service_url)):
+            raise RuntimeError("all split curator model service URLs are required")
+        quality_client = CuratorModelClient(quality_service_url)
+        kenlm_client = CuratorModelClient(kenlm_service_url)
+        embedding_client = CuratorModelClient(embedding_service_url)
+        embedding = RemoteEmbeddingSketch(embedding_client)
+        kenlm = RemoteKenLMScorer(kenlm_client)
+        finepdfs_quality = RemoteQualityClassifier(quality_client, "finepdfs-edu-v2")
+        fineweb_quality = RemoteQualityClassifier(quality_client, "fineweb-edu")
+        model_clients = (quality_client, kenlm_client, embedding_client)
     else:
         embedding = _EmbeddingSketch(
             e5_dir if os.path.isdir(e5_dir) else None,
@@ -204,7 +219,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         policy_revision=os.environ.get(POLICY_REVISION_ENV, "git:dev"),
         scoring_version=os.environ.get(SCORING_VERSION_ENV, "v0.1.0"),
         decision_cache=DecisionCache(os.path.join(cfg.state_dir, "decision-cache.sqlite3")),
-        model_client=model_client,
+        model_clients=model_clients,
     )
 
 

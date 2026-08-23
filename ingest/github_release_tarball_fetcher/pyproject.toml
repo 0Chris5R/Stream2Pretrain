@@ -1,7 +1,7 @@
 [project]
 name = "stream2pretrain-github-release-tarball-fetcher"
 version = "0.2.0"
-description = "GitHub release tarball fetcher for Stream2Pretrain (consumes raw.fetched, emits code BronzeRecord rows)."
+description = "GitHub release tarball fetcher for Stream2Pretrain (consumes github.release.jobs, emits code BronzeRecord rows)."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 

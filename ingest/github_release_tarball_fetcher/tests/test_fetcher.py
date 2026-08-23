@@ -18,6 +18,7 @@ from ingest.github_release_tarball_fetcher.fetcher import (
     FetcherConfig,
     ReleaseRef,
     TarballMetrics,
+    _is_tarball_job,
     code_object_key,
     code_s3_uri,
     fetch_repo_license,
@@ -46,6 +47,27 @@ def _cfg() -> IngestConfig:
         http_timeout_seconds=2.0,
         http_max_retries=0,
     )
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"source_feed": "github-releases"}, True),
+        (
+            {
+                "source_feed": "github-releases",
+                "tarball_job_dispatched": "true",
+            },
+            False,
+        ),
+        ({"source_feed": "github-release-tarballs"}, False),
+        ({}, False),
+    ],
+)
+def test_tarball_job_filter_avoids_dual_publish_duplicates(
+    headers: dict[str, str], expected: bool
+) -> None:
+    assert _is_tarball_job(headers) is expected
 
 
 class _FakeCodeProducer:

@@ -52,6 +52,7 @@ create_topic() {
 
 create_topic "raw.fetched"      4 1
 create_topic "raw.smoke"        4 1 "$RETENTION_MS_SMOKE"
+create_topic "github.release.jobs" 4 1
 create_topic "docs.normalized"  4 1
 create_topic "docs.curated"     4 1
 create_topic "curation.decisions" 4 1

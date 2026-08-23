@@ -14,6 +14,7 @@ x-processor-environment: &processor-environment
   REDPANDA_BROKERS: redpanda:29092
   S2P_RAW_TOPIC: raw.fetched
   S2P_SMOKE_RAW_TOPIC: raw.smoke
+  S2P_GITHUB_RELEASE_JOBS_TOPIC: github.release.jobs
   S2P_NORMALIZED_TOPIC: docs.normalized
   S2P_CURATED_TOPIC: docs.curated
   S2P_DECISIONS_TOPIC: curation.decisions
@@ -134,7 +135,7 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        for topic in raw.fetched raw.smoke docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
+        for topic in raw.fetched raw.smoke github.release.jobs docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
           retention_ms=604800000
           [ "$${topic}" = raw.smoke ] && retention_ms=86400000
           rpk -X brokers=redpanda:29092 topic create "$${topic}" \

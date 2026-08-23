@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -18,6 +18,8 @@ from processor.curate import (
     run_native_curator,
 )
 from processor.model_client import ModelServiceError
+from processor.operators.kenlm_score import PerplexityResult
+from processor.operators.quality import QualityScore
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
 
@@ -45,6 +47,87 @@ def _silver(text: str, doc_id: str = "sha256:" + "a" * 64) -> SilverRecord:
         spdx_license="Apache-2.0",
         spdx_license_source="manual_override",
     )
+
+
+class _SplitModelClient:
+    closed: ClassVar[list[str]] = []
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+        if "quality" in base_url:
+            self.metadata = {
+                "ready": True,
+                "quality": {
+                    "finepdfs-edu-v2": {
+                        "backend": "transformers-cpu",
+                        "revision": "finepdfs@pinned",
+                    },
+                    "fineweb-edu": {
+                        "backend": "transformers-cpu",
+                        "revision": "fineweb@pinned",
+                    },
+                },
+            }
+        elif "kenlm" in base_url:
+            self.metadata = {
+                "ready": True,
+                "kenlm": {
+                    "backend": "kenlm-sentencepiece",
+                    "scorer": "kenlm-sentencepiece:en.arpa.bin",
+                },
+            }
+        else:
+            self.metadata = {
+                "ready": True,
+                "embedding": {
+                    "backend": "onnxruntime-cpu",
+                    "revision": "e5@pinned",
+                },
+            }
+
+    def quality(self, model_family: str, _text: str) -> QualityScore:
+        return QualityScore(4.0, str(self.metadata["quality"][model_family]["revision"]))  # type: ignore[index]
+
+    def perplexity(self, _text: str) -> PerplexityResult:
+        return PerplexityResult(42.0, "head", "kenlm-sentencepiece:en.arpa.bin")
+
+    def embed(self, _text: str) -> list[float]:
+        return [1.0, 0.0]
+
+    def close(self) -> None:
+        self.closed.append(self.base_url)
+
+
+def test_split_model_services_are_all_required_and_closed(
+    cfg: ProcessorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("S2P_MODEL_SERVICE_URL", raising=False)
+    monkeypatch.setenv("S2P_QUALITY_MODEL_SERVICE_URL", "http://quality")
+    monkeypatch.setenv("S2P_KENLM_MODEL_SERVICE_URL", "http://kenlm")
+    monkeypatch.setenv("S2P_EMBEDDING_MODEL_SERVICE_URL", "http://embedding")
+    monkeypatch.setattr("processor.curate.CuratorModelClient", _SplitModelClient)
+    _SplitModelClient.closed.clear()
+
+    state = build_state(cfg)
+    assert len(state.model_clients) == 3
+    state.close()
+    assert set(_SplitModelClient.closed) == {
+        "http://quality",
+        "http://kenlm",
+        "http://embedding",
+    }
+
+
+def test_partial_split_model_service_configuration_fails(
+    cfg: ProcessorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("S2P_MODEL_SERVICE_URL", raising=False)
+    monkeypatch.setenv("S2P_QUALITY_MODEL_SERVICE_URL", "http://quality")
+    monkeypatch.delenv("S2P_KENLM_MODEL_SERVICE_URL", raising=False)
+    monkeypatch.delenv("S2P_EMBEDDING_MODEL_SERVICE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="all split curator model service URLs"):
+        build_state(cfg)
 
 
 def test_curate_clean_text_passes(cfg: ProcessorConfig, long_english_text: str) -> None:

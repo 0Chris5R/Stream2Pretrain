@@ -114,9 +114,15 @@ jobs:
           - profile: none
             repository: processor-base
             extra: runtime
-          - profile: curate
-            repository: processor-base-curate
-            extra: model-service
+          - profile: quality
+            repository: processor-base-quality
+            extra: quality-service
+          - profile: embedding
+            repository: processor-base-embedding
+            extra: embedding-service
+          - profile: kenlm
+            repository: processor-base-kenlm
+            extra: kenlm-service
           - profile: fetcher
             repository: processor-base-fetcher
             extra: runtime
@@ -219,7 +225,9 @@ jobs:
       packages: read
     outputs:
       image: ${{ steps.pin.outputs.image }}
-      curate_image: ${{ steps.pin.outputs.curate_image }}
+      quality_image: ${{ steps.pin.outputs.quality_image }}
+      embedding_image: ${{ steps.pin.outputs.embedding_image }}
+      kenlm_image: ${{ steps.pin.outputs.kenlm_image }}
       fetcher_image: ${{ steps.pin.outputs.fetcher_image }}
     steps:
       - name: Check out source
@@ -290,7 +298,9 @@ jobs:
             echo "Pinned processor base ${image}@${digest}"
           }
           pin_image image "$(resolve_image none processor-base runtime)"
-          pin_image curate_image "$(resolve_image curate processor-base-curate model-service)"
+          pin_image quality_image "$(resolve_image quality processor-base-quality quality-service)"
+          pin_image embedding_image "$(resolve_image embedding processor-base-embedding embedding-service)"
+          pin_image kenlm_image "$(resolve_image kenlm processor-base-kenlm kenlm-service)"
           pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher runtime)"
 
   build:
@@ -346,10 +356,21 @@ jobs:
             context: .
             dockerfile: processor/Dockerfile.app
             inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
-          - image: processor-curate-model
+          - image: processor-quality-model
+            model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor
+          - image: processor-embedding-model
+            model_profile: embedding
+            context: .
+            dockerfile: processor/Dockerfile.model-service.app
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor
+          - image: processor-kenlm-model
+            model_profile: kenlm
+            context: .
+            dockerfile: processor/Dockerfile.model-service.app
+            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.app
@@ -380,7 +401,9 @@ jobs:
         env:
           IMAGE_INPUTS: ${{ matrix.inputs }}
           PROCESSOR_BASE_IMAGE: ${{ needs.processor-base-pin.outputs.image }}
-          PROCESSOR_CURATE_IMAGE: ${{ needs.processor-base-pin.outputs.curate_image }}
+          PROCESSOR_QUALITY_IMAGE: ${{ needs.processor-base-pin.outputs.quality_image }}
+          PROCESSOR_EMBEDDING_IMAGE: ${{ needs.processor-base-pin.outputs.embedding_image }}
+          PROCESSOR_KENLM_IMAGE: ${{ needs.processor-base-pin.outputs.kenlm_image }}
           PROCESSOR_FETCHER_IMAGE: ${{ needs.processor-base-pin.outputs.fetcher_image }}
         run: |
           set -euo pipefail
@@ -388,7 +411,9 @@ jobs:
           registry="ghcr.io/${owner}"
           selected_processor_base="$PROCESSOR_BASE_IMAGE"
           case "${{ matrix.image }}" in
-            processor-curate-model) selected_processor_base="$PROCESSOR_CURATE_IMAGE" ;;
+            processor-quality-model) selected_processor_base="$PROCESSOR_QUALITY_IMAGE" ;;
+            processor-embedding-model) selected_processor_base="$PROCESSOR_EMBEDDING_IMAGE" ;;
+            processor-kenlm-model) selected_processor_base="$PROCESSOR_KENLM_IMAGE" ;;
             processor-fetcher-model) selected_processor_base="$PROCESSOR_FETCHER_IMAGE" ;;
           esac
           component_tree_hash() {
@@ -450,6 +475,7 @@ jobs:
           tags: ${{ steps.image.outputs.revision_ref }}
           build-args: |
             PROCESSOR_BASE_IMAGE=${{ steps.image.outputs.processor_base }}
+            S2P_MODEL_SERVICE_PROFILE=${{ matrix.model_profile }}
           # GHCR can garbage-collect blobs referenced only by a mutable
           # BuildKit cache manifest. GitHub's cache backend keeps ordinary
           # component layers; the processor's large dependencies live in the
@@ -1356,12 +1382,16 @@ jobs:
             --set "image.pullPolicy=IfNotPresent"
             --set "processor.fetcher.tag=${GITHUB_SHA}"
             --set "processor.curate.tag=${GITHUB_SHA}"
-            --set "processor.modelService.tag=${GITHUB_SHA}"
+            --set "processor.modelService.profiles.quality.tag=${GITHUB_SHA}"
+            --set "processor.modelService.profiles.embedding.tag=${GITHUB_SHA}"
+            --set "processor.modelService.profiles.kenlm.tag=${GITHUB_SHA}"
             --set "ingest.arxivHtmlFetcher.tag=${GITHUB_SHA}"
             --set "mixtureController.tag=${GITHUB_SHA}"
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model"
             --set "processor.curate.image=stream2pretrain/processor"
-            --set "processor.modelService.image=stream2pretrain/processor-curate-model"
+            --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model"
+            --set "processor.modelService.profiles.embedding.image=stream2pretrain/processor-embedding-model"
+            --set "processor.modelService.profiles.kenlm.image=stream2pretrain/processor-kenlm-model"
             --set "processor.iceberg.image=stream2pretrain/processor"
             --set "processor.duckdbApi.image=stream2pretrain/processor"
             --set "processor.deconGate.image=stream2pretrain/processor"

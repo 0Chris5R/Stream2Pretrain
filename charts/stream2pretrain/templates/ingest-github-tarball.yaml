@@ -103,10 +103,10 @@ spec:
 {{- if .Values.keda.enabled }}
 ---
 {{/*
-KEDA Prometheus scaler keyed on the tarball fetcher's filtered release metric.
-This intentionally does not use raw.fetched Kafka lag: the worker consumes
-github-releases records from raw.fetched and emits code BronzeRecords back to
-the same topic, so topic-wide Kafka lag creates a positive feedback loop.
+KEDA lag scaler keyed on a dedicated release-job topic. The worker emits code
+BronzeRecords to raw.fetched, so scaling on that output topic would create a
+positive feedback loop. A separate topic is both broker-visible at zero pods
+and proportional only to actual release tarball work.
 */}}
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -125,11 +125,22 @@ spec:
   minReplicaCount: {{ .Values.ingest.githubTarballFetcher.keda.minReplicas }}
   maxReplicaCount: {{ .Values.ingest.githubTarballFetcher.keda.maxReplicas }}
   triggers:
-    - type: prometheus
+    - type: kafka
       metadata:
-        serverAddress: {{ .Values.keda.prometheus.serverAddress | quote }}
-        metricName: s2p_github_releases_unprocessed
-        query: {{ printf "sum(s2p_github_releases_unprocessed{namespace=\"%s\"})" .Release.Namespace | quote }}
-        threshold: {{ .Values.ingest.githubTarballFetcher.keda.threshold | quote }}
+        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
+        consumerGroup: {{ .Values.ingest.githubTarballFetcher.consumerGroup | quote }}
+        topic: {{ .Values.redpanda.topics.githubReleaseJobs | quote }}
+        lagThreshold: {{ .Values.ingest.githubTarballFetcher.keda.lagThreshold | quote }}
+        activationLagThreshold: "0"
+        offsetResetPolicy: earliest
+        allowIdleConsumers: "false"
+        {{- if not .Values.keda.auth.enabled }}
+        sasl: ""
+        tls: "disable"
+        {{- end }}
+      {{- if .Values.keda.auth.enabled }}
+      authenticationRef:
+        name: {{ include "stream2pretrain.fullname" . }}-redpanda
+      {{- end }}
 {{- end }}
 {{- end }}
