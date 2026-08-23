@@ -915,7 +915,10 @@ def native_curator_consumer_config(
     traffic_class: str,
 ) -> dict[str, object]:
     """Return the broker-owned offset configuration for one curation lane."""
-    reset = "latest" if common.kafka_starting_offset() == -1 else "earliest"
+    reset_override = os.environ.get("S2P_CURATOR_AUTO_OFFSET_RESET", "").strip().lower()
+    if reset_override and reset_override not in {"earliest", "latest"}:
+        raise RuntimeError("S2P_CURATOR_AUTO_OFFSET_RESET must be earliest or latest")
+    reset = reset_override or ("latest" if common.kafka_starting_offset() == -1 else "earliest")
     return {
         **common.kafka_consumer_config(group_id),
         "bootstrap.servers": cfg.redpanda_brokers,
@@ -973,15 +976,19 @@ def run_native_curator(
     if not smoke_group:
         raise RuntimeError("S2P_CURATOR_SMOKE_GROUP must not be empty")
 
+    isolated_topic = os.environ.get("S2P_CURATOR_INPUT_TOPIC", "").strip()
     production_consumer = consumer_factory(
         native_curator_consumer_config(cfg, group_id=cfg.consumer_group, traffic_class="production")
     )
-    smoke_consumer = consumer_factory(
-        native_curator_consumer_config(cfg, group_id=smoke_group, traffic_class="canary")
-    )
+    smoke_consumer = None
+    if not isolated_topic:
+        smoke_consumer = consumer_factory(
+            native_curator_consumer_config(cfg, group_id=smoke_group, traffic_class="canary")
+        )
     producer = producer_factory(native_curator_producer_config(cfg))
-    production_consumer.subscribe([cfg.normalized_topic])
-    smoke_consumer.subscribe([smoke_topic])
+    production_consumer.subscribe([isolated_topic or cfg.normalized_topic])
+    if smoke_consumer is not None:
+        smoke_consumer.subscribe([smoke_topic])
     payload_max_bytes = common.kafka_payload_max_bytes()
     flush_timeout = float(os.environ.get("S2P_CURATOR_FLUSH_TIMEOUT_SECONDS", "60"))
     retry_attempts = int(os.environ.get("S2P_CURATOR_RECORD_ATTEMPTS", "2"))
@@ -996,8 +1003,11 @@ def run_native_curator(
 
     try:
         while not should_stop():
-            owner = smoke_consumer
-            message = smoke_consumer.poll(0)
+            owner = production_consumer
+            message = None
+            if smoke_consumer is not None:
+                owner = smoke_consumer
+                message = smoke_consumer.poll(0)
             if message is None:
                 owner = production_consumer
                 message = production_consumer.poll(1.0)
@@ -1086,7 +1096,8 @@ def run_native_curator(
         try:
             producer.flush(flush_timeout)
         finally:
-            smoke_consumer.close()
+            if smoke_consumer is not None:
+                smoke_consumer.close()
             production_consumer.close()
 
 
@@ -1113,7 +1124,14 @@ def main() -> None:
     signal.signal(signal.SIGINT, _stop)
     start_probe_server(metrics_provider=PROCESSOR_METRICS.render_prometheus)
     try:
-        run_native_curator(cfg, state=state, should_stop=lambda: stopping)
+        max_messages_raw = os.environ.get("S2P_CURATOR_MAX_MESSAGES", "").strip()
+        max_messages = int(max_messages_raw) if max_messages_raw else None
+        run_native_curator(
+            cfg,
+            state=state,
+            should_stop=lambda: stopping,
+            max_messages=max_messages,
+        )
     finally:
         state.close()
 

@@ -2,10 +2,9 @@
 
 A long-running consumer that:
 
-1. Subscribes to the dedicated ``github.release.jobs`` topic. During the
-   rolling migration it also drains legacy ``raw.fetched`` release messages;
-   newly dual-published raw metadata is marked and skipped to avoid duplicate
-   tarball downloads.
+1. Subscribes only to the dedicated ``github.release.jobs`` topic. Release
+   metadata remains on ``raw.fetched`` for the normal fetch pipeline, but the
+   tarball worker must not consume its own per-file output topic.
 2. For each release event, derives ``(owner/repo, tag)`` from the release
    atom URL embedded in the BronzeRecord and asks the GitHub License API
    for the SPDX id. Non-permissive licenses cause the release to be skipped.
@@ -36,7 +35,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -108,10 +107,22 @@ class FetcherConfig:
 
     allowed_extensions: tuple[str, ...] = DEFAULT_ALLOWED_EXTENSIONS
     max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES
+    # Live cluster measurements showed 5,057 retained files completing in
+    # about three minutes while 11,000-file CI snapshots exceeded Kafka's
+    # five-minute poll interval. Keep one release below that measured bound.
+    max_files_per_release: int = 5_000
     allowed_licenses: frozenset[str] = DEFAULT_ALLOWED_LICENSES
+    excluded_tag_prefixes: tuple[str, ...] = ("ciflow/", "trunk/")
     request_rate_per_second: float = 1.0
     request_burst: int = 4
     consumer_group: str = "s2p-github-tarball-fetcher"
+    consumer_max_poll_interval_ms: int = 900_000
+
+    def __post_init__(self) -> None:
+        if self.max_file_size_bytes < 1 or self.max_files_per_release < 1:
+            raise ValueError("tarball file limits must be positive")
+        if self.consumer_max_poll_interval_ms < 300_000:
+            raise ValueError("tarball max poll interval must be at least five minutes")
 
 
 class TarballMetrics:
@@ -184,6 +195,12 @@ def parse_release_url(url: str) -> ReleaseRef | None:
         repo=m.group("repo"),
         tag=m.group("tag"),
     )
+
+
+def is_release_candidate(ref: ReleaseRef, fetcher_cfg: FetcherConfig) -> bool:
+    """Reject observed CI snapshot tags that are not software releases."""
+    tag = unquote(ref.tag).lower()
+    return not any(tag.startswith(prefix.lower()) for prefix in fetcher_cfg.excluded_tag_prefixes)
 
 
 def code_object_key(*, owner: str, repo: str, ref: str, path: str) -> str:
@@ -310,6 +327,10 @@ async def process_release(
     ``published_at`` timestamp from the upstream BronzeRecord. When ``None``
     the current UTC time is used as a safe fallback.
     """
+    if not is_release_candidate(ref, fetcher_cfg):
+        log.info("tarball.skip_non_release_tag", repo=ref.full_name, tag=ref.tag)
+        return 0
+
     await bucket.acquire()
     spdx = await fetch_repo_license(client, ref, anonymous_client=anonymous_client)
     admission = decide_license_admission(
@@ -340,11 +361,20 @@ async def process_release(
     valid_from = valid_from or datetime.now(tz=UTC)
 
     emitted = 0
+    failed_paths: list[str] = []
     for extracted in iter_tarball_files(
         tar_bytes,
         allowed_extensions=fetcher_cfg.allowed_extensions,
         max_file_size_bytes=fetcher_cfg.max_file_size_bytes,
     ):
+        if emitted >= fetcher_cfg.max_files_per_release:
+            log.info(
+                "tarball.release_file_limit",
+                repo=ref.full_name,
+                tag=ref.tag,
+                max_files=fetcher_cfg.max_files_per_release,
+            )
+            break
         try:
             await _emit_one_file(
                 extracted,
@@ -364,8 +394,14 @@ async def process_release(
                 path=extracted.path,
                 err=str(exc),
             )
+            failed_paths.append(extracted.path)
             continue
         emitted += 1
+
+    if failed_paths:
+        raise RuntimeError(
+            f"{len(failed_paths)} tarball objects failed to land; first path: {failed_paths[0]}"
+        )
 
     log.info(
         "tarball.release_done",
@@ -588,10 +624,11 @@ async def _consume_loop(
     async def _commit_safely() -> None:
         if not has_commit:
             return
-        try:
-            await consumer.commit()
-        except Exception as exc:
-            log.warning("tarball.commit_failed", err=str(exc))
+        # A swallowed commit error caused completed 11k-file PyTorch releases
+        # to replay indefinitely. Failing the worker is safe because object
+        # keys and Kafka record keys are idempotent; pretending the commit
+        # succeeded is not.
+        await consumer.commit()
 
     total = 0
     async for msg in consumer:
@@ -599,9 +636,9 @@ async def _consume_loop(
             break
         headers = _decode_headers(msg.headers)
         # The release poller keeps its metadata record in raw.fetched and
-        # sends a second copy to github.release.jobs. Skip the marked raw copy;
-        # the unmarked job copy is the single tarball work item. Legacy raw
-        # records have no marker and remain processable during migration.
+        # sends a second copy to github.release.jobs. Only the unmarked job
+        # copy is a tarball work item; marked copies are still rejected
+        # defensively if one is forwarded into this topic.
         if not _is_tarball_job(headers):
             await _commit_safely()
             continue
@@ -670,7 +707,6 @@ async def run(
 
     consumer = AIOKafkaConsumer(
         cfg.github_release_jobs_topic,
-        cfg.raw_topic,
         bootstrap_servers=cfg.redpanda_brokers,
         group_id=fetcher_cfg.consumer_group,
         # Auto-commit OFF: a release tarball can take longer than aiokafka's
@@ -682,6 +718,7 @@ async def run(
         enable_auto_commit=False,
         auto_offset_reset="earliest",
         client_id="s2p-gh-tarball-consumer",
+        max_poll_interval_ms=fetcher_cfg.consumer_max_poll_interval_ms,
     )
     extra_headers: dict[str, str] = {}
     if cfg.github_token:
@@ -771,10 +808,13 @@ def _fetcher_config_from_env() -> FetcherConfig:
     return FetcherConfig(
         allowed_extensions=_csv("S2P_TARBALL_ALLOWED_EXTENSIONS", DEFAULT_ALLOWED_EXTENSIONS),
         max_file_size_bytes=_int("S2P_TARBALL_MAX_FILE_SIZE_BYTES", DEFAULT_MAX_FILE_SIZE_BYTES),
+        max_files_per_release=_int("S2P_TARBALL_MAX_FILES_PER_RELEASE", 5_000),
         allowed_licenses=licenses,
+        excluded_tag_prefixes=_csv("S2P_TARBALL_EXCLUDED_TAG_PREFIXES", ("ciflow/", "trunk/")),
         request_rate_per_second=_float("S2P_TARBALL_RATE_PER_SECOND", 1.0),
         request_burst=_int("S2P_TARBALL_BURST", 4),
         consumer_group=os.environ.get("S2P_TARBALL_CONSUMER_GROUP", "s2p-github-tarball-fetcher"),
+        consumer_max_poll_interval_ms=_int("S2P_TARBALL_MAX_POLL_INTERVAL_MS", 900_000),
     )
 
 
@@ -787,6 +827,8 @@ def main() -> None:
         "tarball.start",
         allowed_licenses=sorted(fetcher_cfg.allowed_licenses),
         max_file_size_bytes=fetcher_cfg.max_file_size_bytes,
+        max_files_per_release=fetcher_cfg.max_files_per_release,
+        excluded_tag_prefixes=fetcher_cfg.excluded_tag_prefixes,
         rate=fetcher_cfg.request_rate_per_second,
     )
     metrics = TarballMetrics()

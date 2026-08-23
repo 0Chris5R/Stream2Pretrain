@@ -321,6 +321,9 @@
             "consumerGroup",
             "allowedExtensions",
             "maxFileSizeBytes",
+            "maxFilesPerRelease",
+            "excludedTagPrefixes",
+            "maxPollIntervalMilliseconds",
             "allowedLicenses",
             "requestRatePerSecond",
             "requestBurst",
@@ -338,6 +341,13 @@
               "items": {"type": "string", "pattern": "^\\.[A-Za-z0-9]+$"}
             },
             "maxFileSizeBytes": {"type": "integer", "minimum": 1},
+            "maxFilesPerRelease": {"type": "integer", "minimum": 1},
+            "excludedTagPrefixes": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "maxPollIntervalMilliseconds": {"type": "integer", "minimum": 300000},
             "allowedLicenses": {
               "type": "array",
               "minItems": 1,

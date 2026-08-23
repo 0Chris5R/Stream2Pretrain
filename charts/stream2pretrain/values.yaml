@@ -387,6 +387,17 @@ ingest:
     # 1 MiB default per-file ceiling. Files above this are skipped without
     # being read into memory.
     maxFileSizeBytes: 1048576
+    # The live DHBW cluster processed roughly 5k retained files in three
+    # minutes, while 11k-file CI snapshots exceeded the consumer poll bound.
+    maxFilesPerRelease: 5000
+    # These prefixes were observed on pytorch/pytorch as ephemeral CI refs,
+    # not published software releases.
+    excludedTagPrefixes:
+      - ciflow/
+      - trunk/
+    # Above the measured bounded-release time and aligned with processor
+    # consumers, so healthy work does not forfeit its partition before commit.
+    maxPollIntervalMilliseconds: 900000
     # OSI permissive default. Repos whose GitHub License API SPDX id is not
     # in this list are skipped entirely (no tarball download, no records).
     allowedLicenses:
