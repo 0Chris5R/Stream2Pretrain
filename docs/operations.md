@@ -55,6 +55,12 @@ as the arXiv HTML and GitHub tarball fetchers. Run the target-cluster procedure
 in `docs/capacity-benchmark.md` and record its evidence before enabling those
 scalers.
 
+The production fetcher consumes only `raw.fetched` and scales on that group's
+lag. A fixed canary worker consumes the short-retention `raw.smoke` traffic
+class with the same image and normalization code. This keeps a multi-minute
+production PDF from starving the bounded deployment check; the canary is not
+production capacity and is never included in the KEDA replica count.
+
 ```bash
 uv run python scripts/capacity_probe.py
 ./scripts/setup_dhbw_demo.sh validate

@@ -444,7 +444,19 @@ def native_producer_config(cfg: common.ProcessorConfig) -> dict[str, object]:
 
 
 def fetcher_input_topics(cfg: common.ProcessorConfig) -> list[str]:
-    """Return production plus the low-retention deployment-canary lane."""
+    """Return this worker's explicitly assigned traffic class.
+
+    Production and deployment-canary records use separate consumer groups in
+    Kubernetes. A slow PDF on the production lane must not starve the bounded
+    canary check. The two-topic default preserves the convenient single-worker
+    local-development setup.
+    """
+    configured = os.environ.get("S2P_FETCHER_INPUT_TOPICS", "").strip()
+    if configured:
+        topics = [topic.strip() for topic in configured.split(",") if topic.strip()]
+        if not topics:
+            raise RuntimeError("S2P_FETCHER_INPUT_TOPICS did not contain a topic")
+        return list(dict.fromkeys(topics))
     smoke_topic = os.environ.get("S2P_SMOKE_RAW_TOPIC", "raw.smoke").strip()
     return list(dict.fromkeys(topic for topic in (cfg.raw_topic, smoke_topic) if topic))
 

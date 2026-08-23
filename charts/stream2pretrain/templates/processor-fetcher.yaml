@@ -45,6 +45,8 @@ spec:
               value: {{ $component | quote }}
             - name: S2P_CONSUMER_GROUP
               value: s2p-fetcher
+            - name: S2P_FETCHER_INPUT_TOPICS
+              value: {{ .Values.redpanda.topics.rawFetched | quote }}
             - name: S2P_FETCHER_COMMIT_BATCH_SIZE
               value: {{ .Values.processor.fetcher.commitBatchSize | int | quote }}
             - name: S2P_FETCHER_COMMIT_INTERVAL_SECONDS
@@ -132,4 +134,86 @@ spec:
       authenticationRef:
         name: {{ include "stream2pretrain.fullname" . }}-redpanda
       {{- end }}
+{{- end }}
+{{- if .Values.processor.fetcher.canary.enabled }}
+---
+{{- $canaryComponent := "processor-fetcher-canary" }}
+{{- $canaryName := printf "%s-%s" (include "stream2pretrain.fullname" .) $canaryComponent }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $canaryName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $canaryComponent) | nindent 4 }}
+spec:
+  replicas: {{ .Values.processor.fetcher.canary.replicas }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $canaryComponent) | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $canaryComponent) | nindent 8 }}
+        stream2pretrain.io/egress-class: blogs
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      containers:
+        - name: fetcher
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image "tag" .Values.processor.fetcher.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["s2p-fetcher"]
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $canaryComponent | quote }}
+            - name: S2P_CONSUMER_GROUP
+              value: {{ .Values.processor.fetcher.canary.consumerGroup | quote }}
+            - name: S2P_FETCHER_INPUT_TOPICS
+              value: {{ .Values.redpanda.topics.smokeRaw | quote }}
+            - name: S2P_FETCHER_COMMIT_BATCH_SIZE
+              value: "1"
+            - name: S2P_FETCHER_COMMIT_INTERVAL_SECONDS
+              value: "1"
+            - name: S2P_FETCHER_MAX_POLL_INTERVAL_MS
+              value: {{ .Values.processor.fetcher.maxPollIntervalMs | int | quote }}
+            - name: S2P_MAX_RAW_OBJECT_BYTES
+              value: "67108864"
+            - name: S2P_MAX_EXPANDED_OBJECT_BYTES
+              value: "67108864"
+            - name: S2P_WAYBACK_LOOKUP_ENABLED
+              value: "0"
+            - name: S2P_DOCLING_ENABLED
+              value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.processor.fetcher.canary.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {{- end }}

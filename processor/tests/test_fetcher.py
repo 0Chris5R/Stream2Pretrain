@@ -364,7 +364,15 @@ def test_native_fetcher_does_not_commit_after_delivery_failure(
 def test_native_consumer_defaults_to_earliest(monkeypatch: Any) -> None:
     monkeypatch.setenv("S2P_KAFKA_START_OFFSET", "beginning")
     monkeypatch.delenv("S2P_SMOKE_RAW_TOPIC", raising=False)
+    monkeypatch.delenv("S2P_FETCHER_INPUT_TOPICS", raising=False)
     cfg = common.load_config()
 
     assert native_consumer_config(cfg)["auto.offset.reset"] == "earliest"
     assert fetcher_input_topics(cfg) == ["raw.fetched", "raw.smoke"]
+
+
+def test_fetcher_input_topics_support_isolated_traffic_class(monkeypatch: Any) -> None:
+    cfg = common.load_config()
+    monkeypatch.setenv("S2P_FETCHER_INPUT_TOPICS", " raw.smoke, raw.smoke ")
+
+    assert fetcher_input_topics(cfg) == ["raw.smoke"]

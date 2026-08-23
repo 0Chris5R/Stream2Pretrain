@@ -483,9 +483,19 @@ processor:
     commitBatchSize: 16
     commitIntervalSeconds: 2
     maxPollIntervalMs: 900000
+    # A multi-minute production PDF must not starve the bounded deployment
+    # health check. This fixed worker runs the identical normalization image
+    # against the 24-hour canary topic but is not production capacity.
+    canary:
+      enabled: true
+      replicas: 1
+      consumerGroup: s2p-fetcher-canary
+      resources:
+        requests: {cpu: 100m, memory: 512Mi}
+        limits: {cpu: 1, memory: 2Gi}
     resources:
-      # The extraction process owns the language detector plus Bytewax recovery
-      # state. The former 1Gi limit was observed OOM-killing the process during
+      # The extraction process owns the language detector and document tools.
+      # The former 1Gi limit was observed OOM-killing the process during
       # initialization; retain headroom while real peak RSS is measured.
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: 1, memory: 2Gi}
