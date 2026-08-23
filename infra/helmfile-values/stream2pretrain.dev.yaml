@@ -82,6 +82,13 @@ processor:
     replicas: 1
   duckdbApi:
     replicas: 1
+    # The live Iceberg dedup/window scan peaks above the previous 1 GiB Pod
+    # ceiling even with DuckDB spilling enabled. Keep half the Pod available
+    # for the Python runtime, Iceberg metadata, and S3 buffers.
+    memoryLimit: 1GB
+    resources:
+      requests: {cpu: 100m, memory: 768Mi}
+      limits: {cpu: 1, memory: 2Gi}
   deconGate:
     replicas: 1
     benchmarkCorpus:
