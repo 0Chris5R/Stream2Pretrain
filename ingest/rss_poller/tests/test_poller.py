@@ -149,3 +149,54 @@ async def test_poll_feed_handles_304(tmp_path: Path) -> None:
         await client.aclose()
     assert emitted == 0
     assert not fake_producer.sent
+
+
+@pytest.mark.asyncio
+async def test_poll_feed_raises_when_feed_is_unavailable(tmp_path: Path) -> None:
+    state = FeedStateStore(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    fake_producer = FakeProducer()
+    fake_admissions = FakeProducer()
+    fake_minio = FakeMinio()
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(httpx.HTTPStatusError, match="503"):
+            await poll_feed(
+                _feed(),
+                client=client,
+                producer=fake_producer,  # type: ignore[arg-type]
+                minio=fake_minio,  # type: ignore[arg-type]
+                bucket="bronze",
+                state_store=state,
+                admission_producer=fake_admissions,  # type: ignore[arg-type]
+            )
+    finally:
+        await client.aclose()
+
+    assert state.get("rss-test") == {}
+
+
+@pytest.mark.asyncio
+async def test_poll_feed_rejects_non_feed_success_response(tmp_path: Path) -> None:
+    state = FeedStateStore(tmp_path)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>challenge</body></html>")
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ValueError, match="invalid RSS/Atom payload"):
+            await poll_feed(
+                _feed(),
+                client=client,
+                producer=FakeProducer(),  # type: ignore[arg-type]
+                minio=FakeMinio(),  # type: ignore[arg-type]
+                bucket="bronze",
+                state_store=state,
+                admission_producer=FakeProducer(),  # type: ignore[arg-type]
+            )
+    finally:
+        await client.aclose()

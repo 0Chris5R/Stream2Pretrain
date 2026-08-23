@@ -91,15 +91,17 @@ async def poll_repo(
         status, body, new_etag = await fetch_releases_atom(client, owner_repo, etag=etag)
     except httpx.HTTPError as exc:
         log.warning("releases.fetch_failed", repo=owner_repo, err=str(exc))
-        return 0
+        raise
 
     if status == 304:
         return 0
     if status >= 400:
         log.warning("releases.bad_status", repo=owner_repo, status=status)
-        return 0
+        raise RuntimeError(f"GitHub releases feed returned HTTP {status} for {owner_repo}")
 
     parsed: Any = feedparser.parse(body)
+    if not parsed.get("version"):
+        raise ValueError(f"invalid GitHub releases Atom payload for {owner_repo}")
     seen: set[str] = set(feed_state.get("seen_doc_ids", []))
     emitted = 0
     for entry in parsed.get("entries", []):
@@ -188,6 +190,7 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
     headers = build_headers(cfg, accept="application/atom+xml")
     bucket = TokenBucket(rate=2.0, burst=4)
     total = 0
+    failures: list[str] = []
     async with (
         build_async_client(cfg, headers=headers) as client,
         BronzeProducer(
@@ -219,6 +222,9 @@ async def run_pass(cfg: IngestConfig, repos: list[str]) -> int:
                 )
             except Exception as exc:
                 log.exception("releases.repo_error", repo=repo, err=str(exc))
+                failures.append(repo)
+    if failures:
+        raise RuntimeError(f"GitHub release polling failed: {', '.join(failures)}")
     return total
 
 

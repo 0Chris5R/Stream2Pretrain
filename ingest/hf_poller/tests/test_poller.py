@@ -139,6 +139,32 @@ async def test_poll_daily_papers_emits(monkeypatch: pytest.MonkeyPatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_poll_daily_papers_raises_on_upstream_http_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_producer = FakeProducer()
+    fake_minio = FakeMinio()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        hf_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError, match="503"):
+        await hf_module.poll_daily_papers(
+            _cfg(),
+            producer=fake_producer,
+            minio=fake_minio,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
 async def test_models_deployment_repeats_only_models(monkeypatch: pytest.MonkeyPatch) -> None:
     passes: list[str] = []
     sleeps: list[float] = []

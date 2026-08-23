@@ -224,11 +224,15 @@ async def _run(cfg: IngestConfig, feeds: list[SourceFeedSpec], **kw: Any) -> int
     state_root = "/var/lib/s2p-state/oaipmh_poller" if not cfg.is_dev else "./.s2p-state/oaipmh"
     state_store = FeedStateStore(state_root)
     total = 0
+    failures: list[str] = []
     for feed in feeds:
         try:
             total += await poll_feed(feed, cfg, state_store=state_store, **kw)
         except Exception as exc:
             log.exception("oai.feed.error", feed=feed.name, err=str(exc))
+            failures.append(feed.name)
+    if failures:
+        raise RuntimeError(f"OAI-PMH feed polling failed: {', '.join(failures)}")
     return total
 
 

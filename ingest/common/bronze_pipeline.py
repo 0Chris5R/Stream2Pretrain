@@ -98,7 +98,7 @@ async def fetch_and_publish(
             return None
         if resp.status_code >= 400:
             span.set_attribute("ingest.error", f"status={resp.status_code}")
-            return None
+            resp.raise_for_status()
         content_type = resp.headers.get("content-type", "application/octet-stream").split(";")[0]
         if expected_content_type and not content_type.startswith(expected_content_type):
             span.set_attribute("ingest.skipped", f"content_type={content_type}")
