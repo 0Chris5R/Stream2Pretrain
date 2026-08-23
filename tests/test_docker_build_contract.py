@@ -167,10 +167,10 @@ def test_scaled_zero_curator_cutover_uses_a_non_processing_pvc_helper() -> None:
 
     assert 'curator_claim="checkpoint-stream2pretrain-processor-curate-0"' in cutover
     assert '"app.kubernetes.io/component": "processor-curate-cutover"' in cutover
-    assert '| del(.initContainers)' in cutover
+    assert "| del(.initContainers)" in cutover
     assert '| .command = ["sh", "-ec"]' in cutover
-    assert 'persistentVolumeClaim: {claimName: $claim}' in cutover
-    assert 'python - < scripts/migrate_fetcher_offsets.py' in cutover
+    assert "persistentVolumeClaim: {claimName: $claim}" in cutover
+    assert "python - < scripts/migrate_fetcher_offsets.py" in cutover
     assert 'delete "pod/$curator_migration_pod" --wait=true' in cutover
 
 
