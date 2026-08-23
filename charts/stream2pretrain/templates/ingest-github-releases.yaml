@@ -57,8 +57,10 @@ spec:
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                {{- if eq .Values.ingest.state.backend "pvc" }}
                 - name: state
                   mountPath: /var/lib/s2p-state
+                {{- end }}
               resources:
                 {{- toYaml .Values.ingest.githubReleases.resources | nindent 16 }}
           volumes:
@@ -67,7 +69,9 @@ spec:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: tmp
               emptyDir: {}
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               persistentVolumeClaim:
                 claimName: {{ $stateClaim | quote }}
+            {{- end }}
 {{- end }}

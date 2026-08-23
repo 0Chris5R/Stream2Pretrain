@@ -2,14 +2,10 @@
 {{- $component := "ingest-openreview-live" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $statePvc := default (printf "%s-%s-state" (include "stream2pretrain.fullname" .) $component) .Values.openreviewPoller.live.state.existingClaim }}
-{{- if not .Values.openreviewPoller.live.state.existingClaim }}
+{{- if and (eq .Values.ingest.state.backend "pvc") (not .Values.openreviewPoller.live.state.existingClaim) }}
 ---
-# Cursor PVC: live.py persists ``seen_note_ids`` to FeedStateStore at
-# /var/lib/s2p-state/openreview_poller. An emptyDir would defeat
-# idempotency (each CronJob Pod would start with an empty seen-set and
-# re-emit every previously-seen submission). We therefore back the cursor
-# with a small ReadWriteOnce PVC. Concurrency is gated by
-# concurrencyPolicy: Forbid below, so RWO is sufficient.
+# Compatibility cursor PVC for installations that explicitly select the PVC
+# state backend. The default S3 backend avoids creating this volume.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -78,16 +74,20 @@ spec:
                       optional: true
                 {{- end }}
               volumeMounts:
+                {{- if eq .Values.ingest.state.backend "pvc" }}
                 - name: state
                   mountPath: /var/lib/s2p-state
+                {{- end }}
                 - name: tmp
                   mountPath: /tmp
               resources:
                 {{- toYaml .Values.ingest.openreview.resources | nindent 16 }}
           volumes:
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               persistentVolumeClaim:
                 claimName: {{ $statePvc }}
+            {{- end }}
             - name: tmp
               emptyDir: {}
 {{- if .Values.openreviewPoller.runBackfill }}

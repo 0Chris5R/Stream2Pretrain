@@ -52,8 +52,10 @@ spec:
                 - name: feeds
                   mountPath: /etc/s2p/feeds
                   readOnly: true
+                {{- if eq .Values.ingest.state.backend "pvc" }}
                 - name: state
                   mountPath: /var/lib/s2p-state
+                {{- end }}
                 - name: tmp
                   mountPath: /tmp
               resources:
@@ -62,9 +64,11 @@ spec:
             - name: feeds
               configMap:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               persistentVolumeClaim:
                 claimName: {{ $stateClaim | quote }}
+            {{- end }}
             - name: tmp
               emptyDir: {}
 {{- end }}

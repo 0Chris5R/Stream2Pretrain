@@ -1,5 +1,5 @@
 {{- $state := .Values.ingest.state -}}
-{{- if not $state.existingClaim }}
+{{- if and (eq $state.backend "pvc") (not $state.existingClaim) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

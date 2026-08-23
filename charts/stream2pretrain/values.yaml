@@ -70,6 +70,7 @@ minio:
     gold: s2p-gold
     decon: s2p-decon
     posttrain: s2p-posttrain
+    state: s2p-state
   credentialsSecret: stream2pretrain-minio
 
 # -----------------------------------------------------------------------------
@@ -274,11 +275,13 @@ sources:
 # Ingest components
 # -----------------------------------------------------------------------------
 ingest:
-  # Small durable cursor store shared by single-replica pollers. Payloads stay
-  # in object storage; this PVC only contains ETags, seen ids, and OAI
-  # resumption tokens. For multi-site production, replace it with an external
-  # transactional cursor store instead of scaling this RWO volume.
+  # Poller cursors are tiny JSON objects in MinIO. Object storage keeps them
+  # durable without pinning unrelated CronJobs and Deployments to the node
+  # holding one ReadWriteOnce volume. The PVC backend remains an explicit
+  # compatibility option for installations without S3-compatible storage.
   state:
+    backend: s3
+    prefix: ingest-cursors
     existingClaim: ""
     storageClass: ""
     size: 1Gi
@@ -450,10 +453,8 @@ openreviewPoller:
   live:
     schedule: "17 */6 * * *"
     activeDeadlineSeconds: 3600
-    # Cursor PVC: holds the seen_note_ids JSON written by FeedStateStore.
-    # Replaces the v0.2.0 emptyDir mount that defeated idempotency. The
-    # default 1Gi accommodates a 20k-id seen-set per venue across the
-    # configured venue list with comfortable headroom.
+    # Used only when ingest.state.backend=pvc. The default S3 backend stores
+    # this cursor beside the other poller cursors in minio.buckets.state.
     state:
       storageClass: ""
       size: 1Gi

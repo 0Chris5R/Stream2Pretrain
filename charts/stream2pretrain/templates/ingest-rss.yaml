@@ -56,8 +56,10 @@ spec:
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                {{- if eq .Values.ingest.state.backend "pvc" }}
                 - name: state
                   mountPath: /var/lib/s2p-state
+                {{- end }}
               resources:
                 {{- toYaml .Values.ingest.rss.resources | nindent 16 }}
           volumes:
@@ -66,9 +68,11 @@ spec:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: tmp
               emptyDir: {}
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               persistentVolumeClaim:
                 claimName: {{ $stateClaim | quote }}
+            {{- end }}
 {{- end }}
 {{- if .Values.sources.blogs.enabled }}
 ---
@@ -124,8 +128,10 @@ spec:
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                {{- if eq .Values.ingest.state.backend "pvc" }}
                 - name: state
                   mountPath: /var/lib/s2p-state
+                {{- end }}
               resources:
                 {{- toYaml .Values.ingest.rss.resources | nindent 16 }}
           volumes:
@@ -134,7 +140,9 @@ spec:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: tmp
               emptyDir: {}
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               persistentVolumeClaim:
                 claimName: {{ $blogStateClaim | quote }}
+            {{- end }}
 {{- end }}

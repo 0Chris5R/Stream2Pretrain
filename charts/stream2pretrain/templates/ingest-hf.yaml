@@ -63,8 +63,10 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               mountPath: /var/lib/s2p-state
+            {{- end }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
@@ -81,9 +83,11 @@ spec:
             name: {{ include "stream2pretrain.fullname" . }}-feeds
         - name: tmp
           emptyDir: {}
+        {{- if eq .Values.ingest.state.backend "pvc" }}
         - name: state
           persistentVolumeClaim:
             claimName: {{ $stateClaim | quote }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -162,8 +166,10 @@ spec:
                   readOnly: true
                 - name: tmp
                   mountPath: /tmp
+                {{- if eq .Values.ingest.state.backend "pvc" }}
                 - name: state
                   mountPath: /var/lib/s2p-state
+                {{- end }}
               resources:
                 {{- toYaml .Values.ingest.hf.resources | nindent 16 }}
           volumes:
@@ -172,7 +178,9 @@ spec:
                 name: {{ include "stream2pretrain.fullname" . }}-feeds
             - name: tmp
               emptyDir: {}
+            {{- if eq .Values.ingest.state.backend "pvc" }}
             - name: state
               persistentVolumeClaim:
                 claimName: {{ $papersStateClaim | quote }}
+            {{- end }}
 {{- end }}

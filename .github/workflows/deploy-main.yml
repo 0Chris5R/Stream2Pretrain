@@ -613,6 +613,71 @@ jobs:
                 -o name
             )
 
+            dump_source_job() {
+              local job="$1"
+              echo "Diagnostics for source validation job: $job" >&2
+              kubectl -n stream2pretrain get "job/$job" -o wide || true
+              kubectl -n stream2pretrain describe "job/$job" || true
+              local pods=()
+              mapfile -t pods < <(
+                kubectl -n stream2pretrain get pods \
+                  -l "job-name=$job" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+                  2>/dev/null || true
+              )
+              if (( ${#pods[@]} == 0 )); then
+                echo "No Pod was created for $job" >&2
+                return
+              fi
+              kubectl -n stream2pretrain get pods "${pods[@]}" -o wide || true
+              for pod in "${pods[@]}"; do
+                kubectl -n stream2pretrain describe "pod/$pod" || true
+                kubectl -n stream2pretrain logs "pod/$pod" \
+                  --all-containers --prefix --ignore-errors || true
+                kubectl -n stream2pretrain logs "pod/$pod" \
+                  --all-containers --prefix --previous --ignore-errors || true
+              done
+            }
+
+            wait_for_source_job() {
+              local job="$1"
+              local deadline=$((SECONDS + 1800))
+              local progress_iteration=0
+              while (( SECONDS < deadline )); do
+                local succeeded failed
+                succeeded="$(
+                  kubectl -n stream2pretrain get "job/$job" \
+                    -o jsonpath='{.status.succeeded}' 2>/dev/null || true
+                )"
+                failed="$(
+                  kubectl -n stream2pretrain get "job/$job" \
+                    -o jsonpath='{.status.failed}' 2>/dev/null || true
+                )"
+                if [[ "$succeeded" == "1" ]]; then
+                  kubectl -n stream2pretrain logs "job/$job" \
+                    --all-containers --prefix --ignore-errors || true
+                  return 0
+                fi
+                if [[ -n "$failed" && "$failed" != "0" ]]; then
+                  dump_source_job "$job"
+                  echo "Source validation job failed: $job" >&2
+                  return 1
+                fi
+                progress_iteration=$((progress_iteration + 1))
+                if (( progress_iteration == 1 || progress_iteration % 6 == 0 )); then
+                  echo "Waiting for source validation job: $job"
+                  kubectl -n stream2pretrain get "job/$job" \
+                    -o custom-columns='NAME:.metadata.name,ACTIVE:.status.active,SUCCEEDED:.status.succeeded,FAILED:.status.failed,STARTED:.status.startTime' \
+                    || true
+                  kubectl -n stream2pretrain get pods \
+                    -l "job-name=$job" -o wide || true
+                fi
+                sleep 10
+              done
+              dump_source_job "$job"
+              echo "Source validation timed out: $job" >&2
+              return 1
+            }
+
             validation_jobs=()
             for cronjob in "${cronjobs[@]}"; do
               if ! kubectl -n stream2pretrain get "cronjob/$cronjob" >/dev/null 2>&1; then
@@ -625,42 +690,9 @@ jobs:
               kubectl -n stream2pretrain delete "job/$job" --ignore-not-found --wait=true
               kubectl -n stream2pretrain create job "$job" --from="cronjob/$cronjob"
               validation_jobs+=("$job")
-            done
-
-            deadline=$((SECONDS + 1800))
-            while (( SECONDS < deadline )); do
-              pending=0
-              for job in "${validation_jobs[@]}"; do
-                succeeded="$(
-                  kubectl -n stream2pretrain get "job/$job" \
-                    -o jsonpath='{.status.succeeded}' 2>/dev/null || true
-                )"
-                failed="$(
-                  kubectl -n stream2pretrain get "job/$job" \
-                    -o jsonpath='{.status.failed}' 2>/dev/null || true
-                )"
-                if [[ "$succeeded" == "1" ]]; then
-                  continue
-                fi
-                if [[ -n "$failed" && "$failed" != "0" ]]; then
-                  kubectl -n stream2pretrain logs "job/$job" --all-containers --prefix || true
-                  echo "Source validation job failed: $job" >&2
-                  exit 1
-                fi
-                pending=$((pending + 1))
-              done
-              (( pending == 0 )) && break
-              sleep 10
-            done
-
-            for job in "${validation_jobs[@]}"; do
-              if [[ "$(kubectl -n stream2pretrain get "job/$job" -o jsonpath='{.status.succeeded}')" != "1" ]]; then
-                kubectl -n stream2pretrain describe "job/$job" || true
-                kubectl -n stream2pretrain logs "job/$job" --all-containers --prefix || true
-                echo "Source validation timed out: $job" >&2
+              if ! wait_for_source_job "$job"; then
                 exit 1
               fi
-              kubectl -n stream2pretrain logs "job/$job" --all-containers --prefix
             done
 
             hf_logs="$(
