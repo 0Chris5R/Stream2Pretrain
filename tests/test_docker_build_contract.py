@@ -167,7 +167,7 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "helm_apply_status=${PIPESTATUS[0]}" in workflow
     assert "release: already exists|another operation .* is in progress" in workflow
     assert 'if [[ "$release_applied" != true ]]' in workflow
-    assert 'select(.metadata.deletionTimestamp == null)' in workflow
+    assert "select(.metadata.deletionTimestamp == null)" in workflow
     assert '"pod/$fetcher_ready_pod" -c fetcher' in workflow
 
 
