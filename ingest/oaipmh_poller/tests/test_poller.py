@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -147,3 +148,44 @@ async def test_run_reports_feed_failure_after_attempting_all(
         await poller._run(_cfg(), feeds)
 
     assert attempted == ["oai-test", "oai-test-2"]
+
+
+@pytest.mark.asyncio
+async def test_poll_feed_rate_limits_page_requests_not_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [_record(f"oai:arXiv.org:2608.{index:05d}") for index in range(3)]
+    pages = [OAIPage(records=records, resumption_token=None)]
+    client_options: list[dict[str, Any]] = []
+
+    class _OAIClient:
+        def __init__(self, *_: object, **kwargs: Any) -> None:
+            client_options.append(kwargs)
+
+        async def list_pages(self, **_: Any):  # type: ignore[no-untyped-def]
+            for page in pages:
+                yield page
+
+    slow_feed = SourceFeedSpec.model_validate(
+        {
+            "name": "oai-slow-request-limit",
+            "protocol": "oai-pmh",
+            "endpoint": "https://oai.example.test/oai",
+            "pollIntervalSeconds": 7200,
+            "rateLimit": {"requestsPerSecond": 0.01, "burst": 1},
+            "licenseDefault": "per-record",
+        }
+    )
+    monkeypatch.setattr(poller, "build_async_client", lambda *_args, **_kwargs: _AsyncResource())
+    monkeypatch.setattr(poller, "BronzeProducer", _Producer)
+    monkeypatch.setattr(poller, "LicenseAdmissionProducer", _Producer)
+    monkeypatch.setattr(poller, "MinioWriter", _Minio)
+    monkeypatch.setattr(poller, "OAIClient", _OAIClient)
+
+    emitted = await asyncio.wait_for(
+        poller.poll_feed(slow_feed, _cfg(), state_store=FeedStateStore(tmp_path)),
+        timeout=0.25,
+    )
+
+    assert emitted == 3
+    assert client_options == [{"sleep_between_requests": 100.0}]

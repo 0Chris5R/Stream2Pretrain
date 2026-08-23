@@ -25,7 +25,6 @@ from ingest.common.license_admission import decide_license_admission, normalize_
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
-from ingest.common.rate_limit import TokenBucket
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 from ingest.common.state import FeedStateStore
 from ingest.oaipmh_poller.client import OAIClient
@@ -58,7 +57,6 @@ async def poll_feed(
         resumption_token = None
 
     headers = build_headers(cfg, accept="application/xml, text/xml;q=0.9")
-    bucket = TokenBucket(feed.rate_limit.requests_per_second, feed.rate_limit.burst)
     emitted = 0
     handled = 0
     pages_handled = 0
@@ -79,7 +77,16 @@ async def poll_feed(
             bucket=cfg.minio_bronze_bucket,
         ) as minio,
     ):
-        oai = OAIClient(str(feed.endpoint), client)
+        # OAI-PMH returns hundreds or thousands of records per HTTP response.
+        # Rate-limit the page requests in OAIClient, never the records already
+        # present in a fetched response.  arXiv asks clients to leave at least
+        # one second between requests, even when a SourceFeed allows more.
+        request_interval = max(1.0, 1.0 / feed.rate_limit.requests_per_second)
+        oai = OAIClient(
+            str(feed.endpoint),
+            client,
+            sleep_between_requests=request_interval,
+        )
         async for page in oai.list_pages(
             metadata_prefix=metadata_prefix,
             set_spec=set_spec,
@@ -88,7 +95,6 @@ async def poll_feed(
             resumption_token=resumption_token,
         ):
             for index, record in enumerate(page.records):
-                await bucket.acquire()
                 handled += 1
                 if not record.deleted:
                     url = record.arxiv_abs_url() or f"oai://{feed.endpoint}/{record.identifier}"
