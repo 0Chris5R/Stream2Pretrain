@@ -97,7 +97,11 @@ for every property of every topic. Deployment stops if a required topic has no
 partitions. Documentation-only pushes do not deploy. Python and Helm checks,
 source reconciliation, the core canary, image builds, and rollout waits are
 selected from the changed paths and immutable digests; an unchanged unhealthy
-workload cannot delay an unrelated release.
+workload cannot delay an unrelated release. Application updates use a direct
+Helm sync, then wait in parallel only for Deployments and StatefulSets whose
+generation changed in that release. The normal readiness budget is 60 seconds;
+only an actual multi-GiB model-image change receives the extended model-load
+budget.
 
 ```bash
 uv run python scripts/capacity_probe.py

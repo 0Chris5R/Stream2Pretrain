@@ -107,9 +107,20 @@ class PiiScanner:
     @staticmethod
     def _load_presidio() -> object | None:
         try:
-            from presidio_analyzer import AnalyzerEngine  # type: ignore[import-untyped]
+            from presidio_analyzer import (  # type: ignore[import-untyped]
+                AnalyzerEngine,
+                RecognizerRegistry,
+            )
             from presidio_analyzer.nlp_engine import (  # type: ignore[import-untyped]
                 NlpEngineProvider,
+            )
+            from presidio_analyzer.predefined_recognizers import (  # type: ignore[import-untyped]
+                CreditCardRecognizer,
+                EmailRecognizer,
+                IpRecognizer,
+                PhoneRecognizer,
+                UsPassportRecognizer,
+                UsSsnRecognizer,
             )
 
             configuration = {
@@ -117,7 +128,24 @@ class PiiScanner:
                 "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
             }
             nlp_engine = NlpEngineProvider(nlp_configuration=configuration).create_engine()
+            # The default Presidio registry eagerly installs every bundled
+            # country-specific recognizer, although this scanner maps only the
+            # six entities below. A non-empty explicit registry prevents that
+            # global recognizer set from being loaded and keeps the CPU curator
+            # inside its memory envelope without weakening mapped PII coverage.
+            registry = RecognizerRegistry(
+                recognizers=[
+                    CreditCardRecognizer(),
+                    EmailRecognizer(),
+                    IpRecognizer(),
+                    PhoneRecognizer(),
+                    UsPassportRecognizer(),
+                    UsSsnRecognizer(),
+                ],
+                supported_languages=["en"],
+            )
             return AnalyzerEngine(
+                registry=registry,
                 nlp_engine=nlp_engine,
                 supported_languages=["en"],
             )

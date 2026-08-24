@@ -207,6 +207,15 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "helm_apply_status=${PIPESTATUS[0]}" in workflow
     assert "release: already exists|another operation .* is in progress" in workflow
     assert 'if [[ "$release_applied" != true ]]' in workflow
+    helm_release = workflow[
+        workflow.index("release_applied=false") : workflow.index(
+            'finish_phase "Changed workload readiness"'
+        )
+    ]
+    assert "\n              sync \\\n" in helm_release
+    assert "--wait-for-jobs" not in helm_release
+    assert 'rollout_timeout=60' in helm_release
+    assert ') >"$log" 2>&1 &' in helm_release
     assert "select(.metadata.deletionTimestamp == null)" in workflow
     assert '"pod/$fetcher_ready_pod" -c fetcher' in workflow
 
@@ -218,6 +227,12 @@ def test_fetcher_uses_matching_official_cpu_vision_wheels() -> None:
     assert '"torchvision>=0.18,<1"' in processor_project
     assert 'name = "torchvision"\nversion = "0.28.0+cpu"' in lock
     assert 'source = { registry = "https://download.pytorch.org/whl/cpu" }' in lock
+
+
+def test_cpu_pdf_fallback_does_not_load_the_codeformula_vlm() -> None:
+    scientific = (ROOT / "processor" / "scientific.py").read_text(encoding="utf-8")
+
+    assert "options.do_formula_enrichment = False" in scientific
 
 
 def test_scaled_zero_curator_cutover_uses_a_non_processing_pvc_helper() -> None:

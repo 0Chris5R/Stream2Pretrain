@@ -90,7 +90,7 @@ jobs:
             deploy=true
           fi
           if grep -Eq \
-            '^(schemas/|charts/stream2pretrain/|infra/helmfile-values/|scripts/(cluster_smoke|reconcile_topic_partitions|bytewax_cutover_marker|migrate_fetcher_offsets)\.|\.github/workflows/deploy-main\.yml$)' \
+            '^(schemas/|charts/stream2pretrain/|infra/helmfile-values/|scripts/(cluster_smoke|reconcile_topic_partitions|bytewax_cutover_marker|migrate_fetcher_offsets)\.)' \
             "$changed"; then
             core=true
           fi
@@ -837,7 +837,7 @@ jobs:
         with:
           version: "${{ env.HELM_VERSION }}"
 
-      - name: Install Helmfile and Helm diff
+      - name: Install Helmfile
         shell: bash
         run: |
           set -euo pipefail
@@ -848,7 +848,6 @@ jobs:
             --output "$archive"
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           sudo install -m 0755 "$RUNNER_TEMP/helmfile" /usr/local/bin/helmfile
-          helm plugin install https://github.com/databus23/helm-diff --version v3.9.12
 
       - name: Install Cisco AnyConnect-compatible VPN client
         run: |
@@ -2302,7 +2301,7 @@ jobs:
           workloads_before="$RUNNER_TEMP/stream2pretrain-workloads-before.json"
           kubectl -n stream2pretrain get deployment,statefulset -o json \
             > "$workloads_before"
-          helm_timeout=240
+          helm_timeout=120
           if [[ "$model_image_changed" == "true" ]]; then
             helm_timeout=600
           fi
@@ -2313,10 +2312,8 @@ jobs:
               --file helmfile.yaml \
               --environment dev \
               --selector name=stream2pretrain \
-              apply \
+              sync \
               --reset-values \
-              --wait \
-              --wait-for-jobs \
               --timeout "$helm_timeout" \
               --description "github-actions ${GITHUB_SHA}" \
               --suppress-secrets \
@@ -2342,18 +2339,16 @@ jobs:
             report_deploy_failure
             exit 1
           fi
-          finish_phase "Helm diff and apply"
+          finish_phase "Helm sync"
 
           kubectl -n stream2pretrain annotate scaledobject --all \
             autoscaling.keda.sh/paused- || true
 
-          # Helm has already waited for changed resources. Never wait on an
-          # unchanged unhealthy workload: compare generations captured before
-          # the apply and inspect only resources this release mutated.
-          while read -r workload; do
-            [[ -n "$workload" ]] || continue
-            kubectl -n stream2pretrain rollout status "$workload" --timeout=30s
-          done < <(
+          # Wait only for resources whose generation this release changed.
+          # Helm's global --wait blocks on every historical workload in the
+          # release, including an unrelated unhealthy component. The parallel
+          # waits preserve fail-closed readiness without serial timeout cost.
+          mapfile -t changed_workloads < <(
             kubectl -n stream2pretrain get deployment,statefulset -o json \
               | jq -r --slurpfile before "$workloads_before" '
                   .items[]
@@ -2374,6 +2369,33 @@ jobs:
                   | (.kind | ascii_downcase) + "/" + .metadata.name
                 '
           )
+          rollout_timeout=60
+          if [[ "$model_image_changed" == "true" ]]; then
+            rollout_timeout=600
+          fi
+          rollout_pids=()
+          rollout_logs=()
+          for workload in "${changed_workloads[@]}"; do
+            [[ -n "$workload" ]] || continue
+            log="$RUNNER_TEMP/rollout-${workload//\//-}.log"
+            (
+              kubectl -n stream2pretrain rollout status \
+                "$workload" --timeout="${rollout_timeout}s"
+            ) >"$log" 2>&1 &
+            rollout_pids+=("$!")
+            rollout_logs+=("$log")
+          done
+          rollout_failed=false
+          for index in "${!rollout_pids[@]}"; do
+            if ! wait "${rollout_pids[$index]}"; then
+              rollout_failed=true
+            fi
+            cat "${rollout_logs[$index]}"
+          done
+          if [[ "$rollout_failed" == "true" ]]; then
+            report_deploy_failure
+            exit 1
+          fi
           finish_phase "Changed workload readiness"
 
           # The running v2 workloads must persist a marker whose identity is
