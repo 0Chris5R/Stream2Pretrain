@@ -207,6 +207,7 @@ jobs:
               raise SystemExit("aggregate ingest-blogs CronJob must not be rendered")
           for kind, name in (
               ("Deployment", "stream2pretrain-processor-fetcher"),
+              ("Deployment", "stream2pretrain-processor-fetcher-scientific"),
               ("StatefulSet", "stream2pretrain-processor-curate"),
               ("Deployment", "stream2pretrain-processor-iceberg-writer"),
               ("Deployment", "stream2pretrain-ingest-arxiv-html"),
@@ -236,6 +237,17 @@ jobs:
                       "S2P_KAFKA_START_OFFSET": "stored",
                       "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-v2",
                       "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-v2",
+                      "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
+                  },
+              ),
+              (
+                  "Deployment",
+                  "stream2pretrain-processor-fetcher-scientific",
+                  "fetcher",
+                  {
+                      "S2P_KAFKA_START_OFFSET": "stored",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-scientific-v2",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-scientific-v2",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -273,6 +285,7 @@ jobs:
                   )
           forbidden_scalers = {
               "stream2pretrain-processor-fetcher",
+              "stream2pretrain-processor-fetcher-scientific",
               "stream2pretrain-processor-curate",
               "stream2pretrain-processor-iceberg-writer",
               "stream2pretrain-ingest-arxiv-html",
@@ -1660,7 +1673,7 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::Processor recovery and metrics"
-            for component in processor-fetcher processor-curate processor-iceberg-writer; do
+            for component in processor-fetcher processor-fetcher-scientific processor-curate processor-iceberg-writer; do
               pod="$(
                 kubectl -n stream2pretrain get pod \
                   -l "app.kubernetes.io/component=${component}" \
@@ -2178,10 +2191,12 @@ jobs:
             --set "ingest.githubTarballFetcher.image=stream2pretrain/ingest-github-tarball-fetcher@${IMAGE_DIGEST_INGEST_GITHUB_TARBALL}"
             --set "ingest.openreview.image=stream2pretrain/ingest-openreview@${IMAGE_DIGEST_INGEST_OPENREVIEW}"
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
+            --set "processor.fetcher.scientific.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
             --set "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
             --set "processor.modelService.profiles.embedding.image=stream2pretrain/processor-embedding-model@${IMAGE_DIGEST_PROCESSOR_EMBEDDING}"
             --set "processor.modelService.profiles.kenlm.image=stream2pretrain/processor-kenlm-model@${IMAGE_DIGEST_PROCESSOR_KENLM}"
+            --set "processor.modelService.profiles.privacy.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.iceberg.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.duckdbApi.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.deconGate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
@@ -2210,14 +2225,19 @@ jobs:
           # digest actually changes. Unchanged services keep their Pods, model
           # memory, HPA state, and readiness throughout the release.
           model_image_changed=false
-          for profile in quality embedding kenlm; do
+          for profile in quality embedding kenlm privacy; do
             model="stream2pretrain-processor-model-service-${profile}"
             case "$profile" in
               quality) digest="$IMAGE_DIGEST_PROCESSOR_QUALITY" ;;
               embedding) digest="$IMAGE_DIGEST_PROCESSOR_EMBEDDING" ;;
               kenlm) digest="$IMAGE_DIGEST_PROCESSOR_KENLM" ;;
+              privacy) digest="$IMAGE_DIGEST_PROCESSOR" ;;
             esac
-            target_image="${registry}/stream2pretrain/processor-${profile}-model@${digest}"
+            if [[ "$profile" == "privacy" ]]; then
+              target_image="${registry}/stream2pretrain/processor@${digest}"
+            else
+              target_image="${registry}/stream2pretrain/processor-${profile}-model@${digest}"
+            fi
             current_image="$(
               kubectl -n stream2pretrain get "deployment/$model" -o json 2>/dev/null \
                 | jq -r '
@@ -2345,7 +2365,15 @@ jobs:
           # the apply and inspect only resources this release mutated.
           while read -r workload; do
             [[ -n "$workload" ]] || continue
+            set +e
             kubectl -n stream2pretrain rollout status "$workload" --timeout=30s
+            rollout_status=$?
+            set -e
+            if [[ "$rollout_status" -ne 0 ]]; then
+              echo "Rollout failed or timed out: $workload" >&2
+              report_deploy_failure
+              exit "$rollout_status"
+            fi
           done < <(
             kubectl -n stream2pretrain get deployment,statefulset -o json \
               | jq -r --slurpfile before "$workloads_before" '

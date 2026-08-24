@@ -54,7 +54,14 @@ processor:
     replicas: 1
     tag: "0.2.0-1f4cf19"
     requireRealModels: true
-    doclingEnabled: true
+    doclingEnabled: false
+    scientific:
+      enabled: true
+      nodeSelector:
+        kubernetes.io/hostname: stream2pretrain-worker-2
+      resources:
+        requests: {cpu: 2, memory: 3Gi}
+        limits: {cpu: 4, memory: 4Gi}
   curate:
     replicas: 1
     tag: "0.2.0-619290f"
@@ -69,6 +76,12 @@ processor:
   modelService:
     enabled: true
     replicas: 1
+    profiles:
+      privacy:
+        image: stream2pretrain/processor
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 2Gi}
     autoscaling:
       enabled: true
       minReplicas: 1

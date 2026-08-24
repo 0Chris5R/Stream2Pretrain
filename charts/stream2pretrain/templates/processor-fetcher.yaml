@@ -78,6 +78,8 @@ spec:
               value: s2p-fetcher
             - name: S2P_FETCHER_INPUT_TOPICS
               value: {{ .Values.redpanda.topics.rawFetched | quote }}
+            - name: S2P_FETCHER_SOURCE_FORMATS
+              value: {{ join "," .Values.processor.fetcher.sourceFormats | quote }}
             - name: S2P_BYTEWAX_RECOVERY_PARTITIONS
               value: {{ $checkpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
@@ -130,6 +132,142 @@ spec:
       targetPort: metrics
   selector:
     {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+{{- if .Values.processor.fetcher.scientific.enabled }}
+---
+{{- $scientificComponent := "processor-fetcher-scientific" }}
+{{- $scientificName := printf "%s-%s" (include "stream2pretrain.fullname" .) $scientificComponent }}
+{{- $scientificCheckpoint := .Values.processor.fetcher.scientific.checkpoint }}
+{{- $scientificCheckpointClaim := default (printf "%s-checkpoint" $scientificName) $scientificCheckpoint.existingClaim }}
+{{- if not $scientificCheckpoint.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $scientificCheckpointClaim }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $scientificComponent) | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $scientificCheckpoint.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $scientificCheckpoint.size | quote }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $scientificName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $scientificComponent) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $scientificComponent) | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $scientificComponent) | nindent 8 }}
+        stream2pretrain.io/egress-class: blogs
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- if .Values.processor.fetcher.scientific.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.processor.fetcher.scientific.nodeSelector | nindent 8 }}
+      {{- else }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      {{- end }}
+      containers:
+        - name: fetcher
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.scientific.image "tag" .Values.processor.fetcher.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["s2p-fetcher"]
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $scientificComponent | quote }}
+            - name: S2P_BYTEWAX_FLOW_NAME
+              value: {{ .Values.processor.fetcher.scientific.flowName | quote }}
+            - name: S2P_BYTEWAX_RECOVERY_NAME
+              value: {{ .Values.processor.fetcher.scientific.recoveryName | quote }}
+            - name: S2P_STATE_DIR
+              value: /var/lib/s2p/checkpoint
+            - name: S2P_CONSUMER_GROUP
+              value: {{ .Values.processor.fetcher.scientific.consumerGroup | quote }}
+            - name: S2P_FETCHER_INPUT_TOPICS
+              value: {{ .Values.redpanda.topics.rawFetched | quote }}
+            - name: S2P_FETCHER_SOURCE_FORMATS
+              value: {{ join "," .Values.processor.fetcher.scientific.sourceFormats | quote }}
+            - name: S2P_BYTEWAX_RECOVERY_PARTITIONS
+              value: {{ $scientificCheckpoint.recoveryPartitions | int | quote }}
+            - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
+              value: {{ $scientificCheckpoint.snapshotSeconds | quote }}
+            - name: S2P_MAX_RAW_OBJECT_BYTES
+              value: "67108864"
+            - name: S2P_MAX_EXPANDED_OBJECT_BYTES
+              value: "67108864"
+            - name: S2P_WAYBACK_LOOKUP_ENABLED
+              value: "0"
+            - name: S2P_DOCLING_ENABLED
+              value: {{ ternary "1" "0" .Values.processor.fetcher.scientific.doclingEnabled | quote }}
+            - name: S2P_REQUIRE_REAL_MODELS
+              value: {{ ternary "1" "0" .Values.processor.fetcher.scientific.requireRealModels | quote }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.processor.fetcher.scientific.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: checkpoint
+              mountPath: /var/lib/s2p/checkpoint
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: checkpoint
+          persistentVolumeClaim:
+            claimName: {{ $scientificCheckpointClaim | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $scientificName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $scientificComponent) | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  selector:
+    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $scientificComponent) | nindent 4 }}
+{{- end }}
 {{- if .Values.processor.fetcher.canary.enabled }}
 ---
 {{- $canaryComponent := "processor-fetcher-canary" }}

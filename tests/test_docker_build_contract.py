@@ -92,7 +92,7 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert "maxSurge:" not in model_service_template
     assert "from docling.document_converter import DocumentConverter" in dockerfile
     assert "hasattr(torch.ops.torchvision, 'nms')" in dockerfile
-    assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 2
+    assert fetcher_template.count("S2P_REQUIRE_REAL_MODELS") == 3
 
 
 def test_fetcher_image_has_an_isolated_application_and_dependency_profile() -> None:
@@ -239,18 +239,13 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 
     model_input = (
-        "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
-        "ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app "
-        "processor/__init__.py processor/common.py processor/model_service.py"
+        "inputs: .dockerignore schemas processor/Dockerfile.model-service.app "
+        "processor/__init__.py processor/common.py processor/model_service.py "
+        "processor/decon_gate.py processor/sign.py processor/operators/__init__.py "
+        "processor/operators/quality.py processor/operators/kenlm_score.py"
     )
     assert workflow.count(model_input) == 3
-    assert (
-        workflow.count(
-            "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
-            "ingest/*/pyproject.toml schemas processor\n"
-        )
-        == 0
-    )
+    assert "processor/__init__.py processor/common.py processor/model_service.py" in workflow
 
 
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)

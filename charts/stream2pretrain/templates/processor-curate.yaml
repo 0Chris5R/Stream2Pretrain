@@ -52,6 +52,7 @@ spec:
                   "http://{{ printf "%s-processor-model-service-quality" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
                   "http://{{ printf "%s-processor-model-service-kenlm" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
                   "http://{{ printf "%s-processor-model-service-embedding" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
+                  "http://{{ printf "%s-processor-model-service-privacy" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
               ]
               deadline = time.monotonic() + 900
               for url in urls:
@@ -160,6 +161,8 @@ spec:
               value: {{ printf "http://%s-processor-model-service-kenlm:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             - name: S2P_EMBEDDING_MODEL_SERVICE_URL
               value: {{ printf "http://%s-processor-model-service-embedding:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_PII_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-privacy:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             {{- end }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.curate.requireRealModels | quote }}

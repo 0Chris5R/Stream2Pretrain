@@ -30,12 +30,26 @@ class _Embedding:
         self.revision = revision or "e5@pinned"
 
 
+class _Privacy:
+    revision = "regex-luhn-v1+presidio-test"
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        return
+
+    def scan(self, _text: str) -> list[object]:
+        return []
+
+    def blocking_flags(self, _text: str) -> list[str]:
+        return []
+
+
 @pytest.mark.parametrize(
     ("profile", "expected_keys"),
     [
         ("quality", {"ready", "profile", "quality"}),
         ("kenlm", {"ready", "profile", "kenlm"}),
         ("embedding", {"ready", "profile", "embedding"}),
+        ("privacy", {"ready", "profile", "privacy"}),
         ("all", {"ready", "profile", "quality", "kenlm", "embedding"}),
     ],
 )
@@ -48,6 +62,7 @@ def test_runtime_loads_only_its_selected_model_family(
     monkeypatch.setattr(model_service, "QualityClassifier", _Quality)
     monkeypatch.setattr(model_service, "KenLMScorer", _KenLM)
     monkeypatch.setattr(model_service, "_EmbeddingSketch", _Embedding)
+    monkeypatch.setattr(model_service, "PiiScanner", _Privacy)
 
     runtime = model_service.CuratorModelRuntime(tmp_path, profile=profile)
 
@@ -55,3 +70,4 @@ def test_runtime_loads_only_its_selected_model_family(
     assert (runtime.finepdfs is not None) is (profile in {"quality", "all"})
     assert (runtime.kenlm is not None) is (profile in {"kenlm", "all"})
     assert (runtime.embedding is not None) is (profile in {"embedding", "all"})
+    assert (runtime.privacy is not None) is (profile == "privacy")

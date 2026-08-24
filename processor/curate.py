@@ -47,6 +47,7 @@ from processor.model_client import (
     CuratorModelClient,
     RemoteEmbeddingSketch,
     RemoteKenLMScorer,
+    RemotePiiScanner,
     RemoteQualityClassifier,
 )
 from processor.operators.c4 import C4Filter
@@ -99,6 +100,15 @@ class PerplexityScorer(Protocol):
     def score(self, text: str) -> PerplexityResult: ...
 
 
+class PiiScannerProtocol(Protocol):
+    @property
+    def revision(self) -> str: ...
+
+    def flags(self, text: str) -> list[PiiFlag]: ...
+
+    def blocking_flags(self, text: str) -> list[PiiFlag]: ...
+
+
 @dataclass(slots=True)
 class CurateState:
     """Per-worker state for the curation dataflow."""
@@ -113,7 +123,7 @@ class CurateState:
     code_quality: CodeQualityPolicy
     metadata_discovery: MetadataDiscoveryPolicy
     review_quality: PeerReviewQualityPolicy
-    pii: PiiScanner
+    pii: PiiScannerProtocol
     decon: DeconGate
     tokenizer: Tokenizer
     policy_revision: str
@@ -136,12 +146,14 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     quality_service_url = os.environ.get("S2P_QUALITY_MODEL_SERVICE_URL", "").strip()
     kenlm_service_url = os.environ.get("S2P_KENLM_MODEL_SERVICE_URL", "").strip()
     embedding_service_url = os.environ.get("S2P_EMBEDDING_MODEL_SERVICE_URL", "").strip()
+    pii_service_url = os.environ.get("S2P_PII_MODEL_SERVICE_URL", "").strip()
     kenlm_path = os.path.join(models, "kenlm", "en.arpa.bin")
     kenlm_sentencepiece_path = os.path.join(models, "kenlm", "en.sp.model")
     finepdfs_quality_dir = os.path.join(models, "finepdfs-edu-v2")
     fineweb_quality_dir = os.path.join(models, "fineweb-edu")
     e5_dir = os.path.join(models, "e5-small")
     model_clients: tuple[CuratorModelClient, ...] = ()
+    pii: PiiScannerProtocol
     embedding: EmbeddingSketch
     kenlm: PerplexityScorer
     finepdfs_quality: QualityScorer
@@ -187,7 +199,12 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             model_family="fineweb-edu",
             allow_fallback=not require_real_models,
         )
-    pii = PiiScanner(allow_fallback=not require_real_models)
+    if pii_service_url:
+        pii_client = CuratorModelClient(pii_service_url)
+        pii = RemotePiiScanner(pii_client)
+        model_clients = (*model_clients, pii_client)
+    else:
+        pii = PiiScanner(allow_fallback=not require_real_models)
     minhasher = MinHasher()
     if require_real_models and minhasher.backend == "fallback-pyhash":
         raise RuntimeError("datasketch or rensa MinHash is required")
@@ -719,7 +736,7 @@ _STRUCTURED_BLOCK_START = re.compile(r"(?=\[(?:TABLE|EQUATION|FIGURE)\])")
 
 
 def _filter_structured_projection(
-    scanner: PiiScanner, structured_text: str
+    scanner: PiiScannerProtocol, structured_text: str
 ) -> tuple[str, list[PiiFlag], list[str]]:
     """Remove only structured evidence blocks containing blocking PII.
 

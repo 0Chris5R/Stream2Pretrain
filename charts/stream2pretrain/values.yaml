@@ -507,7 +507,10 @@ processor:
     # only Docling and figure-classification artifacts and fails startup when
     # a real extraction dependency is missing.
     requireRealModels: true
-    doclingEnabled: true
+    # The main execution owns every format except PDF. It still performs
+    # scientific HTML enrichment, but never initializes the Docling PDF path.
+    sourceFormats: [html, markdown, latex, code, web, metadata, review]
+    doclingEnabled: false
     # Bytewax owns source progress in a durable recovery database. Scale this
     # as one coordinated execution, never with independent Kafka-lag replicas.
     replicas: 1
@@ -534,11 +537,31 @@ processor:
         requests: {cpu: 100m, memory: 512Mi}
         limits: {cpu: 1, memory: 2Gi}
     resources:
-      # The extraction process owns the language detector and document tools.
-      # The former 1Gi limit was observed OOM-killing the process during
-      # initialization; retain headroom while real peak RSS is measured.
+      # The main execution is intentionally below the measured PDF peak.
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: 1, memory: 2Gi}
+    scientific:
+      enabled: true
+      image: stream2pretrain/processor-fetcher-model
+      sourceFormats: [pdf]
+      doclingEnabled: true
+      requireRealModels: true
+      consumerGroup: s2p-fetcher-scientific
+      flowName: s2p-fetcher-scientific-v2
+      recoveryName: fetcher-scientific-v2
+      checkpoint:
+        existingClaim: ""
+        storageClass: ""
+        size: 2Gi
+        recoveryPartitions: 4
+        snapshotSeconds: 1
+      # A real arXiv PDF benchmark peaked at 3,042,484,224 bytes
+      # in the live image. The 4Gi ceiling is the first bounded profile above
+      # that observed peak; re-run the benchmark when the PDF policy changes.
+      resources:
+        requests: {cpu: 2, memory: 3Gi}
+        limits: {cpu: 4, memory: 4Gi}
+      nodeSelector: {}
   curate:
     # Durable deduplication remains in this lightweight stateful worker. Large
     # immutable classifiers are isolated behind modelService so the local RWO
@@ -593,6 +616,11 @@ processor:
         resources:
           requests: {cpu: 250m, memory: 512Mi}
           limits: {cpu: 1, memory: 1Gi}
+      privacy:
+        image: stream2pretrain/processor
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: 2, memory: 2Gi}
     autoscaling:
       enabled: true
       minReplicas: 1

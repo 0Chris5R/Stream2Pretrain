@@ -13,6 +13,7 @@ from processor.fetcher import (
     _review_payload_text,
     fetch_raw_bytes,
     fetcher_input_topics,
+    fetcher_source_formats,
     normalize,
     process_bronze_payload,
     serialize_for_kafka,
@@ -90,6 +91,19 @@ def test_scientific_extraction_is_source_aware(bronze_record: BronzeRecord) -> N
     assert uses_scientific_extraction(blog) is False
     assert uses_scientific_extraction(paper) is True
     assert uses_scientific_extraction(review) is False
+
+
+def test_fetcher_source_format_lane_skips_unowned_records(
+    bronze_record: BronzeRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("S2P_FETCHER_SOURCE_FORMATS", "html,code,review")
+    assert fetcher_source_formats() == frozenset({"html", "code", "review"})
+    s3 = _FakeS3(b"this body must not be read")
+    state = _state(s3)
+    pdf = bronze_record.model_copy(update={"source_format": "pdf"})
+
+    assert process_bronze_payload(state, pdf.model_dump_json().encode()) is None
+    assert s3.calls == []
 
 
 def test_hf_card_projection_excludes_frontmatter_and_fenced_code() -> None:

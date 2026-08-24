@@ -16,11 +16,14 @@ import orjson
 from processor import common
 from processor.decon_gate import _EmbeddingSketch  # type: ignore[attr-defined]
 from processor.operators.kenlm_score import KenLMScorer
+from processor.operators.pii import PiiScanner
 from processor.operators.quality import QualityClassifier
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
-ModelProfile = Literal["quality", "kenlm", "embedding", "all"]
-MODEL_PROFILES: frozenset[str] = frozenset({"quality", "kenlm", "embedding", "all"})
+ModelProfile = Literal["quality", "kenlm", "embedding", "privacy", "all"]
+MODEL_PROFILES: frozenset[str] = frozenset(
+    {"quality", "kenlm", "embedding", "privacy", "all"}
+)
 
 
 class CuratorModelRuntime:
@@ -33,6 +36,7 @@ class CuratorModelRuntime:
         self.fineweb: QualityClassifier | None = None
         self.kenlm: KenLMScorer | None = None
         self.embedding: _EmbeddingSketch | None = None
+        self.privacy: PiiScanner | None = None
         if profile in {"quality", "all"}:
             self.finepdfs = QualityClassifier(
                 root / "finepdfs-edu-v2",
@@ -58,6 +62,8 @@ class CuratorModelRuntime:
                 revision=os.environ.get("E5_SMALL_REVISION"),
                 allow_fallback=False,
             )
+        if profile == "privacy":
+            self.privacy = PiiScanner(use_presidio=True, allow_fallback=False)
         self.lock = threading.Lock()
 
     def metadata(self) -> dict[str, Any]:
@@ -82,6 +88,11 @@ class CuratorModelRuntime:
             metadata["embedding"] = {
                 "backend": self.embedding.backend,
                 "revision": self.embedding.revision,
+            }
+        if self.privacy is not None:
+            metadata["privacy"] = {
+                "backend": "presidio-spacy",
+                "revision": self.privacy.revision,
             }
         return metadata
 
@@ -162,6 +173,22 @@ class _Handler(BaseHTTPRequestHandler):
                     self._write(
                         HTTPStatus.OK,
                         {"embedding": self.runtime.embedding.embed(text)},
+                    )
+                    return
+                if self.path == "/v1/pii":
+                    if self.runtime.privacy is None:
+                        raise ValueError("privacy scanning is unavailable in this model profile")
+                    hits = self.runtime.privacy.scan(text)
+                    self._write(
+                        HTTPStatus.OK,
+                        {
+                            "revision": self.runtime.privacy.revision,
+                            "hits": [
+                                {"flag": hit.flag, "snippet": hit.snippet}
+                                for hit in hits
+                            ],
+                            "blocking_flags": self.runtime.privacy.blocking_flags(text),
+                        },
                     )
                     return
             self._write(HTTPStatus.NOT_FOUND, {"error": "not found"})

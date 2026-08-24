@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from processor.operators.kenlm_score import PerplexityResult
+from processor.operators.pii import PiiHit
 from processor.operators.quality import QualityScore
 from schemas.decon import BenchmarkName
+from schemas.gold import PiiFlag
 
 
 class ModelServiceError(RuntimeError):
@@ -199,6 +201,57 @@ class RemoteEmbeddingSketch:
             (benchmark, max((_cosine(query, vector) for vector in vectors), default=0.0))
             for benchmark, vectors in self._index.items()
         ]
+
+
+class RemotePiiScanner:
+    """PiiScanner-compatible facade backed by the isolated privacy service."""
+
+    def __init__(self, client: CuratorModelClient) -> None:
+        self._client = client
+        metadata = client.metadata.get("privacy", {})
+        if metadata.get("backend") != "presidio-spacy":
+            raise RuntimeError("the remote privacy backend is not Presidio with spaCy")
+        self._revision = str(metadata.get("revision", ""))
+        if not self._revision:
+            raise RuntimeError("the remote privacy backend has no revision")
+
+    @property
+    def revision(self) -> str:
+        return self._revision
+
+    @property
+    def is_presidio_loaded(self) -> bool:
+        return True
+
+    def scan(self, text: str) -> list[PiiHit]:
+        payload = self._client._post("/v1/pii", {"text": text})
+        hits = payload.get("hits", [])
+        if not isinstance(hits, list):
+            raise ModelServiceError("privacy service returned invalid PII hits")
+        result: list[PiiHit] = []
+        for item in hits:
+            if not isinstance(item, dict):
+                raise ModelServiceError("privacy service returned an invalid PII hit")
+            try:
+                result.append(
+                    PiiHit(
+                        flag=cast(PiiFlag, str(item["flag"])),
+                        snippet=str(item["snippet"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ModelServiceError("privacy service returned an invalid PII hit") from exc
+        return result
+
+    def flags(self, text: str) -> list[PiiFlag]:
+        return sorted({hit.flag for hit in self.scan(text)})
+
+    def blocking_flags(self, text: str) -> list[PiiFlag]:
+        payload = self._client._post("/v1/pii", {"text": text})
+        blocking = payload.get("blocking_flags")
+        if not isinstance(blocking, list) or not all(isinstance(value, str) for value in blocking):
+            raise ModelServiceError("privacy service returned invalid blocking PII flags")
+        return [cast(PiiFlag, value) for value in blocking]
 
 
 def _cosine(left: list[float], right: list[float]) -> float:

@@ -102,6 +102,23 @@ def build_state(cfg: common.ProcessorConfig, *, with_wayback: bool = True) -> Fe
     )
 
 
+def fetcher_source_formats() -> frozenset[str] | None:
+    """Return the source-format lane owned by this fetcher execution.
+
+    Multiple Bytewax executions may consume the shared ``raw.fetched`` topic
+    with distinct consumer groups. An empty setting keeps the historical
+    all-formats behavior; a populated setting lets the lightweight execution
+    advance non-PDF records while a dedicated Docling execution owns PDFs.
+    """
+    configured = os.environ.get("S2P_FETCHER_SOURCE_FORMATS", "").strip()
+    if not configured:
+        return None
+    formats = frozenset(value.strip() for value in configured.split(",") if value.strip())
+    if not formats:
+        raise RuntimeError("S2P_FETCHER_SOURCE_FORMATS must contain at least one format")
+    return formats
+
+
 def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
     """Read the raw HTML pointed at by ``bronze.raw_html_s3_uri``.
 
@@ -572,6 +589,9 @@ def process_bronze_payload(
 ) -> SilverRecord | None:
     """Deserialize a Kafka payload, run the pipeline, return the silver row."""
     bronze = common.bronze_loads(payload)
+    owned_formats = fetcher_source_formats()
+    if owned_formats is not None and bronze.source_format not in owned_formats:
+        return None
     # Metadata envelopes schedule content work but are not corpus documents.
     # Skip before the MinIO read, extraction, OCR, language, and MinHash stages.
     if bronze.source_format == "metadata":

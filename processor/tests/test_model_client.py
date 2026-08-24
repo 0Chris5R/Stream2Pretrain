@@ -10,6 +10,7 @@ from processor.model_client import (
     ModelServiceError,
     RemoteEmbeddingSketch,
     RemoteKenLMScorer,
+    RemotePiiScanner,
     RemoteQualityClassifier,
 )
 
@@ -35,6 +36,10 @@ def _metadata() -> dict[str, object]:
             "backend": "onnxruntime-cpu",
             "revision": "e5@pinned",
         },
+        "privacy": {
+            "backend": "presidio-spacy",
+            "revision": "regex-luhn-v1+presidio-test",
+        },
     }
 
 
@@ -57,6 +62,15 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
             )
         if request.url.path == "/v1/embed":
             return httpx.Response(200, json={"embedding": [1.0, 0.0]})
+        if request.url.path == "/v1/pii":
+            return httpx.Response(
+                200,
+                json={
+                    "revision": "regex-luhn-v1+presidio-test",
+                    "hits": [{"flag": "email", "snippet": "user@example.com"}],
+                    "blocking_flags": ["email"],
+                },
+            )
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -66,6 +80,7 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
     fineweb = RemoteQualityClassifier(client, "fineweb-edu")
     kenlm = RemoteKenLMScorer(client)
     embeddings = RemoteEmbeddingSketch(client)
+    privacy = RemotePiiScanner(client)
 
     assert finepdfs.score("paper").edu_score == 4.25
     assert finepdfs.revision == "finepdfs@pinned"
@@ -73,6 +88,9 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
     assert kenlm.score("text").perplexity == 42.0
     embeddings.add("MMLU", "prompt")
     assert list(embeddings.query("candidate")) == [("MMLU", 1.0)]
+    assert privacy.flags("contact user@example.com") == ["email"]
+    assert privacy.blocking_flags("contact user@example.com") == ["email"]
+    assert privacy.revision == "regex-luhn-v1+presidio-test"
     client.close()
 
 

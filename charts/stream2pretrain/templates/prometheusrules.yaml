@@ -19,14 +19,14 @@ spec:
             sum by (namespace, deployment) (
               kube_deployment_spec_replicas{
                 namespace="{{ .Release.Namespace }}",
-                deployment=~"{{ $fullName }}-(processor-fetcher|processor-iceberg-writer|duckdb|ui)"
+                deployment=~"{{ $fullName }}-(processor-fetcher|processor-fetcher-scientific|processor-iceberg-writer|duckdb|ui)"
               }
             )
             >
             sum by (namespace, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="{{ .Release.Namespace }}",
-                deployment=~"{{ $fullName }}-(processor-fetcher|processor-iceberg-writer|duckdb|ui)"
+                deployment=~"{{ $fullName }}-(processor-fetcher|processor-fetcher-scientific|processor-iceberg-writer|duckdb|ui)"
               }
             )
           labels:
