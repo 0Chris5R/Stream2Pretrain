@@ -242,7 +242,8 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
         "inputs: .dockerignore schemas processor/Dockerfile.model-service.app "
         "processor/__init__.py processor/common.py processor/model_service.py "
         "processor/decon_gate.py processor/sign.py processor/operators/__init__.py "
-        "processor/operators/quality.py processor/operators/kenlm_score.py"
+        "processor/operators/quality.py processor/operators/kenlm_score.py "
+        "processor/operators/pii.py"
     )
     assert workflow.count(model_input) == 3
     assert "processor/__init__.py processor/common.py processor/model_service.py" in workflow

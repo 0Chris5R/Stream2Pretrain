@@ -14,7 +14,8 @@ COPY processor/__init__.py      \
      processor/sign.py          /app/processor/
 COPY processor/operators/__init__.py     \
      processor/operators/kenlm_score.py  \
-     processor/operators/quality.py      /app/processor/operators/
+     processor/operators/quality.py      \
+     processor/operators/pii.py           /app/processor/operators/
 
 # This image intentionally lacks unrelated worker dependencies. Import the
 # selected native/model backend so CI proves the minimal environment is

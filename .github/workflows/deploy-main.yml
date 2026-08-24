@@ -573,17 +573,17 @@ jobs:
             model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py processor/operators/pii.py
           - image: processor-embedding-model
             model_profile: embedding
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py processor/operators/pii.py
           - image: processor-kenlm-model
             model_profile: kenlm
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py processor/operators/pii.py
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.fetcher.app
