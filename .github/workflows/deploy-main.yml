@@ -1218,7 +1218,14 @@ jobs:
               base="${cronjob#stream2pretrain-}"
               job="s2p-val-${base:0:42}-${suffix}"
               kubectl -n stream2pretrain delete "job/$job" --ignore-not-found --wait=true
-              kubectl -n stream2pretrain create job "$job" --from="cronjob/$cronjob"
+              kubectl -n stream2pretrain create job "$job" \
+                --from="cronjob/$cronjob" --dry-run=client -o json \
+                | jq '
+                    .spec.backoffLimit = 0
+                    | .spec.ttlSecondsAfterFinished = 900
+                    | .spec.template.spec.restartPolicy = "Never"
+                  ' \
+                | kubectl -n stream2pretrain apply -f -
               validation_jobs+=("$job")
               if ! wait_for_source_job "$job"; then
                 exit 1

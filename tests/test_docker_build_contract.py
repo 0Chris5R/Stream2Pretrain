@@ -239,18 +239,21 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 
     model_input = (
-        "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
-        "ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app "
-        "processor/__init__.py processor/common.py processor/model_service.py"
+        "inputs: .dockerignore schemas processor/Dockerfile.model-service.app "
+        "processor/__init__.py processor/common.py processor/model_service.py "
+        "processor/decon_gate.py processor/sign.py processor/operators/__init__.py "
+        "processor/operators/quality.py processor/operators/kenlm_score.py"
     )
     assert workflow.count(model_input) == 3
-    assert (
-        workflow.count(
-            "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
-            "ingest/*/pyproject.toml schemas processor\n"
-        )
-        == 0
-    )
+    assert "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml" not in workflow
+
+
+def test_foundry_has_an_independent_application_image() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+
+    assert "image: processor-foundry" in workflow
+    assert "dockerfile: processor/Dockerfile.foundry.app" in workflow
+    assert "processor/Dockerfile.foundry.app processor/__init__.py" in workflow
 
 
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)
