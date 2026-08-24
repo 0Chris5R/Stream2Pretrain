@@ -34,9 +34,9 @@ RUN for command in \
         ln -s /usr/local/bin/s2p-entrypoint "/usr/local/bin/${command}"; \
     done
 
-# Catch missing source or runtime dependencies before Helm sees the image.
-RUN python -c "from processor.curate import main as curate; from processor.model_service import main as model_service; from processor.decon_api import main as decon; from processor.duckdb_api import main as duckdb; from processor.fetcher import main as fetcher; from processor.iceberg_maintenance import main as maintenance; from processor.iceberg_writer import main as writer; from processor.local_sources_api import main as sources; from processor.mixture_controller.controller import main as mixture; from processor.polaris_bootstrap import main as bootstrap; from processor.seed_loader import main as seed; from processor.foundry.api import main as foundry_api; from processor.foundry.export_replay import main as replay; from processor.foundry.oracle_build import main as oracle; from processor.foundry.worker import main as foundry; assert all(callable(value) for value in (curate, model_service, decon, duckdb, fetcher, maintenance, writer, sources, mixture, bootstrap, seed, foundry_api, replay, oracle, foundry))"
-
+# Dependencies and model artifacts are validated in the immutable base build;
+# the locked repository suite validates this source-only application layer.
+# Keeping this stage free of imports lets BuildKit reuse the remote base lazily.
 WORKDIR /app
 USER nonroot
 

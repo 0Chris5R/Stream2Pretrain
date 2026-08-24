@@ -572,7 +572,12 @@ class ScientificProcessor:
         options.table_structure_options = TableStructureOptions(
             do_cell_matching=True, mode=TableFormerMode.ACCURATE
         )
-        options.do_formula_enrichment = True
+        # Docling's formula enrichment loads the multi-billion-parameter
+        # CodeFormulaV2 vision model. It exceeds the bounded CPU worker's
+        # memory before the first page is processed. Native arXiv HTML keeps
+        # source LaTeX; PDF fallback retains Docling layout, text, tables,
+        # figures, and Tesseract OCR without this optional VLM enrichment.
+        options.do_formula_enrichment = False
         options.generate_picture_images = True
         options.generate_page_images = False
         options.images_scale = 1.5

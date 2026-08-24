@@ -12,11 +12,12 @@ COPY processor/sign.py               /app/processor/sign.py
 COPY processor/foundry               /app/processor/foundry
 COPY --chmod=0555 processor/container_entrypoint.sh /usr/local/bin/s2p-entrypoint
 
+# Foundry behavior is covered by the locked repository suite. Avoid an image-
+# build import so this source layer does not materialize the large remote base.
 RUN ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-foundry \
  && ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-foundry-api \
  && ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-foundry-export-replay \
- && ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-foundry-build-oracle \
- && python -c "from processor.foundry.api import main as api; from processor.foundry.worker import main as worker; assert callable(api) and callable(worker)"
+ && ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-foundry-build-oracle
 
 WORKDIR /app
 USER nonroot

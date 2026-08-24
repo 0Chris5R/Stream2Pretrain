@@ -17,16 +17,8 @@ COPY processor/operators/__init__.py     \
      processor/operators/quality.py      \
      processor/operators/pii.py           /app/processor/operators/
 
-# This image intentionally lacks unrelated worker dependencies. Import the
-# selected native/model backend so CI proves the minimal environment is
-# complete before Kubernetes pulls it.
-RUN case "${S2P_MODEL_SERVICE_PROFILE}" in \
-      quality) python -c "import safetensors, tokenizers, torch, transformers; from processor.model_service import main; assert callable(main)" ;; \
-      embedding) python -c "import onnxruntime, tokenizers, transformers; from processor.model_service import main; assert callable(main)" ;; \
-      kenlm) python -c "import kenlm, sentencepiece; from processor.model_service import main; assert callable(main)" ;; \
-      *) echo "Unsupported S2P_MODEL_SERVICE_PROFILE=${S2P_MODEL_SERVICE_PROFILE}" >&2; exit 2 ;; \
-    esac
-
+# Each immutable profile base validates its exact native/model dependencies.
+# Repository tests validate this source-only layer without reloading that base.
 WORKDIR /app
 USER nonroot
 
