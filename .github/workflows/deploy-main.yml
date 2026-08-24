@@ -33,26 +33,111 @@ env:
   HELMFILE_VERSION: v1.7.3
 
 jobs:
+  changes:
+    name: Plan changed release scopes
+    if: inputs.mode == '' || inputs.mode == 'deploy'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.scope.outputs.deploy }}
+      python: ${{ steps.scope.outputs.python }}
+      helm: ${{ steps.scope.outputs.helm }}
+      core: ${{ steps.scope.outputs.core }}
+      sources: ${{ steps.scope.outputs.sources }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Resolve changed scopes
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "python=false" >> "$GITHUB_OUTPUT"
+            echo "helm=false" >> "$GITHUB_OUTPUT"
+            echo "core=false" >> "$GITHUB_OUTPUT"
+            echo "sources=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          if [[ -z "$before" || "$before" =~ ^0+$ ]] \
+             || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            before="$(git rev-parse HEAD^)"
+          fi
+          changed="$RUNNER_TEMP/changed-files.txt"
+          git diff --name-only "$before" HEAD > "$changed"
+          python=false
+          helm=false
+          deploy=false
+          core=false
+          sources=false
+          if grep -Eq \
+            '^(schemas/|ingest/|processor/|tests/|scripts/.*\.py$|pyproject\.toml$|uv\.lock$|[^/]+/pyproject\.toml$)' \
+            "$changed"; then
+            python=true
+          fi
+          if grep -Eq \
+            '^(charts/|infra/helmfile-values/|helmfile\.yaml$|scripts/|\.github/workflows/deploy-main\.yml$)' \
+            "$changed"; then
+            helm=true
+          fi
+          if grep -Eq \
+            '^(schemas/|ingest/|processor/|ui/|charts/|infra/helmfile-values/|scripts/|pyproject\.toml$|uv\.lock$|\.dockerignore$|helmfile\.yaml$|\.github/workflows/deploy-main\.yml$)' \
+            "$changed"; then
+            deploy=true
+          fi
+          if grep -Eq \
+            '^(schemas/|charts/stream2pretrain/|infra/helmfile-values/|scripts/(cluster_smoke|reconcile_topic_partitions|bytewax_cutover_marker|migrate_fetcher_offsets)\.|\.github/workflows/deploy-main\.yml$)' \
+            "$changed"; then
+            core=true
+          fi
+          if grep -E '^processor/' "$changed" \
+             | grep -Ev '^processor/foundry/' >/dev/null; then
+            core=true
+          fi
+          if grep -Eq \
+            '^(ingest/|schemas/(sourcefeed|license_admission|bronze)\.py$|charts/stream2pretrain/(files/feeds|templates/ingest-|templates/sourcefeed|values)|infra/helmfile-values/|scripts/load_seed_feeds\.sh$|processor/mixture_controller/)' \
+            "$changed"; then
+            sources=true
+          fi
+          echo "Changed files:"
+          sed 's/^/  /' "$changed"
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+          echo "helm=$helm" >> "$GITHUB_OUTPUT"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "sources=$sources" >> "$GITHUB_OUTPUT"
+
   validate:
     name: Validate repository
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.helm == 'true'
+    needs:
+      - changes
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
 
       - name: Install uv
+        if: needs.changes.outputs.python == 'true' || needs.changes.outputs.helm == 'true'
         uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "0.8.17"
           enable-cache: true
 
       - name: Install Helm 3
+        if: needs.changes.outputs.helm == 'true'
         uses: azure/setup-helm@v5.0.1
         with:
           version: "${{ env.HELM_VERSION }}"
 
       - name: Install Helmfile
+        if: needs.changes.outputs.helm == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -66,15 +151,18 @@ jobs:
           helmfile version
 
       - name: Install Python dependencies
+        if: needs.changes.outputs.python == 'true' || needs.changes.outputs.helm == 'true'
         run: uv sync --all-packages --all-groups --locked
 
       - name: Run Python checks
+        if: needs.changes.outputs.python == 'true'
         run: |
           uv run ruff check schemas ingest processor tests scripts
           uv run ruff format --check schemas ingest processor tests scripts
           uv run pytest
 
       - name: Lint Helm chart and release graph
+        if: needs.changes.outputs.helm == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -206,7 +294,9 @@ jobs:
 
   processor-base:
     name: Build processor base (${{ matrix.profile }})
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
+    needs:
+      - changes
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -320,8 +410,9 @@ jobs:
 
   processor-base-pin:
     name: Pin processor bases by digest
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
     needs:
+      - changes
       - processor-base
     runs-on: ubuntu-latest
     permissions:
@@ -409,8 +500,9 @@ jobs:
 
   build:
     name: Build ${{ matrix.image }}
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
     needs:
+      - changes
       - processor-base-pin
     runs-on: ubuntu-latest
     permissions:
@@ -459,26 +551,30 @@ jobs:
           - image: processor
             context: .
             dockerfile: processor/Dockerfile.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor/*.py processor/Dockerfile.app processor/container_entrypoint.sh processor/mixture_controller processor/operators processor/seed/*.py docs/provider-terms
+          - image: processor-foundry
+            context: .
+            dockerfile: processor/Dockerfile.foundry.app
+            inputs: .dockerignore schemas processor/Dockerfile.foundry.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/iceberg_catalog.py processor/probes.py processor/sign.py processor/foundry
           - image: processor-quality-model
             model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-embedding-model
             model_profile: embedding
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-kenlm-model
             model_profile: kenlm
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.fetcher.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/source_policy.py
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/source_policy.py
           - image: ui
             context: ui
             dockerfile: Dockerfile
@@ -612,8 +708,9 @@ jobs:
 
   image-pin:
     name: Pin release images by digest
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
     needs:
+      - changes
       - build
     runs-on: ubuntu-latest
     permissions:
@@ -629,6 +726,7 @@ jobs:
       ingest_github_tarball_fetcher: ${{ steps.pin.outputs.ingest_github_tarball_fetcher }}
       ingest_openreview: ${{ steps.pin.outputs.ingest_openreview }}
       processor: ${{ steps.pin.outputs.processor }}
+      processor_foundry: ${{ steps.pin.outputs.processor_foundry }}
       processor_quality_model: ${{ steps.pin.outputs.processor_quality_model }}
       processor_embedding_model: ${{ steps.pin.outputs.processor_embedding_model }}
       processor_kenlm_model: ${{ steps.pin.outputs.processor_kenlm_model }}
@@ -677,6 +775,7 @@ jobs:
           pin_component ingest_github_tarball_fetcher ingest-github-tarball-fetcher
           pin_component ingest_openreview ingest-openreview
           pin_component processor processor
+          pin_component processor_foundry processor-foundry
           pin_component processor_quality_model processor-quality-model
           pin_component processor_embedding_model processor-embedding-model
           pin_component processor_kenlm_model processor-kenlm-model
@@ -688,9 +787,12 @@ jobs:
     if: >-
       always() &&
       ((github.event_name == 'workflow_dispatch' && inputs.mode != 'deploy') ||
-      (needs.validate.result == 'success' && needs.build.result == 'success' &&
+      (needs.changes.outputs.deploy == 'true' &&
+      (needs.validate.result == 'success' || needs.validate.result == 'skipped') &&
+      needs.build.result == 'success' &&
       needs.image-pin.result == 'success'))
     needs:
+      - changes
       - validate
       - build
       - image-pin
@@ -708,6 +810,8 @@ jobs:
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
+      CORE_CHANGED: ${{ needs.changes.outputs.core }}
+      SOURCES_CHANGED: ${{ needs.changes.outputs.sources }}
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
       IMAGE_DIGEST_INGEST_SITEMAP: ${{ needs.image-pin.outputs.ingest_sitemap }}
@@ -718,6 +822,7 @@ jobs:
       IMAGE_DIGEST_INGEST_GITHUB_TARBALL: ${{ needs.image-pin.outputs.ingest_github_tarball_fetcher }}
       IMAGE_DIGEST_INGEST_OPENREVIEW: ${{ needs.image-pin.outputs.ingest_openreview }}
       IMAGE_DIGEST_PROCESSOR: ${{ needs.image-pin.outputs.processor }}
+      IMAGE_DIGEST_PROCESSOR_FOUNDRY: ${{ needs.image-pin.outputs.processor_foundry }}
       IMAGE_DIGEST_PROCESSOR_QUALITY: ${{ needs.image-pin.outputs.processor_quality_model }}
       IMAGE_DIGEST_PROCESSOR_EMBEDDING: ${{ needs.image-pin.outputs.processor_embedding_model }}
       IMAGE_DIGEST_PROCESSOR_KENLM: ${{ needs.image-pin.outputs.processor_kenlm_model }}
@@ -754,6 +859,16 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+
+          deploy_started_at="$(date +%s)"
+          phase_started_at="$deploy_started_at"
+          finish_phase() {
+            local name="$1"
+            local now
+            now="$(date +%s)"
+            echo "::notice title=Deployment phase::${name}: $((now - phase_started_at))s"
+            phase_started_at="$now"
+          }
 
           : "${CISCO_VPN_SERVER:?Missing CISCO_VPN_SERVER}"
           : "${CISCO_VPN_USERNAME:?Missing CISCO_VPN_USERNAME}"
@@ -882,6 +997,7 @@ jobs:
           ip -6 route get "$api_host" >&2 || true
 
           kubectl --request-timeout=20s get nodes
+          finish_phase "VPN and cluster connection"
 
           if [[ "$DEPLOY_MODE" == "repair-monitoring" ]]; then
             monitoring_diagnostics() {
@@ -1770,12 +1886,14 @@ jobs:
             report_deploy_failure
             exit 1
           fi
+          finish_phase "Capacity preflight"
 
           # Preserve any pre-native Bytewax progress in the broker group before
           # the native-consumer-to-Bytewax cutback. The durable marker makes
           # this a one-time handoff even when the workflow or Helm deployment
           # is retried. Marker identity must match the stable v2 flow and
           # recovery names or the release fails closed.
+          if [[ "$CORE_CHANGED" == "true" || "$SOURCES_CHANGED" == "true" ]]; then
           legacy_fetcher_checkpoint="$(
             kubectl -n stream2pretrain get deployment \
               stream2pretrain-processor-fetcher -o json 2>/dev/null \
@@ -2024,6 +2142,10 @@ jobs:
           # ambiguous. New partitions added here safely bootstrap at earliest.
           # Four remains a bounded DHBW dev setting; prod is needs-measurement.
           S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh
+          else
+            echo "Skipping Bytewax cutover and topic reconciliation: core and source contracts are unchanged."
+          fi
+          finish_phase "Bytewax and Redpanda reconciliation"
 
           : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
           : "${IMAGE_DIGEST_INGEST_OAIPMH:?Missing pinned ingest-oaipmh digest}"
@@ -2035,6 +2157,7 @@ jobs:
           : "${IMAGE_DIGEST_INGEST_GITHUB_TARBALL:?Missing pinned GitHub tarball digest}"
           : "${IMAGE_DIGEST_INGEST_OPENREVIEW:?Missing pinned OpenReview digest}"
           : "${IMAGE_DIGEST_PROCESSOR:?Missing pinned processor digest}"
+          : "${IMAGE_DIGEST_PROCESSOR_FOUNDRY:?Missing pinned Foundry digest}"
           : "${IMAGE_DIGEST_PROCESSOR_QUALITY:?Missing pinned quality digest}"
           : "${IMAGE_DIGEST_PROCESSOR_EMBEDDING:?Missing pinned embedding digest}"
           : "${IMAGE_DIGEST_PROCESSOR_KENLM:?Missing pinned KenLM digest}"
@@ -2062,7 +2185,7 @@ jobs:
             --set "processor.iceberg.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.duckdbApi.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.deconGate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "processor.foundry.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set "processor.foundry.image=stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
             --set "mixtureController.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "seedLoader.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}"
@@ -2083,12 +2206,35 @@ jobs:
             echo "GHCR_PULL_TOKEN is empty. The published images must be public."
           fi
 
-          # HPAs can preserve multiple old multi-GiB model Pods while Helm is
-          # replacing their images. Quiesce each stateless service at one Pod,
-          # remove failed/evicted remnants, and let Helm recreate the HPAs only
-          # after the replacement-style Deployment specifications are applied.
+          # Only quiesce a multi-GiB model service when its immutable image
+          # digest actually changes. Unchanged services keep their Pods, model
+          # memory, HPA state, and readiness throughout the release.
+          model_image_changed=false
           for profile in quality embedding kenlm; do
             model="stream2pretrain-processor-model-service-${profile}"
+            case "$profile" in
+              quality) digest="$IMAGE_DIGEST_PROCESSOR_QUALITY" ;;
+              embedding) digest="$IMAGE_DIGEST_PROCESSOR_EMBEDDING" ;;
+              kenlm) digest="$IMAGE_DIGEST_PROCESSOR_KENLM" ;;
+            esac
+            target_image="${registry}/stream2pretrain/processor-${profile}-model@${digest}"
+            current_image="$(
+              kubectl -n stream2pretrain get "deployment/$model" -o json 2>/dev/null \
+                | jq -r '
+                    first(
+                      .spec.template.spec.containers[]?
+                      | select(.name == "model-service")
+                      | .image
+                    ) // empty
+                  ' \
+                || true
+            )"
+            if [[ "$current_image" == "$target_image" ]]; then
+              echo "Keeping loaded ${profile} model Pod: image digest is unchanged."
+              continue
+            fi
+            echo "Quiescing ${profile} model service for an actual image change."
+            model_image_changed=true
             kubectl -n stream2pretrain delete "horizontalpodautoscaler/$model" \
               --ignore-not-found --wait=true
             if kubectl -n stream2pretrain get "deployment/$model" >/dev/null 2>&1; then
@@ -2110,9 +2256,23 @@ jobs:
               -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' \
               2>/dev/null || true
           )"
+          foundry_target_image="${registry}/stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
+          foundry_current_image="$(
+            kubectl -n stream2pretrain get statefulset stream2pretrain-foundry -o json \
+              2>/dev/null \
+              | jq -r '
+                  first(
+                    .spec.template.spec.containers[]?
+                    | select(.name == "worker")
+                    | .image
+                  ) // empty
+                ' \
+              || true
+          )"
           if kubectl -n stream2pretrain get statefulset stream2pretrain-foundry \
                >/dev/null 2>&1 \
-             && [[ "$foundry_ready" != "True" ]]; then
+             && [[ "$foundry_ready" != "True" ]] \
+             && [[ "$foundry_current_image" != "$foundry_target_image" ]]; then
             echo "Replacing unhealthy Foundry Pod while preserving its PVC."
             kubectl -n stream2pretrain scale \
               statefulset/stream2pretrain-foundry --replicas=0
@@ -2120,6 +2280,8 @@ jobs:
               pod/stream2pretrain-foundry-0 --timeout=180s \
               || ! kubectl -n stream2pretrain get pod stream2pretrain-foundry-0 \
                 >/dev/null 2>&1
+          elif [[ "$foundry_ready" != "True" ]]; then
+            echo "Leaving the unchanged Foundry Pod untouched; it cannot delay this release."
           fi
 
           # GitHub serialises this workflow, but a teammate can still start a
@@ -2130,6 +2292,13 @@ jobs:
           # fail-closed on the first attempt.
           release_applied=false
           helm_apply_log="$RUNNER_TEMP/stream2pretrain-helm-apply.log"
+          workloads_before="$RUNNER_TEMP/stream2pretrain-workloads-before.json"
+          kubectl -n stream2pretrain get deployment,statefulset -o json \
+            > "$workloads_before"
+          helm_timeout=240
+          if [[ "$model_image_changed" == "true" ]]; then
+            helm_timeout=600
+          fi
           for attempt in 1 2 3; do
             set +e
             helmfile \
@@ -2141,7 +2310,7 @@ jobs:
               --reset-values \
               --wait \
               --wait-for-jobs \
-              --timeout 600 \
+              --timeout "$helm_timeout" \
               --description "github-actions ${GITHUB_SHA}" \
               --suppress-secrets \
               "${helm_overrides[@]}" \
@@ -2166,18 +2335,45 @@ jobs:
             report_deploy_failure
             exit 1
           fi
+          finish_phase "Helm diff and apply"
 
           kubectl -n stream2pretrain annotate scaledobject --all \
             autoscaling.keda.sh/paused- || true
 
+          # Helm has already waited for changed resources. Never wait on an
+          # unchanged unhealthy workload: compare generations captured before
+          # the apply and inspect only resources this release mutated.
           while read -r workload; do
-            kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
-          done < <(kubectl -n stream2pretrain get deployment,statefulset -o name)
+            [[ -n "$workload" ]] || continue
+            kubectl -n stream2pretrain rollout status "$workload" --timeout=30s
+          done < <(
+            kubectl -n stream2pretrain get deployment,statefulset -o json \
+              | jq -r --slurpfile before "$workloads_before" '
+                  .items[]
+                  | . as $current
+                  | (
+                      first(
+                        $before[0].items[]
+                        | select(
+                            .kind == $current.kind
+                            and .metadata.name == $current.metadata.name
+                          )
+                      ) // null
+                    ) as $previous
+                  | select(
+                      $previous == null
+                      or .metadata.generation > $previous.metadata.generation
+                    )
+                  | (.kind | ascii_downcase) + "/" + .metadata.name
+                '
+          )
+          finish_phase "Changed workload readiness"
 
           # The running v2 workloads must persist a marker whose identity is
           # derived from their effective environment. This closes the clean
           # install path (where there was no legacy PVC to mark) and rejects a
           # chart/workflow drift away from OFFSET_STORED or the stable names.
+          if [[ "$CORE_CHANGED" == "true" ]]; then
           fetcher_ready_pod="$(
             kubectl -n stream2pretrain get pod \
               -l app.kubernetes.io/component=processor-fetcher -o json \
@@ -2215,27 +2411,35 @@ jobs:
               S2P_CUTOVER_TOPIC=docs.normalized \
               S2P_CUTOVER_MARKER_MODE=ensure \
             python - < scripts/bytewax_cutover_marker.py
-
-          # SourceFeed CRs are durable runtime configuration, not Helm-owned
-          # templates. Reconcile the complete Phase-1 catalogue on every
-          # deployment so a rebuilt namespace cannot silently lose sources.
-          NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
-          for _ in $(seq 1 60); do
-            source_schedules="$(
-              kubectl -n stream2pretrain get cronjob \
-                -l stream2pretrain.io/source-feed \
-                -o name | wc -l
-            )"
-            [[ "$source_schedules" -ge 10 ]] && break
-            sleep 2
-          done
-          if [[ "$source_schedules" -lt 10 ]]; then
-            kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
-            kubectl -n stream2pretrain get cronjob -o wide || true
-            echo "The controller did not materialize all Phase-1 source schedules" >&2
-            exit 1
+          else
+            echo "Keeping existing Bytewax cutover markers: core runtime is unchanged."
           fi
 
+          # SourceFeed CRs are durable runtime configuration. Reconcile them
+          # only when source definitions or their controller changed.
+          if [[ "$SOURCES_CHANGED" == "true" ]]; then
+            NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
+            for _ in $(seq 1 60); do
+              source_schedules="$(
+                kubectl -n stream2pretrain get cronjob \
+                  -l stream2pretrain.io/source-feed \
+                  -o name | wc -l
+              )"
+              [[ "$source_schedules" -ge 10 ]] && break
+              sleep 2
+            done
+            if [[ "$source_schedules" -lt 10 ]]; then
+              kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
+              kubectl -n stream2pretrain get cronjob -o wide || true
+              echo "The controller did not materialize all Phase-1 source schedules" >&2
+              exit 1
+            fi
+          else
+            echo "Keeping existing SourceFeed schedules: source definitions are unchanged."
+          fi
+          finish_phase "SourceFeed reconciliation"
+
+          if [[ "$CORE_CHANGED" == "true" ]]; then
           # Clone the exact deployed curator Pod spec into a short-lived,
           # isolated consumer group. This gives the release canary its own
           # bounded execution lane without permanently reserving another GiB
@@ -2338,6 +2542,12 @@ jobs:
           kubectl -n stream2pretrain delete "job/$curator_canary_job" \
             --wait=true
           curator_canary_job=""
+          else
+            echo "Skipping the core curator canary: core pipeline inputs are unchanged."
+          fi
+          finish_phase "Core canary"
+          deploy_finished_at="$(date +%s)"
+          echo "::notice title=Deployment total::$((deploy_finished_at - deploy_started_at))s"
 
       - name: Upload rendered UI audit
         if: ${{ always() && inputs.mode == 'audit-ui' }}

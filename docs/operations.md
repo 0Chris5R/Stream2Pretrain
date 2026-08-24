@@ -55,8 +55,11 @@ pre-created recovery partitions. Quality, KenLM, and E5 remain stateless
 `processor-model-service-*` deployments with CPU HPA and cross-node spreading.
 Their deployment strategy is `Recreate`: the DHBW nodes cannot hold two
 generations of the multi-GiB model images at once. The release workflow removes
-the model HPAs, scales each service to one Pod, and lets Helm recreate the HPAs
-after applying the replacement specification.
+an HPA and scales its service to one Pod only when that service's immutable
+image digest changed. An unchanged digest preserves the running Pod, loaded
+model memory, HPA state, and readiness. Foundry has a separate application
+image, so post-training edits do not replace pretraining workers and core edits
+do not replace Foundry.
 
 The single Iceberg writer retains one Bytewax recovery partition. That state
 shard count is independent of the four Kafka topic partitions and deliberately
@@ -84,11 +87,17 @@ advance production progress or mutate production state. Any deterministic
 canary-only failure is separated under the state bucket's
 `canary-processing-failures/` prefix instead of the production Gold ledger.
 
-Before each release, `scripts/reconcile_topic_partitions.sh` also reconciles
+When a core or source contract changes, `scripts/reconcile_topic_partitions.sh`
+also reconciles
 the seven-day core and 24-hour smoke retention already declared in
 `schemas/topics.py`, the document-topic partition floor, delete cleanup policy,
-and the maximum Kafka record size. Deployment stops if a required topic has no
-partitions.
+and the maximum Kafka record size. It inventories topics once and applies
+configuration by retention class instead of opening a Kubernetes exec session
+for every property of every topic. Deployment stops if a required topic has no
+partitions. Documentation-only pushes do not deploy. Python and Helm checks,
+source reconciliation, the core canary, image builds, and rollout waits are
+selected from the changed paths and immutable digests; an unchanged unhealthy
+workload cannot delay an unrelated release.
 
 ```bash
 uv run python scripts/capacity_probe.py
