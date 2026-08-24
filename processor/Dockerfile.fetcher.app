@@ -23,8 +23,10 @@ COPY processor/scientific.py                             /app/processor/scientif
 COPY processor/source_policy.py                          /app/processor/source_policy.py
 COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entrypoint
 
-RUN ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-fetcher \
- && python -c "from processor.fetcher import main; assert callable(main)"
+# The immutable fetcher base already imports Docling/Torch and validates its
+# artifacts. Repository tests validate this source layer. Avoid importing here:
+# doing so materializes the multi-GiB remote base on every source-only build.
+RUN ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-fetcher
 
 WORKDIR /app
 USER nonroot
