@@ -892,6 +892,15 @@ jobs:
           chmod 600 "$kubeconfig"
           export KUBECONFIG="$kubeconfig"
 
+          api_server="$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}')"
+          api_host="${api_server#https://}"
+          if [[ "$api_host" == \[*\]* ]]; then
+            api_host="${api_host#\[}"
+            api_host="${api_host%%\]*}"
+          else
+            api_host="${api_host%%:*}"
+          fi
+
           vpnc_script="$(dpkg -L vpnc-scripts | awk '/\/vpnc-script$/ {print; exit}')"
           if [[ -z "$vpnc_script" || ! -x "$vpnc_script" ]]; then
             echo "The vpnc-scripts package did not provide an executable vpnc-script." >&2
@@ -900,6 +909,7 @@ jobs:
           fi
 
           vpn_log="$RUNNER_TEMP/openconnect.log"
+          vpn_pid=""
           ui_port_forward_pid=""
           foundry_port_forward_pid=""
           prometheus_port_forward_pid=""
@@ -918,10 +928,20 @@ jobs:
             vpn_args+=(--servercert="$CISCO_VPN_SERVERCERT")
           fi
 
-          printf '%s\n' "$CISCO_VPN_PASSWORD" \
-            | sudo -n openconnect "${vpn_args[@]}" "$CISCO_VPN_SERVER" \
-                >"$vpn_log" 2>&1 &
-          vpn_pid=$!
+          start_vpn() {
+            : > "$vpn_log"
+            printf '%s\n' "$CISCO_VPN_PASSWORD" \
+              | sudo -n openconnect "${vpn_args[@]}" "$CISCO_VPN_SERVER" \
+                  >"$vpn_log" 2>&1 &
+            vpn_pid=$!
+          }
+          stop_vpn() {
+            if [[ -n "$vpn_pid" ]]; then
+              sudo -n kill "$vpn_pid" 2>/dev/null || true
+              wait "$vpn_pid" 2>/dev/null || true
+              vpn_pid=""
+            fi
+          }
           cleanup() {
             if [[ -n "$curator_canary_job" ]]; then
               kubectl -n stream2pretrain delete "job/$curator_canary_job" \
@@ -940,24 +960,43 @@ jobs:
             if [[ -n "$prometheus_port_forward_pid" ]]; then
               kill "$prometheus_port_forward_pid" 2>/dev/null || true
             fi
-            sudo -n kill "$vpn_pid" 2>/dev/null || true
+            stop_vpn
             sudo -n pkill -TERM -x openconnect 2>/dev/null || true
           }
           trap cleanup EXIT
 
           tunnel_ready=false
           vpn_interface=""
-          for _ in $(seq 1 60); do
-            if ! kill -0 "$vpn_pid" 2>/dev/null; then
-              tail -n 80 "$vpn_log" >&2 || true
-              exit 1
-            fi
-            vpn_interface="$(ip -o link show up | awk -F': ' '$2 ~ /^tun[0-9]+/ {print $2; exit}')"
-            if [[ -n "$vpn_interface" ]]; then
-              tunnel_ready=true
-              break
-            fi
-            sleep 2
+          for connection_attempt in $(seq 1 3); do
+            start_vpn
+            for _ in $(seq 1 15); do
+              if ! kill -0 "$vpn_pid" 2>/dev/null; then
+                break
+              fi
+              vpn_interface="$(
+                ip -o link show up \
+                  | awk -F': ' '$2 ~ /^tun[0-9]+$/ {print $2; exit}'
+              )"
+              if [[ -n "$vpn_interface" ]]; then
+                if [[ "$api_host" != *:* ]] \
+                  || ip -6 -o addr show dev "$vpn_interface" scope global \
+                    | grep -q 'inet6'; then
+                  tunnel_ready=true
+                  break 2
+                fi
+              fi
+              sleep 2
+            done
+            echo "VPN attempt ${connection_attempt} did not provide a usable tunnel; reconnecting." >&2
+            tail -n 40 "$vpn_log" >&2 || true
+            stop_vpn
+            for _ in $(seq 1 10); do
+              if ! ip -o link show up \
+                | awk -F': ' '$2 ~ /^tun[0-9]+$/ {found=1} END {exit found ? 0 : 1}'; then
+                break
+              fi
+              sleep 1
+            done
           done
           if [[ "$tunnel_ready" != true ]]; then
             tail -n 80 "$vpn_log" >&2 || true
@@ -973,21 +1012,22 @@ jobs:
           ip -o link show dev "$vpn_interface" >&2 || true
           ip -6 -o addr show dev "$vpn_interface" >&2 || true
 
-          api_server="$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}')"
-          api_host="${api_server#https://}"
-          if [[ "$api_host" == \[*\]* ]]; then
-            api_host="${api_host#\[}"
-            api_host="${api_host%%\]*}"
-          else
-            api_host="${api_host%%:*}"
-          fi
-
           if [[ "$api_host" == *:* ]] && ! ip -6 route get "$api_host" >/dev/null 2>&1; then
-            vpn_peer="$(ip -6 -o addr show dev "$vpn_interface" scope global \
-              | sed -n 's/.* peer \([^ ]*\)\/[0-9][0-9]*.*/\1/p' \
-              | head -n 1)"
             route_ready=false
             for _ in $(seq 1 30); do
+              vpn_interface="$(
+                ip -o link show up \
+                  | awk -F': ' '$2 ~ /^tun[0-9]+$/ {print $2; exit}'
+              )"
+              if [[ -z "$vpn_interface" ]] \
+                || ! ip -6 -o addr show dev "$vpn_interface" scope global \
+                  | grep -q 'inet6'; then
+                sleep 1
+                continue
+              fi
+              vpn_peer="$(ip -6 -o addr show dev "$vpn_interface" scope global \
+                | sed -n 's/.* peer \([^ ]*\)\/[0-9][0-9]*.*/\1/p' \
+                | head -n 1)"
               if [[ -n "$vpn_peer" ]]; then
                 route_args=("$api_host/128" via "$vpn_peer" dev "$vpn_interface" onlink)
               else
