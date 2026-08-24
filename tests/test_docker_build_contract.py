@@ -103,7 +103,10 @@ def test_fetcher_image_has_an_isolated_application_and_dependency_profile() -> N
     assert "fetcher-service = [" in processor_project
     assert '"docling==2.114.0"' in processor_project
     assert "processor/Dockerfile.fetcher.app" in workflow
-    assert "processor-fetcher-model\n            context: .\n            dockerfile: processor/Dockerfile.fetcher.app" in workflow
+    assert (
+        "processor-fetcher-model\n            context: .\n            dockerfile: processor/Dockerfile.fetcher.app"
+        in workflow
+    )
     assert "from processor.fetcher import main" in fetcher_app
     assert "processor/curate.py" not in fetcher_app
     assert "processor/iceberg_writer.py" not in fetcher_app
