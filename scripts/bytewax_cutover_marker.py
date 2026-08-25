@@ -15,7 +15,10 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-CUTOVER_ID = "live-frontier-bytewax-v4"
+# The curator's deliberately approved live-frontier reset changed its stable
+# recovery identity from v3 to v4.  Keep the previous v4 marker immutable and
+# record this distinct transition under a new cutover ID.
+CUTOVER_ID = "live-frontier-bytewax-v5"
 SCHEMA_VERSION = 1
 
 
