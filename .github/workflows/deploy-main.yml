@@ -1147,6 +1147,17 @@ jobs:
              && ! kubectl -n stream2pretrain get "configmap/$frontier_reset_marker" \
                   >/dev/null 2>&1; then
             echo "::group::Reset historical backlog to the current live frontier"
+            # KEDA would immediately recreate the lag-driven GitHub worker
+            # while the historical release-job backlog still exists. Pause
+            # its controller before scaling consumers down; the normal Helm
+            # success path removes all KEDA pause annotations below.
+            if kubectl -n stream2pretrain get \
+              scaledobject/stream2pretrain-ingest-github-tarball-fetcher \
+              >/dev/null 2>&1; then
+              kubectl -n stream2pretrain annotate \
+                scaledobject/stream2pretrain-ingest-github-tarball-fetcher \
+                autoscaling.keda.sh/paused=true --overwrite
+            fi
             scale_to_zero_if_present() {
               local kind="$1"
               local name="$2"
