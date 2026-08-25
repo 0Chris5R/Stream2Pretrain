@@ -15,7 +15,6 @@ from processor.fetcher import (
     RawObjectMissing,
     _is_non_release_github_record,
     _markdown_prose_projection,
-    _review_payload_text,
     fetch_raw_bytes,
     fetcher_input_topics,
     normalize,
@@ -108,16 +107,8 @@ def test_scientific_extraction_is_source_aware(bronze_record: BronzeRecord) -> N
             "extraction_pipeline": "arxiv-html-2026-06",
         }
     )
-    review = blog.model_copy(
-        update={
-            "source_format": "review",
-            "source_feed": "openreview-live",
-        }
-    )
-
     assert uses_scientific_extraction(blog) is False
     assert uses_scientific_extraction(paper) is True
-    assert uses_scientific_extraction(review) is False
 
 
 def test_hf_card_projection_excludes_frontmatter_and_fenced_code() -> None:
@@ -140,27 +131,6 @@ SECRET = "not training prose"
     assert "intended use" in text
     assert "SECRET" not in text
     assert "pipeline_tag" in metadata
-
-
-def test_openreview_projection_separates_labels_from_review_prose() -> None:
-    payload = b"""{
-      "id": "note-1",
-      "forum": "paper-1",
-      "invitation": "ICLR.cc/2026/Conference/-/Official_Review",
-      "content": {
-        "summary": {"value": "The paper studies robust optimization."},
-        "strengths": {"value": "The evaluation covers several baselines."},
-        "rating": {"value": "8: accept"},
-        "confidence": {"value": "4: high"}
-      }
-    }"""
-
-    text, _, metadata = _review_payload_text(payload)
-
-    assert "[FIELD summary]" in text
-    assert "[FIELD strengths]" in text
-    assert "8: accept" not in text
-    assert "rating: 8: accept" in metadata
 
 
 def test_fetch_raw_bytes_rejects_oversized_stored_object(

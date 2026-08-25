@@ -97,8 +97,7 @@
         "markdown",
         "code",
         "web",
-        "metadata",
-        "review"
+        "metadata"
       ],
       "title": "Source Format",
       "type": "string"
@@ -128,8 +127,6 @@
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
-        "openreview_note",
-        "openreview_terms",
         "hf_card",
         "archived_page",
         "source_terms",

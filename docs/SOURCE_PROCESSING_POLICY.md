@@ -27,8 +27,6 @@ fabricated zero.
 | GitHub README/docs | Narrative prose after front matter and fenced-code removal. | FineWeb-Edu as an audit signal, CPU language ID, privacy, dedup, and E5 decontamination. Common-Crawl page-shape and KenLM gates are off because repository documentation legitimately contains lists and templates. | Permissive clean documentation can enter pretraining. It is not a paper Foundry candidate. |
 | Hugging Face model card | Exact-revision README prose after card metadata and fenced-code removal. | FineWeb-Edu audit signal, CPU language ID, privacy, dedup, and E5 decontamination. FinePDFs, code, C4/Gopher, and KenLM gates are off. | Pretraining only. |
 | Hugging Face dataset card | Exact-revision README prose after card metadata and fenced-code removal. | Same dedicated card policy as model cards. Dataset rows are out of scope. | Pretraining only. |
-| OpenReview paper | PDF through the same structured scientific extractor as arXiv. | Same FinePDFs Edu v2, structure, privacy, dedup, and decontamination policy as arXiv. | Pretraining and/or paper Foundry according to the three-tier licence outcome. |
-| OpenReview official review | Recognized public review, meta-review, rebuttal, response, rating, and confidence fields. Ratings remain metadata, not training labels. | OpenReview schema-completeness profile, CPU language ID, privacy, dedup, and decontamination. FinePDFs, FineWeb-Edu, C4/Gopher, and KenLM are off. Generic comments are rejected as `insubstantial_review`. | Permissive substantive prose can enter pretraining. It is not a paper Foundry candidate. |
 
 ## Routing rules
 

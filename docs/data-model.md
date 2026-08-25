@@ -89,7 +89,7 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `text` | string | yes | post-PII-scrubbed |
 | `lang` | ISO code | yes | |
 | `tokens` | int >=0 | yes | GPT-2-tokenizer token count |
-| `edu_score` | float 0..5 | yes | Raw source-aware quality signal: FinePDFs v2, FineWeb-Edu, Stack/Dolma code rules, or OpenReview schema completeness |
+| `edu_score` | float 0..5 | yes | Raw source-aware quality signal: FinePDFs v2, FineWeb-Edu, or Stack/Dolma code rules |
 | `quality_score` | float 0..5 | yes | Explainable composite of source quality, source-appropriate structure, language, and only applicable heuristic/KenLM signals |
 | `lang_score` | float 0..1 | yes | language-confidence signal |
 | `gopher_pass` | bool | yes | Gopher heuristic outcome |

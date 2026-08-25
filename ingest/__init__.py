@@ -13,5 +13,4 @@ Subpackages:
 - ``hf_poller``: Hugging Face Hub REST CronJob poller.
 - ``arxiv_html_fetcher``: native arXiv ``/html/<id>`` fetcher with
   ``ar5iv.labs.arxiv.org`` fallback (v0.2.0).
-- ``openreview_poller``: live OpenReview API v2 papers and public reviews.
 """

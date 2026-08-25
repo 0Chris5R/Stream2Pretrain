@@ -626,10 +626,6 @@ jobs:
             context: .
             dockerfile: ingest/github_release_tarball_fetcher/Dockerfile
             inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_release_tarball_fetcher
-          - image: ingest-openreview
-            context: .
-            dockerfile: ingest/openreview_poller/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/openreview_poller
           - image: processor
             context: .
             dockerfile: processor/Dockerfile.app
@@ -822,7 +818,6 @@ jobs:
       ingest_hf: ${{ steps.pin.outputs.ingest_hf }}
       ingest_arxiv_html: ${{ steps.pin.outputs.ingest_arxiv_html }}
       ingest_github_tarball_fetcher: ${{ steps.pin.outputs.ingest_github_tarball_fetcher }}
-      ingest_openreview: ${{ steps.pin.outputs.ingest_openreview }}
       processor: ${{ steps.pin.outputs.processor }}
       processor_foundry: ${{ steps.pin.outputs.processor_foundry }}
       processor_quality_model: ${{ steps.pin.outputs.processor_quality_model }}
@@ -870,7 +865,6 @@ jobs:
           pin_component ingest_hf ingest-hf
           pin_component ingest_arxiv_html ingest-arxiv-html
           pin_component ingest_github_tarball_fetcher ingest-github-tarball-fetcher
-          pin_component ingest_openreview ingest-openreview
           pin_component processor processor
           pin_component processor_foundry processor-foundry
           pin_component processor_quality_model processor-quality-model
@@ -918,7 +912,6 @@ jobs:
       IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
       IMAGE_DIGEST_INGEST_ARXIV_HTML: ${{ needs.image-pin.outputs.ingest_arxiv_html }}
       IMAGE_DIGEST_INGEST_GITHUB_TARBALL: ${{ needs.image-pin.outputs.ingest_github_tarball_fetcher }}
-      IMAGE_DIGEST_INGEST_OPENREVIEW: ${{ needs.image-pin.outputs.ingest_openreview }}
       IMAGE_DIGEST_PROCESSOR: ${{ needs.image-pin.outputs.processor }}
       IMAGE_DIGEST_PROCESSOR_FOUNDRY: ${{ needs.image-pin.outputs.processor_foundry }}
       IMAGE_DIGEST_PROCESSOR_QUALITY: ${{ needs.image-pin.outputs.processor_quality_model }}
@@ -1406,10 +1399,6 @@ jobs:
               stream2pretrain-ingest-github-releases
               stream2pretrain-iceberg-maintenance
             )
-            if kubectl -n stream2pretrain get \
-              cronjob/stream2pretrain-ingest-openreview-live >/dev/null 2>&1; then
-              cronjobs+=(stream2pretrain-ingest-openreview-live)
-            fi
             while read -r cronjob; do
               [[ -n "$cronjob" ]] || continue
               cronjobs+=("${cronjob#cronjob.batch/}")
@@ -2774,7 +2763,6 @@ jobs:
           : "${IMAGE_DIGEST_INGEST_HF:?Missing pinned HF digest}"
           : "${IMAGE_DIGEST_INGEST_ARXIV_HTML:?Missing pinned arXiv HTML digest}"
           : "${IMAGE_DIGEST_INGEST_GITHUB_TARBALL:?Missing pinned GitHub tarball digest}"
-          : "${IMAGE_DIGEST_INGEST_OPENREVIEW:?Missing pinned OpenReview digest}"
           : "${IMAGE_DIGEST_PROCESSOR:?Missing pinned processor digest}"
           : "${IMAGE_DIGEST_PROCESSOR_FOUNDRY:?Missing pinned Foundry digest}"
           : "${IMAGE_DIGEST_PROCESSOR_QUALITY:?Missing pinned quality digest}"
@@ -2782,21 +2770,6 @@ jobs:
           : "${IMAGE_DIGEST_PROCESSOR_KENLM:?Missing pinned KenLM digest}"
           : "${IMAGE_DIGEST_PROCESSOR_FETCHER:?Missing pinned fetcher digest}"
           : "${IMAGE_DIGEST_UI:?Missing pinned UI digest}"
-
-          # OpenReview is part of the release only when its public current-
-          # frontier endpoint is usable. A failed probe means no workload and
-          # no Sources entry, never a permanently disabled/tombstone source.
-          openreview_enabled=false
-          openreview_probe_url='https://api2.openreview.net/notes?invitation=ICLR.cc%2F2026%2FConference%2F-%2FSubmission&limit=1'
-          if curl --fail --silent --show-error --location --max-time 30 \
-              --user-agent 'Stream2Pretrain/0.3 (+https://github.com/ChrisR05/Stream2Pretrain)' \
-              "$openreview_probe_url" \
-              | jq -e '.notes | type == "array"' >/dev/null; then
-            openreview_enabled=true
-            echo "OpenReview public API is reachable; enabling its live current-frontier poller."
-          else
-            echo "OpenReview public API is not reachable; omitting the source from this release."
-          fi
 
           helm_overrides=(
             --set "image.registry=${registry}"
@@ -2809,9 +2782,6 @@ jobs:
             --set "ingest.hf.image=stream2pretrain/ingest-hf@${IMAGE_DIGEST_INGEST_HF}"
             --set "ingest.arxivHtmlFetcher.image=stream2pretrain/ingest-arxiv-html@${IMAGE_DIGEST_INGEST_ARXIV_HTML}"
             --set "ingest.githubTarballFetcher.image=stream2pretrain/ingest-github-tarball-fetcher@${IMAGE_DIGEST_INGEST_GITHUB_TARBALL}"
-            --set "ingest.openreview.image=stream2pretrain/ingest-openreview@${IMAGE_DIGEST_INGEST_OPENREVIEW}"
-            --set "openreviewPoller.enabled=${openreview_enabled}"
-            --set "openreviewPoller.live.enabled=${openreview_enabled}"
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
             --set "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"

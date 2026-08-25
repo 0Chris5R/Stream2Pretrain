@@ -2,8 +2,7 @@ Stream2Pretrain {{ .Chart.AppVersion }} installed in namespace {{ .Release.Names
 
 Components:
 - Ingest: arXiv (OAI-PMH + 4 RSS + native HTML fetcher), GitHub Releases plus
-  per-release tarball fetcher, Hugging Face model/dataset cards, and live
-  OpenReview when configured.
+  per-release tarball fetcher, and Hugging Face model/dataset cards.
 - Processor: fetcher (Resiliparse), curate (Bytewax StatefulSet with in-process
   Decon-Gate scan), iceberg-writer (PyIceberg + signed attestation writer),
   decon-gate API (attestation lookup), post-training foundry (paper-to-SFT/RL

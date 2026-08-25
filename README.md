@@ -6,7 +6,7 @@ This README is the sole report for the DHBW Cloud Computing and Big Data examina
 
 ## 1. Use Case and Motivation
 
-Large language model training needs current, high-quality material. AI research changes continuously across papers, model and dataset documentation, peer reviews, and source code. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
+Large language model training needs current, high-quality material. AI research changes continuously across papers, model and dataset documentation, and source code. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
 
 Stream2Pretrain solves this as a streaming curation service. Its users are data engineers and researchers who need a reproducible training-data view rather than another web crawler. The service preserves raw input, records every policy decision, and exposes only clean records as training output.
 
@@ -16,9 +16,8 @@ The deployed content adapters cover:
 - curated GitHub release source archives and repository documentation
 - exact-version Hugging Face model and dataset cards
 
-OpenReview live papers and public review threads are implemented and join this
-list only when the deployment's public-API probe succeeds. Internal discovery
-envelopes do not appear as sources, documents, acceptances, or quarantines.
+Internal discovery envelopes do not appear as sources, documents, acceptances,
+or quarantines.
 
 The DHBW verification profile runs the same content paths with bounded resources. The screenshots show durable corpus records and a controlled smoke source.
 
@@ -32,7 +31,7 @@ The relevant Big Data characteristics are:
 |---|---|
 | Volume | Raw pages, extracted text, code files, decisions, and table snapshots accumulate continuously. The prototype does not claim an unmeasured production volume. |
 | Velocity | Pollers create a live stream. Release events and feed updates arrive in bursts rather than at a fixed rate. Redpanda buffers these bursts. |
-| Variety | The pipeline handles HTML, metadata, reviews, and code. Each format carries different extraction and quality signals. |
+| Variety | The pipeline handles HTML, PDF fallback, metadata, documentation, and code. Each format carries different extraction and quality signals. |
 | Veracity | Near duplicates, personal data, extraction failures, missing licenses, low-quality pages, and benchmark overlap must remain visible as explicit decisions. |
 | Value | Accepted records become a queryable training export. Rejected records remain useful for auditing and policy improvement. |
 
@@ -125,7 +124,6 @@ Quality is source-aware:
 - General web text uses the FineWeb-Edu profile.
 - Hugging Face cards and repository documentation use a Markdown prose projection and retain FineWeb-Edu as an audit signal without Common-Crawl page-shape gates.
 - Code uses a separate Stack v2 and Dolma-grounded quality policy.
-- OpenReview review forms use schema completeness; ratings, recommendations, confidence, and decisions remain audit metadata rather than training labels.
 - RSS, OAI, Hub-list, and release envelopes are internal discovery messages and never become training text or UI corpus rows.
 
 This prevents a web-education classifier from being treated as a meaningful
@@ -221,7 +219,7 @@ The API and document screenshots in section 11 use the same live cluster data sh
 |---|---|
 | Deployment | Fetcher, arXiv full-text worker, GitHub tarball worker, Hugging Face card poller, Iceberg writer, DuckDB API, decon API, mixture controller, and UI. |
 | StatefulSet | Curator with a persistent global dedup index and decision cache; single-writer foundry with its durable queue, call cache, and append-only artifact audits. |
-| CronJob | Periodic RSS, OAI-PMH, GitHub release, and optional OpenReview live polls. |
+| CronJob | Periodic RSS, OAI-PMH, and GitHub release polls. |
 | ConfigMap | Feed definitions and synthetic benchmark canaries. |
 | Secret | MinIO, Polaris, GitHub, Hugging Face, and Ed25519 credentials. |
 | PVC | Curator state and platform storage. |

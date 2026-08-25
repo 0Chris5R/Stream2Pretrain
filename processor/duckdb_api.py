@@ -54,7 +54,6 @@ def _visible_source_predicate(
         (
             f"{column} NOT LIKE 'rss-arxiv-%'",
             f"{column} NOT LIKE 'seed:%'",
-            f"{column} NOT LIKE 'reviewarena%'",
             f"{column} NOT IN ({removed})",
         )
     )

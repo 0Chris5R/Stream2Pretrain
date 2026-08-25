@@ -17,22 +17,6 @@ from processor.source_policy import resolve_source_policy
             True,
         ),
         (
-            "openreview",
-            "pdf",
-            "openreview-pdf-pending-marker",
-            "scientific_paper",
-            "finepdfs_edu_v2",
-            True,
-        ),
-        (
-            "openreview-live",
-            "pdf",
-            "docling-pdf-cpu-v1",
-            "scientific_paper",
-            "finepdfs_edu_v2",
-            True,
-        ),
-        (
             "github-release-tarballs",
             "code",
             "github-release-tarball-2026-06",
@@ -63,22 +47,6 @@ from processor.source_policy import resolve_source_policy
             "hf-dataset-card-markdown-v1",
             "hf_dataset_card",
             "fineweb_edu",
-            True,
-        ),
-        (
-            "openreview",
-            "review",
-            "openreview-review-text",
-            "peer_review",
-            "openreview_schema",
-            True,
-        ),
-        (
-            "openreview-live",
-            "review",
-            "openreview-review-json-v1",
-            "peer_review",
-            "openreview_schema",
             True,
         ),
         (
@@ -150,19 +118,13 @@ def test_configured_source_dispatch(
     assert policy.training_text is training_text
 
 
-def test_wire_format_cannot_override_explicit_review_or_code_family() -> None:
-    review = resolve_source_policy(
-        source_feed="openreview-live",
-        source_format="review",
-        extraction_pipeline="legacy-scientific-artifact",
-    )
+def test_wire_format_cannot_override_explicit_code_family() -> None:
     code = resolve_source_policy(
         source_feed="arxiv-import",
         source_format="code",
         extraction_pipeline="legacy-html",
     )
 
-    assert review.family == "peer_review"
     assert code.family == "source_code"
 
 

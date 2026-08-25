@@ -269,31 +269,6 @@ def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
 
 _MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 _MARKDOWN_HTML = re.compile(r"<[^>]+>")
-_REVIEW_ADMIN_FIELDS = frozenset(
-    {
-        "authors",
-        "authorids",
-        "cdate",
-        "confidence",
-        "decision",
-        "forum",
-        "id",
-        "invitation",
-        "license",
-        "license_url",
-        "mdate",
-        "note_id",
-        "rating",
-        "recommendation",
-        "reviewer",
-        "reviewer_id",
-        "signatures",
-        "venue",
-        "year",
-    }
-)
-
-
 def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
     """Extract card/README prose while excluding YAML and fenced code.
 
@@ -345,61 +320,6 @@ def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
     return text, title, "\n".join(metadata_lines)[:32768]
 
 
-def _openreview_value(value: object) -> object:
-    """Unwrap the ``{"value": ...}`` envelope used by OpenReview API v2."""
-    if isinstance(value, dict) and "value" in value:
-        return value["value"]
-    return value
-
-
-def _review_payload_text(payload: bytes) -> tuple[str, str | None, str]:
-    """Project public OpenReview form fields without administrative labels.
-
-    Rating, confidence, recommendation, and decision are retained as audit
-    metadata. They are never interpreted as review-quality labels.
-    """
-    try:
-        raw = orjson.loads(payload)
-    except orjson.JSONDecodeError:
-        text = payload.decode("utf-8", errors="replace").strip()
-        return text, None, "legacy_unstructured_review"
-    if not isinstance(raw, dict):
-        return "", None, "invalid_review_envelope"
-
-    content = raw.get("content")
-    fields = content if isinstance(content, dict) else raw
-    title_value = _openreview_value(raw.get("title"))
-    if not isinstance(title_value, str):
-        title_value = _openreview_value(fields.get("title"))
-    title = title_value.strip() if isinstance(title_value, str) and title_value.strip() else None
-
-    metadata: list[str] = []
-    for key in ("id", "note_id", "forum", "invitation", "venue", "year"):
-        value = _openreview_value(raw.get(key))
-        if value not in (None, ""):
-            metadata.append(f"{key}: {value}")
-
-    blocks: list[str] = []
-    for key, wrapped in fields.items():
-        normalized_key = str(key).strip().lower().replace(" ", "_")
-        value = _openreview_value(wrapped)
-        if normalized_key in _REVIEW_ADMIN_FIELDS or normalized_key == "title":
-            if value not in (None, ""):
-                metadata.append(f"{normalized_key}: {value}")
-            continue
-        values: list[str] = []
-        if isinstance(value, str):
-            values = [value]
-        elif isinstance(value, list):
-            values = [item for item in value if isinstance(item, str)]
-        elif isinstance(value, dict):
-            values = [item for item in value.values() if isinstance(item, str)]
-        cleaned = "\n".join(item.strip() for item in values if item.strip()).strip()
-        if cleaned:
-            blocks.append(f"[FIELD {normalized_key}]\n{cleaned}")
-    return "\n\n".join(blocks), title, "\n".join(metadata)[:32768]
-
-
 def uses_scientific_extraction(bronze: BronzeRecord) -> bool:
     """Return whether an HTML record belongs to a scientific-document source.
 
@@ -436,11 +356,6 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         # and legacy calls fail closed as well.
         model_text = ""
         source_metadata_text = text[:32768]
-        extracted_with = bronze.extraction_pipeline
-        extraction_pipeline = bronze.extraction_pipeline
-    elif bronze.source_format == "review":
-        text, title, source_metadata_text = _review_payload_text(raw_html)
-        model_text = text
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
     elif bronze.source_format == "web" and (

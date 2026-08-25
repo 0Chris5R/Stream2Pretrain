@@ -117,12 +117,12 @@ def test_upstream_curation_never_allocates_a_benchmark_split() -> None:
 
 
 def test_non_scientific_high_reasoning_record_is_never_a_paper_candidate() -> None:
-    silver = _silver("review body " * 100).model_copy(
+    silver = _silver("model card body " * 100).model_copy(
         update={
-            "source_feed": "openreview-live",
-            "source_format": "review",
-            "scientific_artifact_s3_uri": "s3://silver/legacy/document.json",
-            "segments": [_segment("review", "other", 100)],
+            "source_feed": "hf-models",
+            "source_format": "web",
+            "extraction_pipeline": "hf-model-card-markdown-v1",
+            "segments": [_segment("model-card", "other", 100)],
         }
     )
 

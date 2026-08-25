@@ -590,7 +590,6 @@
           "validity_interval_invalid",
           "minhash_backend_mismatch",
           "insufficient_body",
-          "insubstantial_review",
           "insufficient_scientific_body",
           "code_quality_filter",
           "secret_detected",
@@ -703,8 +702,7 @@
         "markdown",
         "code",
         "web",
-        "metadata",
-        "review"
+        "metadata"
       ],
       "title": "Source Format",
       "type": "string"
@@ -740,8 +738,6 @@
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
-        "openreview_note",
-        "openreview_terms",
         "hf_card",
         "archived_page",
         "source_terms",

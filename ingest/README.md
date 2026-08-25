@@ -17,7 +17,6 @@ See ``../SOURCES.md`` for the full feed catalogue and rate limits, and
 | ``github_release_tarball_fetcher/`` | Per-release source tarball expander, one ``CodeFileRecord`` per allow-listed file | event-driven on ``github.release.jobs`` |
 | ``hf_poller/`` | HF Hub exact-version model and dataset cards | every 10-15 min |
 | ``arxiv_html_fetcher/`` | Native arXiv ``/html/<id>`` fulltext fetcher with ar5iv and bounded CPU PDF fallbacks | event-driven |
-| ``openreview_poller/`` | Live OpenReview API v2 venue poll | every 6 h when API access is configured |
 | ``common/`` | Shared HTTP client, Kafka producer, MinIO writer, OTel, structlog | n/a |
 
 Content pollers emit identical ``BronzeRecord`` shapes per

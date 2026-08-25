@@ -29,7 +29,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Protocol, cast
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
@@ -59,8 +59,6 @@ from processor.operators.pii import PiiScanner
 from processor.operators.quality import QualityClassifier, QualityScore
 from processor.operators.source_quality import (
     MetadataDiscoveryPolicy,
-    PeerReviewQualityPolicy,
-    is_substantive_review,
 )
 from processor.probes import start_probe_server
 from processor.scientific_policy import (
@@ -113,7 +111,6 @@ class CurateState:
     fineweb_quality: QualityScorer
     code_quality: CodeQualityPolicy
     metadata_discovery: MetadataDiscoveryPolicy
-    review_quality: PeerReviewQualityPolicy
     pii: PiiScanner
     decon: DeconGate
     tokenizer: Tokenizer
@@ -210,7 +207,6 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         fineweb_quality=fineweb_quality,
         code_quality=CodeQualityPolicy(),
         metadata_discovery=MetadataDiscoveryPolicy(),
-        review_quality=PeerReviewQualityPolicy(),
         pii=pii,
         decon=decon,
         tokenizer=Tokenizer(allow_fallback=not require_real_models),
@@ -227,11 +223,10 @@ def _decision_cache_key(state: CurateState, payload: bytes) -> str:
         (
             state.policy_revision,
             state.scoring_version,
-            state.finepdfs_quality.revision,
-            state.fineweb_quality.revision,
-            state.metadata_discovery.revision,
-            state.review_quality.revision,
-            state.kenlm.scorer,
+                state.finepdfs_quality.revision,
+                state.fineweb_quality.revision,
+                state.metadata_discovery.revision,
+                state.kenlm.scorer,
             state.pii.revision,
             state.decon.benchmark_set_version,
         )
@@ -272,7 +267,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         source_format=silver.source_format,
         extraction_pipeline=silver.extraction_pipeline,
     )
-    quality_profile = _quality_profile(silver)
     is_scientific = source_policy.family == "scientific_paper"
     is_code = source_policy.family == "source_code"
     is_metadata = not source_policy.training_text
@@ -282,8 +276,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         primary_quality = state.code_quality
     elif is_scientific:
         primary_quality = state.finepdfs_quality
-    elif quality_profile == "review":
-        primary_quality = state.review_quality
     elif is_metadata:
         primary_quality = state.metadata_discovery
     else:
@@ -449,13 +441,9 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     runtime_excluded.extend(structured_exclusions)
     text = _training_projection(silver, kept_segments, structured_text=structured_text)
     reject: list[RejectReason] = []
-    minimum_words = 20 if is_code else 1 if quality_profile == "review" else 50
+    minimum_words = 20 if is_code else 50
     if is_metadata:
         reject.append("metadata_only")
-    if quality_profile == "review" and not is_substantive_review(
-        model_text, silver.source_metadata_text
-    ):
-        reject.append("insubstantial_review")
     if len(model_text.split()) < minimum_words:
         reject.append("insufficient_scientific_body" if is_scientific else "insufficient_body")
     if removed_body_pii and not kept_segments:
@@ -807,26 +795,6 @@ def _uses_scientific_quality_profile(silver: SilverRecord) -> bool:
         ).family
         == "scientific_paper"
     )
-
-
-def _quality_profile(
-    silver: SilverRecord,
-) -> Literal["code", "metadata", "review", "scientific", "web"]:
-    """Choose a classifier whose training domain matches the source family."""
-    policy = resolve_source_policy(
-        source_feed=silver.source_feed,
-        source_format=silver.source_format,
-        extraction_pipeline=silver.extraction_pipeline,
-    )
-    if policy.family == "source_code":
-        return "code"
-    if not policy.training_text:
-        return "metadata"
-    if policy.family == "peer_review":
-        return "review"
-    if policy.family == "scientific_paper":
-        return "scientific"
-    return "web"
 
 
 def is_trainable_gold(record: GoldRecord) -> bool:

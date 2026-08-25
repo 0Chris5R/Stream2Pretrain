@@ -62,14 +62,8 @@ credential-like secrets are source-specific blockers.
 
 Hugging Face cards and repository documentation remove front matter and fenced
 code before FineWeb-Edu scoring. The score remains an audit signal because the
-ordinary-web threshold was not calibrated for structured Markdown. OpenReview
-reviews use `openreview-schema-completeness-v1`, which counts represented
-public review-form field families. Rating, confidence, recommendation, and
-decision fields remain audit metadata. Official review/response Invitations or
-recognized substantive form fields qualify a review artifact. Generic public
-comments containing only a `comment` field are rejected without inventing a
-word-count threshold. Discovery metadata has no educational classifier and
-cannot reach Gold.
+ordinary-web threshold was not calibrated for structured Markdown. Discovery
+metadata has no educational classifier and cannot reach Gold.
 
 The document educational score is the word-weighted mean of measured, retained
 sections. Each section weight is `max(1, min(word_count, 512))`.

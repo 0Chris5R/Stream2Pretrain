@@ -55,7 +55,6 @@ RejectReason = Literal[
     "validity_interval_invalid",
     "minhash_backend_mismatch",
     "insufficient_body",
-    "insubstantial_review",
     "insufficient_scientific_body",
     "code_quality_filter",
     "secret_detected",

@@ -44,7 +44,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 ### 2026-06-15 - Scope tightened to AI research
 - Domain focus: streaming curation for fresh AI-research pretraining data.
 - Phase-1 sources: arXiv OAI-PMH + 4 arXiv RSS feeds + GitHub Events (AI-filtered) + GitHub Releases Atom (~30 curated AI repos) + HF Hub models + HF Daily Papers + AI-lab blog RSS bundle. Target 5-20k docs/day.
-- Phase-2 expansion: remaining arXiv categories, HF Datasets/Spaces, OpenReview, Semantic Scholar, GitHub READMEs, long-tail blogs, Alignment Forum.
+- Phase-2 expansion was superseded by the 2026-08-25 live source catalogue.
 - Full source catalog with rate limits in `SOURCES.md`.
 - Out of scope (with reasons): GitHub Trending, YouTube transcripts, Twitter/X, Reddit, full arXiv PDFs, paid proceedings.
 
@@ -57,7 +57,6 @@ provide" section. Tracked here for the AI pair.
 - Wildcard TLS DNS zone available to the team (rfc2136 zone + tsig credentials per Exercise Track 1). Replace `stream2pretrain.example.org` placeholders.
 - The five Kubernetes Secrets enumerated in the README before `helm install`.
 - Container image builds for the 12 component images. Build commands per component are in `charts/stream2pretrain/README.md`.
-- First-run verification of seed-loader column names: peS2o v3 (`data/v3/` layout), RedPajama-arxiv config string, FineWeb-Edu (`date` vs `crawl_date`), Stack-Edu config + content column, REVIEWARENA HF dataset id resolution. The loaders log and skip cleanly on mismatch but should be pinned in `values.yaml` once observed.
 
 ## Open TODOs from v0.2.0 adversarial review
 

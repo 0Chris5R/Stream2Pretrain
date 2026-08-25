@@ -586,16 +586,6 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "license": "Versioned public Hub repository terms for README prose",
         "stages": ["discover", "license", "fetch", "classify", "route"],
     },
-    {
-        "name": "openreview",
-        "component": "ingest-openreview-live",
-        "kind": "cronjob",
-        "protocol": "rest-json",
-        "endpoint": "https://api2.openreview.net",
-        "quality": "FinePDFs papers / OpenReview form schema",
-        "license": "Article item field / public-comment terms",
-        "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
-    },
 )
 
 

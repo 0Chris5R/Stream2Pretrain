@@ -30,13 +30,6 @@ internal scheduling messages only.
 | `github-release-tarballs` README and documentation files | Narrative Markdown, reStructuredText, and text after front matter and fenced-code removal. | Same exact-ref and per-file evidence as source files. | Permissive prose may enter pretraining. It is not a paper Foundry candidate. |
 | `hf-models` | Exact-commit `README.md` model-card prose only. Weights, code, and linked datasets are never fetched by this path. | The versioned public README is admitted under the Hugging Face public-repository terms. A model-weight licence in Hub metadata does not control this prose-only projection. A missing immutable commit or private repository is only unresolved discovery metadata and creates no document decision. | Pretraining prose only. Model cards are not SFT/RL candidates. |
 | `hf-datasets` | Exact-commit `README.md` dataset-card prose only. Dataset rows and binaries are never fetched by this path. | The versioned public README is admitted under the Hugging Face public-repository terms. Dataset and wrapper licences do not control this prose-only projection. | Pretraining prose only. Dataset cards are not SFT/RL candidates. |
-| OpenReview live paper | Submission PDF and structured scientific projection. | Use the submission Note's explicit `license` or `license_url`. If absent, the paper is posttrain-only. Explicit incompatible rights quarantine. | Permissive papers may enter pretraining and the paper Foundry; missing or grey rights may only enter the Foundry. |
-| OpenReview official review | Substantive public review, meta-review, rebuttal, or author-response fields. Generic comments are not training items. | Explicit Note rights win. Otherwise OpenReview's versioned public-comment terms provide CC-BY-4.0 evidence for public comments and reviews. | Permissive review prose may enter pretraining. The paper Foundry does not consume reviews. |
-
-OpenReview is licence-suitable. Each deployment performs a live public listing
-probe and creates the current-frontier workload only when it succeeds; a failed
-probe leaves no workload or active Sources entry.
-
 ## Removed sources
 
 GitHub Events and Hugging Face Daily Papers duplicated the release and arXiv

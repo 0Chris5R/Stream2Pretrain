@@ -93,7 +93,7 @@ Stream2Pretrain is not arXiv-only.
 Current and planned source formats already represented in the repository are:
 
 - native arXiv HTML and ar5iv fallback;
-- arXiv/OpenReview PDF and review material;
+- arXiv PDF fallback material;
 - curated AI-lab and project RSS/Atom feeds;
 - Hugging Face model and daily-paper feeds;
 - curated GitHub releases/events and release-tarball code;

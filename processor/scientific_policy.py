@@ -198,17 +198,6 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         )
         tags = ["systems_implementation", "methods_procedures"]
         return ScientificScores(completeness, structural, reasoning, 0.0, tags)
-    if source_policy.family == "peer_review":
-        # Review eligibility is categorical and based on the source schema in
-        # route_document. Do not infer review quality from sentiment keywords.
-        reasoning = min(1.0, quality_score / 5.0)
-        return ScientificScores(
-            completeness,
-            structural,
-            reasoning,
-            0.0,
-            ["peer_review", "critique_and_feedback"],
-        )
     if not source_policy.training_text:
         return ScientificScores(
             completeness,

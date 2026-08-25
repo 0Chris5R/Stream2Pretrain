@@ -109,8 +109,6 @@ See README.md for the high-level project description and RESEARCH.md for the ful
   corpus sources, documents, acceptances, or quarantines.
 - Active content sources are arXiv papers, curated GitHub release files and
   docs, Hugging Face model cards, and Hugging Face dataset cards.
-- OpenReview live is licence-suitable but remains absent from the active
-  catalogue until live API access is configured and verified.
 - GitHub Events, HF Daily Papers, HF Spaces, all five blog feeds, and every
   historical seed/backfill workload were removed.
 - Licence admission has exactly three tiers: permissive -> both routes; grey
@@ -123,7 +121,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 ### 2026-06-15 - Scope tightened to AI research (historical)
 - Domain focus: streaming curation for fresh AI-research pretraining data.
 - Phase-1 sources: arXiv OAI-PMH + 4 arXiv RSS feeds + GitHub Events (AI-filtered) + GitHub Releases Atom (~30 curated AI repos) + HF Hub models + HF Daily Papers + AI-lab blog RSS bundle. Target 5-20k docs/day.
-- Phase-2 expansion: remaining arXiv categories, HF Datasets/Spaces, OpenReview, Semantic Scholar, GitHub READMEs, long-tail blogs, Alignment Forum.
+- Phase-2 expansion was superseded by the 2026-08-25 live source catalogue.
 - Full source catalog with rate limits in `SOURCES.md`.
 - Out of scope (with reasons): GitHub Trending, YouTube transcripts, Twitter/X, Reddit, full arXiv PDFs, paid proceedings.
 

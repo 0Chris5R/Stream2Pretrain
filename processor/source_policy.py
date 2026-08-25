@@ -21,7 +21,6 @@ SourceFamily = Literal[
     "web_prose",
     "repository_documentation",
     "source_code",
-    "peer_review",
     "hf_model_card",
     "hf_dataset_card",
     "discovery_metadata",
@@ -30,7 +29,6 @@ QualityProfile = Literal[
     "finepdfs_edu_v2",
     "fineweb_edu",
     "stack_v2_dolma_rules",
-    "openreview_schema",
     "not_applicable",
 ]
 KenlmMode = Literal["gate", "diagnostic", "off"]
@@ -95,16 +93,6 @@ SOURCE_CODE = SourceProcessingPolicy(
     web_heuristic_gate=False,
     kenlm_mode="off",
 )
-PEER_REVIEW = SourceProcessingPolicy(
-    policy_id="peer-review-openreview-schema",
-    family="peer_review",
-    extraction_profile="openreview-public-fields",
-    quality_profile="openreview_schema",
-    training_text=True,
-    language_gate=True,
-    web_heuristic_gate=False,
-    kenlm_mode="off",
-)
 HF_MODEL_CARD = SourceProcessingPolicy(
     policy_id="hf-model-card-fineweb",
     family="hf_model_card",
@@ -138,7 +126,6 @@ DISCOVERY_METADATA = SourceProcessingPolicy(
 
 _SCIENTIFIC_MARKERS = (
     "arxiv",
-    "openreview",
     "pes2o",
     "redpajama-arxiv",
     "s2orc",
@@ -160,8 +147,6 @@ def resolve_source_policy(
 
     if source_format == "metadata":
         return DISCOVERY_METADATA
-    if source_format == "review":
-        return PEER_REVIEW
     if source_format == "code":
         return SOURCE_CODE
 
@@ -195,7 +180,6 @@ def source_policy_catalog() -> tuple[SourceProcessingPolicy, ...]:
         WEB_PROSE,
         REPOSITORY_DOCUMENTATION,
         SOURCE_CODE,
-        PEER_REVIEW,
         HF_MODEL_CARD,
         HF_DATASET_CARD,
         DISCOVERY_METADATA,

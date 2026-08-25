@@ -40,8 +40,6 @@
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
-        "openreview_note",
-        "openreview_terms",
         "hf_card",
         "archived_page",
         "source_terms",

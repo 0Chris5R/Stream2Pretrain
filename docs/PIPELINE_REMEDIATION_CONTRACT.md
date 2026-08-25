@@ -26,7 +26,7 @@ The outcome is always based on the individual content item. A SourceFeed
 default, dataset wrapper licence, repository topic, or venue must not silently
 establish rights for all contained content. A versioned source-wide grant may
 apply only to the exact projection it covers, such as a public Hugging Face
-repository README or an OpenReview public comment.
+repository README.
 
 Each source family must implement the metadata lookup appropriate to it:
 
@@ -37,8 +37,6 @@ Each source family must implement the metadata lookup appropriate to it:
 - Hugging Face model and dataset cards use an exact commit and either explicit
   README rights or the versioned public-repository terms. This never grants
   rights in weights, dataset rows, or linked artifacts.
-- OpenReview live records resolve paper rights at the individual Note and use
-  the versioned public-comment terms only for public review/comment prose.
 
 Discovery envelopes create no licence or curation decision and do not appear
 in Sources, Documents, acceptance, or quarantine statistics. The Sources and
@@ -104,8 +102,6 @@ All configured sources run through a dedicated, tested path:
   arXiv full-text artifact with bounded CPU PDF fallback;
 - GitHub Releases Atom schedules exact-ref release tarball code and docs;
 - Hugging Face Hub model and dataset cards retain exact-revision README prose;
-- OpenReview live papers and public review threads join once live API access is
-  configured and verified.
 
 Redundant discovery sources, sources without a useful corpus projection, blog
 feeds without an audited reusable-content grant, and historical backfill-only

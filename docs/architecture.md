@@ -95,11 +95,11 @@ A Python streaming dataflow with the Rust core. The pipeline is wired in
 6. `lshbloom` - band-partitioned Bloom near-dup index (RocksDB-checkpointed).
 7. `quality_classifier` - source-aware CPU inference: pinned FinePDFs Edu v2
    for scientific HTML/PDF, pinned FineWeb-Edu for ordinary web prose and as
-   an audit-only signal for card/documentation prose, Stack v2/Dolma-grounded
-   rules for source code, and OpenReview form-schema completeness for peer
-   reviews. Structured discovery metadata has no educational score.
+   an audit-only signal for card/documentation prose, and Stack v2/Dolma-
+   grounded rules for source code. Structured discovery metadata has no
+   educational score.
 8. `kenlm_perplexity` - mmap'd binary KenLM model gated only on ordinary web
-   prose. Scientific text, code, reviews, metadata, cards, and repository
+   prose. Scientific text, code, metadata, cards, and repository
    documentation bypass this web-domain signal.
 9. `pii_regex` - email / phone / SSN / credit-card / IP scan.
 10. `decon_gate` - 13-gram Bloom + E5 embedding sketch plus signed attestation API.

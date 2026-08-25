@@ -54,12 +54,11 @@ SourceFormat = Literal[
     "code",
     "web",
     "metadata",
-    "review",
 ]
 """Wire shape of the source document.
 
 - ``html``: a rendered HTML page (arXiv ``/html/<id>``, ar5iv, AI-lab blog).
-- ``pdf``: a binary PDF (OpenReview, ACL Anthology, conference proceedings).
+- ``pdf``: a binary PDF (arXiv fallback, ACL Anthology, conference proceedings).
 - ``latex``: TeX/LaTeX source from arXiv ``s3://arxiv/src``.
 - ``markdown``: scientific full text already converted to Markdown by a
   source-side OCR or document extraction pipeline.
@@ -67,8 +66,6 @@ SourceFormat = Literal[
   ``the-stack-v2`` blob.
 - ``web``: an opaque crawled web page (CommonCrawl-derived seeds).
 - ``metadata``: an OAI-PMH or REST JSON record with no body, only metadata.
-- ``review``: peer-review prose from OpenReview (separate from the paper PDF
-  it discusses).
 """
 
 SpdxLicenseSource = Literal[
@@ -79,8 +76,6 @@ SpdxLicenseSource = Literal[
     "rss_entry",
     "oai_metadata",
     "arxiv_api",
-    "openreview_note",
-    "openreview_terms",
     "hf_card",
     "archived_page",
     "source_terms",

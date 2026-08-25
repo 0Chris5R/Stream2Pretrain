@@ -110,7 +110,7 @@
     "source_format": {
       "anyOf": [
         {
-          "enum": ["html", "pdf", "latex", "code", "web", "metadata", "review", "markdown"],
+          "enum": ["html", "pdf", "latex", "code", "web", "metadata", "markdown"],
           "type": "string"
         },
         {"type": "null"}

@@ -13,15 +13,6 @@ posttrain-only, or quarantined documents.
 | Hugging Face model cards | `/api/models` sorted by `lastModified` | Exact-commit public `README.md` prose only | Pretraining technical documentation |
 | Hugging Face dataset cards | `/api/datasets` sorted by `lastModified` | Exact-commit public `README.md` prose only | Pretraining technical documentation |
 
-## Pending live source
-
-OpenReview live ingestion is implemented for ICLR, NeurIPS, ICML, and COLM
-2026 papers plus official reviews, meta-reviews, rebuttals, and responses.
-OpenReview article PDFs use each Note's licence. A missing paper licence is
-posttrain-only; public comments and reviews are covered by OpenReview's
-CC-BY-4.0 public-comment terms. Each deployment probes the public listing API;
-the CronJob and Sources entry exist only when that probe succeeds.
-
 ## Internal discovery paths
 
 - `https://rss.arxiv.org/rss/cs.CL`
@@ -75,5 +66,3 @@ all other backfill-only workloads were also removed.
 - [Hugging Face repository licences](https://huggingface.co/docs/hub/repositories-licenses)
 - [Hugging Face Terms of Service](https://huggingface.co/terms-of-service)
 - [GitHub REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
-- [OpenReview Terms](https://openreview.net/legal/terms)
-- [OpenReview API v2](https://docs.openreview.net/reference/api-v2)

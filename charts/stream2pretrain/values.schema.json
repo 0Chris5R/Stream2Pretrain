@@ -310,41 +310,6 @@
         }
       }
     },
-    "openreviewPoller": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled", "venues", "live"],
-      "properties": {
-        "enabled": {"type": "boolean"},
-        "venues": {
-          "type": "array",
-          "items": {"type": "string", "minLength": 1},
-          "minItems": 0
-        },
-        "tokenSecret": {"type": "string"},
-        "tokenSecretKey": {"type": "string"},
-        "live": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["enabled", "schedule", "activeDeadlineSeconds", "state"],
-          "properties": {
-            "enabled": {"type": "boolean"},
-            "schedule": {"type": "string", "minLength": 1},
-            "activeDeadlineSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
-            "state": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["storageClass", "size", "existingClaim"],
-              "properties": {
-                "storageClass": {"type": "string"},
-                "size": {"type": "string", "minLength": 1},
-                "existingClaim": {"type": "string"}
-              }
-            }
-          }
-        }
-      }
-    },
     "processor": {
       "type": "object",
       "required": ["fetcher", "curate", "iceberg"],

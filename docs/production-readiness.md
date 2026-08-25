@@ -39,7 +39,6 @@ These must pass before calling the repo production ready:
 | ID | Status | Area | Required fix | Verification |
 |---|---|---|---|---|
 | PRD-001 | done | Python workspace | Add every local Python component to the uv workspace, add a real `tests` package, and make the root dev group install all testable components. | `uv run pytest -q` - 280 passed, 4 skipped |
-| PRD-002 | done | Helm | Fix chart schema drift for OpenReview live cursor PVC. | `helm lint charts/stream2pretrain` |
 | PRD-003 | done | Runtime config | Align Helm env vars with `ingest.common.config` and `processor.common`. Remove silent localhost/default credential fallbacks from Kubernetes paths. | Rendered manifests plus config unit tests |
 | PRD-004 | done | Kubernetes probes | Add real health/ready/metrics endpoints or remove invalid probes. Prefer explicit endpoints for long-running Deployments. | Rendered manifests plus probe route/module tests |
 | PRD-005 | done | UI build | Commit `ui/package-lock.json` and make UI build reproducible with `npm ci`. | `npm ci --prefix ui`, `npm run build --prefix ui` |

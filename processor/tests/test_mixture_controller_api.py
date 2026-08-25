@@ -125,7 +125,6 @@ def test_builtin_inventory_excludes_removed_discovery_and_backfill_sources() -> 
         "github-release-tarballs",
         "hf-models",
         "hf-datasets",
-        "openreview",
     }
 
 

@@ -43,10 +43,10 @@ def test_dev_state_root_override(tmp_path: Path, monkeypatch) -> None:
 
 def test_state_keys_are_portable_file_names(tmp_path: Path) -> None:
     store = FeedStateStore(tmp_path)
-    store.put("openreview:ICLR.cc:2026", {"cursor": "abc"})
+    store.put("source:cursor", {"cursor": "abc"})
 
-    assert store.get("openreview:ICLR.cc:2026") == {"cursor": "abc"}
-    assert [path.name for path in tmp_path.iterdir()] == ["openreview%3AICLR.cc%3A2026.json"]
+    assert store.get("source:cursor") == {"cursor": "abc"}
+    assert [path.name for path in tmp_path.iterdir()] == ["source%3Acursor.json"]
 
 
 def test_legacy_state_file_is_read_during_filename_migration(tmp_path: Path) -> None:
