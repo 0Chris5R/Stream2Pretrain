@@ -35,6 +35,9 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "types-PyYAML>=6.0",
+    # Iceberg writer unit doubles materialize Arrow tables. Production gets
+    # this from processor[runtime]; CI needs it explicitly as well.
+    "pyarrow>=16.0",
     "stream2pretrain-ingest-common",
     "stream2pretrain-rss-poller",
     "stream2pretrain-sitemap-poller",

@@ -100,8 +100,6 @@ runtime = [
     "docling==2.114.0",
     "pandas>=2.1,<4",
     "sympy==1.13.3",
-    # v0.2.0 seed loader: streaming HuggingFace dataset reader.
-    "datasets>=2.20",
 ]
 # Stateless model services are intentionally split so neither CI nor a worker
 # node must materialize every large artifact in one image or process. Keep
