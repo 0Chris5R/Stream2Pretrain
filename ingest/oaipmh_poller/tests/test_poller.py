@@ -95,7 +95,6 @@ async def test_poll_feed_resumes_the_same_window_from_checkpoint(
 
     monkeypatch.setattr(poller, "build_async_client", lambda *_args, **_kwargs: _AsyncResource())
     monkeypatch.setattr(poller, "BronzeProducer", _Producer)
-    monkeypatch.setattr(poller, "LicenseAdmissionProducer", _Producer)
     monkeypatch.setattr(poller, "MinioWriter", _Minio)
     monkeypatch.setattr(poller, "OAIClient", _OAIClient)
     monkeypatch.setattr(poller, "_today_iso", lambda: "2026-08-22")
@@ -109,8 +108,8 @@ async def test_poll_feed_resumes_the_same_window_from_checkpoint(
     )
 
     assert emitted == 1
-    assert store.get("oai-test") == {
-        "window_from": "2024-01-01",
+    assert store.get("oai-test:live-v1") == {
+        "window_from": "2026-08-22",
         "window_until": "2026-08-22",
         "resumption_token": "next",
     }
@@ -126,9 +125,9 @@ async def test_poll_feed_resumes_the_same_window_from_checkpoint(
 
     assert emitted == 1
     assert calls[1]["resumption_token"] == "next"
-    assert calls[1]["from_"] == "2024-01-01"
+    assert calls[1]["from_"] == "2026-08-22"
     assert calls[1]["until"] == "2026-08-22"
-    assert store.get("oai-test") == {"until": "2026-08-22"}
+    assert store.get("oai-test:live-v1") == {"until": "2026-08-22"}
 
 
 @pytest.mark.asyncio
@@ -178,7 +177,6 @@ async def test_poll_feed_rate_limits_page_requests_not_records(
     )
     monkeypatch.setattr(poller, "build_async_client", lambda *_args, **_kwargs: _AsyncResource())
     monkeypatch.setattr(poller, "BronzeProducer", _Producer)
-    monkeypatch.setattr(poller, "LicenseAdmissionProducer", _Producer)
     monkeypatch.setattr(poller, "MinioWriter", _Minio)
     monkeypatch.setattr(poller, "OAIClient", _OAIClient)
 
@@ -210,16 +208,9 @@ async def test_non_arxiv_record_never_inherits_feed_default(
         async def list_pages(self, **_: Any):  # type: ignore[no-untyped-def]
             yield OAIPage(records=[record], resumption_token=None)
 
-    producers: list[_Producer] = []
-
-    class _TrackedProducer(_Producer):
-        def __init__(self, *_: object, **__: object) -> None:
-            super().__init__()
-            producers.append(self)
-
     monkeypatch.setattr(poller, "build_async_client", lambda *_args, **_kwargs: _AsyncResource())
-    monkeypatch.setattr(poller, "BronzeProducer", _TrackedProducer)
-    monkeypatch.setattr(poller, "LicenseAdmissionProducer", _TrackedProducer)
+    producer = _Producer()
+    monkeypatch.setattr(poller, "BronzeProducer", lambda *_args, **_kwargs: producer)
     monkeypatch.setattr(poller, "MinioWriter", _Minio)
     monkeypatch.setattr(poller, "OAIClient", _OAIClient)
 
@@ -231,6 +222,4 @@ async def test_non_arxiv_record_never_inherits_feed_default(
     )
 
     assert emitted == 0
-    assert producers[0].sent == []
-    assert producers[1].sent[0].status == "quarantined"
-    assert producers[1].sent[0].evidence_scope == "unknown"
+    assert producer.sent == []

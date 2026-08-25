@@ -13,13 +13,11 @@ See ``../SOURCES.md`` for the full feed catalogue and rate limits, and
 |------|-------|---------|
 | ``rss_poller/`` | RSS / Atom CronJob | every 2 h (configurable per SourceFeed) |
 | ``oaipmh_poller/`` | OAI-PMH 2.0 CronJob (arXiv default) | every 2 h |
-| ``sitemap_poller/`` | Gzipped sitemap.xml CronJob with index expansion | every 24 h |
-| ``github_events/`` | Long-running Deployment (60 s ``X-Poll-Interval``) | continuous |
 | ``github_releases/`` | Atom feed CronJob across curated AI repos | every 2 h |
 | ``github_release_tarball_fetcher/`` | Per-release source tarball expander, one ``CodeFileRecord`` per allow-listed file | event-driven on ``github.release.jobs`` |
-| ``hf_poller/`` | HF Hub exact-version model/dataset/Space cards plus Daily Papers discovery | every 10-15 min / 6 h |
-| ``arxiv_html_fetcher/`` | Native arXiv ``/html/<id>`` fulltext fetcher with ``ar5iv.labs.arxiv.org`` fallback | event-driven on ``docs.normalized`` |
-| ``openreview_poller/`` | OpenReview API v2 venue poll + REVIEWARENA backfill | every 6 h / one-shot |
+| ``hf_poller/`` | HF Hub exact-version model and dataset cards | every 10-15 min |
+| ``arxiv_html_fetcher/`` | Native arXiv ``/html/<id>`` fulltext fetcher with ar5iv and bounded CPU PDF fallbacks | event-driven |
+| ``openreview_poller/`` | Live OpenReview API v2 venue poll | every 6 h when API access is configured |
 | ``common/`` | Shared HTTP client, Kafka producer, MinIO writer, OTel, structlog | n/a |
 
 Content pollers emit identical ``BronzeRecord`` shapes per
@@ -37,18 +35,11 @@ export HF_TOKEN=hf_...
 
 # One-pass pollers
 uv run python -m ingest.rss_poller.poller
-uv run python -m ingest.sitemap_poller.poller
 uv run python -m ingest.oaipmh_poller.poller
 uv run python -m ingest.github_releases.poller
 uv run python -m ingest.hf_poller.poller
 
-# Long-running pollers
-uv run python -m ingest.github_events.poller &
-
-# v0.2.0 fulltext + code fetchers (one-shot mode)
-uv run python -m ingest.arxiv_html_fetcher.fetcher --once
-uv run python -m ingest.openreview_poller.poller --once
-uv run python -m ingest.github_release_tarball_fetcher.fetcher --once
+# Event-driven content workers are deployed through Helm.
 ```
 
 ## Tests

@@ -44,6 +44,7 @@ from processor.foundry.quota import QuotaExceededError, QuotaLedger
 from processor.foundry.store import FoundryStore
 from processor.foundry.util import canonical_json, sha256
 from processor.probes import start_probe_server
+from processor.source_policy import resolve_source_policy
 from schemas.foundry import FoundryArtifactRecord, FoundryEvent
 from schemas.gold import GoldRecord
 from schemas.topics import FOUNDRY_ARTIFACTS, FOUNDRY_EVENTS, FOUNDRY_JOBS
@@ -187,6 +188,14 @@ class WorkerRuntime:
         if not accepted_routes.intersection({incoming.route, *incoming.eligible_routes}):
             self.store.remove_queued_candidate(incoming.doc_id)
             return {"doc_id": incoming.doc_id, "status": "not_posttrain_candidate"}
+        source_policy = resolve_source_policy(
+            source_feed=incoming.source_feed,
+            source_format=incoming.source_format,
+            extraction_pipeline=incoming.extraction_pipeline,
+        )
+        if source_policy.family != "scientific_paper":
+            self.store.remove_queued_candidate(incoming.doc_id)
+            return {"doc_id": incoming.doc_id, "status": "unsupported_posttrain_source"}
         if not incoming.scientific_artifact_s3_uri or incoming.training_word_count < 1:
             parsed_artifact_uri = urlparse(incoming.scientific_artifact_s3_uri or "")
             exc = ScientificArtifactUnavailableError(

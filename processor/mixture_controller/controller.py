@@ -557,26 +557,6 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
     },
     {
-        "name": "github-events",
-        "component": "ingest-github-events",
-        "kind": "deployment",
-        "protocol": "rest-json",
-        "endpoint": "https://api.github.com/events",
-        "quality": "Discovery only",
-        "license": "Resolved at release ref and file",
-        "stages": ["discover", "dispatch"],
-    },
-    {
-        "name": "github-releases",
-        "component": "ingest-github-releases",
-        "kind": "cronjob",
-        "protocol": "atom",
-        "endpoint": "https://github.com/releases.atom",
-        "quality": "Discovery only",
-        "license": "Resolved at release ref and file",
-        "stages": ["discover", "dispatch"],
-    },
-    {
         "name": "github-release-tarballs",
         "component": "ingest-github-tarball-fetcher",
         "kind": "deployment",
@@ -593,7 +573,7 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "protocol": "rest-json",
         "endpoint": "https://huggingface.co/api/models",
         "quality": "FineWeb-Edu audit on versioned model cards",
-        "license": "Model-card item metadata at immutable revision",
+        "license": "Versioned public Hub repository terms for README prose",
         "stages": ["discover", "license", "fetch", "classify", "route"],
     },
     {
@@ -603,28 +583,8 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "protocol": "rest-json",
         "endpoint": "https://huggingface.co/api/datasets",
         "quality": "FineWeb-Edu audit on versioned dataset cards",
-        "license": "Dataset-card item metadata at immutable revision",
+        "license": "Versioned public Hub repository terms for README prose",
         "stages": ["discover", "license", "fetch", "classify", "route"],
-    },
-    {
-        "name": "hf-spaces",
-        "component": "ingest-hf-cards",
-        "kind": "deployment",
-        "protocol": "rest-json",
-        "endpoint": "https://huggingface.co/api/spaces",
-        "quality": "FineWeb-Edu audit on versioned Space cards",
-        "license": "Space-card item metadata at immutable revision",
-        "stages": ["discover", "license", "fetch", "classify", "route"],
-    },
-    {
-        "name": "hf-daily-papers",
-        "component": "ingest-hf-daily-papers",
-        "kind": "cronjob",
-        "protocol": "rest-json",
-        "endpoint": "https://huggingface.co/api/daily_papers",
-        "quality": "FinePDFs Edu v2 after arXiv full-text extraction",
-        "license": "arXiv item rights",
-        "stages": ["discover", "license", "dispatch"],
     },
     {
         "name": "openreview",
@@ -634,71 +594,6 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "endpoint": "https://api2.openreview.net",
         "quality": "FinePDFs papers / OpenReview form schema",
         "license": "Article item field / public-comment terms",
-        "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
-    },
-    {
-        "name": "openreview-backfill",
-        "component": "ingest-openreview-backfill",
-        "kind": "job",
-        "protocol": "rest-json",
-        "endpoint": "https://huggingface.co/datasets",
-        "quality": "FinePDFs papers / OpenReview form schema",
-        "license": "Article item field / public-comment terms",
-        "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
-    },
-    {
-        "name": "seed:allenai/peS2o",
-        "component": "seed-loader",
-        "seed_component": "pes2o",
-        "kind": "job",
-        "protocol": "rest-json",
-        "endpoint": "https://huggingface.co/datasets/allenai/peS2o",
-        "quality": "FinePDFs Edu v2 on scientific rows",
-        "license": "Per-paper row rights; wrapper ignored",
-        "stages": ["license", "extract", "classify", "route"],
-    },
-    {
-        "name": "seed:togethercomputer/RedPajama-Data-1T",
-        "component": "seed-loader",
-        "seed_component": "redpajama-arxiv",
-        "kind": "job",
-        "protocol": "rest-json",
-        "endpoint": "https://huggingface.co/datasets/togethercomputer/RedPajama-Data-1T",
-        "quality": "FinePDFs Edu v2 on scientific rows",
-        "license": "Per-paper row rights; wrapper ignored",
-        "stages": ["license", "extract", "classify", "route"],
-    },
-    {
-        "name": "seed:HuggingFaceFW/fineweb-edu",
-        "component": "seed-loader",
-        "seed_component": "fineweb-edu",
-        "kind": "job",
-        "protocol": "rest-json",
-        "endpoint": "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu",
-        "quality": "FineWeb / DataTrove web policy",
-        "license": "Per-page row rights; wrapper ignored",
-        "stages": ["license", "classify", "route"],
-    },
-    {
-        "name": "seed:HuggingFaceTB/stack-edu",
-        "component": "seed-loader",
-        "seed_component": "stack-edu",
-        "kind": "job",
-        "protocol": "rest-json",
-        "endpoint": "https://huggingface.co/datasets/HuggingFaceTB/stack-edu",
-        "quality": "Stack v2 / Dolma code rules",
-        "license": "Per-file detected SPDX at pinned blob; wrapper ignored",
-        "stages": ["license", "fetch", "classify", "route"],
-    },
-    {
-        "name": "seed:wayback",
-        "component": "seed-loader",
-        "seed_component": "wayback",
-        "kind": "job",
-        "protocol": "rest-json",
-        "endpoint": "https://web.archive.org",
-        "quality": "Original-source scientific, web, or code policy",
-        "license": "Archived item rights; archive presence is not a grant",
         "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
     },
 )
@@ -895,6 +790,11 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
                 runtime=runtime.get(str(item.get("metadata", {}).get("name", ""))),
             )
             for item in resp.get("items", [])
+            # arXiv RSS/OAI are internal scheduling lanes for the one logical
+            # arXiv full-text source. Discovery lanes never appear as corpus
+            # sources or contribute accepted/quarantined counts.
+            if not str(item.get("metadata", {}).get("name", "")).startswith("rss-arxiv-")
+            and str(item.get("metadata", {}).get("name", "")) != "oai-arxiv-cs"
         ]
         known = {str(source["name"]) for source in crd_sources}
         deployments = {
@@ -915,6 +815,7 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
             for descriptor in _BUILTIN_SOURCES
             if descriptor["name"] not in known
         ]
+        builtins = [source for source in builtins if source["spec"]["enabled"]]
         return web.json_response(sorted([*crd_sources, *builtins], key=lambda row: row["name"]))
 
     async def create_source(request: web.Request) -> web.Response:

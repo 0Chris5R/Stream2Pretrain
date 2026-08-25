@@ -38,11 +38,6 @@ data:
     }
   github-repos.json: |-
     {
-      "events": {
-        "ai_org_filter": {{ toJson .Values.sources.github.events.aiOrgFilter }},
-        "poll_interval_seconds": {{ .Values.sources.github.events.pollIntervalSeconds }},
-        "respect_x_poll_interval": {{ .Values.sources.github.events.respectXPollInterval }}
-      },
       "releases": {
         "repos": {{ toJson .Values.sources.github.releases.repos }},
         "poll_interval_seconds": {{ .Values.sources.github.releases.pollIntervalSeconds }}
@@ -57,37 +52,7 @@ data:
       "datasets": {
         "endpoint": {{ .Values.sources.huggingface.datasets.endpoint | quote }},
         "poll_interval_seconds": {{ .Values.sources.huggingface.datasets.pollIntervalSeconds }}
-      },
-      "spaces": {
-        "endpoint": {{ .Values.sources.huggingface.spaces.endpoint | quote }},
-        "poll_interval_seconds": {{ .Values.sources.huggingface.spaces.pollIntervalSeconds }}
-      },
-      "daily_papers": {
-        "endpoint": {{ .Values.sources.huggingface.dailyPapers.endpoint | quote }},
-        "poll_interval_seconds": {{ .Values.sources.huggingface.dailyPapers.pollIntervalSeconds }}
       }
-    }
-  blogs.json: |-
-    {
-      "feeds": [
-        {{- range $idx, $feed := .Values.sources.blogs.feeds }}
-        {{- if $idx }},{{ end }}
-        {
-          "name": {{ printf "rss-%s" $feed.name | quote }},
-          "protocol": "rss",
-          "endpoint": {{ $feed.url | quote }},
-          "pollIntervalSeconds": {{ $.Values.sources.blogs.pollIntervalSeconds }},
-          {{- if or (eq $feed.name "openai-news") (eq $feed.name "deepmind") (eq $feed.name "hf-blog") }}
-          "rateLimit": {"requestsPerSecond": 1, "burst": 2},
-          {{- else }}
-          "rateLimit": {"requestsPerSecond": 0.5, "burst": 1},
-          {{- end }}
-          "licenseDefault": "per-record",
-          "enabled": true
-        }
-        {{- end }}
-      ],
-      "poll_interval_seconds": {{ .Values.sources.blogs.pollIntervalSeconds }}
     }
   sitemap.json: |-
     {

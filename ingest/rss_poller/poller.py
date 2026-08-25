@@ -15,6 +15,7 @@ Last-Modified state under ``/var/lib/s2p-state``.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -22,8 +23,8 @@ from typing import Any
 import feedparser
 import httpx
 
-from ingest.common.arxiv_license import arxiv_id_from_url, fetch_arxiv_license_with_source
-from ingest.common.bronze_pipeline import fetch_and_publish
+from ingest.common.arxiv_license import arxiv_id_from_url
+from ingest.common.bronze_pipeline import fetch_and_publish, publish_discovery_payload
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.feeds import (
     feeds_by_protocol,
@@ -32,11 +33,10 @@ from ingest.common.feeds import (
 )
 from ingest.common.http_client import build_async_client
 from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
-from ingest.common.license_admission import normalize_license
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
-from ingest.common.page_license import PageLicenseEvidence, resolve_page_license
+from ingest.common.page_license import resolve_page_license
 from ingest.common.rate_limit import TokenBucket
 from ingest.common.state import FeedStateStore
 from schemas.sourcefeed import SourceFeedSpec
@@ -137,20 +137,30 @@ async def poll_feed(
     for entry in entries:
         url = entry.url
         arxiv_id = arxiv_id_from_url(url)
-        if arxiv_id is not None and normalize_license(entry.license_value) == "unknown":
-            resolved, license_source = await fetch_arxiv_license_with_source(
-                arxiv_id,
-                client,
-                bucket=bucket_limit,
-            )
-            evidence = PageLicenseEvidence(
-                raw_license=resolved,
-                license_source=license_source,  # type: ignore[arg-type]
-                resolver=f"arxiv:{license_source}",
-                evidence_url=f"https://arxiv.org/abs/{arxiv_id}",
-                evidence_revision=arxiv_id,
-                evidence_scope=("item" if normalize_license(resolved) != "unknown" else "unknown"),
-            )
+        if arxiv_id is not None:
+            # RSS is only a scheduling signal. It must not create a licence or
+            # corpus decision and it must not fetch the arXiv abstract page.
+            try:
+                await publish_discovery_payload(
+                    payload=json.dumps(
+                        {"arxiv_id": arxiv_id, "source_url": url}, sort_keys=True
+                    ).encode("utf-8"),
+                    url=url,
+                    source_feed=feed.name,
+                    producer=producer,
+                    minio=minio,
+                    bucket=bucket,
+                    extension="discovery.json.gz",
+                    content_type="application/json",
+                    extraction_pipeline="arxiv-rss-discovery-v2",
+                    metadata={"arxiv_id": arxiv_id},
+                )
+            except Exception as exc:
+                log.warning("entry.publish_failed", feed=feed.name, url=url, err=str(exc))
+                entry_failures.append(url)
+                continue
+            emitted += 1
+            continue
         else:
             evidence = await resolve_page_license(
                 client,
@@ -177,10 +187,8 @@ async def poll_feed(
                 license_evidence_url=evidence.evidence_url,
                 license_evidence_revision=evidence.evidence_revision,
                 license_evidence_scope=evidence.evidence_scope,
-                source_format="metadata" if arxiv_id is not None else "html",
-                extraction_pipeline=(
-                    "arxiv-rss-discovery-v1" if arxiv_id is not None else "rss-page-html-v1"
-                ),
+                source_format="html",
+                extraction_pipeline="rss-page-html-v1",
                 admission_producer=admission_producer,
             )
         except httpx.HTTPError as exc:

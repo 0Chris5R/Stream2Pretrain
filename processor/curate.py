@@ -79,8 +79,8 @@ from schemas.silver import SilverRecord, SilverSegment
 
 POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
-CURATOR_FLOW_NAME = "s2p-curate-v2"
-CURATOR_RECOVERY_NAME = "curate-v2"
+CURATOR_FLOW_NAME = "s2p-curate-live-v3"
+CURATOR_RECOVERY_NAME = "curate-live-v3"
 
 
 class QualityScorer(Protocol):
@@ -588,24 +588,17 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         "quarantine",
         "retry",
     }:
-        if posttrain_candidate_eligible(silver):
-            route = RouteDecision(
-                route="posttrain_candidate",
-                eligible_routes=["posttrain_candidate"],
-                reasons=[
-                    "source is restricted to derived post-training generation; "
-                    "verbatim pretraining export is forbidden"
-                ],
-            )
-        else:
-            route = RouteDecision(
-                route="quarantine",
-                eligible_routes=["quarantine"],
-                reasons=[
-                    "transform-only content has no durable scientific artifact "
-                    "compatible with the current paper Foundry"
-                ],
-            )
+        reason = (
+            "source is restricted to derived post-training generation; "
+            "verbatim pretraining export is forbidden"
+        )
+        if not posttrain_candidate_eligible(silver):
+            reason += "; the current paper Foundry does not consume this source family"
+        route = RouteDecision(
+            route="posttrain_candidate",
+            eligible_routes=["posttrain_candidate"],
+            reasons=[reason],
+        )
     risk = _risk_from_reject(reject, pii_flags)
     license_id = silver.spdx_license or "unknown"
     token_count = state.tokenizer.count(text)

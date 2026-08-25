@@ -30,8 +30,8 @@ materially larger than the older FineWeb-only configuration.
   namespace overrides are known.
 - Metrics Server is installed if you want live `kubectl top` values. The
   capacity report does not require it.
-- The seed-loader benchmark must run as a small-scale smoke first. Only the
-  scale parameter changes for the full run.
+- The historical seed/backfill path is removed. Capacity is measured against
+  live source rates and an explicit bounded canary.
 
 ## One-Shot Capacity Report
 
@@ -54,7 +54,7 @@ The report covers:
 
 - Node allocatable CPU and memory from `kubectl get nodes -o json`.
 - Stream2Pretrain pod requests and limits from rendered live Pods.
-- PVC requests/capacity, including seed-loader/HF cache claims when present.
+- PVC requests/capacity, including processor recovery and model caches.
 - Redpanda topic metadata for `raw.fetched`, `docs.normalized`,
   `docs.curated`, and `decon.attest` when `rpk` is reachable inside a broker
   Pod.
@@ -71,28 +71,11 @@ kubectl get storageclass
 kubectl top nodes
 ```
 
-## Seed Loader Smoke
+## Live-frontier smoke
 
-Validate the seed-loader path with a sub-minute run first:
-
-```sh
-bash scripts/seed_corpus.sh \
-  --namespace stream2pretrain \
-  --components=pes2o \
-  --max-docs=10
-```
-
-Record:
-
-- Job wall-clock duration from `kubectl get job` and Pod timestamps.
-- Peak Pod CPU/memory from `kubectl top pod` or Prometheus.
-- HF cache PVC used bytes from the storage backend or CSI metrics.
-- Documents emitted to `docs.normalized`.
-
-After the smoke passes, scale only `--max-docs` or the component list. Do not
-change code, images, resource requests, or topic settings between smoke and
-the larger run unless the smoke found a defect and the run is restarted from
-the beginning.
+After the approved one-time backlog reset, record an exact newly discovered
+document from every active content family. Measure end-to-end duration, peak
+worker CPU and memory, and topic lag without generating historical load.
 
 ## Redpanda Partition Decision
 
@@ -108,7 +91,7 @@ Only update topic partition defaults after those four values are recorded.
 
 For fetcher, curator, and Iceberg writer, record the `s2p_*_total` Prometheus
 counters, durable recovery frontier, partition assignment, processing-failure
-objects, and per-Pod CPU/memory. Their broker groups bootstrap a clean v2
+objects, and per-Pod CPU/memory. Their broker groups bootstrap a clean live-v3
 recovery through `OFFSET_STORED`, but broker commits are not the steady-state
 Bytewax frontier. Core worker count, recovery partition count, input topic
 partition count, and CPU allocation must be changed and validated together.
@@ -134,9 +117,9 @@ PRD-013 can move from `needs-measurement` to `done` only when
 `docs/capacity-report.generated.md` contains measured values for:
 
 - Redpanda partitions and drain behavior.
-- Worker CPU/RAM headroom for fetcher, curate, Iceberg writer, DuckDB API, and
-  seed-loader.
+- Worker CPU/RAM headroom for fetcher, curator, Iceberg writer, DuckDB API,
+  source pollers, and model services.
 - MinIO read/write throughput.
-- Seed-loader PVC sizing for the selected demo seed mixture.
+- Recovery PVC and model-cache sizing for the live pipeline.
 
 If any field remains `needs-measurement`, keep PRD-013 open.

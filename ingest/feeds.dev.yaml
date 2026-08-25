@@ -46,56 +46,6 @@ feeds:
     license_default: per-record
     egress_allow: ["rss.arxiv.org", "arxiv.org", "export.arxiv.org"]
 
-  - name: rss-openai-news
-    protocol: rss
-    endpoint: https://openai.com/news/rss.xml
-    poll_interval_seconds: 21600
-    rate_limit:
-      requests_per_second: 1.0
-      burst: 2
-    license_default: per-record
-    egress_allow: ["openai.com", "cdn.openai.com"]
-
-  - name: rss-deepmind-blog
-    protocol: rss
-    endpoint: https://deepmind.google/blog/rss.xml
-    poll_interval_seconds: 21600
-    rate_limit:
-      requests_per_second: 1.0
-      burst: 2
-    license_default: per-record
-    egress_allow: ["deepmind.google"]
-
-  - name: rss-hf-blog
-    protocol: rss
-    endpoint: https://huggingface.co/blog/feed.xml
-    poll_interval_seconds: 21600
-    rate_limit:
-      requests_per_second: 1.0
-      burst: 2
-    license_default: per-record
-    egress_allow: ["huggingface.co", "hf.co"]
-
-  - name: rss-bair-blog
-    protocol: rss
-    endpoint: https://bair.berkeley.edu/blog/feed.xml
-    poll_interval_seconds: 86400
-    rate_limit:
-      requests_per_second: 0.5
-      burst: 1
-    license_default: per-record
-    egress_allow: ["bair.berkeley.edu"]
-
-  - name: rss-eleuther-blog
-    protocol: rss
-    endpoint: https://blog.eleuther.ai/index.xml
-    poll_interval_seconds: 86400
-    rate_limit:
-      requests_per_second: 0.5
-      burst: 1
-    license_default: per-record
-    egress_allow: ["blog.eleuther.ai"]
-
   - name: oai-arxiv-cs
     protocol: oai-pmh
     endpoint: https://oaipmh.arxiv.org/oai
@@ -133,49 +83,6 @@ feeds:
       secret_name: hf-token
       secret_key: token
     egress_allow: ["huggingface.co", "hf.co"]
-
-  - name: hf-spaces
-    protocol: rest-json
-    endpoint: https://huggingface.co/api/spaces
-    poll_interval_seconds: 600
-    rate_limit:
-      requests_per_second: 1.0
-      burst: 2
-    license_default: per-record
-    auth:
-      type: bearer
-      secret_name: hf-token
-      secret_key: token
-    egress_allow: ["huggingface.co", "hf.co"]
-
-  - name: hf-daily-papers
-    protocol: rest-json
-    endpoint: https://huggingface.co/api/daily_papers
-    poll_interval_seconds: 21600
-    rate_limit:
-      requests_per_second: 0.5
-      burst: 1
-    license_default: per-record
-    auth:
-      type: bearer
-      secret_name: hf-token
-      secret_key: token
-    egress_allow: ["huggingface.co", "hf.co"]
-
-  - name: github-events
-    protocol: rest-json
-    endpoint: https://api.github.com/events
-    poll_interval_seconds: 60
-    rate_limit:
-      requests_per_second: 1.0
-      burst: 1
-      respect_x_poll_interval: true
-    license_default: per-record
-    auth:
-      type: bearer
-      secret_name: github-token
-      secret_key: token
-    egress_allow: ["api.github.com", "github.com"]
 
   - name: github-releases
     protocol: atom

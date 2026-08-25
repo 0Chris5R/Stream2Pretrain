@@ -33,7 +33,7 @@ Measurements were taken from the existing DHBW k3s cluster on 2026-08-15.
 
 These values describe the observed cluster. They are not throughput or capacity
 claims. Peak workload resource requirements, retention sizing, partition counts,
-and seed-loader storage remain `needs-measurement`.
+and recovery/model-cache storage remain `needs-measurement`.
 
 ## Confirmed failures
 

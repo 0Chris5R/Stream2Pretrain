@@ -1226,6 +1226,38 @@ def test_candidate_without_structured_uri_is_an_auditable_rejection(tmp_path: Pa
     assert published_jobs[0]["status"] == "posttrain_preflight_rejected"
 
 
+def test_nonpaper_posttrain_pool_row_is_not_sent_to_paper_foundry(tmp_path: Path) -> None:
+    gold = _gold_candidate().model_copy(
+        update={
+            "source_feed": "hf-models",
+            "source_format": "web",
+            "extraction_pipeline": "hf-model-card-markdown-v1",
+            "scientific_artifact_s3_uri": None,
+            "training_usage": "posttrain_transform_only",
+        }
+    )
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    published_jobs: list[dict[str, Any]] = []
+    runtime = object.__new__(WorkerRuntime)
+    runtime.config = FoundryConfig(providers={})
+    runtime.store = store
+    runtime.kafka = SimpleNamespace(
+        event=lambda _event: None,
+        artifact=lambda _artifact: None,
+        job=published_jobs.append,
+        flush=lambda: None,
+    )
+
+    result = runtime.process(gold.model_dump_json().encode())
+
+    assert result == {
+        "doc_id": gold.doc_id,
+        "status": "unsupported_posttrain_source",
+    }
+    assert store.queued_candidates() == 0
+    assert published_jobs == []
+
+
 def test_interrupted_provider_calls_are_identified_until_terminal(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     job_id, _ = store.start_job(

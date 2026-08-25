@@ -47,8 +47,8 @@ from processor.source_policy import resolve_source_policy
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
-FETCHER_FLOW_NAME = "s2p-fetcher-v2"
-FETCHER_RECOVERY_NAME = "fetcher-v2"
+FETCHER_FLOW_NAME = "s2p-fetcher-live-v3"
+FETCHER_RECOVERY_NAME = "fetcher-live-v3"
 
 
 class PdfProcessingTemporarilyDisabled(common.DeterministicProcessingError):

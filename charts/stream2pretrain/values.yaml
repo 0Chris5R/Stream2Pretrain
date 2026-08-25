@@ -177,34 +177,8 @@ sources:
     htmlFetcher:
       enabled: true
       feedName: arxiv-html-fetcher
-      backfill:
-        enabled: false
-        schedule: "23 4 * * *"
-        deadlineSeconds: 7200
-        # When non-empty, mount this ConfigMap at /etc/s2p/backfill instead
-        # of the chart's default empty placeholder. Operators populate it
-        # with a single ``ids.txt`` key containing one arXiv id per line.
-        configMap: ""
   github:
     enabled: true
-    events:
-      name: github-events
-      pollIntervalSeconds: 60
-      respectXPollInterval: true
-      kind: deployment
-      tokenSecret: stream2pretrain-github
-      tokenSecretKey: token
-      aiOrgFilter:
-        - openai
-        - anthropics
-        - huggingface
-        - google-deepmind
-        - meta-llama
-        - mistralai
-        - allenai
-        - eleutherai
-        - bytewax
-        - vllm-project
     releases:
       name: github-releases
       pollIntervalSeconds: 7200
@@ -259,37 +233,6 @@ sources:
       kind: deployment
       tokenSecret: stream2pretrain-hf
       tokenSecretKey: token
-    spaces:
-      name: hf-spaces
-      endpoint: https://huggingface.co/api/spaces
-      pollIntervalSeconds: 600
-      kind: deployment
-      tokenSecret: stream2pretrain-hf
-      tokenSecretKey: token
-    dailyPapers:
-      name: hf-daily-papers
-      endpoint: https://huggingface.co/api/daily_papers
-      pollIntervalSeconds: 21600
-      kind: cronjob
-      schedule: "47 */6 * * *"
-      tokenSecret: stream2pretrain-hf
-      tokenSecretKey: token
-  blogs:
-    enabled: true
-    pollIntervalSeconds: 21600
-    kind: cronjob
-    schedule: "53 */6 * * *"
-    feeds:
-      - name: openai-news
-        url: https://openai.com/news/rss.xml
-      - name: deepmind
-        url: https://deepmind.google/blog/rss.xml
-      - name: hf-blog
-        url: https://huggingface.co/blog/feed.xml
-      - name: bair
-        url: https://bair.berkeley.edu/blog/feed.xml
-      - name: eleuther
-        url: https://blog.eleuther.ai/index.xml
   sitemap:
     enabled: false
     name: sitemap-poller
@@ -334,12 +277,6 @@ ingest:
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: 500m, memory: 256Mi}
-  githubEvents:
-    image: stream2pretrain/ingest-github-events
-    replicas: 1
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
   githubReleases:
     image: stream2pretrain/ingest-github-releases
     replicas: 1
@@ -354,8 +291,8 @@ ingest:
     image: stream2pretrain/ingest-arxiv-html
     replicas: 1
     # The durable group starts at earliest on a clean cluster so every retained
-    # discovery is handled. Historical ids outside retention use the bounded
-    # backfill CronJob.
+    # discovery is handled. The one-time 2026-08-25 frontier reset deliberately
+    # discards older queued ids; there is no historical backfill workload.
     consumerGroup: s2p-arxiv-html-fetcher-v2
     autoOffsetReset: earliest
     # Optional bounded drain for explicit diagnostics. Production is unlimited.
@@ -437,41 +374,35 @@ ingest:
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
-  # OpenReview poller (v0.2.0). The same image runs both live and backfill
-  # modes; the Helm template selects via container `command`.
+  # OpenReview current-frontier poller implementation. It is not part of the
+  # active release until public API access is demonstrated from the cluster.
   openreview:
     image: stream2pretrain/ingest-openreview
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
-    # Backfill streams a multi-GB HF dataset; size up the head room.
-    backfillResources:
-      requests: {cpu: 200m, memory: 512Mi}
-      limits: {cpu: 1, memory: 2Gi}
 
 # -----------------------------------------------------------------------------
-# OpenReview poller (v0.2.0). Live CronJob polls api2.openreview.net every 6h;
-# the backfill Job is a one-shot REVIEWARENA HF dataset bridge gated behind
-# ``openreviewPoller.runBackfill = true`` so an operator opts in explicitly.
+# OpenReview live poller. Articles use their item licence field; public review
+# comments use OpenReview's CC-BY-4.0 terms. No historical backfill is deployed.
 # -----------------------------------------------------------------------------
 openreviewPoller:
-  enabled: true
+  enabled: false
   # ICLR.cc/2026/Conference, NeurIPS.cc/2025/Conference, ICML.cc/2025/Conference,
   # COLM/2025/Conference. Which years are actually open at any given time is
   # ``needs-measurement``; the live module skips venues that return zero notes.
   venues:
     - ICLR.cc/2026/Conference
-    - NeurIPS.cc/2025/Conference
-    - ICML.cc/2025/Conference
-    - COLM/2025/Conference
+    - NeurIPS.cc/2026/Conference
+    - ICML.cc/2026/Conference
+    - COLM/2026/Conference
   # OpenReview supports anonymous listing once a venue's submissions are
   # public. Populate ``tokenSecret`` to unlock pre-release access.
   tokenSecret: ""
   tokenSecretKey: token
   live:
-    # OpenReview's notes endpoints currently require an authenticated token or
-    # interactive challenge. Keep the live poller absent until tokenSecret is
-    # configured; ReviewArena remains the pinned post-training fallback.
+    # The current deployment has no OpenReview credential and anonymous probes
+    # are rejected. Keep the workload absent so Sources never claims it works.
     enabled: false
     schedule: "17 */6 * * *"
     activeDeadlineSeconds: 3600
@@ -481,21 +412,6 @@ openreviewPoller:
       storageClass: ""
       size: 1Gi
       existingClaim: ""
-  runBackfill: false
-  backfill:
-    datasetId: anonymousNeurIPS2026submission4281/reviewarena
-    revision: c2978add17c2099219eaddbc2599974d69d4d09b
-    splits:
-      - neurips
-      - iclr
-      - icml
-      - tmlr
-      - emnlp
-      - corl
-      - colm
-    # Optional smoke-scale limit. Empty means "no limit".
-    maxRows: ""
-    activeDeadlineSeconds: 21600
 
 # -----------------------------------------------------------------------------
 # Processor components
@@ -715,64 +631,6 @@ mixtureController:
 # -----------------------------------------------------------------------------
 # Seed loader (one-shot Bytewax Job; v0.2.0)
 # -----------------------------------------------------------------------------
-# Streams the 5-component HuggingFace seed mixture into docs.normalized as
-# Silver records. Disabled by default - kick off explicitly via the helper
-# script `scripts/seed_corpus.sh`. Honest scope notes live in
-# processor/seed/README.md; the headline ones:
-#   - HF cache PVC default is 50Gi. Full 5-component backfill needs 1-2 TiB,
-#     so the demo cluster runs only a selected subset via --components=...
-#   - peS2o v3 token count and FineWeb-Edu domain-filter yield are
-#     `needs-measurement` per docs/research-seed-corpus.md.
-seedLoader:
-  enabled: false
-  image: stream2pretrain/processor-seed-loader
-  # The seed Job serializes admission -> Silver acknowledgement -> cursor.
-  # Keep this true until a transactional cross-topic Bytewax outbox exists.
-  inProcess: true
-  dryRun: false
-  # Components to ingest, in priority order. Override on the helm CLI:
-  #   --set seedLoader.components={pes2o,stack-edu}
-  components:
-    - pes2o
-    - redpajama-arxiv
-    - fineweb-edu
-    - stack-edu
-    - wayback
-  maxDocsPerComponent: 0  # 0 means unlimited; set to N for smoke runs
-  waybackMonths: 24
-  stateBucket: s2p-state
-  runId: ""  # filled in by scripts/seed_corpus.sh; templates default to now
-  activeDeadlineSeconds: 86400
-  hfTokenSecret: stream2pretrain-hf
-  hfTokenSecretKey: token
-  hf_cache_pvc:
-    existingClaim: ""
-    storageClass: ""
-    size: 50Gi
-  resources:
-    requests: {cpu: 500m, memory: 2Gi}
-    limits: {cpu: 2, memory: 6Gi}
-  # FineWeb-Edu URL allowlist - hostnames matched as exact-host or suffix
-  # (so `magazine.sebastianraschka.com` matches `sebastianraschka.com`).
-  fineweb_url_allowlist:
-    - arxiv.org
-    - openai.com
-    - deepmind.google
-    - anthropic.com
-    - ai.meta.com
-    - huggingface.co
-    - distill.pub
-    - eleuther.ai
-    - bair.berkeley.edu
-    - lilianweng.github.io
-    - sebastianraschka.com
-    - magazine.sebastianraschka.com
-    - jalammar.github.io
-    - karpathy.ai
-    - pytorch.org
-    - tensorflow.org
-    - pytorch-lightning.readthedocs.io
-
 # -----------------------------------------------------------------------------
 # UI (Next.js 14)
 # -----------------------------------------------------------------------------

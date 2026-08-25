@@ -26,6 +26,11 @@ PERMISSIVE_TRAINING_LICENSES = frozenset(
         "MPL-2.0",
         "ISC",
         "Unlicense",
+        # Hugging Face's public-repository terms grant every Hub user broad
+        # reuse rights in public repository content. This identifier applies
+        # only to the exact-revision README card, never to model weights,
+        # dataset rows, or other repository files.
+        "HF-Public-Repository-Terms-2022-09-15",
     }
 )
 
@@ -39,7 +44,7 @@ POSTTRAIN_TRANSFORM_LICENSES = frozenset(
     }
 )
 
-LICENSE_POLICY_REVISION = "license-policy-2026-08-23"
+LICENSE_POLICY_REVISION = "license-policy-2026-08-25"
 
 _CC_PATTERN = re.compile(
     r"creativecommons\.org/(?:licenses|publicdomain)/(by(?:-sa|-nc|-nc-sa|-nc-nd|-nd)?|zero)/(\d\.\d)",
@@ -105,9 +110,9 @@ def normalize_license(value: str | None) -> str:
         "isc": "ISC",
         "unlicense": "Unlicense",
         # ODC-By licences the database structure, not necessarily the
-        # copyright in each paper, page, or code file contained in it. Keep
-        # the normalized identifier for an explicit quarantine reason, but
-        # never admit content based on a dataset wrapper alone.
+        # copyright in each contained paper, page, or code file. Keep the
+        # normalized identifier so wrapper-only evidence can be restricted to
+        # derived post-training rather than verbatim pretraining.
         "odc-by-1.0": "ODC-By-1.0",
     }
     return aliases.get(lowered, cleaned)
@@ -126,7 +131,15 @@ def is_training_permitted(value: str | None, *, source_format: str = "web") -> b
 
 def is_posttrain_transform_permitted(value: str | None) -> bool:
     """Return whether a non-pretraining source may feed derived SFT/RL generation."""
-    return normalize_license(value) in POSTTRAIN_TRANSFORM_LICENSES
+    normalized = normalize_license(value)
+    # Missing item rights and dataset-wrapper-only evidence are deliberately
+    # retained only as grounding for derived post-training artifacts. They can
+    # never enter a verbatim pretraining export. An explicit incompatible
+    # licence such as an ND grant remains quarantined.
+    return normalized in POSTTRAIN_TRANSFORM_LICENSES or normalized in {
+        "unknown",
+        "ODC-By-1.0",
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,15 +192,21 @@ def decide_license_admission(
     )
     if admitted:
         reason = f"{normalized} is on the training allowlist"
+    elif normalized == "unknown":
+        reason = (
+            "item-level licence is unresolved; excluded from verbatim pretraining and "
+            "allowed only for derived post-training generation"
+        )
+    elif normalized == "ODC-By-1.0":
+        reason = (
+            "dataset wrapper licence does not establish item rights; excluded from "
+            "verbatim pretraining and allowed only for derived post-training generation"
+        )
     elif transform_only:
         reason = (
             f"{normalized} is excluded from verbatim pretraining and allowed only "
             "for derived post-training generation"
         )
-    elif normalized == "unknown":
-        reason = "item-level machine-readable licence is unresolved"
-    elif normalized == "ODC-By-1.0":
-        reason = "dataset wrapper licence does not establish rights in this content item"
     else:
         reason = f"{normalized} is not on the training allowlist"
     resolved_at = observed_at or datetime.now(UTC)

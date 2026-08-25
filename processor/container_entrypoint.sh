@@ -20,7 +20,6 @@ case "$command_name" in
   s2p-duckdb-api) module="processor.duckdb_api" ;;
   s2p-local-sources-api) module="processor.local_sources_api" ;;
   s2p-mixture-controller) module="processor.mixture_controller.controller" ;;
-  s2p-seed-loader) module="processor.seed_loader" ;;
   s2p-foundry) module="processor.foundry.worker" ;;
   s2p-foundry-api) module="processor.foundry.api" ;;
   s2p-foundry-export-replay) module="processor.foundry.export_replay" ;;

@@ -174,7 +174,7 @@ The deployment policy records an immutable decision before body retrieval.
 Only the 286 permissively licensed announcements in this observed sample would
 enter verbatim pretraining. Reviewed arXiv non-exclusive and CC BY-NC/NC-SA
 items may be fetched only for derived post-training generation. Missing,
-unknown, wrapper-only, and no-derivatives records remain quarantined and never
+explicit incompatible and no-derivatives records remain quarantined and never
 reach extraction or classifiers. This is an engineering policy and provenance
 control, not a legal conclusion. Sources:
 `https://info.arxiv.org/help/license/index.html` and

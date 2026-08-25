@@ -102,7 +102,7 @@ async def test_collect_urls_expands_index_and_decompresses_gzip() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sitemap_url_requires_item_page_evidence(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_sitemap_url_without_item_rights_is_posttrain_only(tmp_path) -> None:  # type: ignore[no-untyped-def]
     requests: list[tuple[str, str, str | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -111,7 +111,12 @@ async def test_sitemap_url_requires_item_page_evidence(tmp_path) -> None:  # typ
             return httpx.Response(200, text=SITEMAP_URLSET, request=request)
         if request.method == "HEAD":
             return httpx.Response(200, request=request)
-        return httpx.Response(200, text="<html><body>no licence</body></html>", request=request)
+        return httpx.Response(
+            200,
+            text="<html><body>no licence</body></html>",
+            request=request,
+            headers={"content-type": "text/html"},
+        )
 
     producer = FakeProducer()
     admissions = FakeProducer()
@@ -130,12 +135,12 @@ async def test_sitemap_url_requires_item_page_evidence(tmp_path) -> None:  # typ
     finally:
         await client.aclose()
 
-    assert emitted == 0
+    assert emitted == 2
     assert len(admissions.sent) == 2
-    assert {sent["record"].status for sent in admissions.sent} == {"quarantined"}
-    assert not producer.sent
-    assert not minio.objects
-    assert not any(
+    assert {sent["record"].status for sent in admissions.sent} == {"posttrain_transform_only"}
+    assert len(producer.sent) == 2
+    assert minio.objects
+    assert any(
         method == "GET" and path in {"/a", "/b"} and range_value is None
         for method, path, range_value in requests
     )

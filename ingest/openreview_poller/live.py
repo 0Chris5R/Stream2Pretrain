@@ -49,7 +49,7 @@ from schemas.bronze import BronzeRecord
 
 log = get_logger(__name__)
 OPENREVIEW_TERMS_URL = "https://openreview.net/legal/terms"
-OPENREVIEW_TERMS_REVISION = "retrieved-2026-08-23"
+OPENREVIEW_TERMS_REVISION = "retrieved-2026-08-25"
 
 OPENREVIEW_BASE_V2 = "https://api2.openreview.net"
 OPENREVIEW_PDF_BASE = "https://openreview.net/pdf"
@@ -63,9 +63,9 @@ PIPELINE_REVIEW = "openreview-review-text"
 # ICML 2025, COLM 2024-2025; we mirror the upper bounds here.
 DEFAULT_VENUES: tuple[tuple[str, int], ...] = (
     ("ICLR.cc", 2026),
-    ("NeurIPS.cc", 2025),
-    ("ICML.cc", 2025),
-    ("COLM", 2025),
+    ("NeurIPS.cc", 2026),
+    ("ICML.cc", 2026),
+    ("COLM", 2026),
 )
 
 
@@ -90,7 +90,7 @@ class VenueSpec:
     @property
     def state_key(self) -> str:
         safe_venue = self.venue.replace("/", "_").replace(".", "_")
-        return f"{SOURCE_FEED}:{safe_venue}:{self.year}"
+        return f"{SOURCE_FEED}:{safe_venue}:{self.year}:live-v1"
 
 
 @dataclass(slots=True)
@@ -509,6 +509,10 @@ async def poll_venue(
 ) -> tuple[int, int, int]:
     """One venue pass; returns (submissions_emitted, reviews_emitted, skipped)."""
     state = state_store.get(venue.state_key)
+    pass_started_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+    # An absent cursor means "start now", not "enumerate the venue". This is
+    # the live stream. Historical venue material belongs to no deployed path.
+    cursor_ms = int(state.get("cursor_ms") or pass_started_ms)
     legacy_seen: set[str] = set(state.get("seen_note_ids", []))
     seen_submissions: set[str] = set(state.get("seen_submission_revisions", []))
     seen_replies: set[str] = set(state.get("seen_reply_revisions", []))
@@ -519,7 +523,9 @@ async def poll_venue(
     # PUTs, Kafka heartbeats, and the rate-limit token bucket. Off-load to
     # the default executor so the event loop stays responsive.
     raw_submissions = await asyncio.to_thread(
-        or_client.get_all_notes, invitation=venue.submission_invitation
+        or_client.get_all_notes,
+        invitation=venue.submission_invitation,
+        mintmdate=cursor_ms,
     )
     submissions = list(_iter_notes(raw_submissions, venue_id=venue.venue_id))
     log.info(
@@ -591,6 +597,9 @@ async def poll_venue(
             "seen_note_ids": sorted(legacy_seen),
             "seen_submission_revisions": sorted(seen_submissions),
             "seen_reply_revisions": sorted(seen_replies),
+            # Store the pass start, not finish, so notes changed while this
+            # pass was running are included by the next overlapping query.
+            "cursor_ms": pass_started_ms,
         },
     )
     return submissions_emitted, reviews_emitted, skipped

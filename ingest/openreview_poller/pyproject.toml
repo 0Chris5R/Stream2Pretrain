@@ -1,7 +1,7 @@
 [project]
 name = "stream2pretrain-openreview-poller"
 version = "0.2.0"
-description = "OpenReview API v2 poller and REVIEWARENA backfill bridge for Stream2Pretrain."
+description = "OpenReview API v2 live poller for Stream2Pretrain."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 
@@ -10,14 +10,10 @@ dependencies = [
     "stream2pretrain-ingest-common",
     # OpenReview Python client (v2). Pinned to the actively maintained 1.x line.
     "openreview-py>=1.45,<2",
-    # HuggingFace dataset streaming for the REVIEWARENA backfill Job.
-    "datasets>=2.20",
-    "huggingface-hub>=0.24",
 ]
 
 [project.scripts]
 s2p-openreview-live = "ingest.openreview_poller.live:main"
-s2p-openreview-backfill = "ingest.openreview_poller.backfill:main"
 
 [build-system]
 requires = ["hatchling"]

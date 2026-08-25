@@ -17,12 +17,48 @@ from functools import partial
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
-from ingest.common.license_admission import PERMISSIVE_TRAINING_LICENSES
+from ingest.common.license_admission import LICENSE_POLICY_REVISION, PERMISSIVE_TRAINING_LICENSES
 
 _RELATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 _TRAINING_LICENSE_SQL = ", ".join(
     f"'{value.replace(chr(39), chr(39) * 2)}'" for value in sorted(PERMISSIVE_TRAINING_LICENSES)
 )
+_LICENSE_POLICY_SQL = LICENSE_POLICY_REVISION.replace("'", "''")
+_REMOVED_CORPUS_SOURCES = (
+    "github-events",
+    "github-releases",
+    "hf-daily-papers",
+    "oai-arxiv-cs",
+    "rss-openai-news",
+    "rss-deepmind-blog",
+    "rss-hf-blog",
+    "rss-bair-blog",
+    "rss-eleuther-blog",
+)
+
+
+def _visible_source_predicate(
+    column: str = "source_feed", *, include_fixtures: bool = False
+) -> str:
+    """Exclude fixtures, internal discovery, removed sources, and backfills."""
+    removed = ", ".join(f"'{value}'" for value in _REMOVED_CORPUS_SOURCES)
+    clauses: list[str] = []
+    if not include_fixtures:
+        clauses.extend(
+            (
+                f"{column} NOT LIKE 'local-%'",
+                f"{column} <> 'cluster-smoke'",
+            )
+        )
+    clauses.extend(
+        (
+            f"{column} NOT LIKE 'rss-arxiv-%'",
+            f"{column} NOT LIKE 'seed:%'",
+            f"{column} NOT LIKE 'reviewarena%'",
+            f"{column} NOT IN ({removed})",
+        )
+    )
+    return " AND ".join(clauses)
 
 
 class DuckDBConnection(Protocol):
@@ -100,6 +136,7 @@ class DuckDBQueryService:
         FROM {self._gold}
         WHERE valid_from <= CAST(? AS TIMESTAMP)
           AND (valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP))
+          AND {_visible_source_predicate()}
         GROUP BY source_feed
         ORDER BY tokens DESC, source_feed ASC
         """
@@ -111,6 +148,7 @@ class DuckDBQueryService:
           CAST(FLOOR(quality_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
         FROM {self._gold}
+        WHERE {_visible_source_predicate()}
         GROUP BY score
         ORDER BY score ASC
         """
@@ -119,6 +157,7 @@ class DuckDBQueryService:
           CAST(FLOOR(edu_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
         FROM {self._gold}
+        WHERE {_visible_source_predicate()}
         GROUP BY score
         ORDER BY score ASC
         """
@@ -138,6 +177,7 @@ class DuckDBQueryService:
           CAST(COALESCE(AVG(quality_score), 0) AS DOUBLE) AS mean_quality,
           CAST(COALESCE(AVG(edu_score), 0) AS DOUBLE) AS mean_edu
         FROM {self._decisions}
+        WHERE {_visible_source_predicate()}
         GROUP BY route
         ORDER BY documents DESC, route ASC
         """
@@ -147,6 +187,9 @@ class DuckDBQueryService:
             SELECT CAST(COUNT(*) AS BIGINT) AS documents
             FROM {self._license_admissions} AS admission
             WHERE admission.status = 'quarantined'
+              AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND admission.source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate("admission.source_feed")}
               AND NOT EXISTS (
                 SELECT 1 FROM {self._decisions} AS decision
                 WHERE decision.doc_id = admission.doc_id
@@ -185,6 +228,7 @@ class DuckDBQueryService:
             f"""
             SELECT CAST(COUNT(*) AS BIGINT) AS durable_decisions
             FROM {self._decisions}
+            WHERE {_visible_source_predicate()}
             """,
             [],
             relation=self._decisions,
@@ -193,6 +237,7 @@ class DuckDBQueryService:
             f"""
             SELECT CAST(COUNT(*) AS BIGINT) AS training_export_documents
             FROM {self._gold}
+            WHERE {_visible_source_predicate()}
             """,
             [],
             relation=self._gold,
@@ -201,6 +246,7 @@ class DuckDBQueryService:
             f"""
             SELECT reason, CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._decisions}, UNNEST(reject_reasons) AS rejected(reason)
+            WHERE {_visible_source_predicate()}
             GROUP BY 1
             ORDER BY count DESC, reason ASC
             """,
@@ -211,6 +257,7 @@ class DuckDBQueryService:
             f"""
             SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
             FROM {self._decisions}
+            WHERE {_visible_source_predicate()}
             GROUP BY source_feed
             ORDER BY source_feed ASC
             """,
@@ -221,6 +268,7 @@ class DuckDBQueryService:
             f"""
             SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS accepted
             FROM {self._gold}
+            WHERE {_visible_source_predicate()}
             GROUP BY source_feed
             ORDER BY source_feed ASC
             """,
@@ -237,6 +285,9 @@ class DuckDBQueryService:
               CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions} AS admission
             WHERE admission.status = 'quarantined'
+              AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND admission.source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate("admission.source_feed")}
               AND NOT EXISTS (
                 SELECT 1 FROM {self._decisions} AS decision
                 WHERE decision.doc_id = admission.doc_id
@@ -252,6 +303,9 @@ class DuckDBQueryService:
             SELECT admission.source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
             FROM {self._license_admissions} AS admission
             WHERE admission.status = 'quarantined'
+              AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND admission.source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate("admission.source_feed")}
               AND NOT EXISTS (
                 SELECT 1 FROM {self._decisions} AS decision
                 WHERE decision.doc_id = admission.doc_id
@@ -293,6 +347,9 @@ class DuckDBQueryService:
             f"""
             SELECT status, CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
+            WHERE policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY status
             ORDER BY status
             """,
@@ -303,6 +360,9 @@ class DuckDBQueryService:
             f"""
             SELECT license_id, status, CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
+            WHERE policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY license_id, status
             ORDER BY count DESC, license_id
             """,
@@ -316,6 +376,9 @@ class DuckDBQueryService:
                    status, license_id, license_source, reason,
                    content_fetch_started
             FROM {self._license_admissions}
+            WHERE policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             ORDER BY observed_at DESC, decision_id
             LIMIT ?
             """,
@@ -351,6 +414,9 @@ class DuckDBQueryService:
               CAST(MAX(observed_at) AS VARCHAR) AS last_observed_at
             FROM {self._license_admissions}
             WHERE observed_at >= CAST(? AS TIMESTAMP)
+              AND policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY 1
             ORDER BY source_feed
             """,
@@ -369,6 +435,9 @@ class DuckDBQueryService:
               CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
             WHERE observed_at >= CAST(? AS TIMESTAMP)
+              AND policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY 1, license_id, status
             ORDER BY source_feed, count DESC, license_id, status
             """,
@@ -386,6 +455,9 @@ class DuckDBQueryService:
               CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
             WHERE observed_at >= CAST(? AS TIMESTAMP)
+              AND policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY 1, license_source
             ORDER BY source_feed, count DESC, license_source
             """,
@@ -481,6 +553,7 @@ class DuckDBQueryService:
             scientific_artifact_s3_uri,
             FALSE AS admission_only
           FROM {self._decisions}
+          WHERE {_visible_source_predicate()}
           UNION ALL
           SELECT
             admission.doc_id,
@@ -515,6 +588,9 @@ class DuckDBQueryService:
             TRUE AS admission_only
           FROM {self._license_admissions} AS admission
           WHERE admission.status = 'quarantined'
+            AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+            AND admission.source_format IS DISTINCT FROM 'metadata'
+            AND {_visible_source_predicate("admission.source_feed")}
             AND NOT EXISTS (
               SELECT 1 FROM {self._decisions} AS decision
               WHERE decision.doc_id = admission.doc_id
@@ -577,7 +653,7 @@ class DuckDBQueryService:
         if self._refresh_iceberg:
             self._prepare_relation(self._decisions)
             self._prepare_relation(self._license_admissions)
-        fixture_clause = "" if include_fixtures else "WHERE source_feed NOT LIKE 'local-%'"
+        fixture_clause = f"WHERE {_visible_source_predicate(include_fixtures=include_fixtures)}"
         admission_rows = f"""
           SELECT admission.source_feed,
                  COALESCE(admission.source_format, 'unfetched') AS source_format,
@@ -585,6 +661,9 @@ class DuckDBQueryService:
                       THEN 'license_missing' ELSE 'license_not_permitted' END AS reason
           FROM {self._license_admissions} AS admission
           WHERE admission.status = 'quarantined'
+            AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+            AND admission.source_format IS DISTINCT FROM 'metadata'
+            AND {_visible_source_predicate("admission.source_feed")}
             AND NOT EXISTS (
               SELECT 1 FROM {self._decisions} AS decision
               WHERE decision.doc_id = admission.doc_id
@@ -820,10 +899,8 @@ class DuckDBQueryService:
         min_quality: float | None = None,
         max_quality: float | None = None,
     ) -> tuple[str, list[Any]]:
-        clauses: list[str] = []
+        clauses: list[str] = [_visible_source_predicate(include_fixtures=include_fixtures)]
         params: list[Any] = []
-        if not include_fixtures:
-            clauses.append("source_feed NOT LIKE 'local-%'")
         if search and search.strip():
             clauses.append(
                 "(LOWER(text) LIKE ? OR LOWER(doc_id) LIKE ? OR LOWER(source_feed) LIKE ?)"

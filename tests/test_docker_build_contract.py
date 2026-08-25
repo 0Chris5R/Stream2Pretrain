@@ -16,7 +16,6 @@ INGEST_PACKAGES = sorted(
 LOCAL_PACKAGE_PATHS = {
     "stream2pretrain": ".",
     "stream2pretrain-ingest-common": "./ingest/common",
-    "stream2pretrain-github-events": "./ingest/github_events",
 }
 
 

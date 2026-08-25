@@ -33,7 +33,6 @@ from ingest.arxiv_html_fetcher.fetcher import (
     fetch_arxiv_license_with_source,
     fetch_one,
     is_valid_arxiv_id,
-    load_backfill_ids,
     make_bronze_record,
     run_for_ids,
 )
@@ -77,7 +76,6 @@ def test_stream_source_filter_matches_deployed_feed_names() -> None:
     assert _is_arxiv_source_feed("oai-arxiv-cs", None)
     assert _is_arxiv_source_feed("rss-arxiv-cs-lg", None)
     assert _is_arxiv_source_feed("arxiv-oai-cs", None)
-    assert _is_arxiv_source_feed("hf-daily-papers", None)
     assert _is_arxiv_source_feed("custom-arxiv", ("custom-arxiv",))
 
 
@@ -560,25 +558,6 @@ def test_make_bronze_record_pdf_branch() -> None:
     assert content_type == "application/pdf"
     assert key.endswith(".pdf.gz")
     assert record.source_format == "pdf"
-
-
-def test_load_backfill_ids_filters_blank_and_invalid(tmp_path: Any) -> None:
-    p = tmp_path / "ids.txt"
-    p.write_text(
-        "\n".join(
-            [
-                "# header",
-                "",
-                "2401.12345",
-                "not-an-id",
-                "cs/0703123v1",
-                "   ",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    ids = load_backfill_ids(p)
-    assert ids == ["2401.12345", "cs/0703123v1"]
 
 
 @pytest.mark.asyncio

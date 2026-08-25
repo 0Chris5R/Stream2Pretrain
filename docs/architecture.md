@@ -40,12 +40,8 @@ Deployment depending on cadence):
 |---|---|---|---|
 | `rss-arxiv-cs-*` (4 feeds) | per-SourceFeed `ingest-rss` CronJob | 2h conditional GET | `raw.fetched` |
 | `oai-arxiv-cs` | `ingest-oaipmh` CronJob | 2h with resumption tokens | `raw.fetched` |
-| `github-events` | `ingest-github-events` Deployment | `X-Poll-Interval` (~60s) | `github.release.jobs` discovery only |
 | `github-releases` | `ingest-github-releases` Deployment | 2h ETag-conditional | `github.release.jobs` discovery only |
-| `hf-models`, `hf-datasets`, `hf-spaces` | `ingest-hf-cards` Deployment | 10-15 min | exact-revision card content to `raw.fetched` |
-| `hf-daily-papers` | `ingest-hf-daily-papers` CronJob | 6h | arXiv discovery to `raw.fetched` |
-| `*-blog` RSS feeds | per-SourceFeed `ingest-rss` CronJob | 6-24h | `raw.fetched` |
-| Sitemaps | per-SourceFeed `ingest-sitemap` CronJob | per-feed | `raw.fetched` |
+| `hf-models`, `hf-datasets` | `ingest-hf-cards` Deployment | 10-15 min | exact-revision README prose to `raw.fetched` |
 
 Every content poller writes the **raw bytes** to MinIO under
 `s3://bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.html.gz` and
@@ -54,10 +50,10 @@ emits a `BronzeRecord` pointer (defined in `schemas/bronze.py`) onto
 `doc_id`; the bronze object is overwritten with the latest bytes plus a fresh
 `fetched_at`.
 
-Discovery is not training content. OAI, arXiv RSS, Daily Papers, and Hub list
-responses schedule an exact paper or card artifact. GitHub events and release
-feeds schedule an exact release tarball. Metadata-only envelopes are excluded
-before body extraction and cannot reach Gold directly.
+Discovery is not training content. OAI and arXiv RSS schedule an exact paper;
+Hub list responses schedule an exact README revision; GitHub release feeds
+schedule an exact release tarball. Metadata-only envelopes are excluded before
+body extraction, never create corpus decisions, and cannot reach Gold directly.
 
 GitHub release metadata is dual-published to the bounded
 `github.release.jobs` control topic. Tarball workers scale on that topic's

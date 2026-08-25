@@ -1,14 +1,8 @@
-"""arXiv full-paper-body fetcher.
+"""Live arXiv full-paper-body fetcher.
 
-Two run modes share the same body:
-
-- **stream**: subscribe to ``docs.normalized``, pick records whose
-  ``source_feed`` matches an arXiv-flavoured poller, and fetch the native
-  HTML for each id. The processor downstream of ``raw.fetched`` is then
-  responsible for upgrading the Silver record with the full text.
-- **backfill**: a CronJob with ``--ids-file /path/to/list.txt`` walks a
-  newline-separated list of arXiv ids (e.g. ``2024.12345v2``) and fetches
-  each one. Used for a one-shot import after an outage and for bench tests.
+The worker subscribes to the discovery stream, selects arXiv records, and
+fetches the full artifact. The processor downstream of ``raw.fetched`` then
+builds the structured scientific projection.
 
 Both modes reuse :mod:`ingest.common.http_client` (retry, polite UA),
 :class:`ingest.common.rate_limit.TokenBucket` (4 req/s + 1 s sleep per
@@ -37,7 +31,6 @@ import secrets
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -402,23 +395,6 @@ def make_bronze_record(
     return record, key, content_type
 
 
-def load_backfill_ids(path: str | Path) -> list[str]:
-    """Read a newline-separated list of arXiv ids; ignore blanks and comments."""
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"backfill ids file not found: {p}")
-    out: list[str] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        if not is_valid_arxiv_id(s):
-            log.warning("arxiv_html.invalid_id", id=s)
-            continue
-        out.append(s)
-    return out
-
-
 async def stream_ids_from_topic(
     cfg: IngestConfig,
     *,
@@ -491,7 +467,6 @@ def _is_arxiv_source_feed(source: str, sources_filter: Iterable[str] | None) -> 
         "oai-arxiv-cs",
         "arxiv-oai-cs",
         "arxiv-rss-cs",
-        "hf-daily-papers",
     } or source.startswith("rss-arxiv-cs-")
 
 
@@ -721,10 +696,6 @@ def _build_argparser() -> argparse.ArgumentParser:
         description="Fetch arXiv full-paper HTML and emit Bronze records.",
     )
     p.add_argument(
-        "--ids-file",
-        help="Backfill mode: newline-separated list of arXiv ids to fetch.",
-    )
-    p.add_argument(
         "--feed-name",
         default="arxiv-html-fetcher",
         help="SourceFeed label written onto every Bronze record.",
@@ -749,7 +720,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--auto-offset-reset",
         choices=("earliest", "latest"),
         default="earliest",
-        help="Initial offset for a new consumer group; explicit backfills use --ids-file.",
+        help="Initial offset for a new live consumer group.",
     )
     return p
 
@@ -758,17 +729,6 @@ async def _async_main(args: argparse.Namespace) -> int:
     cfg = load_config()
     configure_logging(cfg.log_level, json_output=not cfg.is_dev)
     init_tracer("ingest.arxiv_html_fetcher", cfg)
-
-    if args.ids_file:
-        ids = load_backfill_ids(args.ids_file)
-        log.info("arxiv_html.backfill.start", count=len(ids))
-        emitted = await run_for_ids(
-            ids,
-            cfg,
-            feed_name=args.feed_name,
-        )
-        log.info("arxiv_html.backfill.done", emitted=emitted)
-        return emitted
 
     log.info("arxiv_html.stream.start", topic=args.stream_topic)
     total = await _run_stream(args, cfg)

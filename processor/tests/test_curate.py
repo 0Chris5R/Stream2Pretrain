@@ -514,7 +514,7 @@ def test_permissive_substantive_review_remains_pretrain_eligible(
         state.close()
 
 
-def test_transform_only_review_is_not_mislabelled_as_a_paper_candidate(
+def test_transform_only_review_stays_in_posttrain_pool_without_pretraining(
     cfg: ProcessorConfig,
 ) -> None:
     state = build_state(cfg)
@@ -535,10 +535,10 @@ def test_transform_only_review_is_not_mislabelled_as_a_paper_candidate(
 
         gold = curate_one(state, silver)
 
-        assert gold.route == "quarantine"
-        assert gold.eligible_routes == ["quarantine"]
+        assert gold.route == "posttrain_candidate"
+        assert gold.eligible_routes == ["posttrain_candidate"]
         assert "current paper Foundry" in gold.route_reasons[0]
-        assert not is_trainable_gold(gold)
+        assert is_trainable_gold(gold)
     finally:
         state.close()
 

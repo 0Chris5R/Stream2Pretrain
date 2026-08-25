@@ -38,7 +38,6 @@ resolution-markers = [
 members = [
     "stream2pretrain",
     "stream2pretrain-arxiv-html-fetcher",
-    "stream2pretrain-github-events",
     "stream2pretrain-github-release-tarball-fetcher",
     "stream2pretrain-github-releases",
     "stream2pretrain-hf-poller",
@@ -5111,7 +5110,6 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
     { name = "stream2pretrain-arxiv-html-fetcher" },
-    { name = "stream2pretrain-github-events" },
     { name = "stream2pretrain-github-release-tarball-fetcher" },
     { name = "stream2pretrain-github-releases" },
     { name = "stream2pretrain-hf-poller" },
@@ -5152,7 +5150,6 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "stream2pretrain-arxiv-html-fetcher", editable = "ingest/arxiv_html_fetcher" },
-    { name = "stream2pretrain-github-events", editable = "ingest/github_events" },
     { name = "stream2pretrain-github-release-tarball-fetcher", editable = "ingest/github_release_tarball_fetcher" },
     { name = "stream2pretrain-github-releases", editable = "ingest/github_releases" },
     { name = "stream2pretrain-hf-poller", editable = "ingest/hf_poller" },
@@ -5197,21 +5194,6 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
-name = "stream2pretrain-github-events"
-version = "0.1.0"
-source = { editable = "ingest/github_events" }
-dependencies = [
-    { name = "stream2pretrain" },
-    { name = "stream2pretrain-ingest-common" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "stream2pretrain", editable = "." },
-    { name = "stream2pretrain-ingest-common", editable = "ingest/common" },
-]
-
-[[package]]
 name = "stream2pretrain-github-release-tarball-fetcher"
 version = "0.2.0"
 source = { editable = "ingest/github_release_tarball_fetcher" }
@@ -5235,7 +5217,6 @@ source = { editable = "ingest/github_releases" }
 dependencies = [
     { name = "feedparser" },
     { name = "stream2pretrain" },
-    { name = "stream2pretrain-github-events" },
     { name = "stream2pretrain-ingest-common" },
 ]
 
@@ -5243,7 +5224,6 @@ dependencies = [
 requires-dist = [
     { name = "feedparser", specifier = ">=6.0.11" },
     { name = "stream2pretrain", editable = "." },
-    { name = "stream2pretrain-github-events", editable = "ingest/github_events" },
     { name = "stream2pretrain-ingest-common", editable = "ingest/common" },
 ]
 
@@ -5325,8 +5305,6 @@ name = "stream2pretrain-openreview-poller"
 version = "0.2.0"
 source = { editable = "ingest/openreview_poller" }
 dependencies = [
-    { name = "datasets" },
-    { name = "huggingface-hub" },
     { name = "openreview-py" },
     { name = "stream2pretrain" },
     { name = "stream2pretrain-ingest-common" },
@@ -5334,8 +5312,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "datasets", specifier = ">=2.20" },
-    { name = "huggingface-hub", specifier = ">=0.24" },
     { name = "openreview-py", specifier = ">=1.45,<2" },
     { name = "stream2pretrain", editable = "." },
     { name = "stream2pretrain-ingest-common", editable = "ingest/common" },

@@ -1,6 +1,4 @@
-# Multi-stage Dockerfile for the OpenReview poller (live + backfill modes).
-# The same image ships both entrypoints; the Helm CronJob/Job picks one via the
-# image command.
+# Multi-stage Dockerfile for the live OpenReview poller.
 ARG PYTHON_VERSION=3.11
 
 FROM python:${PYTHON_VERSION}-slim AS builder
@@ -28,10 +26,8 @@ RUN groupadd --system --gid 65532 nonroot \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/s2p-openreview-live /usr/local/bin/s2p-openreview-live
-COPY --from=builder /usr/local/bin/s2p-openreview-backfill /usr/local/bin/s2p-openreview-backfill
 COPY --from=builder /src /app
 ENV PYTHONPATH=/app
 WORKDIR /app
 USER nonroot
-# Default to live mode; CronJob template overrides for backfill Jobs.
 ENTRYPOINT ["s2p-openreview-live"]

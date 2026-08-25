@@ -12,12 +12,10 @@ COPY README.md /src/README.md
 COPY schemas /src/schemas
 COPY ingest/__init__.py /src/ingest/__init__.py
 COPY ingest/common /src/ingest/common
-COPY ingest/github_events /src/ingest/github_events
 COPY ingest/github_releases /src/ingest/github_releases
 RUN uv pip install --system --no-cache --no-config --no-sources \
         -e . \
         -e ./ingest/common \
-        -e ./ingest/github_events \
         -e ./ingest/github_releases
 
 FROM python:${PYTHON_VERSION}-slim AS runtime

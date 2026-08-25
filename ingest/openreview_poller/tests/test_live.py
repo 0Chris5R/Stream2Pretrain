@@ -244,8 +244,15 @@ async def test_poll_venue_keeps_review_path_when_paper_license_is_unknown(
             admission_producer=fake_admissions,  # type: ignore[arg-type]
         )
 
-    assert (submissions, reviews, skipped) == (0, 1, 0)
-    assert [message["record"].source_format for message in fake_producer.sent] == ["review"]
+    assert (submissions, reviews, skipped) == (1, 1, 0)
+    assert [message["record"].source_format for message in fake_producer.sent] == [
+        "pdf",
+        "review",
+    ]
+    assert [item["record"].status for item in fake_admissions.sent] == [
+        "posttrain_transform_only",
+        "admitted",
+    ]
 
 
 @pytest.mark.asyncio

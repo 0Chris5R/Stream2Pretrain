@@ -135,11 +135,6 @@ sources:
     enabled: false
     htmlFetcher:
       enabled: true
-  # Blog SourceFeeds clone the suspended RSS template above, so a second
-  # aggregate blog CronJob would only duplicate polling.
-  blogs:
-    enabled: false
-
 ingest:
   # One arXiv OAI page per two-hour poll is a measured-course-cluster
   # backpressure boundary; the durable token resumes the same window later.
@@ -152,11 +147,3 @@ ingest:
     replicas: 1
   githubTarballFetcher:
     enabled: true
-
-openreviewPoller:
-  enabled: true
-  live:
-    state:
-      # Reuse the already-bound cursor volume; a standalone WaitForFirstConsumer
-      # PVC cannot bind until the first six-hour CronJob and would block Helm.
-      existingClaim: stream2pretrain-ingest-state

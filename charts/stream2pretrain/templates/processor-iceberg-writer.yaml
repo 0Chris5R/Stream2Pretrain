@@ -68,6 +68,10 @@ spec:
               value: {{ $component | quote }}
             - name: S2P_STATE_DIR
               value: /var/lib/s2p/checkpoint
+            - name: S2P_BYTEWAX_FLOW_NAME
+              value: "s2p-iceberg-writer-live-v2"
+            - name: S2P_BYTEWAX_RECOVERY_NAME
+              value: "iceberg-writer-live-v2"
             - name: S2P_BYTEWAX_RECOVERY_PARTITIONS
               value: {{ $checkpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS

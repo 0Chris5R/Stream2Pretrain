@@ -16,33 +16,34 @@ body is fetched. There are exactly three outcomes:
 1. `pretrain_and_posttrain`: a permissive content licence allows the retained
    projection to enter pretraining and allows the paper to become a
    post-training candidate.
-2. `posttrain_transform_only`: a reviewed grey-area licence permits the item to
-   ground derived SFT or RL artifacts, but forbids verbatim pretraining export.
-3. `quarantined`: a restrictive, contradictory, or unresolved licence prevents
-   body retrieval and all downstream processing.
+2. `posttrain_transform_only`: a reviewed grey-area licence or no stated item
+   licence allows the item to ground derived SFT or RL artifacts, but forbids
+   verbatim pretraining export.
+3. `quarantined`: an explicit restrictive, contradictory, no-derivatives, or
+   otherwise incompatible licence prevents body retrieval and processing.
 
 The outcome is always based on the individual content item. A SourceFeed
-default, dataset wrapper licence, repository topic, venue, or hosting platform
-must not silently establish rights for all contained content.
+default, dataset wrapper licence, repository topic, or venue must not silently
+establish rights for all contained content. A versioned source-wide grant may
+apply only to the exact projection it covers, such as a public Hugging Face
+repository README or an OpenReview public comment.
 
 Each source family must implement the metadata lookup appropriate to it:
 
-- arXiv RSS, OAI-PMH, HTML, and Hugging Face Daily Papers resolve the licence
-  of the individual arXiv paper before full-text retrieval.
-- GitHub events, releases, and tarball files resolve the repository/release
-  licence and retain repository, ref, path, and licence provenance.
-- Hugging Face model, dataset, and Space records use the individual card/API
-  metadata at an immutable revision; a dataset wrapper licence does not
-  licence referenced external content.
-- OpenReview live and backfill records resolve paper and review licences at the
-  individual note or artifact level.
-- RSS, sitemap, and lab-blog pages use item/page metadata or an explicitly
-  audited source-wide content licence. An unknown default does not permit a
-  body fetch.
+- arXiv RSS and OAI-PMH are internal scheduling messages. The full-text worker
+  resolves the individual paper licence before body retrieval.
+- GitHub release discovery is internal. The tarball worker retains repository,
+  exact ref, path, licence blob SHA, and any per-file SPDX provenance.
+- Hugging Face model and dataset cards use an exact commit and either explicit
+  README rights or the versioned public-repository terms. This never grants
+  rights in weights, dataset rows, or linked artifacts.
+- OpenReview live records resolve paper rights at the individual Note and use
+  the versioned public-comment terms only for public review/comment prose.
 
-The Sources and Documents interfaces report observed item-level decisions and
-their provenance. They must not infer a fixed training policy from a feed
-default.
+Discovery envelopes create no licence or curation decision and do not appear
+in Sources, Documents, acceptance, or quarantine statistics. The Sources and
+Documents interfaces report only content-bearing item decisions and their
+provenance.
 
 ## 2. Bytewax is the production stream engine
 
@@ -77,13 +78,12 @@ source training-data pipelines. The implementation document must record the
 exact model/revision, licence, input projection, CPU runtime, output scale,
 threshold rationale, and fallback behavior.
 
-At minimum, distinct policies are required for:
+Distinct policies are required for the active content families:
 
 - scientific papers and peer-reviewed full text;
-- general web and lab-blog prose;
 - source code and repository documentation;
 - peer reviews;
-- model, dataset, and release metadata.
+- model and dataset cards.
 
 FinePDFs Edu v2 remains the scientific-quality default unless same-sample
 evidence justifies a change. FineWeb-Edu must not score code or structured
@@ -98,20 +98,22 @@ curation.
 
 ## 4. Ingest coverage and replay
 
-All configured Phase-1 sources must run through a dedicated, tested path:
+All configured sources run through a dedicated, tested path:
 
-- arXiv OAI-PMH and four arXiv RSS categories;
-- arXiv full-text HTML with bounded PDF fallback;
-- GitHub Events, Releases, and release tarball code;
-- Hugging Face Hub model, dataset, and Space cards plus Daily Papers;
-- configured AI-lab blogs;
-- OpenReview live papers, public review threads, and the configured backfill;
-- the peS2o, RedPajama arXiv, FineWeb-Edu, Stack-Edu, and Wayback seed
-  components, each under the same per-item admission contract as live ingest.
+- four arXiv RSS categories and current-frontier OAI-PMH schedule one canonical
+  arXiv full-text artifact with bounded CPU PDF fallback;
+- GitHub Releases Atom schedules exact-ref release tarball code and docs;
+- Hugging Face Hub model and dataset cards retain exact-revision README prose;
+- OpenReview live papers and public review threads join once live API access is
+  configured and verified.
 
-Arbitrary page caps, new-group `latest` offsets, and other changes that can
-silently reduce coverage are removed. Rate limits and backpressure remain, but
-they delay work through durable state rather than dropping it.
+Redundant discovery sources, sources without a useful corpus projection, blog
+feeds without an audited reusable-content grant, and historical backfill-only
+workloads are removed rather than shown as permanently failing sources.
+
+After the explicitly approved 2026-08-25 backlog reset, every source starts at
+the current live frontier. Rate limits and backpressure then delay work through
+durable state rather than dropping new records.
 
 ## 5. Complete source cockpit
 
@@ -126,8 +128,8 @@ For every source it shows:
 - extraction and classifier policy;
 - pipeline lag or queued work where applicable.
 
-Quarantined items remain inspectable in Documents. Dataset export alone applies
-the strict pretraining licence filter.
+Quarantined content items remain inspectable in Documents. Discovery envelopes
+do not. Dataset export applies the strict pretraining licence filter.
 
 ## 6. Configurable storage retention
 

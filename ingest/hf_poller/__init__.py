@@ -1,1 +1,1 @@
-"""Hugging Face exact-version card poller and Daily Papers discovery adapter."""
+"""Hugging Face exact-version model and dataset card poller."""

@@ -134,14 +134,12 @@ also published to `docs.curated` and committed to `gold.curated`. The two
 Iceberg appends are not a distributed transaction; current delivery is
 at-least-once and replay behavior remains a runtime measurement.
 
-The strict admission policy records missing and excluded licences before body
-retrieval. Such documents never enter Bronze processing. The query layer folds
-these pre-fetch records into the same corpus route ledger as downstream
-curation decisions, using `license_missing` or `license_not_permitted` as the
-route reason. The internal pre-fetch table is not a second product ledger. The
-defensive curation rule still represents a replayed legacy row as a rejected
-decision with `license=unknown`; it never enters `gold.curated` or dataset
-export.
+The admission policy records a purpose-aware decision before body retrieval.
+Missing rights may enter Bronze only as `posttrain_transform_only` and never
+enter a verbatim pretraining export. Explicit incompatible rights stop before
+body retrieval; the query layer folds those records into the same corpus route
+ledger using `license_not_permitted`. The internal pre-fetch table is not a
+second product ledger. Discovery metadata produces no licence or document row.
 
 ## Decon attestations
 

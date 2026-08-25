@@ -13,7 +13,7 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
-from ingest.common.arxiv_license import fetch_arxiv_license_with_source
+from ingest.common.bronze_pipeline import publish_discovery_payload
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.feeds import (
     feeds_by_protocol,
@@ -21,16 +21,12 @@ from ingest.common.feeds import (
     load_feeds_from_yaml,
 )
 from ingest.common.http_client import build_async_client, build_headers
-from ingest.common.kafka_producer import BronzeProducer, LicenseAdmissionProducer
-from ingest.common.license_admission import decide_license_admission, normalize_license
+from ingest.common.kafka_producer import BronzeProducer
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
-from ingest.common.rate_limit import TokenBucket
-from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 from ingest.common.state import FeedStateStore
 from ingest.oaipmh_poller.client import OAIClient
-from schemas.bronze import BronzeRecord
 from schemas.sourcefeed import SourceFeedSpec
 
 log = get_logger(__name__)
@@ -51,8 +47,11 @@ async def poll_feed(
     max_pages: int | None = None,
 ) -> int:
     """Run one OAI-PMH pass. Returns number of bronze records emitted."""
-    feed_state = state_store.get(feed.name)
-    window_from = str(feed_state.get("window_from") or feed_state.get("until") or "2024-01-01")
+    # The epoch suffix intentionally abandons the old historical cursor. OAI
+    # is a current-frontier no-gap discovery path, not a backfill source.
+    state_key = f"{feed.name}:live-v1"
+    feed_state = state_store.get(state_key)
+    window_from = str(feed_state.get("window_from") or feed_state.get("until") or _today_iso())
     window_until = str(feed_state.get("window_until") or _today_iso())
     resumption_token = feed_state.get("resumption_token")
     if not isinstance(resumption_token, str) or not resumption_token:
@@ -67,11 +66,6 @@ async def poll_feed(
         BronzeProducer(
             cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-oai-poller"
         ) as producer,
-        LicenseAdmissionProducer(
-            cfg.redpanda_brokers,
-            topic=cfg.license_admissions_topic,
-            client_id="s2p-oai-license-admission",
-        ) as admission_producer,
         MinioWriter(
             cfg.minio_endpoint,
             cfg.minio_access_key,
@@ -89,7 +83,6 @@ async def poll_feed(
             client,
             sleep_between_requests=request_interval,
         )
-        license_bucket = TokenBucket(rate=1.0, burst=1)
         async for page in oai.list_pages(
             metadata_prefix=metadata_prefix,
             set_spec=set_spec,
@@ -101,97 +94,26 @@ async def poll_feed(
                 handled += 1
                 if not record.deleted:
                     url = record.arxiv_abs_url() or f"oai://{feed.endpoint}/{record.identifier}"
-                    per_record_license = normalize_license(record.license_value())
-                    license_source = "oai_metadata"
                     arxiv_id = record.arxiv_id()
-                    resolver = "oai-record-rights"
-                    evidence_url = url if url.startswith("http") else str(feed.endpoint)
-                    evidence_revision = record.datestamp or record.identifier
-                    evidence_scope = "item" if per_record_license != "unknown" else "unknown"
-                    if per_record_license == "unknown" and arxiv_id is not None:
-                        resolved, license_source = await fetch_arxiv_license_with_source(
-                            arxiv_id,
-                            client,
-                            bucket=license_bucket,
-                        )
-                        per_record_license = normalize_license(resolved)
-                        resolver = f"arxiv:{license_source}"
-                        evidence_url = f"https://arxiv.org/abs/{arxiv_id}"
-                        evidence_revision = arxiv_id
-                        evidence_scope = "item" if per_record_license != "unknown" else "unknown"
-                    elif per_record_license == "unknown":
-                        # A SourceFeed default is not evidence for this OAI
-                        # record. Non-arXiv records therefore fail closed.
-                        license_source = "unknown"
-                    trace_id = _random_trace_id()
-                    decision_url = (
-                        url
-                        if url.startswith("http")
-                        else f"{str(feed.endpoint).rstrip('/')}#record={record.identifier}"
-                    )
-                    admission = decide_license_admission(
-                        source_url=decision_url,
+                    if arxiv_id is None:
+                        continue
+                    await publish_discovery_payload(
+                        payload=record.raw,
+                        url=url,
                         source_feed=feed.name,
-                        license_value=per_record_license,
-                        license_source=license_source,
-                        source_format="metadata",
-                        trace_id=trace_id,
-                        resolver=resolver,
-                        evidence_url=evidence_url,
-                        evidence_revision=evidence_revision,
-                        evidence_scope=evidence_scope,
+                        producer=producer,
+                        minio=minio,
+                        bucket=cfg.minio_bronze_bucket,
+                        extension="oai.xml.gz",
+                        content_type="application/xml",
+                        extraction_pipeline="oai-pmh-discovery-v2",
+                        metadata={
+                            "arxiv_id": arxiv_id,
+                            "oai_identifier": record.identifier,
+                            "oai_datestamp": record.datestamp,
+                        },
                     )
-                    await admission_producer.send(admission.decision)
-                    if not admission.fetch_allowed:
-                        log.info(
-                            "oai.license_quarantined",
-                            feed=feed.name,
-                            identifier=record.identifier,
-                            license=admission.license_id,
-                        )
-                    else:
-                        fetched_at = datetime.now(tz=UTC)
-                        key = bronze_object_key(
-                            source_feed=feed.name,
-                            doc_id=admission.decision.doc_id,
-                            fetched_at=fetched_at,
-                            extension="oai.xml.gz",
-                        )
-                        stored = await minio.put_bronze(
-                            key=key,
-                            payload=record.raw,
-                            content_type="application/xml",
-                            gzip_compress=True,
-                            metadata={
-                                "doc_id": admission.decision.doc_id,
-                                "source_feed": feed.name,
-                                "oai_identifier": record.identifier,
-                            },
-                        )
-                        br = BronzeRecord(
-                            doc_id=admission.decision.doc_id,
-                            url=decision_url,  # type: ignore[arg-type]
-                            fetched_at=fetched_at,
-                            http_status=200,
-                            content_type="application/xml",
-                            raw_html_s3_uri=bronze_s3_uri(
-                                bucket=cfg.minio_bronze_bucket,
-                                source_feed=feed.name,
-                                doc_id=admission.decision.doc_id,
-                                fetched_at=fetched_at,
-                                extension="oai.xml.gz",
-                            ),
-                            source_feed=feed.name,
-                            trace_id=trace_id,
-                            bytes_size=stored,
-                            source_format="metadata",
-                            extraction_pipeline="oai-pmh-metadata-v1",
-                            spdx_license=admission.license_id,
-                            spdx_license_source=license_source,  # type: ignore[arg-type]
-                            training_usage=admission.training_usage,
-                        )
-                        await producer.send(br)
-                        emitted += 1
+                    emitted += 1
 
                 if (
                     max_records is not None
@@ -206,7 +128,7 @@ async def poll_feed(
             pages_handled += 1
             if page.resumption_token:
                 state_store.put(
-                    feed.name,
+                    state_key,
                     {
                         "window_from": window_from,
                         "window_until": window_until,
@@ -222,16 +144,10 @@ async def poll_feed(
                     )
                     return emitted
             else:
-                state_store.put(feed.name, {"until": window_until})
+                state_store.put(state_key, {"until": window_until})
                 return emitted
 
     return emitted
-
-
-def _random_trace_id() -> str:
-    import secrets
-
-    return secrets.token_hex(16)
 
 
 def _sha256(text: str) -> str:

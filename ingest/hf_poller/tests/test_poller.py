@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import httpx
@@ -50,13 +49,6 @@ def _models_payload() -> list[dict]:
     ]
 
 
-def _papers_payload() -> list[dict]:
-    return [
-        {"paper": {"id": "2406.12345", "title": "Paper A", "license": "CC-BY-4.0"}},
-        {"paper": {"id": "2406.67890", "title": "Paper B", "license": "CC-BY-SA-4.0"}},
-    ]
-
-
 def _dataset_payload() -> list[dict]:
     return [
         {
@@ -64,17 +56,6 @@ def _dataset_payload() -> list[dict]:
             "lastModified": "2026-08-20T10:00:00Z",
             "sha": "c" * 40,
             "cardData": {"license": "cc-by-4.0"},
-        }
-    ]
-
-
-def _space_payload() -> list[dict]:
-    return [
-        {
-            "id": "org/research-demo",
-            "lastModified": "2026-08-20T11:00:00Z",
-            "sha": "d" * 40,
-            "tags": ["license:apache-2.0"],
         }
     ]
 
@@ -99,15 +80,21 @@ async def test_poll_models_emits_two(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         "ingest.hf_poller.poller.build_async_client",
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
+    admissions = FakeProducer()
     emitted = await hf_module.poll_models(
         _cfg(),
         producer=fake_producer,  # type: ignore[arg-type]
         minio=fake_minio,
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
     )
     assert emitted == 2
     assert len(fake_producer.sent) == 2
     assert all(item["record"].source_format == "web" for item in fake_producer.sent)
+    assert all(
+        item["record"].spdx_license == hf_module.HF_PUBLIC_REPOSITORY_TERMS
+        for item in fake_producer.sent
+    )
+    assert all(item["record"].resolver == "hf-public-repository-terms" for item in admissions.sent)
 
 
 @pytest.mark.asyncio
@@ -132,12 +119,13 @@ async def test_poll_dataset_cards_emits_versioned_markdown(
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
 
+    admissions = FakeProducer()
     emitted = await hf_module.poll_hub_cards(
         _cfg(),
         kind="dataset",
         producer=fake_producer,  # type: ignore[arg-type]
         minio=fake_minio,
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
     )
 
     assert emitted == 1
@@ -146,43 +134,8 @@ async def test_poll_dataset_cards_emits_versioned_markdown(
     assert record.source_format == "web"
     assert record.extraction_pipeline == "hf-dataset-card-markdown-v1"
     assert "/blob/" in str(record.url)
-
-
-@pytest.mark.asyncio
-async def test_poll_space_cards_emits_versioned_markdown(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/spaces":
-            return httpx.Response(200, json=_space_payload())
-        if request.url.path.endswith("/README.md"):
-            return httpx.Response(200, text="# Space card\n\nLicensed research application.")
-        return httpx.Response(404)
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        hf_module,
-        "build_async_client",
-        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
-    )
-
-    emitted = await hf_module.poll_hub_cards(
-        _cfg(),
-        kind="space",
-        producer=fake_producer,  # type: ignore[arg-type]
-        minio=fake_minio,
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
-    )
-
-    assert emitted == 1
-    record = fake_producer.sent[0]["record"]
-    assert record.source_feed == "hf-spaces"
-    assert record.extraction_pipeline == "hf-space-card-markdown-v1"
-    assert f"/blob/{'d' * 40}/README.md" in str(record.url)
+    assert record.spdx_license == hf_module.HF_PUBLIC_REPOSITORY_TERMS
+    assert admissions.sent[0]["record"].resolver == "hf-public-repository-terms"
 
 
 @pytest.mark.asyncio
@@ -227,8 +180,7 @@ async def test_hub_card_without_exact_revision_is_quarantined_before_card_fetch(
     assert emitted == 0
     assert requests == ["/api/datasets"]
     assert records.sent == []
-    assert admissions.sent[0]["record"].status == "quarantined"
-    assert admissions.sent[0]["record"].evidence_scope == "unknown"
+    assert admissions.sent == []
 
 
 @pytest.mark.asyncio
@@ -271,95 +223,7 @@ async def test_model_without_exact_revision_is_quarantined_before_card_fetch(
     assert emitted == 0
     assert requests == ["/api/models"]
     assert records.sent == []
-    assert admissions.sent[0]["record"].status == "quarantined"
-    assert admissions.sent[0]["record"].evidence_scope == "unknown"
-
-
-@pytest.mark.asyncio
-async def test_poll_daily_papers_uses_public_api_without_token(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert "authorization" not in request.headers
-        return httpx.Response(200, json=_papers_payload())
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        hf_module,
-        "build_async_client",
-        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
-    )
-    emitted = await hf_module.poll_daily_papers(
-        _cfg(token=None),
-        producer=fake_producer,
-        minio=fake_minio,  # type: ignore[arg-type]
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
-    )
-    assert emitted == 2
-
-
-def test_model_license_reads_hub_license_tag() -> None:
-    assert hf_module._model_license({"tags": ["pytorch", "license:apache-2.0"]}) == "Apache-2.0"
-
-
-@pytest.mark.asyncio
-async def test_poll_daily_papers_emits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
-    await fake_producer.start()
-    await fake_minio.start()
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            content=json.dumps(_papers_payload()).encode("utf-8"),
-            headers={"content-type": "application/json"},
-        )
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        "ingest.hf_poller.poller.build_async_client",
-        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
-    )
-    emitted = await hf_module.poll_daily_papers(
-        _cfg(),
-        producer=fake_producer,
-        minio=fake_minio,  # type: ignore[arg-type]
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
-    )
-    assert emitted == 2
-
-
-@pytest.mark.asyncio
-async def test_poll_daily_papers_raises_on_upstream_http_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, request=request)
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        hf_module,
-        "build_async_client",
-        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
-    )
-
-    with pytest.raises(httpx.HTTPStatusError, match="503"):
-        await hf_module.poll_daily_papers(
-            _cfg(),
-            producer=fake_producer,
-            minio=fake_minio,  # type: ignore[arg-type]
-            admission_producer=FakeProducer(),  # type: ignore[arg-type]
-        )
+    assert admissions.sent == []
 
 
 @pytest.mark.asyncio
@@ -367,9 +231,9 @@ async def test_models_deployment_repeats_only_models(monkeypatch: pytest.MonkeyP
     passes: list[str] = []
     sleeps: list[float] = []
 
-    async def fake_run_pass(_: IngestConfig, *, mode: str = "all") -> tuple[int, int, int, int]:
+    async def fake_run_pass(_: IngestConfig, *, mode: str = "all") -> tuple[int, int]:
         passes.append(mode)
-        return 1, 0, 0, 0
+        return 1, 0
 
     class StopLoopError(Exception):
         pass

@@ -252,8 +252,8 @@ jobs:
                   "fetcher",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-v2",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-v2",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-live-v3",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-live-v3",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -263,8 +263,8 @@ jobs:
                   "curate",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-v2",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-v2",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-live-v3",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-live-v3",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -274,6 +274,8 @@ jobs:
                   "iceberg-writer",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-iceberg-writer-live-v2",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "iceberg-writer-live-v2",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "1",
                   },
               ),
@@ -608,14 +610,10 @@ jobs:
             context: .
             dockerfile: ingest/sitemap_poller/Dockerfile
             inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/sitemap_poller
-          - image: ingest-github-events
-            context: .
-            dockerfile: ingest/github_events/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_events
           - image: ingest-github-releases
             context: .
             dockerfile: ingest/github_releases/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_events ingest/github_releases
+            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_releases
           - image: ingest-hf
             context: .
             dockerfile: ingest/hf_poller/Dockerfile
@@ -635,7 +633,7 @@ jobs:
           - image: processor
             context: .
             dockerfile: processor/Dockerfile.app
-            inputs: .dockerignore schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor/*.py processor/Dockerfile.app processor/container_entrypoint.sh processor/mixture_controller processor/operators processor/seed/*.py docs/provider-terms
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor/*.py processor/Dockerfile.app processor/container_entrypoint.sh processor/mixture_controller processor/operators docs/provider-terms
           - image: processor-foundry
             context: .
             dockerfile: processor/Dockerfile.foundry.app
@@ -820,7 +818,6 @@ jobs:
       ingest_rss: ${{ steps.pin.outputs.ingest_rss }}
       ingest_oaipmh: ${{ steps.pin.outputs.ingest_oaipmh }}
       ingest_sitemap: ${{ steps.pin.outputs.ingest_sitemap }}
-      ingest_github_events: ${{ steps.pin.outputs.ingest_github_events }}
       ingest_github_releases: ${{ steps.pin.outputs.ingest_github_releases }}
       ingest_hf: ${{ steps.pin.outputs.ingest_hf }}
       ingest_arxiv_html: ${{ steps.pin.outputs.ingest_arxiv_html }}
@@ -869,7 +866,6 @@ jobs:
           pin_component ingest_rss ingest-rss
           pin_component ingest_oaipmh ingest-oaipmh
           pin_component ingest_sitemap ingest-sitemap
-          pin_component ingest_github_events ingest-github-events
           pin_component ingest_github_releases ingest-github-releases
           pin_component ingest_hf ingest-hf
           pin_component ingest_arxiv_html ingest-arxiv-html
@@ -918,7 +914,6 @@ jobs:
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
       IMAGE_DIGEST_INGEST_SITEMAP: ${{ needs.image-pin.outputs.ingest_sitemap }}
-      IMAGE_DIGEST_INGEST_GITHUB_EVENTS: ${{ needs.image-pin.outputs.ingest_github_events }}
       IMAGE_DIGEST_INGEST_GITHUB_RELEASES: ${{ needs.image-pin.outputs.ingest_github_releases }}
       IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
       IMAGE_DIGEST_INGEST_ARXIV_HTML: ${{ needs.image-pin.outputs.ingest_arxiv_html }}
@@ -1141,6 +1136,74 @@ jobs:
           kubectl --request-timeout=20s get nodes
           finish_phase "VPN and cluster connection"
 
+          # One explicitly approved reset discards only the historical Kafka
+          # backlog. Existing Iceberg data and dedup state remain intact. Core
+          # Bytewax flows switch to new durable recovery identities and import
+          # the broker frontier committed here. The marker makes this action
+          # impossible to repeat accidentally on later deployments.
+          frontier_reset_applied=false
+          frontier_reset_marker=stream2pretrain-live-frontier-20260825
+          if [[ "$DEPLOY_MODE" == "deploy" ]] \
+             && ! kubectl -n stream2pretrain get "configmap/$frontier_reset_marker" \
+                  >/dev/null 2>&1; then
+            echo "::group::Reset historical backlog to the current live frontier"
+            scale_to_zero_if_present() {
+              local kind="$1"
+              local name="$2"
+              if kubectl -n stream2pretrain get "$kind/$name" >/dev/null 2>&1; then
+                kubectl -n stream2pretrain scale "$kind/$name" \
+                  --replicas=0 --timeout=180s
+              else
+                echo "$kind/$name is already absent"
+              fi
+            }
+            scale_to_zero_if_present deployment stream2pretrain-processor-fetcher
+            scale_to_zero_if_present deployment stream2pretrain-processor-iceberg-writer
+            scale_to_zero_if_present deployment stream2pretrain-ingest-arxiv-html
+            scale_to_zero_if_present deployment stream2pretrain-ingest-github-tarball-fetcher
+            scale_to_zero_if_present statefulset stream2pretrain-processor-curate
+            for selector in \
+              app.kubernetes.io/component=processor-fetcher \
+              app.kubernetes.io/component=processor-curate \
+              app.kubernetes.io/component=processor-iceberg-writer \
+              app.kubernetes.io/component=ingest-arxiv-html \
+              app.kubernetes.io/component=ingest-github-tarball-fetcher; do
+              if kubectl -n stream2pretrain get pod -l "$selector" -o name \
+                | grep -q .; then
+                kubectl -n stream2pretrain wait --for=delete pod \
+                  -l "$selector" --timeout=240s
+              fi
+              if kubectl -n stream2pretrain get pod -l "$selector" -o name \
+                | grep -q .; then
+                echo "A reset-target consumer is still running: $selector" >&2
+                exit 1
+              fi
+            done
+            seek_to_live_frontier() {
+              local group="$1"
+              local topics="$2"
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group seek "$group" --to end --topics "$topics" \
+                  --allow-new-topics
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group describe "$group"
+            }
+            seek_to_live_frontier s2p-fetcher raw.fetched
+            seek_to_live_frontier s2p-curate docs.normalized
+            seek_to_live_frontier s2p-iceberg-writer curation.decisions
+            seek_to_live_frontier s2p-iceberg-writer-licenses license.admissions
+            seek_to_live_frontier s2p-arxiv-html-fetcher-v2 raw.fetched
+            seek_to_live_frontier s2p-github-tarball-fetcher github.release.jobs
+            kubectl -n stream2pretrain create configmap "$frontier_reset_marker" \
+              --from-literal=reset-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --from-literal=git-sha="$GITHUB_SHA" \
+              --from-literal=policy="discard-historical-backlog-start-live" \
+              --dry-run=client -o yaml \
+              | kubectl apply -f -
+            frontier_reset_applied=true
+            echo "::endgroup::"
+          fi
+
           if [[ "$DEPLOY_MODE" == "repair-monitoring" ]]; then
             monitoring_diagnostics() {
               kubectl -n monitoring get deployment,statefulset,pod,service,endpoints \
@@ -1254,12 +1317,10 @@ jobs:
               kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io \
                 -o name | wc -l
             )"
-            if [[ "$source_count" -lt 10 ]]; then
-              echo "Expected all 10 Phase-1 SourceFeeds, found $source_count" >&2
+            if [[ "$source_count" -ne 5 ]]; then
+              echo "Expected exactly five internal arXiv discovery SourceFeeds, found $source_count" >&2
               exit 1
             fi
-            kubectl -n stream2pretrain rollout status \
-              deployment/stream2pretrain-ingest-github-events --timeout=180s
             kubectl -n stream2pretrain rollout status \
               deployment/stream2pretrain-ingest-github-tarball-fetcher --timeout=180s
             kubectl -n stream2pretrain rollout status \
@@ -1269,7 +1330,6 @@ jobs:
 
             cronjobs=(
               stream2pretrain-ingest-github-releases
-              stream2pretrain-ingest-hf-daily-papers
               stream2pretrain-iceberg-maintenance
             )
             if kubectl -n stream2pretrain get \
@@ -1381,15 +1441,6 @@ jobs:
             printf '%s\n' "$hf_logs"
             grep -Eq 'hf_poller.pass_done.*models=[1-9][0-9]*' <<<"$hf_logs" || {
               echo "HF model source completed but admitted no licensed model" >&2
-              exit 1
-            }
-            github_events_logs="$(
-              kubectl -n stream2pretrain logs \
-                deployment/stream2pretrain-ingest-github-events --tail=240
-            )"
-            printf '%s\n' "$github_events_logs"
-            grep -Eq 'github_events\.(batch|not_modified)' <<<"$github_events_logs" || {
-              echo "GitHub Events has no verified successful upstream poll in recent logs" >&2
               exit 1
             }
             kubectl -n stream2pretrain logs \
@@ -2384,9 +2435,10 @@ jobs:
           # Preserve any pre-native Bytewax progress in the broker group before
           # the native-consumer-to-Bytewax cutback. The durable marker makes
           # this a one-time handoff even when the workflow or Helm deployment
-          # is retried. Marker identity must match the stable v2 flow and
+          # is retried. Marker identity must match the stable live-v3 flow and
           # recovery names or the release fails closed.
-          if [[ "$CORE_CHANGED" == "true" || "$SOURCES_CHANGED" == "true" ]]; then
+          if [[ ("$CORE_CHANGED" == "true" || "$SOURCES_CHANGED" == "true") \
+             && "$frontier_reset_applied" != "true" ]]; then
           legacy_fetcher_checkpoint="$(
             kubectl -n stream2pretrain get deployment \
               stream2pretrain-processor-fetcher -o json 2>/dev/null \
@@ -2412,8 +2464,8 @@ jobs:
                 ' \
               || true
           )"
-          if [[ "$existing_fetcher_flow" == "s2p-fetcher-v2" ]]; then
-            echo "Fetcher already declares the stable Bytewax v2 identity."
+          if [[ "$existing_fetcher_flow" == "s2p-fetcher-live-v3" ]]; then
+            echo "Fetcher already declares the stable live Bytewax identity."
           elif [[ "$legacy_fetcher_checkpoint" == "true" ]]; then
             fetcher_pod="$(
               kubectl -n stream2pretrain get pod \
@@ -2437,8 +2489,8 @@ jobs:
               S2P_CUTOVER_COMPONENT=fetcher
               S2P_CUTOVER_TOPIC=raw.fetched
               S2P_CONSUMER_GROUP=s2p-fetcher
-              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-v2
-              S2P_BYTEWAX_RECOVERY_NAME=fetcher-v2
+              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-live-v3
+              S2P_BYTEWAX_RECOVERY_NAME=fetcher-live-v3
               S2P_BYTEWAX_RECOVERY_PARTITIONS=4
             )
             set +e
@@ -2507,7 +2559,7 @@ jobs:
                 ' \
               || true
           )"
-          if [[ "$existing_curator_flow" != "s2p-curate-v2" \
+          if [[ "$existing_curator_flow" != "s2p-curate-live-v3" \
              && -n "$curator_exists" \
              && -z "$curator_pod" ]]; then
             curator_claim="checkpoint-stream2pretrain-processor-curate-0"
@@ -2582,8 +2634,8 @@ jobs:
             curator_pod="$curator_migration_pod"
             echo "Mounted the scaled-zero curator recovery PVC in $curator_migration_pod."
           fi
-          if [[ "$existing_curator_flow" == "s2p-curate-v2" ]]; then
-            echo "Curator already declares the stable Bytewax v2 identity."
+          if [[ "$existing_curator_flow" == "s2p-curate-live-v3" ]]; then
+            echo "Curator already declares the stable live Bytewax identity."
           elif [[ -n "$curator_pod" ]]; then
             curator_cutover_env=(
               S2P_STATE_DIR=/var/lib/s2p/checkpoint
@@ -2591,8 +2643,8 @@ jobs:
               S2P_CUTOVER_COMPONENT=curate
               S2P_CUTOVER_TOPIC=docs.normalized
               S2P_CONSUMER_GROUP=s2p-curate
-              S2P_BYTEWAX_FLOW_NAME=s2p-curate-v2
-              S2P_BYTEWAX_RECOVERY_NAME=curate-v2
+              S2P_BYTEWAX_FLOW_NAME=s2p-curate-live-v3
+              S2P_BYTEWAX_RECOVERY_NAME=curate-live-v3
               S2P_BYTEWAX_RECOVERY_PARTITIONS=4
             )
             set +e
@@ -2643,7 +2695,6 @@ jobs:
           : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
           : "${IMAGE_DIGEST_INGEST_OAIPMH:?Missing pinned ingest-oaipmh digest}"
           : "${IMAGE_DIGEST_INGEST_SITEMAP:?Missing pinned ingest-sitemap digest}"
-          : "${IMAGE_DIGEST_INGEST_GITHUB_EVENTS:?Missing pinned GitHub events digest}"
           : "${IMAGE_DIGEST_INGEST_GITHUB_RELEASES:?Missing pinned GitHub releases digest}"
           : "${IMAGE_DIGEST_INGEST_HF:?Missing pinned HF digest}"
           : "${IMAGE_DIGEST_INGEST_ARXIV_HTML:?Missing pinned arXiv HTML digest}"
@@ -2657,6 +2708,21 @@ jobs:
           : "${IMAGE_DIGEST_PROCESSOR_FETCHER:?Missing pinned fetcher digest}"
           : "${IMAGE_DIGEST_UI:?Missing pinned UI digest}"
 
+          # OpenReview is part of the release only when its public current-
+          # frontier endpoint is usable. A failed probe means no workload and
+          # no Sources entry, never a permanently disabled/tombstone source.
+          openreview_enabled=false
+          openreview_probe_url='https://api2.openreview.net/notes?invitation=ICLR.cc%2F2026%2FConference%2F-%2FSubmission&limit=1'
+          if curl --fail --silent --show-error --location --max-time 30 \
+              --user-agent 'Stream2Pretrain/0.3 (+https://github.com/ChrisR05/Stream2Pretrain)' \
+              "$openreview_probe_url" \
+              | jq -e '.notes | type == "array"' >/dev/null; then
+            openreview_enabled=true
+            echo "OpenReview public API is reachable; enabling its live current-frontier poller."
+          else
+            echo "OpenReview public API is not reachable; omitting the source from this release."
+          fi
+
           helm_overrides=(
             --set "image.registry=${registry}"
             --set "image.tag=${GITHUB_SHA}"
@@ -2664,12 +2730,13 @@ jobs:
             --set "ingest.rss.image=stream2pretrain/ingest-rss@${IMAGE_DIGEST_INGEST_RSS}"
             --set "ingest.oaipmh.image=stream2pretrain/ingest-oaipmh@${IMAGE_DIGEST_INGEST_OAIPMH}"
             --set "ingest.sitemap.image=stream2pretrain/ingest-sitemap@${IMAGE_DIGEST_INGEST_SITEMAP}"
-            --set "ingest.githubEvents.image=stream2pretrain/ingest-github-events@${IMAGE_DIGEST_INGEST_GITHUB_EVENTS}"
             --set "ingest.githubReleases.image=stream2pretrain/ingest-github-releases@${IMAGE_DIGEST_INGEST_GITHUB_RELEASES}"
             --set "ingest.hf.image=stream2pretrain/ingest-hf@${IMAGE_DIGEST_INGEST_HF}"
             --set "ingest.arxivHtmlFetcher.image=stream2pretrain/ingest-arxiv-html@${IMAGE_DIGEST_INGEST_ARXIV_HTML}"
             --set "ingest.githubTarballFetcher.image=stream2pretrain/ingest-github-tarball-fetcher@${IMAGE_DIGEST_INGEST_GITHUB_TARBALL}"
             --set "ingest.openreview.image=stream2pretrain/ingest-openreview@${IMAGE_DIGEST_INGEST_OPENREVIEW}"
+            --set "openreviewPoller.enabled=${openreview_enabled}"
+            --set "openreviewPoller.live.enabled=${openreview_enabled}"
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
             --set "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
@@ -2680,7 +2747,6 @@ jobs:
             --set "processor.deconGate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.foundry.image=stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
             --set "mixtureController.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "seedLoader.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}"
           )
 
@@ -2892,7 +2958,7 @@ jobs:
           fi
           finish_phase "Changed workload readiness"
 
-          # The running v2 workloads must persist a marker whose identity is
+          # The running stable live workloads must persist a marker whose identity is
           # derived from their effective environment. This closes the clean
           # install path (where there was no legacy PVC to mark) and rejects a
           # chart/workflow drift away from OFFSET_STORED or the stable names.
@@ -2942,19 +3008,27 @@ jobs:
           # only when source definitions or their controller changed.
           if [[ "$SOURCES_CHANGED" == "true" ]]; then
             NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
+            kubectl -n stream2pretrain delete \
+              deployment/stream2pretrain-ingest-github-events \
+              cronjob/stream2pretrain-ingest-hf-daily-papers \
+              job/stream2pretrain-ingest-openreview-backfill \
+              --ignore-not-found --wait=true
+            kubectl -n stream2pretrain delete job \
+              -l app.kubernetes.io/component=seed-loader \
+              --ignore-not-found --wait=true
             for _ in $(seq 1 60); do
               source_schedules="$(
                 kubectl -n stream2pretrain get cronjob \
                   -l stream2pretrain.io/source-feed \
                   -o name | wc -l
               )"
-              [[ "$source_schedules" -ge 10 ]] && break
+              [[ "$source_schedules" -eq 5 ]] && break
               sleep 2
             done
-            if [[ "$source_schedules" -lt 10 ]]; then
+            if [[ "$source_schedules" -ne 5 ]]; then
               kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
               kubectl -n stream2pretrain get cronjob -o wide || true
-              echo "The controller did not materialize all Phase-1 source schedules" >&2
+              echo "The controller did not materialize exactly five arXiv discovery schedules" >&2
               exit 1
             fi
           else

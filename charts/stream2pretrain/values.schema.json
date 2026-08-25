@@ -128,7 +128,7 @@
     },
     "sources": {
       "type": "object",
-      "required": ["arxiv", "github", "huggingface", "blogs"],
+      "required": ["arxiv", "github", "huggingface"],
       "properties": {
         "arxiv": {
           "type": "object",
@@ -164,39 +164,16 @@
               "required": ["enabled", "feedName"],
               "properties": {
                 "enabled": {"type": "boolean"},
-                "feedName": {"type": "string", "minLength": 1, "maxLength": 128},
-                "backfill": {
-                  "type": "object",
-                  "required": ["enabled"],
-                  "properties": {
-                    "enabled": {"type": "boolean"},
-                    "schedule": {"type": "string"},
-                    "deadlineSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
-                    "configMap": {"type": "string"}
-                  }
-                }
+                "feedName": {"type": "string", "minLength": 1, "maxLength": 128}
               }
             }
           }
         },
         "github": {
           "type": "object",
-          "required": ["enabled", "events", "releases"],
+          "required": ["enabled", "releases"],
           "properties": {
             "enabled": {"type": "boolean"},
-            "events": {
-              "type": "object",
-              "required": ["name", "pollIntervalSeconds", "tokenSecret", "tokenSecretKey"],
-              "properties": {
-                "name": {"type": "string"},
-                "pollIntervalSeconds": {"type": "integer", "minimum": 30, "maximum": 86400},
-                "respectXPollInterval": {"type": "boolean"},
-                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
-                "tokenSecret": {"type": "string"},
-                "tokenSecretKey": {"type": "string"},
-                "aiOrgFilter": {"type": "array", "items": {"type": "string"}}
-              }
-            },
             "releases": {
               "type": "object",
               "required": ["name", "pollIntervalSeconds", "schedule", "tokenSecret", "tokenSecretKey", "repos"],
@@ -214,7 +191,7 @@
         },
         "huggingface": {
           "type": "object",
-          "required": ["enabled", "models", "datasets", "spaces", "dailyPapers"],
+          "required": ["enabled", "models", "datasets"],
           "properties": {
             "enabled": {"type": "boolean"},
             "models": {
@@ -239,52 +216,6 @@
                 "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
                 "tokenSecret": {"type": "string"},
                 "tokenSecretKey": {"type": "string"}
-              }
-            },
-            "spaces": {
-              "type": "object",
-              "required": ["name", "endpoint", "pollIntervalSeconds", "tokenSecret", "tokenSecretKey"],
-              "properties": {
-                "name": {"type": "string"},
-                "endpoint": {"type": "string", "format": "uri"},
-                "pollIntervalSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
-                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
-                "tokenSecret": {"type": "string"},
-                "tokenSecretKey": {"type": "string"}
-              }
-            },
-            "dailyPapers": {
-              "type": "object",
-              "required": ["name", "endpoint", "pollIntervalSeconds", "schedule", "tokenSecret", "tokenSecretKey"],
-              "properties": {
-                "name": {"type": "string"},
-                "endpoint": {"type": "string", "format": "uri"},
-                "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
-                "schedule": {"type": "string"},
-                "tokenSecret": {"type": "string"},
-                "tokenSecretKey": {"type": "string"}
-              }
-            }
-          }
-        },
-        "blogs": {
-          "type": "object",
-          "required": ["enabled", "schedule", "feeds"],
-          "properties": {
-            "enabled": {"type": "boolean"},
-            "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-            "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
-            "schedule": {"type": "string"},
-            "feeds": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "required": ["name", "url"],
-                "properties": {
-                  "name": {"type": "string"},
-                  "url": {"type": "string", "format": "uri"}
-                }
               }
             }
           }
@@ -382,7 +313,7 @@
     "openreviewPoller": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "venues", "live", "backfill", "runBackfill"],
+      "required": ["enabled", "venues", "live"],
       "properties": {
         "enabled": {"type": "boolean"},
         "venues": {
@@ -410,29 +341,6 @@
                 "existingClaim": {"type": "string"}
               }
             }
-          }
-        },
-        "runBackfill": {"type": "boolean"},
-        "backfill": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["datasetId", "revision", "splits", "activeDeadlineSeconds"],
-          "properties": {
-            "datasetId": {"type": "string"},
-            "revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-            "splits": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": {"type": "string", "minLength": 1}
-            },
-            "maxRows": {
-              "anyOf": [
-                {"type": "string"},
-                {"type": "integer", "minimum": 0}
-              ]
-            },
-            "activeDeadlineSeconds": {"type": "integer", "minimum": 60, "maximum": 172800}
           }
         }
       }
@@ -517,47 +425,6 @@
       }
     },
     "mixtureController": {"type": "object"},
-    "seedLoader": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["enabled", "image", "components"],
-      "properties": {
-        "enabled": {"type": "boolean"},
-        "image": {"type": "string", "minLength": 1},
-        "inProcess": {"type": "boolean", "const": true},
-        "dryRun": {"type": "boolean"},
-        "components": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "string",
-            "enum": ["pes2o", "redpajama-arxiv", "fineweb-edu", "stack-edu", "wayback"]
-          }
-        },
-        "maxDocsPerComponent": {"type": "integer", "minimum": 0},
-        "waybackMonths": {"type": "integer", "minimum": 1, "maximum": 120},
-        "stateBucket": {"type": "string", "minLength": 1},
-        "runId": {"type": "string"},
-        "activeDeadlineSeconds": {"type": "integer", "minimum": 60, "maximum": 604800},
-        "hfTokenSecret": {"type": "string"},
-        "hfTokenSecretKey": {"type": "string"},
-        "hf_cache_pvc": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["size"],
-          "properties": {
-            "existingClaim": {"type": "string"},
-            "storageClass": {"type": "string"},
-            "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"}
-          }
-        },
-        "resources": {"type": "object"},
-        "fineweb_url_allowlist": {
-          "type": "array",
-          "items": {"type": "string", "minLength": 1}
-        }
-      }
-    },
     "ui": {"type": "object"},
     "keda": {
       "type": "object",

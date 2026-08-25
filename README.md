@@ -1,25 +1,26 @@
 # Stream2Pretrain
 
-Stream2Pretrain is a Kubernetes-native pipeline that turns continuous AI research sources into an auditable pretraining corpus. It admits only explicitly licence-cleared content, extracts useful text, applies source-aware quality rules, checks benchmark contamination, stores every decision in an Iceberg lakehouse, and serves the results through a web cockpit.
+Stream2Pretrain is a Kubernetes-native pipeline that turns continuous AI research sources into an auditable training-data corpus. It separates permissive pretraining data from grey-area and unlicensed inputs that may only ground derived post-training artifacts, applies source-aware quality rules, checks benchmark contamination, stores every decision in an Iceberg lakehouse, and serves the results through a web cockpit.
 
 This README is the sole report for the DHBW Cloud Computing and Big Data examination. It is written in English because the code, APIs, field names, and cited technical sources use English. Keeping one language also makes the links between the report and implementation easier to follow.
 
 ## 1. Use Case and Motivation
 
-Large language model training needs current, high-quality material. AI research changes continuously across papers, laboratory blogs, model releases, reviews, and source code. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
+Large language model training needs current, high-quality material. AI research changes continuously across papers, model and dataset documentation, peer reviews, and source code. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
 
 Stream2Pretrain solves this as a streaming curation service. Its users are data engineers and researchers who need a reproducible training-data view rather than another web crawler. The service preserves raw input, records every policy decision, and exposes only clean records as training output.
 
-The implemented source adapters cover:
+The deployed content adapters cover:
 
-- arXiv OAI-PMH metadata, RSS feeds, and native HTML
-- AI laboratory and project RSS feeds
-- GitHub events, releases, and release source archives
-- Exact-version Hugging Face model, dataset, and Space cards plus Daily Papers discovery
-- OpenReview submissions and reviews
-- A one-shot historical seed loader for controlled backfill
+- arXiv full papers discovered through OAI-PMH and four RSS categories
+- curated GitHub release source archives and repository documentation
+- exact-version Hugging Face model and dataset cards
 
-The DHBW verification profile enables a smaller subset that fits the available cluster. The screenshots show processed records from AI blog feeds, Hugging Face metadata, and a controlled smoke source.
+OpenReview live papers and public review threads are implemented and join this
+list only when the deployment's public-API probe succeeds. Internal discovery
+envelopes do not appear as sources, documents, acceptances, or quarantines.
+
+The DHBW verification profile runs the same content paths with bounded resources. The screenshots show durable corpus records and a controlled smoke source.
 
 This is a Big Data problem because the input is continuous, heterogeneous, and unbounded. The current course prototype is intentionally small. Its architecture separates the event log, object storage, processing state, table catalog, and query service so the same data path can grow without replacing the processing model.
 
@@ -39,7 +40,7 @@ The live verification produced measurable evidence rather than a throughput esti
 
 ## 3. Architecture Decision
 
-Stream2Pretrain uses a Kappa architecture. Live events and backfill records enter the same topics and pass through the same transformations. There is no separate batch implementation with a second policy path. Reprocessing uses retained Redpanda events and versioned Iceberg decisions.
+Stream2Pretrain uses a Kappa architecture. Live records enter one streaming path and pass through the same transformations. There is no separate historical batch implementation. Reprocessing uses retained Redpanda events and versioned Iceberg decisions.
 
 ```mermaid
 flowchart LR
@@ -88,9 +89,9 @@ These choices support the use case directly. They are not included only to incre
 
 The end-to-end flow is:
 
-1. A poller discovers a URL or release and its machine-readable content licence.
-2. It publishes an immutable pre-fetch decision which the product folds into the corpus route ledger.
-3. Missing or excluded licences stop before body fetch. Admitted content is compressed into the Bronze bucket and published to `raw.fetched`.
+1. A poller discovers a content identity. Internal discovery envelopes schedule a full-content worker and produce no corpus decision.
+2. The content worker resolves the exact item rights and publishes an immutable pre-fetch decision which the product folds into the corpus route ledger.
+3. Permissive and posttrain-only items are compressed into Bronze and published to `raw.fetched`; explicit incompatible rights stop before body fetch.
 4. The fetcher repeats the licence check, extracts text, and publishes a `SilverRecord` to `docs.normalized`.
 5. The curator produces one auditable decision for every normalized record.
 6. Every curation decision is published to `curation.decisions`.
@@ -125,7 +126,7 @@ Quality is source-aware:
 - Hugging Face cards and repository documentation use a Markdown prose projection and retain FineWeb-Edu as an audit signal without Common-Crawl page-shape gates.
 - Code uses a separate Stack v2 and Dolma-grounded quality policy.
 - OpenReview review forms use schema completeness; ratings, recommendations, confidence, and decisions remain audit metadata rather than training labels.
-- RSS, OAI, Hub-list, Daily Papers, GitHub event, and release envelopes are discovery-only and never become training text.
+- RSS, OAI, Hub-list, and release envelopes are internal discovery messages and never become training text or UI corpus rows.
 
 This prevents a web-education classifier from being treated as a meaningful
 code classifier. The DHBW chart fails closed on missing models. FinePDFs,
@@ -135,11 +136,11 @@ with the lightweight stateful curator. Every row records its classifier
 revision and backend.
 
 Before these transformations, the shared licence gate records both verbatim
-pretraining rights and transform-only post-training rights. Explicit
-permissive content can reach pretraining. Only explicitly allowlisted
-transform-only licences, including arXiv's non-exclusive distribution grant,
-can reach the post-training-only route. Missing, unknown, dataset-wrapper,
-no-derivatives, and provider-prohibited rights remain quarantined. The
+pretraining rights and transform-only post-training rights. Permissive content
+can reach pretraining. Grey-area licences, arXiv's non-exclusive distribution
+grant, and missing item rights can only reach the derived post-training route.
+Explicit incompatible, no-derivatives, contradictory, or provider-prohibited
+rights quarantine. The
 curator also applies PII detection, licence policy, and MinHash near-duplicate
 detection. Language confidence gates natural-language profiles, not source
 code. Gopher, C4, and KenLM gates apply only to ordinary web prose, where those
@@ -218,10 +219,9 @@ The API and document screenshots in section 11 use the same live cluster data sh
 
 | Kubernetes object | Components |
 |---|---|
-| Deployment | Fetcher, Iceberg writer, DuckDB API, decon API, mixture controller, GitHub event poller, and UI. |
+| Deployment | Fetcher, arXiv full-text worker, GitHub tarball worker, Hugging Face card poller, Iceberg writer, DuckDB API, decon API, mixture controller, and UI. |
 | StatefulSet | Curator with a persistent global dedup index and decision cache; single-writer foundry with its durable queue, call cache, and append-only artifact audits. |
-| CronJob | Periodic RSS, OAI-PMH, Hugging Face, and GitHub release polls. |
-| Job | Optional historical seed loader. |
+| CronJob | Periodic RSS, OAI-PMH, GitHub release, and optional OpenReview live polls. |
 | ConfigMap | Feed definitions and synthetic benchmark canaries. |
 | Secret | MinIO, Polaris, GitHub, Hugging Face, and Ed25519 credentials. |
 | PVC | Curator state and platform storage. |

@@ -16,9 +16,9 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - `docs/PIPELINE_REMEDIATION_CONTRACT.md` is the binding source of truth for
   remediation of `fix/deployment-pipeline`.
 - Licence admission is purpose-aware but always per individual content item:
-  permissive items may enter pretraining and post-training, reviewed grey-area
-  items may only ground derived post-training artifacts, and restrictive or
-  unresolved items are quarantined before body fetch.
+  permissive items may enter pretraining and post-training, while reviewed
+  grey-area items and missing item rights may only ground derived post-training
+  artifacts. Explicit incompatible rights quarantine before body fetch.
 - Source defaults, hosting platforms, and dataset wrapper licences never replace
   item-level licence resolution.
 - Bytewax remains the production stream engine. Deployment recovery changes
@@ -47,8 +47,8 @@ See README.md for the high-level project description and RESEARCH.md for the ful
   enabled.
 - Every pretraining and post-training content path uses the per-item
   purpose-aware licence contract in `docs/PIPELINE_REMEDIATION_CONTRACT.md`.
-  Grey-area content may be fetched only for derived post-training generation;
-  restrictive or unresolved items are quarantined before body fetch.
+  Grey-area or unlicensed content may be fetched only for derived
+  post-training generation; explicit incompatible items quarantine.
 - Provider qualification benchmarks, score thresholds, availability
   heartbeats, maximum-gap rules, and provider approval are deliberately absent.
 - Human approval and rejection apply per generated SFT/RL artifact. The
@@ -103,7 +103,24 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Verified free on PyPI, GitHub user/repo, Hugging Face, npm, crates.io (2026-06-15).
 - Backup names if conflict ever surfaces: `Corpustide`, `Verbastream`, `Distilstream`, `Kairoscorpus` (all probed free same day).
 
-### 2026-06-15 - Scope tightened to AI research
+### 2026-08-25 - Live source catalogue simplified
+
+- Discovery envelopes are internal scheduling events and never appear as
+  corpus sources, documents, acceptances, or quarantines.
+- Active content sources are arXiv papers, curated GitHub release files and
+  docs, Hugging Face model cards, and Hugging Face dataset cards.
+- OpenReview live is licence-suitable but remains absent from the active
+  catalogue until live API access is configured and verified.
+- GitHub Events, HF Daily Papers, HF Spaces, all five blog feeds, and every
+  historical seed/backfill workload were removed.
+- Licence admission has exactly three tiers: permissive -> both routes; grey
+  area or missing rights -> posttrain-only; explicit incompatible rights ->
+  quarantine.
+- The project owner explicitly approved discarding the historical stream
+  backlog and restarting each consumer at the current live frontier before a
+  fresh throughput measurement.
+
+### 2026-06-15 - Scope tightened to AI research (historical)
 - Domain focus: streaming curation for fresh AI-research pretraining data.
 - Phase-1 sources: arXiv OAI-PMH + 4 arXiv RSS feeds + GitHub Events (AI-filtered) + GitHub Releases Atom (~30 curated AI repos) + HF Hub models + HF Daily Papers + AI-lab blog RSS bundle. Target 5-20k docs/day.
 - Phase-2 expansion: remaining arXiv categories, HF Datasets/Spaces, OpenReview, Semantic Scholar, GitHub READMEs, long-tail blogs, Alignment Forum.
@@ -119,7 +136,6 @@ provide" section. Tracked here for the AI pair.
 - Wildcard TLS DNS zone available to the team (rfc2136 zone + tsig credentials per Exercise Track 1). Replace `stream2pretrain.example.org` placeholders.
 - The five Kubernetes Secrets enumerated in the README before `helm install`.
 - Container image builds for the 12 component images. Build commands per component are in `charts/stream2pretrain/README.md`.
-- First-run verification of seed-loader column names: peS2o v3 (`data/v3/` layout), RedPajama-arxiv config string, FineWeb-Edu (`date` vs `crawl_date`), and Stack-Edu config + content column. ReviewArena is resolved and pinned in `values.yaml` to the schema-tested Hugging Face revision.
 
 ## Open TODOs from v0.2.0 adversarial review
 
@@ -267,19 +283,16 @@ cadence on MinIO bronze, and DHBWCloud quotas.
 
 ### 2026-08-19 - Strict content-license admission policy
 
-Superseded on 2026-08-23 by the per-item purpose-aware policy in
+Superseded on 2026-08-25 by the per-item purpose-aware policy in
 `docs/PIPELINE_REMEDIATION_CONTRACT.md`. The immutable pre-fetch decision and
 item-level provenance requirements below remain in force.
 
 - Every content-bearing source emits an immutable `license.admissions` record
   before it may retrieve or process the document body. Publication failure
   fails the ingest attempt closed.
-- Missing, unknown, no-derivatives, wrapper-only, and other unreviewed
-  licences are quarantined before Bronze storage, extraction, OCR,
-  classifiers, or curation. Reviewed non-commercial and arXiv non-exclusive
-  items may enter only the derived post-training route and are excluded from
-  verbatim pretraining. Replayed legacy Bronze records receive the same
-  defensive check before their MinIO object is read.
+- Missing or grey-area rights enter only the derived post-training route and
+  are excluded from verbatim pretraining. Explicit incompatible or
+  no-derivatives items quarantine before Bronze storage and processing.
 - Dataset wrapper licences such as ODC-By do not establish rights in each
   contained paper, page, or code file. Only per-record content licences or an
   explicitly audited source-wide content licence qualify.

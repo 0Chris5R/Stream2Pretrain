@@ -52,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made licence admission purpose-aware and fail closed for every content
   format. Permissive items may enter both training routes, reviewed NC and
   arXiv non-exclusive items may enter transform-only post-training, and
-  missing, ND, conflicting, or dataset-wrapper-only rights quarantine before
+  explicit ND, conflicting, or otherwise incompatible rights quarantine before
   body retrieval.
 - Reimplemented the DHBW deployment as measured `platform`, `catalog`,
   `topics`, and `application` stages with Helm 3 validation and pinned charts.

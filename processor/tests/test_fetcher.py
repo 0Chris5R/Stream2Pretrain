@@ -235,32 +235,6 @@ def test_normalize_code_bronze_decodes_plain_text(bronze_record: BronzeRecord) -
     assert "def fit_model" in silver.text
 
 
-@pytest.mark.parametrize("source_format", ["latex", "markdown"])
-def test_normalize_scientific_text_skips_html_extraction(
-    bronze_record: BronzeRecord, source_format: str
-) -> None:
-    state = _state(_FakeS3(b""))
-    scientific_bronze = bronze_record.model_copy(
-        update={
-            "url": "https://openreview.net/pdf?id=paper1",
-            "source_format": source_format,
-            "source_feed": "openreview-backfill",
-            "extraction_pipeline": "reviewarena-ocr-markdown-v1",
-            "spdx_license": "unknown",
-            "spdx_license_source": "unknown",
-            "training_usage": "posttrain_transform_only",
-        }
-    )
-    payload = b"# A scientific paper\n\nWe derive the objective $L(theta)$ and evaluate it."
-
-    silver = normalize(state, scientific_bronze, payload)
-
-    assert silver is not None
-    assert silver.source_format == source_format
-    assert "derive the objective" in silver.text
-    assert silver.extracted_with == "reviewarena-ocr-markdown-v1"
-
-
 def test_normalize_structured_metadata_extracts_human_text(bronze_record: BronzeRecord) -> None:
     state = _state(_FakeS3(b""))
     metadata_bronze = bronze_record.model_copy(

@@ -1168,7 +1168,7 @@ def build_dataflow(
             DEFAULT_FLUSH_INTERVAL_SECONDS,
         )
     )
-    flow = Dataflow("s2p-iceberg-writer")
+    flow = Dataflow(os.environ.get("S2P_BYTEWAX_FLOW_NAME", "s2p-iceberg-writer-live-v2"))
     # The configured offset is only the bootstrap frontier for a new recovery
     # database. Once snapshots exist, Bytewax recovery owns progress.
     start_offset = common.kafka_starting_offset()
@@ -1317,6 +1317,6 @@ def main() -> None:
     common.run_bytewax_flow(
         flow,
         cfg,
-        "iceberg-writer",
+        os.environ.get("S2P_BYTEWAX_RECOVERY_NAME", "iceberg-writer-live-v2"),
         runtime_status=runtime_status,
     )

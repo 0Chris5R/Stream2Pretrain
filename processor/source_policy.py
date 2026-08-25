@@ -24,7 +24,6 @@ SourceFamily = Literal[
     "peer_review",
     "hf_model_card",
     "hf_dataset_card",
-    "hf_space_card",
     "discovery_metadata",
 ]
 QualityProfile = Literal[
@@ -126,16 +125,6 @@ HF_DATASET_CARD = SourceProcessingPolicy(
     web_heuristic_gate=False,
     kenlm_mode="off",
 )
-HF_SPACE_CARD = SourceProcessingPolicy(
-    policy_id="hf-space-card-fineweb",
-    family="hf_space_card",
-    extraction_profile="hf-card-markdown-prose",
-    quality_profile="fineweb_edu",
-    training_text=True,
-    language_gate=True,
-    web_heuristic_gate=False,
-    kenlm_mode="off",
-)
 DISCOVERY_METADATA = SourceProcessingPolicy(
     policy_id="metadata-discovery-only",
     family="discovery_metadata",
@@ -180,8 +169,6 @@ def resolve_source_policy(
         return HF_MODEL_CARD
     if "hf-dataset-card" in pipeline or feed == "hf-datasets":
         return HF_DATASET_CARD
-    if "hf-space-card" in pipeline or feed == "hf-spaces":
-        return HF_SPACE_CARD
     if any(
         marker in pipeline
         for marker in ("github-readme", "repository-readme", "repository-documentation")
@@ -211,6 +198,5 @@ def source_policy_catalog() -> tuple[SourceProcessingPolicy, ...]:
         PEER_REVIEW,
         HF_MODEL_CARD,
         HF_DATASET_CARD,
-        HF_SPACE_CARD,
         DISCOVERY_METADATA,
     )

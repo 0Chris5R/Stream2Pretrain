@@ -1,7 +1,6 @@
 """GitHub Releases Atom poller (CronJob).
 
-Iterates the curated repo list (``repo_filter.CURATED_REPOS`` from the events
-module). For each repo:
+Iterates the curated repository catalogue. For each repo:
 
 - ``GET https://github.com/<owner>/<repo>/releases.atom`` with conditional GET
 - parse with feedparser
@@ -35,7 +34,7 @@ from ingest.common.otel import init_tracer
 from ingest.common.rate_limit import TokenBucket
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
 from ingest.common.state import FeedStateStore
-from ingest.github_events.repo_filter import CURATED_REPOS
+from ingest.github_releases.repo_catalog import CURATED_REPOS
 from schemas.bronze import BronzeRecord
 
 log = get_logger(__name__)

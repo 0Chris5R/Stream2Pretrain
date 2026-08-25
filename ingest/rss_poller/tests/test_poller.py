@@ -204,7 +204,7 @@ async def test_poll_feed_rejects_non_feed_success_response(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_unlicensed_item_is_quarantined_after_bounded_probe(tmp_path: Path) -> None:
+async def test_unlicensed_item_is_posttrain_only_after_bounded_probe(tmp_path: Path) -> None:
     body = """<rss version="2.0"><channel><title>x</title>
     <item><title>Unlicensed</title><link>https://example.com/unlicensed</link></item>
     </channel></rss>"""
@@ -214,7 +214,11 @@ async def test_unlicensed_item_is_quarantined_after_bounded_probe(tmp_path: Path
         requests.append((request.method, request.url.path))
         if request.url.path == "/rss":
             return httpx.Response(200, text=body, headers={"content-type": "application/rss+xml"})
-        return httpx.Response(200, text="<html><head></head><body>private body</body></html>")
+        return httpx.Response(
+            200,
+            text="<html><head></head><body>private body</body></html>",
+            headers={"content-type": "text/html"},
+        )
 
     producer = FakeProducer()
     admissions = FakeProducer()
@@ -233,12 +237,18 @@ async def test_unlicensed_item_is_quarantined_after_bounded_probe(tmp_path: Path
     finally:
         await client.aclose()
 
-    assert emitted == 0
-    assert not producer.sent
-    assert not minio.objects
-    assert admissions.sent[0]["record"].status == "quarantined"
-    # One HEAD and one bounded range probe are allowed; no separate full GET.
-    assert requests == [("GET", "/rss"), ("HEAD", "/unlicensed"), ("GET", "/unlicensed")]
+    assert emitted == 1
+    assert len(producer.sent) == 1
+    assert minio.objects
+    assert admissions.sent[0]["record"].status == "posttrain_transform_only"
+    # Missing rights may ground derived post-training data, so the full body is
+    # fetched only after the durable posttrain-only decision.
+    assert requests == [
+        ("GET", "/rss"),
+        ("HEAD", "/unlicensed"),
+        ("GET", "/unlicensed"),
+        ("GET", "/unlicensed"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -296,29 +306,20 @@ async def test_item_html_license_is_admitted_before_full_fetch(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_arxiv_rss_record_is_discovery_metadata_not_duplicate_corpus(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     body = """<rss version="2.0"><channel><title>arXiv</title>
     <item><title>Paper</title><link>https://arxiv.org/abs/2608.01234</link></item>
     </channel></rss>"""
 
-    async def fake_arxiv_license(*_: object, **__: object) -> tuple[str, str]:
-        return "CC-BY-4.0", "arxiv_api"
+    requests: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
         if request.url.path == "/rss":
             return httpx.Response(200, text=body, request=request)
-        return httpx.Response(
-            200,
-            text="<html><body>abstract page</body></html>",
-            request=request,
-            headers={"content-type": "text/html"},
-        )
+        return httpx.Response(500, request=request)
 
-    monkeypatch.setattr(
-        "ingest.rss_poller.poller.fetch_arxiv_license_with_source",
-        fake_arxiv_license,
-    )
     producer = FakeProducer()
     admissions = FakeProducer()
     minio = FakeMinio()
@@ -339,5 +340,6 @@ async def test_arxiv_rss_record_is_discovery_metadata_not_duplicate_corpus(
     assert emitted == 1
     record = producer.sent[0]["record"]
     assert record.source_format == "metadata"
-    assert record.extraction_pipeline == "arxiv-rss-discovery-v1"
-    assert record.spdx_license == "CC-BY-4.0"
+    assert record.extraction_pipeline == "arxiv-rss-discovery-v2"
+    assert admissions.sent == []
+    assert requests == ["/rss"]
