@@ -29,7 +29,7 @@ spec:
         - name: api
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.deconGate.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-decon-api"]
+          command: ["s2p-entrypoint", "s2p-decon-api"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics

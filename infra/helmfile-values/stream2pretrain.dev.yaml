@@ -55,6 +55,13 @@ processor:
     tag: "0.2.0-1f4cf19"
     requireRealModels: true
     doclingEnabled: true
+    # RESTORED AFTER CAPACITY RESIZE (2026-08-25): the checkpoint-pinned master
+    # now has 32 GiB RAM. Run the complete Docling/Tesseract/TableFormer path
+    # and retain an explicit 8 GiB ceiling while peak RSS is measured in cloud.
+    pdfProcessingEnabled: true
+    resources:
+      requests: {cpu: 200m, memory: 2Gi}
+      limits: {cpu: 2, memory: 8Gi}
   curate:
     replicas: 1
     tag: "0.2.0-619290f"

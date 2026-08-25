@@ -100,6 +100,14 @@ from processor.source_policy import resolve_source_policy
             "fineweb_edu",
             True,
         ),
+        (
+            "cluster-smoke",
+            "html",
+            "resiliparse-0.14",
+            "repository_documentation",
+            "fineweb_edu",
+            True,
+        ),
         ("hf-models", "web", "hf-model-card-markdown-v1", "hf_model_card", "fineweb_edu", True),
         (
             "hf-datasets",

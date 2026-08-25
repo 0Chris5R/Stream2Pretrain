@@ -49,72 +49,79 @@ smoke_decisions_topic="${S2P_SMOKE_DECISIONS_TOPIC:-curation.decisions.smoke}"
 smoke_license_admissions_topic="${S2P_SMOKE_LICENSE_ADMISSIONS_TOPIC:-license.admissions.smoke}"
 license_admissions_topic="${S2P_LICENSE_ADMISSIONS_TOPIC:-license.admissions}"
 github_release_jobs_topic="${S2P_GITHUB_RELEASE_JOBS_TOPIC:-github.release.jobs}"
-for managed_topic in \
-  "$smoke_topic" \
-  "$smoke_normalized_topic" \
-  "$smoke_curated_topic" \
-  "$smoke_decisions_topic" \
-  "$smoke_license_admissions_topic" \
-  "$github_release_jobs_topic"; do
-  if ! kubectl_retry -n redpanda exec statefulset/redpanda -- rpk topic list \
-    | awk 'NR > 1 {print $1}' \
-    | grep -qx "$managed_topic"; then
-    retention_ms="$core_retention_ms"
-    if [[ "$managed_topic" == "$smoke_topic" \
-       || "$managed_topic" == "$smoke_normalized_topic" \
-       || "$managed_topic" == "$smoke_curated_topic" \
-       || "$managed_topic" == "$smoke_decisions_topic" \
-       || "$managed_topic" == "$smoke_license_admissions_topic" ]]; then
-      retention_ms="$smoke_retention_ms"
-    fi
-    echo "Creating managed topic $managed_topic"
-    kubectl_retry -n redpanda exec statefulset/redpanda -- \
-      rpk topic create "$managed_topic" \
-        --partitions "$target" \
-        --replicas 1 \
-        --topic-config "retention.ms=$retention_ms" \
-        --topic-config cleanup.policy=delete \
-        --topic-config "max.message.bytes=$max_message_bytes"
-  fi
-done
-
-license_partitions="$(
-  kubectl_retry -n redpanda exec statefulset/redpanda -- \
-    rpk topic describe "$license_admissions_topic" -p \
-    | awk 'NR > 1 && $1 ~ /^[0-9]+$/ { count++ } END { print count + 0 }'
-)"
-if [[ "$license_partitions" -eq 0 ]]; then
-  echo "Licence admission topic is missing or has no partitions: $license_admissions_topic" >&2
-  exit 1
-fi
-kubectl_retry -n redpanda exec statefulset/redpanda -- \
-  rpk topic alter-config "$license_admissions_topic" \
-    --set "max.message.bytes=$max_message_bytes"
-kubectl_retry -n redpanda exec statefulset/redpanda -- \
-  rpk topic alter-config "$license_admissions_topic" \
-    --set "retention.ms=$core_retention_ms"
-kubectl_retry -n redpanda exec statefulset/redpanda -- \
-  rpk topic alter-config "$license_admissions_topic" --set cleanup.policy=delete
-
-topics=(
-  raw.fetched
+smoke_topics=(
   "$smoke_topic"
-  "$github_release_jobs_topic"
-  docs.normalized
   "$smoke_normalized_topic"
-  docs.curated
   "$smoke_curated_topic"
-  curation.decisions
   "$smoke_decisions_topic"
   "$smoke_license_admissions_topic"
 )
+core_topics=(
+  raw.fetched
+  "$github_release_jobs_topic"
+  docs.normalized
+  docs.curated
+  curation.decisions
+)
+topics=("${core_topics[@]}" "${smoke_topics[@]}")
+configured_core_topics=("$license_admissions_topic" "${core_topics[@]}")
+
+# One inventory request replaces a separate Kubernetes exec for every topic.
+topic_inventory="$(
+  kubectl_retry -n redpanda exec statefulset/redpanda -- rpk topic list
+)"
+license_partitions="$(
+  awk -v topic="$license_admissions_topic" \
+    'NR > 1 && $1 == topic {print $2; exit}' <<<"$topic_inventory"
+)"
+if ! [[ "$license_partitions" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Licence admission topic is missing or has no partitions: $license_admissions_topic" >&2
+  exit 1
+fi
+missing_core=()
+missing_smoke=()
+for managed_topic in "$github_release_jobs_topic" "${smoke_topics[@]}"; do
+  if ! awk -v topic="$managed_topic" 'NR > 1 && $1 == topic {found=1} END {exit !found}' \
+    <<<"$topic_inventory"; then
+    if [[ "$managed_topic" == "$github_release_jobs_topic" ]]; then
+      missing_core+=("$managed_topic")
+    else
+      missing_smoke+=("$managed_topic")
+    fi
+  fi
+done
+if [[ "${#missing_core[@]}" -gt 0 ]]; then
+  echo "Creating managed core topics: ${missing_core[*]}"
+  kubectl_retry -n redpanda exec statefulset/redpanda -- \
+    rpk topic create "${missing_core[@]}" \
+      --partitions "$target" \
+      --replicas 1 \
+      --topic-config "retention.ms=$core_retention_ms" \
+      --topic-config cleanup.policy=delete \
+      --topic-config "max.message.bytes=$max_message_bytes"
+fi
+if [[ "${#missing_smoke[@]}" -gt 0 ]]; then
+  echo "Creating managed smoke topics: ${missing_smoke[*]}"
+  kubectl_retry -n redpanda exec statefulset/redpanda -- \
+    rpk topic create "${missing_smoke[@]}" \
+      --partitions "$target" \
+      --replicas 1 \
+      --topic-config "retention.ms=$smoke_retention_ms" \
+      --topic-config cleanup.policy=delete \
+      --topic-config "max.message.bytes=$max_message_bytes"
+fi
+
+# Refresh once after any creates. rpk topic list reports the partition count,
+# so no per-topic describe sessions are needed.
+topic_inventory="$(
+  kubectl_retry -n redpanda exec statefulset/redpanda -- rpk topic list
+)"
 for topic in "${topics[@]}"; do
   current="$(
-    kubectl_retry -n redpanda exec statefulset/redpanda -- \
-      rpk topic describe "$topic" -p \
-      | awk 'NR > 1 && $1 ~ /^[0-9]+$/ { count++ } END { print count + 0 }'
+    awk -v topic="$topic" 'NR > 1 && $1 == topic {print $2; exit}' \
+      <<<"$topic_inventory"
   )"
-  if [[ "$current" -eq 0 ]]; then
+  if ! [[ "$current" =~ ^[1-9][0-9]*$ ]]; then
     echo "Core topic is missing or has no partitions: $topic" >&2
     exit 1
   fi
@@ -126,19 +133,18 @@ for topic in "${topics[@]}"; do
   else
     echo "$topic already has $current partitions"
   fi
-  kubectl_retry -n redpanda exec statefulset/redpanda -- \
-    rpk topic alter-config "$topic" --set "max.message.bytes=$max_message_bytes"
-  if [[ "$topic" == "$smoke_topic" \
-     || "$topic" == "$smoke_normalized_topic" \
-     || "$topic" == "$smoke_curated_topic" \
-     || "$topic" == "$smoke_decisions_topic" \
-     || "$topic" == "$smoke_license_admissions_topic" ]]; then
-    kubectl_retry -n redpanda exec statefulset/redpanda -- \
-      rpk topic alter-config "$topic" --set "retention.ms=$smoke_retention_ms"
-  else
-    kubectl_retry -n redpanda exec statefulset/redpanda -- \
-      rpk topic alter-config "$topic" --set "retention.ms=$core_retention_ms"
-  fi
-  kubectl_retry -n redpanda exec statefulset/redpanda -- \
-    rpk topic alter-config "$topic" --set cleanup.policy=delete
 done
+
+# Redpanda supports altering multiple topics in one command. Keep the two
+# retention classes separate, while setting all three properties atomically
+# per class.
+kubectl_retry -n redpanda exec statefulset/redpanda -- \
+  rpk topic alter-config "${configured_core_topics[@]}" \
+    --set "max.message.bytes=$max_message_bytes" \
+    --set "retention.ms=$core_retention_ms" \
+    --set cleanup.policy=delete
+kubectl_retry -n redpanda exec statefulset/redpanda -- \
+  rpk topic alter-config "${smoke_topics[@]}" \
+    --set "max.message.bytes=$max_message_bytes" \
+    --set "retention.ms=$smoke_retention_ms" \
+    --set cleanup.policy=delete

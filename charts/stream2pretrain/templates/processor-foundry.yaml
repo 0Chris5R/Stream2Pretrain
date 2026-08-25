@@ -32,7 +32,7 @@ spec:
         - name: worker
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-foundry"]
+          command: ["s2p-entrypoint", "s2p-foundry"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics
@@ -101,7 +101,7 @@ spec:
         - name: api
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-foundry-api"]
+          command: ["s2p-entrypoint", "s2p-foundry-api"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: http

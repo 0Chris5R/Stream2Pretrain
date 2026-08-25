@@ -51,6 +51,17 @@ FETCHER_FLOW_NAME = "s2p-fetcher-v2"
 FETCHER_RECOVERY_NAME = "fetcher-v2"
 
 
+class PdfProcessingTemporarilyDisabled(common.DeterministicProcessingError):
+    """Audit-only deferral used while the deployment lacks PDF worker RAM.
+
+    This is intentionally record-local and deterministic: Bytewax writes the
+    input coordinate to the durable processing-failure ledger and advances,
+    allowing HTML, code, web, card, and review records behind the PDF to run.
+    Re-enable ``S2P_PDF_PROCESSING_ENABLED`` after the checkpoint-pinned node
+    has enough memory for the full Docling, Tesseract, and TableFormer path.
+    """
+
+
 @dataclass(slots=True)
 class FetcherState:
     """Per-worker state for extraction and normalization.
@@ -587,6 +598,14 @@ def process_bronze_payload(
     )
     if not pretrain_allowed and not transform_allowed:
         return None
+    # Temporary deployment capacity switch. Do not replace this with a silent
+    # drop or a reduced PDF parser: disabled PDFs receive an idempotent durable
+    # deferral in ``processing-failures/`` before Bytewax checkpoints them.
+    # The full extraction code and models remain intact for re-enablement.
+    if bronze.source_format == "pdf" and os.environ.get("S2P_PDF_PROCESSING_ENABLED", "1") != "1":
+        raise PdfProcessingTemporarilyDisabled(
+            "PDF processing is temporarily disabled until the extraction node is resized"
+        )
     raw_html = fetch_raw_bytes(state, bronze)
     if not raw_html:
         raise RuntimeError(f"raw body is unavailable for {bronze.doc_id}")

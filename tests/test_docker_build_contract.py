@@ -42,7 +42,17 @@ def test_processor_ci_image_uses_an_immutable_dependency_base() -> None:
     assert "target: runtime-base" in workflow
     assert "dockerfile: processor/Dockerfile.app" in workflow
     assert "type=gha,scope=${{ matrix.image }}" in workflow
+    assert "Build and publish thin processor image" in workflow
+    thin_processor_step = workflow.split("Build and publish thin processor image", maxsplit=1)[1]
+    thin_processor_step = thin_processor_step.split(
+        "Smoke-test Python runtime imports", maxsplit=1
+    )[0]
+    assert "cache-from:" not in thin_processor_step
+    assert "cache-to:" not in thin_processor_step
     assert 's2p-curator-model-service) module="processor.model_service"' in entrypoint
+    assert 'command_name="$1"' in entrypoint
+    assert "RUN python -c" not in app
+    assert "RUN case" not in model_app
 
 
 def test_processor_model_images_are_component_specific_and_immutable() -> None:
@@ -103,8 +113,12 @@ def test_fetcher_image_has_an_isolated_application_and_dependency_profile() -> N
     assert "fetcher-service = [" in processor_project
     assert '"docling==2.114.0"' in processor_project
     assert "processor/Dockerfile.fetcher.app" in workflow
-    assert "processor-fetcher-model\n            context: .\n            dockerfile: processor/Dockerfile.fetcher.app" in workflow
-    assert "from processor.fetcher import main" in fetcher_app
+    assert (
+        "processor-fetcher-model\n            context: .\n            dockerfile: processor/Dockerfile.fetcher.app"
+        in workflow
+    )
+    assert "from processor.fetcher import main" not in fetcher_app
+    assert 'ENTRYPOINT ["s2p-entrypoint", "s2p-fetcher"]' in fetcher_app
     assert "processor/curate.py" not in fetcher_app
     assert "processor/iceberg_writer.py" not in fetcher_app
 
@@ -155,7 +169,7 @@ def test_catalog_bootstrap_precedes_application_rollout() -> None:
     assert "python -m processor.polaris_bootstrap" in template
     assert "--apply --register-missing --register-only" in template
     assert "activeDeadlineSeconds: 300" in template
-    assert "from processor.polaris_bootstrap import main as bootstrap" in dockerfile
+    assert "COPY processor" in dockerfile
 
 
 def test_github_tarball_scaler_uses_a_non_amplifying_job_topic() -> None:
@@ -204,6 +218,22 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "helm_apply_status=${PIPESTATUS[0]}" in workflow
     assert "release: already exists|another operation .* is in progress" in workflow
     assert 'if [[ "$release_applied" != true ]]' in workflow
+    helm_release = workflow[
+        workflow.index("release_applied=false") : workflow.index(
+            'finish_phase "Changed workload readiness"'
+        )
+    ]
+    assert "\n              sync \\\n" in helm_release
+    assert "--wait=false" in helm_release
+    assert "--wait-for-jobs=false" in helm_release
+    assert "workload_timeout=60" in helm_release
+    assert '"$workload" == deployment/stream2pretrain-processor-model-service-*' in helm_release
+    assert "workload_timeout=600" in helm_release
+    helmfile = (ROOT / "helmfile.yaml").read_text(encoding="utf-8")
+    application_release = helmfile.split("  - name: stream2pretrain", maxsplit=1)[1]
+    assert "    wait: false" in application_release
+    assert "    waitForJobs: false" in application_release
+    assert ') >"$log" 2>&1 &' in helm_release
     assert "select(.metadata.deletionTimestamp == null)" in workflow
     assert '"pod/$fetcher_ready_pod" -c fetcher' in workflow
 
@@ -215,6 +245,20 @@ def test_fetcher_uses_matching_official_cpu_vision_wheels() -> None:
     assert '"torchvision>=0.18,<1"' in processor_project
     assert 'name = "torchvision"\nversion = "0.28.0+cpu"' in lock
     assert 'source = { registry = "https://download.pytorch.org/whl/cpu" }' in lock
+
+
+def test_pdf_fallback_uses_the_bounded_cpu_tableformer_mode() -> None:
+    scientific = (ROOT / "processor" / "scientific.py").read_text(encoding="utf-8")
+
+    assert "mode=TableFormerMode.FAST" in scientific
+    assert "mode=TableFormerMode.ACCURATE" not in scientific
+    assert "options.do_formula_enrichment = False" in scientific
+
+
+def test_cpu_pdf_fallback_does_not_load_the_codeformula_vlm() -> None:
+    scientific = (ROOT / "processor" / "scientific.py").read_text(encoding="utf-8")
+
+    assert "options.do_formula_enrichment = False" in scientific
 
 
 def test_scaled_zero_curator_cutover_uses_a_non_processing_pvc_helper() -> None:
@@ -236,18 +280,21 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 
     model_input = (
-        "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
-        "ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app "
-        "processor/__init__.py processor/common.py processor/model_service.py"
+        "inputs: .dockerignore schemas processor/Dockerfile.model-service.app "
+        "processor/__init__.py processor/common.py processor/model_service.py "
+        "processor/decon_gate.py processor/sign.py processor/operators/__init__.py "
+        "processor/operators/quality.py processor/operators/kenlm_score.py"
     )
     assert workflow.count(model_input) == 3
-    assert (
-        workflow.count(
-            "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml "
-            "ingest/*/pyproject.toml schemas processor\n"
-        )
-        == 0
-    )
+    assert "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml" not in workflow
+
+
+def test_foundry_has_an_independent_application_image() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+
+    assert "image: processor-foundry" in workflow
+    assert "dockerfile: processor/Dockerfile.foundry.app" in workflow
+    assert "processor/Dockerfile.foundry.app processor/__init__.py" in workflow
 
 
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)

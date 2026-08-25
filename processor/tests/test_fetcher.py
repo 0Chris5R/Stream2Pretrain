@@ -9,6 +9,7 @@ import pytest
 
 from processor.fetcher import (
     FetcherState,
+    PdfProcessingTemporarilyDisabled,
     _markdown_prose_projection,
     _review_payload_text,
     fetch_raw_bytes,
@@ -317,6 +318,26 @@ def test_missing_code_license_stops_before_minio_and_processing(
     )
 
     assert process_bronze_payload(state, unlicensed.model_dump_json().encode()) is None
+    assert s3.calls == []
+
+
+def test_temporarily_disabled_pdf_is_deferred_before_minio(
+    bronze_record: BronzeRecord, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("S2P_PDF_PROCESSING_ENABLED", "0")
+    s3 = _FakeS3(b"%PDF-1.7\nnot fetched", gzip_encoded=False)
+    state = _state(s3)
+    pdf = bronze_record.model_copy(
+        update={
+            "source_format": "pdf",
+            "content_type": "application/pdf",
+            "extraction_pipeline": "docling-pdf-cpu-2.114.0",
+        }
+    )
+
+    with pytest.raises(PdfProcessingTemporarilyDisabled):
+        process_bronze_payload(state, pdf.model_dump_json().encode())
+
     assert s3.calls == []
 
 

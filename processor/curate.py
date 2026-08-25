@@ -438,9 +438,12 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         ]
 
     model_text = "\n\n".join(segment.text.strip() for segment in kept_segments).strip()
-    structured_text, structured_pii_flags, structured_exclusions = _filter_structured_projection(
-        state.pii, silver.structured_text
-    )
+    (
+        structured_text,
+        structured_pii_flags,
+        structured_audit_pii_flags,
+        structured_exclusions,
+    ) = _filter_structured_projection(state.pii, silver.structured_text)
     removed_body_pii.extend(structured_pii_flags)
     runtime_excluded.extend(structured_exclusions)
     text = _training_projection(silver, kept_segments, structured_text=structured_text)
@@ -542,11 +545,25 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     ):
         reject.append("incomplete_scientific_extraction")
 
-    pii_flags = state.pii.blocking_flags(text)
+    # Blocking PII was already evaluated on every source segment and every
+    # structured evidence block. Sensitive inputs were removed from ``text``
+    # above, so another whole-paper scan would add no coverage.
+    pii_flags: list[PiiFlag] = []
     if pii_flags:
         reject.append("pii_detected")
     metadata_pii_flags = state.pii.flags(silver.source_metadata_text)
-    pii_review_flags = sorted(set(state.pii.flags(text)) - set(pii_flags))
+    pii_review_flags = sorted(
+        (
+            {
+                flag
+                for score in segment_scores
+                if score.decision == "included"
+                for flag in score.pii_flags
+            }
+            | set(structured_audit_pii_flags)
+        )
+        - set(pii_flags)
+    )
     pii_review_notes = (
         [f"non-blocking PII-like patterns retained for audit: {', '.join(pii_review_flags)}"]
         if pii_review_flags
@@ -720,7 +737,7 @@ _STRUCTURED_BLOCK_START = re.compile(r"(?=\[(?:TABLE|EQUATION|FIGURE)\])")
 
 def _filter_structured_projection(
     scanner: PiiScanner, structured_text: str
-) -> tuple[str, list[PiiFlag], list[str]]:
+) -> tuple[str, list[PiiFlag], list[PiiFlag], list[str]]:
     """Remove only structured evidence blocks containing blocking PII.
 
     The full table/figure/equation remains in the immutable scientific
@@ -728,12 +745,13 @@ def _filter_structured_projection(
     training projection.
     """
     if not structured_text.strip():
-        return "", [], []
+        return "", [], [], []
     blocks = [
         value.strip() for value in _STRUCTURED_BLOCK_START.split(structured_text) if value.strip()
     ]
     kept: list[str] = []
     removed: list[PiiFlag] = []
+    audit_flags: list[PiiFlag] = []
     exclusions: list[str] = []
     for index, block in enumerate(blocks, start=1):
         flags = scanner.blocking_flags(block)
@@ -744,7 +762,13 @@ def _filter_structured_projection(
             )
         else:
             kept.append(block)
-    return "\n\n".join(kept), sorted(set(removed)), exclusions
+            audit_flags.extend(scanner.flags(block))
+    return (
+        "\n\n".join(kept),
+        sorted(set(removed)),
+        sorted(set(audit_flags)),
+        exclusions,
+    )
 
 
 def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFlag]) -> RiskTier:

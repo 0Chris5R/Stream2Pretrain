@@ -2,6 +2,14 @@
 set -eu
 
 command_name="$(basename "$0")"
+if [ "$command_name" = "s2p-entrypoint" ]; then
+  if [ "$#" -eq 0 ]; then
+    echo "Missing Stream2Pretrain component selector" >&2
+    exit 64
+  fi
+  command_name="$1"
+  shift
+fi
 case "$command_name" in
   s2p-fetcher) module="processor.fetcher" ;;
   s2p-curate) module="processor.curate" ;;

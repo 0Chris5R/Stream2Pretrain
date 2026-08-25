@@ -31,7 +31,7 @@ spec:
             - name: maintenance
               image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.iceberg.image) | quote }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
-              command: ["s2p-iceberg-maintenance"]
+              command: ["s2p-entrypoint", "s2p-iceberg-maintenance"]
               args: ["--apply"]
               {{- include "stream2pretrain.containerSecurityContext" . | nindent 14 }}
               env:

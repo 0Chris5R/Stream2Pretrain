@@ -443,9 +443,10 @@
       "properties": {
         "fetcher": {
           "type": "object",
-          "required": ["replicas", "checkpoint", "canary"],
+          "required": ["replicas", "pdfProcessingEnabled", "checkpoint", "canary"],
           "properties": {
             "replicas": {"type": "integer", "const": 1},
+            "pdfProcessingEnabled": {"type": "boolean"},
             "checkpoint": {
               "type": "object",
               "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],

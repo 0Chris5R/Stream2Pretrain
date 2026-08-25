@@ -103,6 +103,11 @@ releases:
   - name: stream2pretrain
     namespace: stream2pretrain
     chart: ./charts/stream2pretrain
+    # Application readiness is verified per changed workload by the deployment
+    # workflow. A release-wide Helm wait reloads unchanged model services and
+    # blocks on unrelated historical failures.
+    wait: false
+    waitForJobs: false
     labels: {tier: application}
     needs:
       - monitoring/kube-prometheus-stack

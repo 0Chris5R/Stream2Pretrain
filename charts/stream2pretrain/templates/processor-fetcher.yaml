@@ -59,7 +59,7 @@ spec:
         - name: fetcher
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image "tag" .Values.processor.fetcher.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-fetcher"]
+          command: ["s2p-entrypoint", "s2p-fetcher"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics
@@ -90,6 +90,8 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_PDF_PROCESSING_ENABLED
+              value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.fetcher.requireRealModels | quote }}
           livenessProbe:
@@ -185,7 +187,7 @@ spec:
         - name: fetcher
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image "tag" .Values.processor.fetcher.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-fetcher"]
+          command: ["s2p-entrypoint", "s2p-fetcher"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics
@@ -222,6 +224,8 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_PDF_PROCESSING_ENABLED
+              value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.fetcher.requireRealModels | quote }}
           livenessProbe:

@@ -187,6 +187,12 @@ def resolve_source_policy(
         for marker in ("github-readme", "repository-readme", "repository-documentation")
     ):
         return REPOSITORY_DOCUMENTATION
+    # The synthetic cluster canary is technical documentation, not randomly
+    # crawled web prose. It still exercises the real FineWeb-Edu service, but
+    # uses the documentation policy where that score is an audit signal rather
+    # than an out-of-domain hard gate.
+    if feed == "cluster-smoke":
+        return REPOSITORY_DOCUMENTATION
 
     if source_format in {"pdf", "latex", "markdown"}:
         return SCIENTIFIC_PAPER

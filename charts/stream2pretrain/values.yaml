@@ -508,6 +508,10 @@ processor:
     # a real extraction dependency is missing.
     requireRealModels: true
     doclingEnabled: true
+    # Emergency capacity switch only. False durably defers PDF records before
+    # MinIO reads while every non-PDF source continues through the full path.
+    # Keep true in the portable chart; deployment overrides must explain why.
+    pdfProcessingEnabled: true
     # Bytewax owns source progress in a durable recovery database. Scale this
     # as one coordinated execution, never with independent Kafka-lag replicas.
     replicas: 1

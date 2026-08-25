@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from schemas.gold import PiiFlag
@@ -42,6 +43,10 @@ _IPV6 = re.compile(r"\b(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{1,4}\b")
 _PASSPORT = re.compile(r"\b[A-Z]{1,2}\d{6,9}\b")
 
 _MIN_DIGITS_PHONE = 9
+# Operational NLP chunk bound. Peak RSS on the target cluster remains
+# needs-measurement; every character is still inspected, but spaCy never has
+# to materialize an entire scientific paper in one analysis call.
+_DEFAULT_PRESIDIO_CHUNK_CHARS = 32_768
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +88,17 @@ class PiiScanner:
         *,
         use_presidio: bool | None = None,
         max_text_chars: int = 1_000_000,
+        presidio_chunk_chars: int | None = None,
         allow_fallback: bool = True,
     ) -> None:
         self._max_text_chars = max_text_chars
+        self._presidio_chunk_chars = (
+            int(os.environ.get("S2P_PRESIDIO_CHUNK_CHARS", str(_DEFAULT_PRESIDIO_CHUNK_CHARS)))
+            if presidio_chunk_chars is None
+            else int(presidio_chunk_chars)
+        )
+        if self._presidio_chunk_chars < 1:
+            raise ValueError("presidio_chunk_chars must be positive")
         self._allow_fallback = allow_fallback
         self._use_presidio = (
             os.environ.get("S2P_USE_PRESIDIO") == "1" if use_presidio is None else use_presidio
@@ -107,9 +120,20 @@ class PiiScanner:
     @staticmethod
     def _load_presidio() -> object | None:
         try:
-            from presidio_analyzer import AnalyzerEngine  # type: ignore[import-untyped]
+            from presidio_analyzer import (  # type: ignore[import-untyped]
+                AnalyzerEngine,
+                RecognizerRegistry,
+            )
             from presidio_analyzer.nlp_engine import (  # type: ignore[import-untyped]
                 NlpEngineProvider,
+            )
+            from presidio_analyzer.predefined_recognizers import (  # type: ignore[import-untyped]
+                CreditCardRecognizer,
+                EmailRecognizer,
+                IpRecognizer,
+                PhoneRecognizer,
+                UsPassportRecognizer,
+                UsSsnRecognizer,
             )
 
             configuration = {
@@ -117,7 +141,24 @@ class PiiScanner:
                 "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
             }
             nlp_engine = NlpEngineProvider(nlp_configuration=configuration).create_engine()
+            # The default Presidio registry eagerly installs every bundled
+            # country-specific recognizer, although this scanner maps only the
+            # six entities below. A non-empty explicit registry prevents that
+            # global recognizer set from being loaded and keeps the CPU curator
+            # inside its memory envelope without weakening mapped PII coverage.
+            registry = RecognizerRegistry(
+                recognizers=[
+                    CreditCardRecognizer(),
+                    EmailRecognizer(),
+                    IpRecognizer(),
+                    PhoneRecognizer(),
+                    UsPassportRecognizer(),
+                    UsSsnRecognizer(),
+                ],
+                supported_languages=["en"],
+            )
             return AnalyzerEngine(
+                registry=registry,
                 nlp_engine=nlp_engine,
                 supported_languages=["en"],
             )
@@ -159,11 +200,15 @@ class PiiScanner:
             hits.append(PiiHit("passport", m.group(0)))
         if self._presidio is not None:
             try:
-                results = self._presidio.analyze(text=snippet, language="en")  # type: ignore[union-attr]
-                for r in results:
-                    flag = self._presidio_flag(r.entity_type)
-                    if flag:
-                        hits.append(PiiHit(flag, snippet[r.start : r.end]))
+                for chunk in _bounded_text_chunks(snippet, self._presidio_chunk_chars):
+                    results = self._presidio.analyze(  # type: ignore[union-attr]
+                        text=chunk,
+                        language="en",
+                    )
+                    for r in results:
+                        flag = self._presidio_flag(r.entity_type)
+                        if flag:
+                            hits.append(PiiHit(flag, chunk[r.start : r.end]))
             except Exception:
                 if not self._allow_fallback:
                     raise
@@ -227,3 +272,21 @@ def _deduplicate(hits: list[PiiHit]) -> list[PiiHit]:
         seen.add(key)
         out.append(h)
     return out
+
+
+def _bounded_text_chunks(text: str, max_chars: int) -> Iterator[str]:
+    """Cover ``text`` with whitespace-aligned chunks bounded for spaCy RSS."""
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        end = min(start + max_chars, text_length)
+        if end < text_length:
+            newline = text.rfind("\n", start, end)
+            space = text.rfind(" ", start, end)
+            boundary = max(newline, space)
+            if boundary > start:
+                end = boundary
+        chunk = text[start:end]
+        if chunk:
+            yield chunk
+        start = end

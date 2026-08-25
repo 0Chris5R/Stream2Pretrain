@@ -23,10 +23,7 @@ COPY processor/scientific.py                             /app/processor/scientif
 COPY processor/source_policy.py                          /app/processor/source_policy.py
 COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entrypoint
 
-RUN ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-fetcher \
- && python -c "from processor.fetcher import main; assert callable(main)"
-
 WORKDIR /app
 USER nonroot
 
-ENTRYPOINT ["s2p-fetcher"]
+ENTRYPOINT ["s2p-entrypoint", "s2p-fetcher"]

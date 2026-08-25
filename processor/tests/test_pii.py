@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 from processor.operators.pii import PiiScanner, is_valid_ipv4, luhn_ok
 
 
@@ -61,3 +64,70 @@ def test_clean_text_has_no_flags(long_english_text: str) -> None:
 def test_credit_card_invalid_luhn_not_flagged() -> None:
     flags = PiiScanner().flags("number 1234 5678 9012 3456 is just text")
     assert "credit_card" not in flags
+
+
+def test_presidio_loads_only_the_entities_mapped_by_the_scanner(monkeypatch) -> None:
+    recognizer_names = [
+        "CreditCardRecognizer",
+        "EmailRecognizer",
+        "IpRecognizer",
+        "PhoneRecognizer",
+        "UsPassportRecognizer",
+        "UsSsnRecognizer",
+    ]
+    recognizers = ModuleType("presidio_analyzer.predefined_recognizers")
+    for name in recognizer_names:
+        setattr(recognizers, name, type(name, (), {}))
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def __init__(self, **kwargs: object) -> None:
+            captured["registry"] = kwargs
+
+    class FakeAnalyzer:
+        def __init__(self, **kwargs: object) -> None:
+            captured["analyzer"] = kwargs
+
+    class FakeProvider:
+        def __init__(self, **kwargs: object) -> None:
+            captured["provider"] = kwargs
+
+        def create_engine(self) -> object:
+            return SimpleNamespace(name="spacy")
+
+    presidio = ModuleType("presidio_analyzer")
+    presidio.AnalyzerEngine = FakeAnalyzer  # type: ignore[attr-defined]
+    presidio.RecognizerRegistry = FakeRegistry  # type: ignore[attr-defined]
+    nlp_engine = ModuleType("presidio_analyzer.nlp_engine")
+    nlp_engine.NlpEngineProvider = FakeProvider  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "presidio_analyzer", presidio)
+    monkeypatch.setitem(sys.modules, "presidio_analyzer.nlp_engine", nlp_engine)
+    monkeypatch.setitem(sys.modules, "presidio_analyzer.predefined_recognizers", recognizers)
+
+    scanner = PiiScanner(use_presidio=True)
+
+    assert scanner.is_presidio_loaded
+    registry_args = captured["registry"]
+    assert isinstance(registry_args, dict)
+    assert [type(item).__name__ for item in registry_args["recognizers"]] == recognizer_names
+    assert registry_args["supported_languages"] == ["en"]
+
+
+def test_presidio_scans_large_text_in_bounded_complete_chunks() -> None:
+    scanner = PiiScanner(use_presidio=False, presidio_chunk_chars=16)
+    observed: list[str] = []
+
+    class FakeAnalyzer:
+        def analyze(self, *, text: str, language: str) -> list[object]:
+            assert language == "en"
+            observed.append(text)
+            return []
+
+    scanner._presidio = FakeAnalyzer()  # type: ignore[attr-defined]
+    source = "alpha beta gamma delta epsilon zeta eta theta"
+
+    assert scanner.flags(source) == []
+    assert observed
+    assert all(len(chunk) <= 16 for chunk in observed)
+    assert "".join(observed) == source
