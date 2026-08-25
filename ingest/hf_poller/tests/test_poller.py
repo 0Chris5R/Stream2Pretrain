@@ -38,12 +38,14 @@ def _models_payload() -> list[dict]:
             "lastModified": "2026-06-14T10:00:00Z",
             "sha": "a" * 40,
             "license": "Apache-2.0",
+            "siblings": [{"rfilename": "README.md"}],
         },
         {
             "id": "mistralai/Mistral-Small-3",
             "lastModified": "2026-06-14T11:00:00Z",
             "sha": "b" * 40,
             "license": "MIT",
+            "siblings": [{"rfilename": "README.md"}],
         },
         {"id": "no-last-modified-model"},  # missing lastModified -> skipped
     ]
@@ -108,6 +110,8 @@ async def test_poll_dataset_cards_emits_versioned_markdown(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/datasets":
             return httpx.Response(200, json=_dataset_payload())
+        if request.url.path.startswith("/api/datasets/org/research-dataset/tree/"):
+            return httpx.Response(200, json=[{"type": "file", "path": "README.md"}])
         if request.url.path.endswith("/README.md"):
             return httpx.Response(200, text="# Dataset card\n\nDocumented research data.")
         return httpx.Response(404)
@@ -136,6 +140,94 @@ async def test_poll_dataset_cards_emits_versioned_markdown(
     assert "/blob/" in str(record.url)
     assert record.spdx_license == hf_module.HF_PUBLIC_REPOSITORY_TERMS
     assert admissions.sent[0]["record"].resolver == "hf-public-repository-terms"
+
+
+@pytest.mark.asyncio
+async def test_model_without_readme_is_discovery_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/models":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "example/weights-only",
+                        "lastModified": "2026-08-25T12:00:00Z",
+                        "sha": "d" * 40,
+                        "siblings": [
+                            {"rfilename": ".gitattributes"},
+                            {"rfilename": "model.safetensors"},
+                        ],
+                    }
+                ],
+            )
+        return httpx.Response(500, request=request)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        hf_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
+    )
+    records = FakeProducer()
+    admissions = FakeProducer()
+
+    emitted = await hf_module.poll_models(
+        _cfg(),
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
+    )
+
+    assert emitted == 0
+    assert requests == ["/api/models"]
+    assert records.sent == []
+    assert admissions.sent == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_without_readme_is_discovery_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/datasets":
+            return httpx.Response(200, json=_dataset_payload())
+        if request.url.path.startswith("/api/datasets/org/research-dataset/tree/"):
+            return httpx.Response(200, json=[{"type": "file", "path": "data.jsonl"}])
+        return httpx.Response(500, request=request)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        hf_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
+    )
+    records = FakeProducer()
+    admissions = FakeProducer()
+
+    emitted = await hf_module.poll_hub_cards(
+        _cfg(),
+        kind="dataset",
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
+    )
+
+    assert emitted == 0
+    assert len(requests) == 2
+    assert requests[0] == "/api/datasets"
+    assert requests[1].startswith("/api/datasets/org/research-dataset/tree/")
+    assert records.sent == []
+    assert admissions.sent == []
 
 
 @pytest.mark.asyncio

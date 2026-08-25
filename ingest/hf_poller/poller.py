@@ -15,6 +15,9 @@ import argparse
 import asyncio
 import os
 from datetime import UTC, datetime
+from typing import Any
+
+import httpx
 
 from ingest.common.config import IngestConfig, load_config
 from ingest.common.hashing import doc_id_for_url
@@ -42,6 +45,52 @@ MODELS_ENDPOINT = "/api/models"
 DATASETS_ENDPOINT = "/api/datasets"
 SOURCE_FEED_MODELS = "hf-models"
 SOURCE_FEED_DATASETS = "hf-datasets"
+
+
+def _root_readme_in_siblings(item: dict[str, Any]) -> bool | None:
+    """Return README presence when the Hub listing included a file inventory."""
+    siblings = item.get("siblings")
+    if not isinstance(siblings, list):
+        return None
+    return any(
+        isinstance(sibling, dict) and sibling.get("rfilename") == "README.md"
+        for sibling in siblings
+    )
+
+
+async def _has_root_readme(
+    client: httpx.AsyncClient,
+    *,
+    repo_type: str,
+    repo_id: str,
+    revision: str,
+    item: dict[str, Any],
+) -> bool:
+    """Resolve README existence from metadata without fetching its body.
+
+    Model listings currently expose ``siblings`` with ``full=true``. Dataset
+    listings do not, so their exact-revision repository tree is queried. A
+    missing, private, gated, or deleted repository is discovery metadata only:
+    it must not create a licence admission or corpus document.
+    """
+    listed = _root_readme_in_siblings(item)
+    if listed is not None:
+        return listed
+
+    response = await client.get(
+        f"{HF_API_BASE}/api/{repo_type}/{repo_id}/tree/{revision}",
+        params={"recursive": "false", "expand": "false"},
+    )
+    if response.status_code in {401, 403, 404}:
+        return False
+    response.raise_for_status()
+    tree = response.json()
+    if not isinstance(tree, list):
+        raise ValueError(f"Hugging Face {repo_type} tree response must be a JSON list")
+    return any(
+        isinstance(entry, dict) and entry.get("type") == "file" and entry.get("path") == "README.md"
+        for entry in tree
+    )
 
 
 def _trace_id() -> str:
@@ -188,6 +237,20 @@ async def poll_models(
             if revision_value is None or item.get("private") is True:
                 continue
             revision_path = revision_value
+            if not await _has_root_readme(
+                client,
+                repo_type="models",
+                repo_id=model_id,
+                revision=revision_value,
+                item=item,
+            ):
+                log.info(
+                    "hf_models.card_absent",
+                    model=model_id,
+                    revision=revision_value,
+                )
+                seen[model_id] = last_modified
+                continue
             card_url = f"https://huggingface.co/{model_id}/blob/{revision_path}/README.md"
             # Only README prose enters this source. The model artefact licence
             # does not license that prose and must not control its route.
@@ -213,15 +276,16 @@ async def poll_models(
             card_response = await client.get(
                 f"https://huggingface.co/{model_id}/resolve/{revision_path}/README.md"
             )
-            if card_response.status_code >= 400:
+            if card_response.status_code in {401, 403, 404}:
                 log.warning(
-                    "hf_models.card_fetch_failed",
+                    "hf_models.card_disappeared",
                     model=model_id,
                     revision=revision_value,
                     status=card_response.status_code,
                 )
-                emit_failures.append(model_id)
+                seen[model_id] = last_modified
                 continue
+            card_response.raise_for_status()
             try:
                 await _emit_payload(
                     payload=card_response.content,
@@ -327,6 +391,21 @@ async def poll_hub_cards(
                 continue
             if item.get("private") is True:
                 continue
+            if not await _has_root_readme(
+                client,
+                repo_type="datasets",
+                repo_id=repo_id,
+                revision=revision,
+                item=item,
+            ):
+                log.info(
+                    "hf_cards.card_absent",
+                    kind=kind,
+                    repo=repo_id,
+                    revision=revision,
+                )
+                seen[repo_id] = last_modified
+                continue
             card_url = f"https://huggingface.co/{route_prefix}/{repo_id}/blob/{revision}/README.md"
             # Dataset rows and files are outside this source. Only the exact
             # README revision is admitted under the Hub repository terms.
@@ -349,16 +428,17 @@ async def poll_hub_cards(
             card_response = await client.get(
                 f"https://huggingface.co/{route_prefix}/{repo_id}/resolve/{revision}/README.md"
             )
-            if card_response.status_code >= 400:
+            if card_response.status_code in {401, 403, 404}:
                 log.warning(
-                    "hf_cards.card_fetch_failed",
+                    "hf_cards.card_disappeared",
                     kind=kind,
                     repo=repo_id,
                     revision=revision,
                     status=card_response.status_code,
                 )
-                failures.append(repo_id)
+                seen[repo_id] = last_modified
                 continue
+            card_response.raise_for_status()
             try:
                 await _emit_payload(
                     payload=card_response.content,
