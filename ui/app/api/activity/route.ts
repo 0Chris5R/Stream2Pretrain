@@ -16,13 +16,10 @@ const WINDOWS = {
 
 const METRICS = {
   fetched:
-    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="raw.fetched"})',
-  extracted:
-    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="docs.normalized"})',
-  decided:
-    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="curation.decisions"})',
-  training:
-    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="docs.curated"})',
+    'redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="raw.fetched"}',
+  extracted: 's2p_documents_emitted_total{stage="normalize"}',
+  decided: 's2p_processor_routed_total',
+  training: 's2p_processor_curated_total',
 } as const;
 
 type Stage = keyof typeof METRICS;
@@ -65,10 +62,10 @@ async function stageSeries(
   const buckets = new Map<number, number>();
   for (let ts = start; ts <= end; ts += step) buckets.set(ts, 0);
 
-  // Redpanda's public metrics expose each topic's partition high-water marks,
-  // not a records-produced counter. Their summed observed deltas
-  // are the records appended inside the visible window. Treat a decrease as
-  // topic recreation rather than reporting a negative count.
+  // Each Prometheus series remains separate here. For the fetched stage those
+  // are Redpanda partition high-water marks; for later stages they are the
+  // processor's counters split by pod, source, or route. Summing positive
+  // deltas across the series reports actual stage work and survives pod restarts.
   for (const series of body.data?.result ?? []) {
     let previous: number | null = null;
     for (const [ts, raw] of series.values ?? []) {
