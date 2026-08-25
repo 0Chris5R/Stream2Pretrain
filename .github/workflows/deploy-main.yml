@@ -3029,10 +3029,14 @@ jobs:
           fi
 
           # SourceFeed CRs are durable runtime configuration. A one-time live
-          # frontier reset must reconcile them even when a prior CI-only fix
-          # split the source edit and successful deployment across two pushes.
+          # policy marker is written only after the exact current schedules
+          # and obsolete workloads have been reconciled. A retry after any
+          # earlier deployment failure therefore cannot skip this boundary.
+          source_policy_marker=stream2pretrain-source-policy-20260825
           if [[ "$SOURCES_CHANGED" == "true" \
-             || "$frontier_reset_applied" == "true" ]]; then
+             || "$frontier_reset_applied" == "true" ]] \
+             || ! kubectl -n stream2pretrain get \
+                  "configmap/$source_policy_marker" >/dev/null 2>&1; then
             NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
             kubectl -n stream2pretrain delete \
               deployment/stream2pretrain-ingest-github-events \
@@ -3057,6 +3061,12 @@ jobs:
               echo "The controller did not materialize exactly five arXiv discovery schedules" >&2
               exit 1
             fi
+            kubectl -n stream2pretrain create configmap "$source_policy_marker" \
+              --from-literal=applied-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --from-literal=git-sha="$GITHUB_SHA" \
+              --from-literal=policy="live-sources-2026-08-25" \
+              --dry-run=client -o yaml \
+              | kubectl apply -f -
           else
             echo "Keeping existing SourceFeed schedules: source definitions are unchanged."
           fi
