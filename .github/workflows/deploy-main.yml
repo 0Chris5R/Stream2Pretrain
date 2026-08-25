@@ -86,17 +86,17 @@ jobs:
             python=true
           fi
           if grep -Eq \
-            '^(charts/|infra/helmfile-values/|helmfile\.yaml$|scripts/)' \
+            '^(\.github/workflows/deploy-main\.yml$|charts/|infra/helmfile-values/|helmfile\.yaml$|scripts/)' \
             "$changed"; then
             helm=true
           fi
           if grep -Eq \
-            '^(schemas/|ingest/|processor/|ui/|charts/|infra/helmfile-values/|scripts/|pyproject\.toml$|uv\.lock$|\.dockerignore$|helmfile\.yaml$)' \
+            '^(\.github/workflows/deploy-main\.yml$|schemas/|ingest/|processor/|ui/|charts/|infra/helmfile-values/|scripts/|pyproject\.toml$|uv\.lock$|\.dockerignore$|helmfile\.yaml$)' \
             "$changed"; then
             deploy=true
           fi
           if grep -Eq \
-            '^(schemas/|charts/stream2pretrain/|infra/helmfile-values/|scripts/(cluster_smoke|reconcile_topic_partitions|bytewax_cutover_marker|migrate_fetcher_offsets)\.)' \
+            '^(\.github/workflows/deploy-main\.yml$|schemas/|charts/stream2pretrain/|infra/helmfile-values/|scripts/(cluster_smoke|reconcile_topic_partitions|bytewax_cutover_marker|migrate_fetcher_offsets)\.)' \
             "$changed"; then
             core=true
           fi
@@ -105,7 +105,7 @@ jobs:
             core=true
           fi
           if grep -Eq \
-            '^(ingest/|schemas/(sourcefeed|license_admission|bronze)\.py$|charts/stream2pretrain/(files/feeds|templates/ingest-|templates/sourcefeed|values)|infra/helmfile-values/|scripts/load_seed_feeds\.sh$|processor/mixture_controller/)' \
+            '^(\.github/workflows/deploy-main\.yml$|ingest/|schemas/(sourcefeed|license_admission|bronze)\.py$|charts/stream2pretrain/(files/feeds|templates/ingest-|templates/sourcefeed|values)|infra/helmfile-values/|scripts/load_seed_feeds\.sh$|processor/mixture_controller/)' \
             "$changed"; then
             sources=true
           fi
@@ -3004,9 +3004,11 @@ jobs:
             echo "Keeping existing Bytewax cutover markers: core runtime is unchanged."
           fi
 
-          # SourceFeed CRs are durable runtime configuration. Reconcile them
-          # only when source definitions or their controller changed.
-          if [[ "$SOURCES_CHANGED" == "true" ]]; then
+          # SourceFeed CRs are durable runtime configuration. A one-time live
+          # frontier reset must reconcile them even when a prior CI-only fix
+          # split the source edit and successful deployment across two pushes.
+          if [[ "$SOURCES_CHANGED" == "true" \
+             || "$frontier_reset_applied" == "true" ]]; then
             NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
             kubectl -n stream2pretrain delete \
               deployment/stream2pretrain-ingest-github-events \
