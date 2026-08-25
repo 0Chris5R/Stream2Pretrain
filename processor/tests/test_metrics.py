@@ -6,6 +6,7 @@ from processor.metrics import ProcessorMetrics
 def test_processor_metrics_render_dashboard_contract() -> None:
     metrics = ProcessorMetrics(namespace="stream2pretrain")
 
+    metrics.record_received(source_feed="arxiv-rss")
     metrics.record_normalized(source_feed="arxiv-rss")
     metrics.record_curated(source_feed="arxiv-rss", quality_score=3.25, edu_score=4.0)
     metrics.record_dropped(reasons=["license_excluded"], quality_score=0.75, edu_score=1.0)
@@ -16,6 +17,10 @@ def test_processor_metrics_render_dashboard_contract() -> None:
 
     body = metrics.render_prometheus().decode("utf-8")
 
+    assert (
+        's2p_processor_received_total{namespace="stream2pretrain",source="arxiv-rss"} 1.0'
+        in body
+    )
     assert (
         's2p_processor_ingested_total{namespace="stream2pretrain",source="arxiv-rss"} 1.0' in body
     )

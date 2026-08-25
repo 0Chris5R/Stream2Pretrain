@@ -35,6 +35,12 @@ class ProcessorMetrics:
             ["namespace", "stage"],
             registry=self.registry,
         )
+        self._processor_received = Counter(
+            "s2p_processor_received_total",
+            "Content-bearing Bronze documents selected for normalization.",
+            ["namespace", "source"],
+            registry=self.registry,
+        )
         self._processor_ingested = Counter(
             "s2p_processor_ingested_total",
             "Bronze documents accepted by the processor fetcher.",
@@ -108,6 +114,10 @@ class ProcessorMetrics:
         with self._lock:
             self._processor_ingested.labels(self._namespace, source_feed).inc()
             self._documents_emitted.labels(self._namespace, "normalize").inc()
+
+    def record_received(self, *, source_feed: str) -> None:
+        with self._lock:
+            self._processor_received.labels(self._namespace, source_feed).inc()
 
     def record_curated(
         self, *, source_feed: str, quality_score: float, edu_score: float | None = None

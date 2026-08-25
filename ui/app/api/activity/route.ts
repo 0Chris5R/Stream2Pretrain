@@ -15,8 +15,7 @@ const WINDOWS = {
 } as const;
 
 const METRICS = {
-  fetched:
-    'redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="raw.fetched"}',
+  fetched: 's2p_processor_received_total',
   extracted: 's2p_documents_emitted_total{stage="normalize"}',
   decided: 's2p_processor_routed_total',
   training: 's2p_processor_curated_total',

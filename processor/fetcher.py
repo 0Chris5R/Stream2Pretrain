@@ -565,6 +565,8 @@ def process_bronze_payload(
     )
     if not pretrain_allowed and not transform_allowed:
         return None
+    if metrics is not None:
+        metrics.record_received(source_feed=bronze.source_feed)
     # Temporary deployment capacity switch. Do not replace this with a silent
     # drop or a reduced PDF parser: disabled PDFs receive an idempotent durable
     # deferral in ``processing-failures/`` before Bytewax checkpoints them.
@@ -636,7 +638,7 @@ def build_dataflow(
             return None
         with tracer.start_as_current_span("fetcher.process") as span:
             try:
-                silver = process_bronze_payload(state, payload)
+                silver = process_bronze_payload(state, payload, metrics=PROCESSOR_METRICS)
                 if silver is None:
                     return None
                 encoded = common.silver_dumps(silver)
@@ -676,7 +678,6 @@ def build_dataflow(
                 # Unknown, storage, extraction, and model failures must stop the
                 # execution before Bytewax snapshots source progress.
                 raise
-            PROCESSOR_METRICS.record_normalized(source_feed=silver.source_feed)
             span.set_attribute("doc_id", silver.doc_id)
             return KafkaSinkMessage(
                 key=silver.doc_id.encode("utf-8"),
