@@ -223,10 +223,10 @@ def _decision_cache_key(state: CurateState, payload: bytes) -> str:
         (
             state.policy_revision,
             state.scoring_version,
-                state.finepdfs_quality.revision,
-                state.fineweb_quality.revision,
-                state.metadata_discovery.revision,
-                state.kenlm.scorer,
+            state.finepdfs_quality.revision,
+            state.fineweb_quality.revision,
+            state.metadata_discovery.revision,
+            state.kenlm.scorer,
             state.pii.revision,
             state.decon.benchmark_set_version,
         )

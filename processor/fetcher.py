@@ -269,6 +269,8 @@ def _structured_payload_text(payload: bytes) -> tuple[str, str | None]:
 
 _MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 _MARKDOWN_HTML = re.compile(r"<[^>]+>")
+
+
 def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
     """Extract card/README prose while excluding YAML and fenced code.
 
