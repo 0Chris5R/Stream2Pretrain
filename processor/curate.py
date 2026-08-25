@@ -588,18 +588,27 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         "quarantine",
         "retry",
     }:
-        reason = (
-            "source is restricted to derived post-training generation; "
-            "verbatim pretraining export is forbidden"
-        )
-        if not posttrain_candidate_eligible(silver):
-            reason += "; the current paper Foundry does not consume this source family"
-        route = RouteDecision(
-            route="posttrain_candidate",
-            eligible_routes=["posttrain_candidate"],
-            reasons=[reason],
-        )
-    risk = _risk_from_reject(reject, pii_flags)
+        if posttrain_candidate_eligible(silver):
+            route = RouteDecision(
+                route="posttrain_candidate",
+                eligible_routes=["posttrain_candidate"],
+                reasons=[
+                    "source is restricted to derived post-training generation; "
+                    "verbatim pretraining export is forbidden"
+                ],
+            )
+        else:
+            route = RouteDecision(
+                route="quarantine",
+                eligible_routes=["quarantine"],
+                reasons=[
+                    "licence permits derived post-training use only, but the current "
+                    "paper Foundry does not consume this source family"
+                ],
+            )
+    risk: RiskTier = _risk_from_reject(reject, pii_flags)
+    if route.route == "quarantine" and risk == 1:
+        risk = 2
     license_id = silver.spdx_license or "unknown"
     token_count = state.tokenizer.count(text)
     pii_action = (

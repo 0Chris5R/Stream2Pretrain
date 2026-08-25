@@ -199,6 +199,10 @@ def iter_tarball_files(
             if len(data) > max_file_size_bytes:
                 # Defensive: tar header lied about size.
                 continue
+            if not data.strip():
+                # Empty and whitespace-only files carry no training signal and
+                # otherwise become poison records for the normalizer.
+                continue
             if b"\x00" in data:
                 continue
             try:

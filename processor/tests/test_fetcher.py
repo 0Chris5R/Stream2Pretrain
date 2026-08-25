@@ -11,7 +11,9 @@ from botocore.exceptions import ClientError
 from processor.fetcher import (
     FetcherState,
     PdfProcessingTemporarilyDisabled,
+    RawObjectEmpty,
     RawObjectMissing,
+    _is_non_release_github_record,
     _markdown_prose_projection,
     _review_payload_text,
     fetch_raw_bytes,
@@ -48,6 +50,29 @@ class _FakeS3:
         if self._gzip:
             headers["ContentEncoding"] = "gzip"
         return headers
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [b"viable/strict/1787664910", b"viable%2Fstrict%2F1787664910", b"ciflow/test"],
+)
+def test_historical_ci_refs_are_not_corpus_records(ref: bytes) -> None:
+    class Message:
+        def __init__(self) -> None:
+            self.headers = [("source_feed", b"github-releases"), ("github_ref", ref)]
+
+    assert _is_non_release_github_record(Message()) is True
+
+
+def test_real_github_release_ref_is_not_filtered() -> None:
+    class Message:
+        def __init__(self) -> None:
+            self.headers = [
+                ("source_feed", b"github-releases"),
+                ("github_ref", b"v2.8.0"),
+            ]
+
+    assert _is_non_release_github_record(Message()) is False
 
 
 def _state(s3: _FakeS3, *, bucket: str = "bronze") -> FetcherState:
@@ -176,6 +201,15 @@ def test_missing_raw_object_is_a_record_local_durable_failure(
 
     with pytest.raises(RawObjectMissing, match=bronze_record.doc_id):
         fetch_raw_bytes(state, bronze_record)
+
+
+def test_empty_raw_object_is_a_record_local_durable_failure(
+    bronze_record: BronzeRecord,
+) -> None:
+    state = _state(_FakeS3(b"", gzip_encoded=False))
+
+    with pytest.raises(RawObjectEmpty, match=bronze_record.doc_id):
+        process_bronze_payload(state, bronze_record.model_dump_json().encode("utf-8"))
 
 
 def test_transient_raw_object_failure_remains_retryable(

@@ -114,6 +114,10 @@ def _build_tarball(files: dict[str, bytes]) -> bytes:
             "https://github.com/owner.with.dot/repo-name/releases/tag/2026.06.0",
             ReleaseRef("owner.with.dot", "repo-name", "2026.06.0"),
         ),
+        (
+            "https://github.com/pytorch/pytorch/releases/tag/viable%2Fstrict%2F123",
+            ReleaseRef("pytorch", "pytorch", "viable/strict/123"),
+        ),
         ("https://github.com/owner/repo/releases", None),
         ("https://example.com/owner/repo/releases/tag/v1", None),
         ("not a url", None),
@@ -454,6 +458,11 @@ def test_release_ref_tarball_url() -> None:
     assert ref.full_name == "hf/transformers"
 
 
+def test_release_ref_tarball_url_encodes_slash_once() -> None:
+    ref = ReleaseRef("owner", "repo", "release/2026.08")
+    assert ref.tarball_url.endswith("/tarball/release%2F2026.08")
+
+
 @pytest.mark.parametrize(
     ("tag", "expected"),
     [
@@ -461,6 +470,8 @@ def test_release_ref_tarball_url() -> None:
         ("apache-iceberg-1.10.1", True),
         ("ciflow%2Finductor%2F194479", False),
         ("trunk%2F52310c5c0b79395d1b8691a1908d0f5b3ccb9992", False),
+        ("viable%2Fstrict%2F1787664910", False),
+        ("viable/strict/1787664910", False),
     ],
 )
 def test_release_candidate_excludes_observed_ci_refs(tag: str, expected: bool) -> None:

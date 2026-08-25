@@ -351,6 +351,7 @@ ingest:
     excludedTagPrefixes:
       - ciflow/
       - trunk/
+      - viable/
     # Above the measured bounded-release time and aligned with processor
     # consumers, so healthy work does not forfeit its partition before commit.
     maxPollIntervalMilliseconds: 900000

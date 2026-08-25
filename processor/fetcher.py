@@ -24,6 +24,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import unquote
 
 import boto3
 import orjson
@@ -50,6 +51,8 @@ from schemas.silver import SilverRecord, SilverSegment, SilverTags
 FETCHER_FLOW_NAME = "s2p-fetcher-live-v3"
 FETCHER_RECOVERY_NAME = "fetcher-live-v3"
 
+_NON_RELEASE_GITHUB_REF_PREFIXES = ("ciflow/", "trunk/", "viable/")
+
 
 class PdfProcessingTemporarilyDisabled(common.DeterministicProcessingError):
     """Audit-only deferral used while the deployment lacks PDF worker RAM.
@@ -72,6 +75,36 @@ class RawObjectMissing(common.DeterministicProcessingError):
     block every later source record in that partition. Transport, permission,
     timeout, and server failures remain retryable and still stop the flow.
     """
+
+
+class RawObjectEmpty(common.DeterministicProcessingError):
+    """A retained Bronze object has no content that can be normalized."""
+
+
+def _message_header_text(message: object, name: str) -> str | None:
+    """Read one UTF-8 Kafka header from a Bytewax source message."""
+    for key, raw_value in getattr(message, "headers", None) or ():
+        key_text = key.decode("utf-8", errors="ignore") if isinstance(key, bytes) else str(key)
+        if key_text != name:
+            continue
+        if isinstance(raw_value, bytes):
+            return raw_value.decode("utf-8", errors="ignore")
+        return str(raw_value)
+    return None
+
+
+def _is_non_release_github_record(message: object) -> bool:
+    """Identify historical CI refs that were incorrectly treated as releases.
+
+    These records are control-plane noise, not failed corpus documents. They
+    are therefore skipped before a Bronze object read and never enter the
+    processing-failure or corpus-route ledgers.
+    """
+    ref = _message_header_text(message, "github_ref")
+    if ref is None:
+        return False
+    canonical_ref = unquote(ref).strip().lower()
+    return canonical_ref.startswith(_NON_RELEASE_GITHUB_REF_PREFIXES)
 
 
 @dataclass(slots=True)
@@ -625,7 +658,7 @@ def process_bronze_payload(
         )
     raw_html = fetch_raw_bytes(state, bronze)
     if not raw_html:
-        raise RuntimeError(f"raw body is unavailable for {bronze.doc_id}")
+        raise RawObjectEmpty(f"raw body is unavailable for {bronze.doc_id}")
     silver = normalize(state, bronze, raw_html)
     if silver is None:
         raise ValueError(f"extraction produced no trainable body for {bronze.doc_id}")
@@ -677,6 +710,8 @@ def build_dataflow(
     payload_max_bytes = common.kafka_payload_max_bytes()
 
     def _step(msg: object) -> KafkaSinkMessage | None:
+        if _is_non_release_github_record(msg):
+            return None
         payload = getattr(msg, "value", None)
         if payload is None:
             failure_writer.record(stage="fetcher", message=msg, reason="kafka_tombstone")
@@ -693,7 +728,7 @@ def build_dataflow(
                         f"normalized payload for {silver.doc_id} is {len(encoded)} bytes; "
                         f"limit is {payload_max_bytes}"
                     )
-            except ValueError as exc:
+            except (ValueError, common.DeterministicProcessingError) as exc:
                 span.record_exception(exc)
                 reason = type(exc).__name__
                 failure_writer.record(stage="fetcher", message=msg, reason=reason)

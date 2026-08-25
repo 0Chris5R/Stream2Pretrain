@@ -76,6 +76,18 @@ def test_extractor_skips_generated_vendor_and_undecodable_files() -> None:
     assert {item.path for item in iter_tarball_files(payload)} == {"src/main.py"}
 
 
+def test_extractor_skips_empty_and_whitespace_only_files() -> None:
+    payload = _build_tarball(
+        {
+            "src/empty.py": b"",
+            "src/blank.py": b" \n\t\n",
+            "src/kept.py": b"value = 1\n",
+        }
+    )
+
+    assert {item.path for item in iter_tarball_files(payload)} == {"src/kept.py"}
+
+
 def test_extractor_respects_custom_allow_list() -> None:
     payload = _build_tarball(
         {

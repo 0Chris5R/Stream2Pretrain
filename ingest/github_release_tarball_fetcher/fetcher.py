@@ -36,7 +36,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
 
@@ -91,7 +91,8 @@ class ReleaseRef:
 
     @property
     def tarball_url(self) -> str:
-        return f"https://api.github.com/repos/{self.owner}/{self.repo}/tarball/{self.tag}"
+        encoded_ref = quote(self.tag, safe="")
+        return f"https://api.github.com/repos/{self.owner}/{self.repo}/tarball/{encoded_ref}"
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,7 @@ class FetcherConfig:
 
     allowed_extensions: tuple[str, ...] = DEFAULT_ALLOWED_EXTENSIONS
     max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES
-    excluded_tag_prefixes: tuple[str, ...] = ("ciflow/", "trunk/")
+    excluded_tag_prefixes: tuple[str, ...] = ("ciflow/", "trunk/", "viable/")
     request_rate_per_second: float = 1.0
     request_burst: int = 4
     consumer_group: str = "s2p-github-tarball-fetcher"
@@ -193,7 +194,9 @@ def parse_release_url(url: str) -> ReleaseRef | None:
     return ReleaseRef(
         owner=m.group("owner"),
         repo=m.group("repo"),
-        tag=m.group("tag"),
+        # Atom links percent-encode slashes. Keep the canonical ref decoded so
+        # query parameters are encoded exactly once by httpx.
+        tag=unquote(m.group("tag")),
     )
 
 
@@ -302,7 +305,7 @@ async def fetch_repo_license_evidence(
     html_url = payload.get("html_url")
     return RepoLicenseEvidence(
         spdx_id=spdx,
-        api_url=f"{url}?ref={ref.tag}",
+        api_url=f"{url}?{urlencode({'ref': ref.tag})}",
         ref=ref.tag,
         blob_sha=blob_sha,
         path=path if isinstance(path, str) else None,
@@ -419,7 +422,8 @@ async def process_release(
             else spdx
         )
         file_source = "file_header" if header_match is not None else "github_api"
-        file_url = f"https://github.com/{ref.owner}/{ref.repo}/blob/{ref.tag}/{extracted.path}"
+        encoded_ref = quote(ref.tag, safe="")
+        file_url = f"https://github.com/{ref.owner}/{ref.repo}/blob/{encoded_ref}/{extracted.path}"
         file_digest = f"sha256:{hashlib.sha256(extracted.data).hexdigest()}"
         source_format = (
             "web" if extracted.language in {"markdown", "restructuredtext", "text"} else "code"
@@ -497,7 +501,8 @@ async def _emit_one_file(
     producer: BronzeProducerProtocol,
     valid_from: datetime,
 ) -> None:
-    file_url = f"https://github.com/{ref.owner}/{ref.repo}/blob/{ref.tag}/{extracted.path}"
+    encoded_ref = quote(ref.tag, safe="")
+    file_url = f"https://github.com/{ref.owner}/{ref.repo}/blob/{encoded_ref}/{extracted.path}"
     doc_id = doc_id_for_url(file_url)
     key = code_object_key(owner=ref.owner, repo=ref.repo, ref=ref.tag, path=extracted.path)
     await minio.put_bronze(
@@ -891,7 +896,9 @@ def _fetcher_config_from_env() -> FetcherConfig:
     return FetcherConfig(
         allowed_extensions=_csv("S2P_TARBALL_ALLOWED_EXTENSIONS", DEFAULT_ALLOWED_EXTENSIONS),
         max_file_size_bytes=_int("S2P_TARBALL_MAX_FILE_SIZE_BYTES", DEFAULT_MAX_FILE_SIZE_BYTES),
-        excluded_tag_prefixes=_csv("S2P_TARBALL_EXCLUDED_TAG_PREFIXES", ("ciflow/", "trunk/")),
+        excluded_tag_prefixes=_csv(
+            "S2P_TARBALL_EXCLUDED_TAG_PREFIXES", ("ciflow/", "trunk/", "viable/")
+        ),
         request_rate_per_second=_float("S2P_TARBALL_RATE_PER_SECOND", 1.0),
         request_burst=_int("S2P_TARBALL_BURST", 4),
         consumer_group=os.environ.get("S2P_TARBALL_CONSUMER_GROUP", "s2p-github-tarball-fetcher"),
