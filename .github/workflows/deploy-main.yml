@@ -262,8 +262,8 @@ jobs:
                   "curate",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-live-v3",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-live-v3",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-live-v4",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-live-v4",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -1128,6 +1128,7 @@ jobs:
           # impossible to repeat accidentally on later deployments.
           frontier_reset_applied=false
           source_noise_reset_applied=false
+          curator_frontier_reset_active=false
           frontier_reset_marker=stream2pretrain-live-frontier-20260825
           if [[ "$DEPLOY_MODE" == "deploy" ]] \
              && ! kubectl -n stream2pretrain get "configmap/$frontier_reset_marker" \
@@ -1261,6 +1262,48 @@ jobs:
               echo "::endgroup::"
             fi
             source_noise_reset_applied=true
+          fi
+
+          # The source-noise reset moved the raw fetcher frontier but retained
+          # the already-normalized GitHub catch-up behind the curator. Discard
+          # that explicitly approved one-time backlog before measuring whether
+          # one correctly running live worker can keep pace. The v3 recovery
+          # directory and its global dedup state remain retained on the PVC;
+          # the v4 flow starts from the broker frontier recorded here.
+          curator_frontier_reset_marker=stream2pretrain-curator-live-frontier-20260825
+          if [[ "$DEPLOY_MODE" == "deploy" ]]; then
+            if kubectl -n stream2pretrain get \
+              "configmap/$curator_frontier_reset_marker" >/dev/null 2>&1; then
+              curator_frontier_reset_active=true
+            else
+              echo "::group::Discard normalized historical source catch-up"
+              if kubectl -n stream2pretrain get \
+                statefulset/stream2pretrain-processor-curate >/dev/null 2>&1; then
+                kubectl -n stream2pretrain scale \
+                  statefulset/stream2pretrain-processor-curate \
+                  --replicas=0 --timeout=180s
+                if kubectl -n stream2pretrain get pod \
+                  -l app.kubernetes.io/component=processor-curate -o name \
+                  | grep -q .; then
+                  kubectl -n stream2pretrain wait --for=delete pod \
+                    -l app.kubernetes.io/component=processor-curate --timeout=240s
+                fi
+              fi
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group seek s2p-curate --to end --topics docs.normalized \
+                  --allow-new-topics
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group describe s2p-curate
+              kubectl -n stream2pretrain create configmap \
+                "$curator_frontier_reset_marker" \
+                --from-literal=reset-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --from-literal=git-sha="$GITHUB_SHA" \
+                --from-literal=policy="discard-normalized-historical-source-catch-up" \
+                --dry-run=client -o yaml \
+                | kubectl apply -f -
+              curator_frontier_reset_active=true
+              echo "::endgroup::"
+            fi
           fi
 
           if [[ "$DEPLOY_MODE" == "repair-monitoring" ]]; then
@@ -1709,78 +1752,13 @@ jobs:
           fi
 
           if [[ "$DEPLOY_MODE" == "inspect-storage" ]]; then
-            inspector=stream2pretrain-storage-inspector
-            kubectl -n kube-system delete pod "$inspector" \
-              --ignore-not-found --wait=true
-            kubectl -n kube-system apply -f - <<'EOF'
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: stream2pretrain-storage-inspector
-          spec:
-            nodeName: stream2pretrain-worker-2
-            priorityClassName: system-node-critical
-            restartPolicy: Never
-            tolerations:
-              - key: node.kubernetes.io/disk-pressure
-                operator: Exists
-                effect: NoSchedule
-            containers:
-              - name: inspector
-                image: busybox:1.36.1
-                command:
-                  - sh
-                  - -ec
-                  - |
-                    volume=/host/var/lib/rancher/k3s/storage/pvc-731446d1-c621-4aeb-8b1e-f4e4d92535cb_minio_minio-data
-                    echo 'MinIO top-level directories (KiB):'
-                    du -x -k -d 1 "$volume" 2>/dev/null | sort -n
-                    echo 'MinIO system directories (KiB):'
-                    du -x -k -d 2 "$volume/.minio.sys" 2>/dev/null \
-                      | sort -n | tail -n 100
-                    gold="$volume/s2p-gold"
-                    echo 'Gold directory breakdown (KiB):'
-                    du -x -k -d 5 "$gold" 2>/dev/null \
-                      | sort -n | tail -n 100
-                    echo 'Gold file count:'
-                    find "$gold" -xdev -type f | wc -l
-                    echo 'Gold file extensions:'
-                    find "$gold" -xdev -type f \
-                      | sed 's/.*\.//' | sort | uniq -c | sort -n
-                resources:
-                  requests:
-                    cpu: 10m
-                    memory: 16Mi
-                    ephemeral-storage: 1Mi
-                  limits:
-                    cpu: 100m
-                    memory: 64Mi
-                    ephemeral-storage: 16Mi
-                securityContext:
-                  allowPrivilegeEscalation: false
-                  readOnlyRootFilesystem: true
-                  runAsUser: 0
-                volumeMounts:
-                  - name: host-root
-                    mountPath: /host
-                    readOnly: true
-            volumes:
-              - name: host-root
-                hostPath:
-                  path: /
-                  type: Directory
-          EOF
-            if ! kubectl -n kube-system wait \
-              --for=jsonpath='{.status.phase}'=Succeeded \
-              "pod/$inspector" --timeout=600s; then
-              kubectl -n kube-system describe pod "$inspector" || true
-              kubectl -n kube-system logs "$inspector" || true
-              kubectl -n kube-system delete pod "$inspector" \
-                --ignore-not-found --wait=false
-              exit 1
-            fi
-            kubectl -n kube-system logs "$inspector"
-            kubectl -n kube-system delete pod "$inspector" --wait=true
+            # Query the S3 API instead of recursively walking the MinIO PVC.
+            # The latter took longer than ten minutes once the object count
+            # grew, while this reports the logical retained bytes we need for
+            # lifecycle sizing and does not depend on a node-local PVC path.
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- \
+              python - < scripts/inspect_object_store.py
             exit 0
           fi
 
@@ -2579,7 +2557,12 @@ jobs:
 
           # Advance the broker bridge to any legacy curator recovery progress
           # before replacing the native consumer. Retaining the PVC preserves
-          # the global dedup index and deterministic decision cache.
+          # the global dedup index and deterministic decision cache. The
+          # explicitly marked live-frontier reset bypasses legacy offset import
+          # so the new recovery identity starts at the selected broker frontier.
+          if [[ "$curator_frontier_reset_active" == "true" ]]; then
+            echo "Curator live-frontier reset is authoritative; skipping legacy offset import."
+          else
           curator_exists="$(
             kubectl -n stream2pretrain get statefulset \
               stream2pretrain-processor-curate -o name 2>/dev/null || true
@@ -2615,7 +2598,7 @@ jobs:
                 ' \
               || true
           )"
-          if [[ "$existing_curator_flow" != "s2p-curate-live-v3" \
+          if [[ "$existing_curator_flow" != "s2p-curate-live-v4" \
              && -n "$curator_exists" \
              && -z "$curator_pod" ]]; then
             curator_claim="checkpoint-stream2pretrain-processor-curate-0"
@@ -2690,7 +2673,7 @@ jobs:
             curator_pod="$curator_migration_pod"
             echo "Mounted the scaled-zero curator recovery PVC in $curator_migration_pod."
           fi
-          if [[ "$existing_curator_flow" == "s2p-curate-live-v3" ]]; then
+          if [[ "$existing_curator_flow" == "s2p-curate-live-v4" ]]; then
             echo "Curator already declares the stable live Bytewax identity."
           elif [[ -n "$curator_pod" ]]; then
             curator_cutover_env=(
@@ -2699,8 +2682,8 @@ jobs:
               S2P_CUTOVER_COMPONENT=curate
               S2P_CUTOVER_TOPIC=docs.normalized
               S2P_CONSUMER_GROUP=s2p-curate
-              S2P_BYTEWAX_FLOW_NAME=s2p-curate-live-v3
-              S2P_BYTEWAX_RECOVERY_NAME=curate-live-v3
+              S2P_BYTEWAX_FLOW_NAME=s2p-curate-live-v4
+              S2P_BYTEWAX_RECOVERY_NAME=curate-live-v4
               S2P_BYTEWAX_RECOVERY_PARTITIONS=4
             )
             set +e
@@ -2735,6 +2718,7 @@ jobs:
             fi
           elif [[ -z "$curator_exists" ]]; then
             echo "No legacy curator exists; the first Bytewax execution will use OFFSET_STORED."
+          fi
           fi
 
           # Migrate the existing partition set before expanding it. Otherwise a

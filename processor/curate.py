@@ -77,8 +77,8 @@ from schemas.silver import SilverRecord, SilverSegment
 
 POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
-CURATOR_FLOW_NAME = "s2p-curate-live-v3"
-CURATOR_RECOVERY_NAME = "curate-live-v3"
+CURATOR_FLOW_NAME = "s2p-curate-live-v4"
+CURATOR_RECOVERY_NAME = "curate-live-v4"
 
 
 class QualityScorer(Protocol):
