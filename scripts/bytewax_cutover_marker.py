@@ -1,9 +1,10 @@
-"""Create or validate the one-time native-consumer to Bytewax cutover marker.
+"""Create or validate the current live-frontier Bytewax cutover marker.
 
 The marker lives on the same retained state volume as Bytewax recovery.  A
 deployment retry can therefore distinguish a completed broker-offset handoff
 from an unattempted migration without relying on the lifetime of a Pod or a
-workflow run.
+workflow run. Each deliberate recovery-identity transition uses a new cutover
+ID, preserving prior marker files as immutable migration history.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-CUTOVER_ID = "native-consumer-to-bytewax-v2"
+CUTOVER_ID = "live-frontier-bytewax-v3"
 SCHEMA_VERSION = 1
 
 
