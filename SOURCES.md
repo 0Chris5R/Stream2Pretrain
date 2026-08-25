@@ -9,7 +9,6 @@ posttrain-only, or quarantined documents.
 | Source | Live input | Corpus artifact | Intended use |
 |---|---|---|---|
 | arXiv full text | Four RSS categories (`cs.CL`, `cs.LG`, `cs.AI`, `cs.CV`) plus OAI-PMH `set=cs` discover current arXiv ids | Native HTML, ar5iv fallback, or bounded CPU PDF extraction with sections, math, tables, figures, and OCR | Pretraining and paper-based SFT/RL, subject to the per-paper licence tier |
-| Curated GitHub releases | Release Atom feeds for the 30 repositories in `charts/stream2pretrain/values.yaml` | Per-file code plus README/documentation projections from the exact release tag | Pretraining code and technical prose; no current paper-Foundry route |
 | Hugging Face model cards | `/api/models` sorted by `lastModified` | Exact-commit public `README.md` prose only | Pretraining technical documentation |
 | Hugging Face dataset cards | `/api/datasets` sorted by `lastModified` | Exact-commit public `README.md` prose only | Pretraining technical documentation |
 
@@ -20,7 +19,6 @@ posttrain-only, or quarantined documents.
 - `https://rss.arxiv.org/rss/cs.AI`
 - `https://rss.arxiv.org/rss/cs.CV`
 - `https://oaipmh.arxiv.org/oai`, `set=cs`
-- `https://github.com/<owner>/<repo>/releases.atom` for each curated repository
 - Hugging Face Hub list API responses for model and dataset cards
 
 These envelopes carry ids, revisions, and scheduling state. The full-content
@@ -39,23 +37,12 @@ terms; model and dataset artefact licences do not control this prose-only
 projection. This does not admit model weights, dataset rows, Space
 repositories, or linked artifacts.
 
-## Removed sources
-
-HF Daily Papers duplicated arXiv discovery; GitHub Events duplicated curated
-release discovery; HF Spaces lacked a clear corpus role. All three were
-removed. The OpenAI, DeepMind, Hugging Face, BAIR, and EleutherAI blogs were
-removed after their public pages failed to provide a defensible site-wide
-training-content grant. Historical seed mixtures, ReviewArena, Wayback, and
-all other backfill-only workloads were also removed.
-
 ## Operational budgets
 
 - arXiv requests follow the published polite client guidance and are handled
   by one live full-text worker today.
 - Hugging Face cards poll in bounded `lastModified` pages and retain exact
   commit SHAs.
-- GitHub Atom discovery is conditional with ETags. The tarball worker uses the
-  authenticated REST budget and bounded per-release file selection.
 - Daily item counts and sustained throughput are `needs-measurement` until the
   controlled current-frontier deployment run completes.
 
@@ -65,4 +52,3 @@ all other backfill-only workloads were also removed.
 - [arXiv OAI-PMH](https://info.arxiv.org/help/oa/index.html)
 - [Hugging Face repository licences](https://huggingface.co/docs/hub/repositories-licenses)
 - [Hugging Face Terms of Service](https://huggingface.co/terms-of-service)
-- [GitHub REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)

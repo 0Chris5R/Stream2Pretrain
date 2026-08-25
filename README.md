@@ -6,14 +6,13 @@ This README is the sole report for the DHBW Cloud Computing and Big Data examina
 
 ## 1. Use Case and Motivation
 
-Large language model training needs current, high-quality material. AI research changes continuously across papers, model and dataset documentation, and source code. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
+Large language model training needs current, high-quality material. AI research changes continuously across papers and model or dataset documentation. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
 
 Stream2Pretrain solves this as a streaming curation service. Its users are data engineers and researchers who need a reproducible training-data view rather than another web crawler. The service preserves raw input, records every policy decision, and exposes only clean records as training output.
 
 The deployed content adapters cover:
 
 - arXiv full papers discovered through OAI-PMH and four RSS categories
-- curated GitHub release source archives and repository documentation
 - exact-version Hugging Face model and dataset cards
 
 Internal discovery envelopes do not appear as sources, documents, acceptances,
@@ -29,9 +28,9 @@ The relevant Big Data characteristics are:
 
 | Characteristic | Project meaning |
 |---|---|
-| Volume | Raw pages, extracted text, code files, decisions, and table snapshots accumulate continuously. The prototype does not claim an unmeasured production volume. |
-| Velocity | Pollers create a live stream. Release events and feed updates arrive in bursts rather than at a fixed rate. Redpanda buffers these bursts. |
-| Variety | The pipeline handles HTML, PDF fallback, metadata, documentation, and code. Each format carries different extraction and quality signals. |
+| Volume | Raw pages, extracted text, decisions, and table snapshots accumulate continuously. The prototype does not claim an unmeasured production volume. |
+| Velocity | Pollers create a live stream. Feed updates arrive in bursts rather than at a fixed rate. Redpanda buffers these bursts. |
+| Variety | The pipeline handles HTML, PDF fallback, metadata, and Markdown documentation. Each format carries different extraction and quality signals. |
 | Veracity | Near duplicates, personal data, extraction failures, missing licenses, low-quality pages, and benchmark overlap must remain visible as explicit decisions. |
 | Value | Accepted records become a queryable training export. Rejected records remain useful for auditing and policy improvement. |
 
@@ -122,12 +121,10 @@ Quality is source-aware:
 
 - Scientific HTML, PDF, and LaTeX use the FinePDFs profile.
 - General web text uses the FineWeb-Edu profile.
-- Hugging Face cards and repository documentation use a Markdown prose projection and retain FineWeb-Edu as an audit signal without Common-Crawl page-shape gates.
-- Code uses a separate Stack v2 and Dolma-grounded quality policy.
-- RSS, OAI, Hub-list, and release envelopes are internal discovery messages and never become training text or UI corpus rows.
+- Hugging Face cards use a Markdown prose projection and retain FineWeb-Edu as an audit signal without Common-Crawl page-shape gates.
+- RSS, OAI, and Hub-list envelopes are internal discovery messages and never become training text or UI corpus rows.
 
-This prevents a web-education classifier from being treated as a meaningful
-code classifier. The DHBW chart fails closed on missing models. FinePDFs,
+The DHBW chart fails closed on missing models. FinePDFs,
 FineWeb-Edu, KenLM, and E5 run from a pinned immutable model image behind a
 stateless in-cluster inference service; Presidio, MinHash, and tokenization stay
 with the lightweight stateful curator. Every row records its classifier
@@ -140,8 +137,8 @@ grant, and missing item rights can only reach the derived post-training route.
 Explicit incompatible, no-derivatives, contradictory, or provider-prohibited
 rights quarantine. The
 curator also applies PII detection, licence policy, and MinHash near-duplicate
-detection. Language confidence gates natural-language profiles, not source
-code. Gopher, C4, and KenLM gates apply only to ordinary web prose, where those
+detection. Language confidence gates natural-language profiles. Gopher, C4,
+and KenLM gates apply only to ordinary web prose, where those
 web-derived signals are meaningful.
 
 ### Stateful processing
@@ -217,11 +214,11 @@ The API and document screenshots in section 11 use the same live cluster data sh
 
 | Kubernetes object | Components |
 |---|---|
-| Deployment | Fetcher, arXiv full-text worker, GitHub tarball worker, Hugging Face card poller, Iceberg writer, DuckDB API, decon API, mixture controller, and UI. |
+| Deployment | Fetcher, arXiv full-text worker, Hugging Face card poller, Iceberg writer, DuckDB API, decon API, mixture controller, and UI. |
 | StatefulSet | Curator with a persistent global dedup index and decision cache; single-writer foundry with its durable queue, call cache, and append-only artifact audits. |
-| CronJob | Periodic RSS, OAI-PMH, and GitHub release polls. |
+| CronJob | Periodic arXiv RSS and OAI-PMH discovery polls. |
 | ConfigMap | Feed definitions and synthetic benchmark canaries. |
-| Secret | MinIO, Polaris, GitHub, Hugging Face, and Ed25519 credentials. |
+| Secret | MinIO, Polaris, Hugging Face, and Ed25519 credentials. |
 | PVC | Curator state and platform storage. |
 | ServiceMonitor and PrometheusRule | Metrics discovery and availability alerts. |
 
@@ -246,7 +243,7 @@ of independent replicas joining the group.
 - Container images built from the included Dockerfiles
 - A reviewed `terraform.tfvars`
 - The existing DHBW RFC2136 inventory outside Git
-- Kubernetes Secrets for MinIO, Polaris, GitHub, Hugging Face, decon signing,
+- Kubernetes Secrets for MinIO, Polaris, Hugging Face, decon signing,
   and Grafana, plus the foundry provider Secret when the foundry is enabled
 
 Use `uv` for every Python command.
@@ -293,7 +290,6 @@ Required Secret names are:
 - `polaris/polaris-minio`
 - `stream2pretrain/stream2pretrain-minio`
 - `stream2pretrain/stream2pretrain-polaris`
-- `stream2pretrain/stream2pretrain-github`
 - `stream2pretrain/stream2pretrain-hf`
 - `stream2pretrain/stream2pretrain-decon-signing`
 - `stream2pretrain/stream2pretrain-foundry-providers` with
@@ -314,7 +310,7 @@ Open `http://127.0.0.1:3000/dashboard` after the port forward starts.
 
 - [`ingest/common/bronze_pipeline.py#L42`](ingest/common/bronze_pipeline.py#L42) fetches a source, stores immutable Bronze bytes, and publishes the Bronze event.
 - [`processor/fetcher.py#L290`](processor/fetcher.py#L290) converts a Bronze payload into a normalized record.
-- [`processor/curate.py#L178`](processor/curate.py#L178) selects the code, scientific, or web quality path and applies the curation policy.
+- [`processor/curate.py#L178`](processor/curate.py#L178) selects the scientific, card, or web quality path and applies the curation policy.
 - [`processor/decon_gate.py#L38`](processor/decon_gate.py#L38) defines the benchmark families and the 13-token contamination index.
 - [`processor/iceberg_writer.py#L204`](processor/iceberg_writer.py#L204) separates audit decisions, accepted rows, and benchmark candidates before commit.
 - [`processor/iceberg_writer.py#L547`](processor/iceberg_writer.py#L547) defines the Iceberg partition specification and format version.

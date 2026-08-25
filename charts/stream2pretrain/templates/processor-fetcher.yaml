@@ -46,7 +46,7 @@ spec:
     metadata:
       labels:
         {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
-        stream2pretrain.io/egress-class: blogs
+        stream2pretrain.io/egress-class: arxiv
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
@@ -69,9 +69,9 @@ spec:
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
             - name: S2P_BYTEWAX_FLOW_NAME
-              value: "s2p-fetcher-live-v4"
+              value: "s2p-fetcher-live-v5"
             - name: S2P_BYTEWAX_RECOVERY_NAME
-              value: "fetcher-live-v4"
+              value: "fetcher-live-v5"
             - name: S2P_STATE_DIR
               value: /var/lib/s2p/checkpoint
             - name: S2P_CONSUMER_GROUP
@@ -174,7 +174,7 @@ spec:
     metadata:
       labels:
         {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $canaryComponent) | nindent 8 }}
-        stream2pretrain.io/egress-class: blogs
+        stream2pretrain.io/egress-class: arxiv
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"

@@ -4,8 +4,7 @@ What this exercises:
 1. Boot ``docker-compose.dev.yml`` (via the ``dev_stack`` fixture).
 2. Inject a synthetic ``BronzeRecord`` directly onto ``raw.fetched``. The v0.2
    pipeline replaces the v0.1 manual submit endpoint with native fulltext
-   pollers (``arxiv_html_fetcher``,
-   ``github_release_tarball_fetcher``).
+   pollers (``arxiv_html_fetcher`` and ``hf_poller``).
 3. Consume the matching scored outcome from ``curation.decisions`` within 30
    seconds. Every document must reach this durable audit stream, including
    quarantine, retry, benchmark-reserve, and training-eligible outcomes.

@@ -10,7 +10,7 @@ Field semantics match RESEARCH.md section 6.
 v0.2.0 adds three classifier columns shared by Bronze, Silver, and Gold:
 
 - ``source_format`` records the wire shape the document arrived in (HTML page
-  vs PDF vs LaTeX source vs code file vs raw web vs metadata-only vs review
+  vs PDF vs LaTeX source vs raw web vs metadata-only
   text). Downstream operators dispatch on this column to pick the correct
   extractor pipeline.
 - ``extraction_pipeline`` is a free-form identifier of the operator chain that
@@ -51,7 +51,6 @@ SourceFormat = Literal[
     "pdf",
     "latex",
     "markdown",
-    "code",
     "web",
     "metadata",
 ]
@@ -62,14 +61,11 @@ SourceFormat = Literal[
 - ``latex``: TeX/LaTeX source from arXiv ``s3://arxiv/src``.
 - ``markdown``: scientific full text already converted to Markdown by a
   source-side OCR or document extraction pipeline.
-- ``code``: a single source file extracted from a release tarball or
-  ``the-stack-v2`` blob.
 - ``web``: an opaque crawled web page (CommonCrawl-derived seeds).
 - ``metadata``: an OAI-PMH or REST JSON record with no body, only metadata.
 """
 
 SpdxLicenseSource = Literal[
-    "github_api",
     "file_header",
     "http_link",
     "html_meta",
@@ -85,13 +81,11 @@ SpdxLicenseSource = Literal[
 ]
 """Provenance of the SPDX id attached to the document.
 
-- ``github_api``: GitHub ``/repos/{o}/{r}/license`` response.
 - ``file_header``: a licence identifier attached to the individual file.
 - ``http_link``: an RFC 8288 ``Link`` response header with ``rel=license``.
 - ``html_meta``: ``<meta name="dc.rights">`` / ``<meta name="license">`` tag
   on the source HTML page.
-- ``dataset_metadata``: per-blob attestation in a HuggingFace dataset
-  (``the-stack-v2``, ``stack-edu``, etc.).
+- ``dataset_metadata``: an item-level attestation in a dataset record.
 - ``manual_override``: explicit synthetic-fixture or audited administrative
   provenance. Normal SourceFeed CRDs accept only ``per-record`` resolution and
   cannot use this value as a source-wide default.

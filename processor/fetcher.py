@@ -24,7 +24,6 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any, cast
-from urllib.parse import unquote
 
 import boto3
 import orjson
@@ -48,10 +47,8 @@ from processor.source_policy import resolve_source_policy
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
-FETCHER_FLOW_NAME = "s2p-fetcher-live-v4"
-FETCHER_RECOVERY_NAME = "fetcher-live-v4"
-
-_NON_RELEASE_GITHUB_REF_PREFIXES = ("ciflow/", "trunk/", "viable/")
+FETCHER_FLOW_NAME = "s2p-fetcher-live-v5"
+FETCHER_RECOVERY_NAME = "fetcher-live-v5"
 
 
 class PdfProcessingTemporarilyDisabled(common.DeterministicProcessingError):
@@ -59,7 +56,7 @@ class PdfProcessingTemporarilyDisabled(common.DeterministicProcessingError):
 
     This is intentionally record-local and deterministic: Bytewax writes the
     input coordinate to the durable processing-failure ledger and advances,
-    allowing HTML, code, web, card, and review records behind the PDF to run.
+    allowing HTML, web, and card records behind the PDF to run.
     Re-enable ``S2P_PDF_PROCESSING_ENABLED`` after the checkpoint-pinned node
     has enough memory for the full Docling, Tesseract, and TableFormer path.
     """
@@ -79,32 +76,6 @@ class RawObjectMissing(common.DeterministicProcessingError):
 
 class RawObjectEmpty(common.DeterministicProcessingError):
     """A retained Bronze object has no content that can be normalized."""
-
-
-def _message_header_text(message: object, name: str) -> str | None:
-    """Read one UTF-8 Kafka header from a Bytewax source message."""
-    for key, raw_value in getattr(message, "headers", None) or ():
-        key_text = key.decode("utf-8", errors="ignore") if isinstance(key, bytes) else str(key)
-        if key_text != name:
-            continue
-        if isinstance(raw_value, bytes):
-            return raw_value.decode("utf-8", errors="ignore")
-        return str(raw_value)
-    return None
-
-
-def _is_non_release_github_record(message: object) -> bool:
-    """Identify historical CI refs that were incorrectly treated as releases.
-
-    These records are control-plane noise, not failed corpus documents. They
-    are therefore skipped before a Bronze object read and never enter the
-    processing-failure or corpus-route ledgers.
-    """
-    ref = _message_header_text(message, "github_ref")
-    if ref is None:
-        return False
-    canonical_ref = unquote(ref).strip().lower()
-    return canonical_ref.startswith(_NON_RELEASE_GITHUB_REF_PREFIXES)
 
 
 @dataclass(slots=True)
@@ -360,20 +331,12 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         source_metadata_text = text[:32768]
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
-    elif bronze.source_format == "web" and (
-        "markdown" in bronze.content_type.lower()
-        or resolve_source_policy(
-            source_feed=bronze.source_feed,
-            source_format=bronze.source_format,
-            extraction_pipeline=bronze.extraction_pipeline,
-        ).family
-        == "repository_documentation"
-    ):
+    elif bronze.source_format == "web" and "markdown" in bronze.content_type.lower():
         text, title, source_metadata_text = _markdown_prose_projection(raw_html)
         model_text = text
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
-    elif bronze.source_format in {"code", "latex", "markdown"}:
+    elif bronze.source_format in {"latex", "markdown"}:
         text = raw_html.decode("utf-8", errors="replace").strip()
         title = str(bronze.url).rsplit("/", 1)[-1] or None
         model_text = text
@@ -629,8 +592,6 @@ def build_dataflow(
     payload_max_bytes = common.kafka_payload_max_bytes()
 
     def _step(msg: object) -> KafkaSinkMessage | None:
-        if _is_non_release_github_record(msg):
-            return None
         payload = getattr(msg, "value", None)
         if payload is None:
             failure_writer.record(stage="fetcher", message=msg, reason="kafka_tombstone")

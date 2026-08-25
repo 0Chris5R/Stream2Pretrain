@@ -22,7 +22,7 @@ from schemas.license_admission import LicenseAdmissionDecision
 def _gold() -> GoldRecord:
     return GoldRecord(
         doc_id="sha256:" + "a" * 64,
-        text="def train_model(x): return x",
+        text="A compact training-data document.",
         lang="en",
         tokens=6,
         quality_score=4.0,
@@ -35,10 +35,10 @@ def _gold() -> GoldRecord:
         classifier_revision="classifier-test",
         policy_revision="git:test",
         trace_id="0" * 32,
-        source_format="code",
-        extraction_pipeline="github-release-tarball-2026-06",
+        source_format="web",
+        extraction_pipeline="hf-model-card-markdown-v1",
         spdx_license="Apache-2.0",
-        spdx_license_source="github_api",
+        spdx_license_source="source_terms",
     )
 
 
@@ -53,10 +53,10 @@ def test_to_arrow_includes_v2_provenance_columns() -> None:
 
     table = writer._to_arrow([_gold()])
 
-    assert table.column("source_format").to_pylist() == ["code"]
-    assert table.column("extraction_pipeline").to_pylist() == ["github-release-tarball-2026-06"]
+    assert table.column("source_format").to_pylist() == ["web"]
+    assert table.column("extraction_pipeline").to_pylist() == ["hf-model-card-markdown-v1"]
     assert table.column("spdx_license").to_pylist() == ["Apache-2.0"]
-    assert table.column("spdx_license_source").to_pylist() == ["github_api"]
+    assert table.column("spdx_license_source").to_pylist() == ["source_terms"]
 
 
 class _FakeS3:

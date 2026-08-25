@@ -41,8 +41,6 @@ dev = [
     "stream2pretrain-ingest-common",
     "stream2pretrain-rss-poller",
     "stream2pretrain-arxiv-html-fetcher",
-    "stream2pretrain-github-releases",
-    "stream2pretrain-github-release-tarball-fetcher",
     "stream2pretrain-hf-poller",
     "stream2pretrain-oaipmh-poller",
     "stream2pretrain-processor",
@@ -71,11 +69,9 @@ packages = ["schemas"]
 members = [
     "ingest/common",
     "ingest/rss_poller",
-    "ingest/github_releases",
     "ingest/hf_poller",
     "ingest/oaipmh_poller",
     "ingest/arxiv_html_fetcher",
-    "ingest/github_release_tarball_fetcher",
     "processor",
     "tests",
 ]
@@ -85,8 +81,6 @@ stream2pretrain = { workspace = true }
 stream2pretrain-ingest-common = { workspace = true }
 stream2pretrain-rss-poller = { workspace = true }
 stream2pretrain-arxiv-html-fetcher = { workspace = true }
-stream2pretrain-github-releases = { workspace = true }
-stream2pretrain-github-release-tarball-fetcher = { workspace = true }
 stream2pretrain-hf-poller = { workspace = true }
 stream2pretrain-oaipmh-poller = { workspace = true }
 stream2pretrain-processor = { workspace = true }
@@ -198,8 +192,6 @@ module = [
     "processor.iceberg_writer",
     "processor.mixture_controller.controller",
     "ingest.oaipmh_poller.client",
-    "ingest.github_releases.poller",
-    "ingest.github_release_tarball_fetcher.*",
 ]
 disable_error_code = ["arg-type", "assignment", "attr-defined", "misc", "no-any-return", "type-arg", "union-attr", "untyped-decorator"]
 
@@ -209,11 +201,9 @@ testpaths = [
     "processor/tests",
     "ingest/common/tests",
     "ingest/rss_poller/tests",
-    "ingest/github_releases/tests",
     "ingest/hf_poller/tests",
     "ingest/oaipmh_poller/tests",
     "ingest/arxiv_html_fetcher/tests",
-    "ingest/github_release_tarball_fetcher/tests",
 ]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers --strict-config"

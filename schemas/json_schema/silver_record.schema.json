@@ -255,7 +255,6 @@
         "pdf",
         "latex",
         "markdown",
-        "code",
         "web",
         "metadata"
       ],
@@ -293,7 +292,6 @@
       "default": "unknown",
       "description": "Where the SPDX id was read from.",
       "enum": [
-        "github_api",
         "file_header",
         "http_link",
         "html_meta",

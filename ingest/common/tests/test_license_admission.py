@@ -29,19 +29,7 @@ def test_unknown_item_license_is_posttrain_only_with_provenance() -> None:
         assert result.decision.content_fetch_started is False
 
 
-def test_unknown_code_and_noncommercial_content_are_transform_only() -> None:
-    unknown_code = decide_license_admission(
-        source_url="https://github.com/example/repo/releases/tag/v1",
-        source_feed="github-release-tarball",
-        license_value=None,
-        license_source="unknown",
-        source_format="code",
-    )
-    assert unknown_code.admitted is False
-    assert unknown_code.fetch_allowed is True
-    assert unknown_code.decision.status == "posttrain_transform_only"
-    assert unknown_code.decision.source_format == "code"
-
+def test_noncommercial_content_is_transform_only() -> None:
     for value in ("CC-BY-NC-4.0", "CC-BY-NC-SA-4.0"):
         result = decide_license_admission(
             source_url="https://arxiv.org/abs/2608.00001",

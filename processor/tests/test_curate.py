@@ -402,29 +402,6 @@ def test_curate_recomputes_placeholder_seed_minhash(
         state.close()
 
 
-def test_curate_propagates_source_format_and_spdx(
-    cfg: ProcessorConfig, long_english_text: str
-) -> None:
-    state = build_state(cfg)
-    try:
-        silver = _silver(long_english_text, doc_id="sha256:" + "4" * 64).model_copy(
-            update={
-                "source_format": "code",
-                "extraction_pipeline": "github-release-tarball-2026-06",
-                "spdx_license": "Apache-2.0",
-                "spdx_license_source": "github_api",
-            }
-        )
-        gold = curate_one(state, silver)
-        assert gold.source_format == "code"
-        assert gold.extraction_pipeline == "github-release-tarball-2026-06"
-        assert gold.license == "Apache-2.0"
-        assert gold.spdx_license == "Apache-2.0"
-        assert gold.spdx_license_source == "github_api"
-    finally:
-        state.close()
-
-
 def test_transform_only_scientific_artifact_reaches_paper_foundry(
     cfg: ProcessorConfig,
     long_english_text: str,
@@ -537,43 +514,5 @@ def test_missing_paper_license_is_quarantined(cfg: ProcessorConfig, long_english
         assert "license_excluded" in gold.reject_reasons
         assert gold.license == "unknown"
         assert not trainable
-    finally:
-        state.close()
-
-
-def test_missing_code_license_is_not_trainable(
-    cfg: ProcessorConfig, long_english_text: str
-) -> None:
-    state = build_state(cfg)
-    try:
-        silver = _silver(long_english_text, doc_id="sha256:" + "8" * 64).model_copy(
-            update={
-                "source_format": "code",
-                "spdx_license": None,
-                "spdx_license_source": "unknown",
-            }
-        )
-        gold = curate_one(state, silver)
-        assert "license_excluded" in gold.reject_reasons
-        assert not is_trainable_gold(gold)
-    finally:
-        state.close()
-
-
-def test_code_license_must_be_permissive_whitelist(
-    cfg: ProcessorConfig, long_english_text: str
-) -> None:
-    state = build_state(cfg)
-    try:
-        silver = _silver(long_english_text, doc_id="sha256:" + "7" * 64).model_copy(
-            update={
-                "source_format": "code",
-                "spdx_license": "GPL-3.0-only",
-                "spdx_license_source": "github_api",
-            }
-        )
-        gold = curate_one(state, silver)
-        assert "license_excluded" in gold.reject_reasons
-        assert not is_trainable_gold(gold)
     finally:
         state.close()

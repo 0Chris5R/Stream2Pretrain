@@ -67,7 +67,6 @@ def _cfg() -> IngestConfig:
         minio_bronze_bucket="bronze",
         otel_endpoint=None,
         otel_protocol="grpc",
-        github_token=None,
         hf_token=None,
         user_agent="ua",
         http_timeout_seconds=2.0,

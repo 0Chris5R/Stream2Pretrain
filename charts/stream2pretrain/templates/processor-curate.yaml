@@ -140,9 +140,9 @@ spec:
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
             - name: S2P_BYTEWAX_FLOW_NAME
-              value: "s2p-curate-live-v4"
+              value: "s2p-curate-live-v5"
             - name: S2P_BYTEWAX_RECOVERY_NAME
-              value: "curate-live-v4"
+              value: "curate-live-v5"
             - name: S2P_CHECKPOINT_DIR
               value: /var/lib/s2p/checkpoint
             - name: S2P_STATE_DIR

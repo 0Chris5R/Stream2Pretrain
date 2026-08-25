@@ -11,7 +11,6 @@ Public API
 - :class:`schemas.bronze.BronzeRecord`
 - :class:`schemas.silver.SilverRecord`
 - :class:`schemas.gold.GoldRecord`
-- :class:`schemas.code.CodeFileRecord`
 - :class:`schemas.decon.DeconAttestation`
 - :class:`schemas.sourcefeed.SourceFeedSpec`
 - :mod:`schemas.topics` - topic name + partition / replication constants.
@@ -24,7 +23,6 @@ from schemas.bronze import (
     SourceFormat,
     SpdxLicenseSource,
 )
-from schemas.code import CodeFileRecord
 from schemas.decon import BenchmarkHit, DeconAttestation
 from schemas.foundry import (
     AnswerManifest,
@@ -64,7 +62,6 @@ from schemas.sourcefeed import (
     SourceFeedSpec,
 )
 from schemas.topics import (
-    CODE_SOURCE_FORMAT,
     CURATION_DECISIONS,
     DECON_ATTEST,
     DOCS_CURATED,
@@ -72,7 +69,6 @@ from schemas.topics import (
     FOUNDRY_ARTIFACTS,
     FOUNDRY_EVENTS,
     FOUNDRY_JOBS,
-    GITHUB_RELEASE_JOBS,
     LICENSE_ADMISSIONS,
     RAW_FETCHED,
     RAW_SMOKE,
@@ -82,7 +78,6 @@ from schemas.topics import (
 )
 
 __all__ = [
-    "CODE_SOURCE_FORMAT",
     "CURATION_DECISIONS",
     "DECON_ATTEST",
     "DOCS_CURATED",
@@ -90,7 +85,6 @@ __all__ = [
     "FOUNDRY_ARTIFACTS",
     "FOUNDRY_EVENTS",
     "FOUNDRY_JOBS",
-    "GITHUB_RELEASE_JOBS",
     "LICENSE_ADMISSIONS",
     "RAW_FETCHED",
     "RAW_SMOKE",
@@ -98,7 +92,6 @@ __all__ = [
     "ArtifactAuditRecord",
     "BenchmarkHit",
     "BronzeRecord",
-    "CodeFileRecord",
     "CorpusRoute",
     "DeconAttestation",
     "EnvironmentManifest",

@@ -127,12 +127,6 @@ fi
 echo "applying Phase-1 SourceFeed catalogue to namespace=${NAMESPACE}"
 echo "${MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 
-# These names belonged to removed sources. Delete the CRDs so the controller
-# also removes their generated workloads; do not leave disabled source cards.
-kubectl delete sourcefeeds.stream2pretrain.io -n "${NAMESPACE}" \
-  rss-openai-news rss-deepmind-blog rss-hf-blog rss-bair-blog rss-eleuther-blog \
-  --ignore-not-found --wait=true
-
 echo
 echo "current SourceFeeds:"
 kubectl get sourcefeeds.stream2pretrain.io -n "${NAMESPACE}" -o wide || true

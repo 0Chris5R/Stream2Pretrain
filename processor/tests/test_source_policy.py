@@ -17,26 +17,10 @@ from processor.source_policy import resolve_source_policy
             True,
         ),
         (
-            "github-release-tarballs",
-            "code",
-            "github-release-tarball-2026-06",
-            "source_code",
-            "stack_v2_dolma_rules",
-            True,
-        ),
-        (
-            "github-release-tarballs",
-            "web",
-            "github-readme-markdown-v1",
-            "repository_documentation",
-            "fineweb_edu",
-            True,
-        ),
-        (
             "cluster-smoke",
             "html",
             "resiliparse-0.14",
-            "repository_documentation",
+            "web_prose",
             "fineweb_edu",
             True,
         ),
@@ -89,14 +73,6 @@ from processor.source_policy import resolve_source_policy
             "not_applicable",
             False,
         ),
-        (
-            "github-releases",
-            "metadata",
-            "github-releases-atom-v1",
-            "discovery_metadata",
-            "not_applicable",
-            False,
-        ),
     ],
 )
 def test_configured_source_dispatch(
@@ -116,16 +92,6 @@ def test_configured_source_dispatch(
     assert policy.family == family
     assert policy.quality_profile == quality
     assert policy.training_text is training_text
-
-
-def test_wire_format_cannot_override_explicit_code_family() -> None:
-    code = resolve_source_policy(
-        source_feed="arxiv-import",
-        source_format="code",
-        extraction_pipeline="legacy-html",
-    )
-
-    assert code.family == "source_code"
 
 
 def test_only_ordinary_web_enables_web_shape_and_kenlm_gates() -> None:
@@ -151,13 +117,3 @@ def test_only_ordinary_web_enables_web_shape_and_kenlm_gates() -> None:
     assert scientific.kenlm_mode == "off"
     assert card.web_heuristic_gate is False
     assert card.kenlm_mode == "off"
-
-
-def test_code_does_not_use_natural_language_as_a_source_language_gate() -> None:
-    code = resolve_source_policy(
-        source_feed="github-release-tarballs",
-        source_format="code",
-        extraction_pipeline="github-release-tarball-2026-06",
-    )
-
-    assert code.language_gate is False

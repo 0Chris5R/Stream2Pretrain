@@ -18,7 +18,6 @@ from typing import Final
 from pydantic import BaseModel
 
 from schemas.bronze import BronzeRecord
-from schemas.code import CodeFileRecord
 from schemas.decon import DeconAttestation
 from schemas.foundry import (
     ArtifactAuditRecord,
@@ -43,7 +42,6 @@ EXPORTS: Final[tuple[tuple[type[BaseModel], str], ...]] = (
     (SilverRecord, "silver_record"),
     (GoldRecord, "gold_record"),
     (ScientificDocument, "scientific_document"),
-    (CodeFileRecord, "code_file_record"),
     (DeconAttestation, "decon_attestation"),
     (SourceFeedSpec, "source_feed_spec"),
     (MixtureRecipeSpec, "mixture_recipe_spec"),

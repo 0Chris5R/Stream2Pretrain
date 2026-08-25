@@ -171,22 +171,6 @@ def test_catalog_bootstrap_precedes_application_rollout() -> None:
     assert "COPY processor" in dockerfile
 
 
-def test_github_tarball_scaler_uses_a_non_amplifying_job_topic() -> None:
-    values = (ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text(encoding="utf-8")
-    template = (
-        ROOT / "charts" / "stream2pretrain" / "templates" / "ingest-github-tarball.yaml"
-    ).read_text(encoding="utf-8")
-    helper = (ROOT / "charts" / "stream2pretrain" / "templates" / "_helpers.tpl").read_text(
-        encoding="utf-8"
-    )
-
-    assert "githubReleaseJobs: github.release.jobs" in values
-    assert "- type: kafka" in template
-    assert ".Values.redpanda.topics.githubReleaseJobs" in template
-    assert "- type: prometheus" not in template
-    assert "S2P_GITHUB_RELEASE_JOBS_TOPIC" in helper
-
-
 def test_release_images_are_deployed_by_content_digest() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
     helper = (ROOT / "charts" / "stream2pretrain" / "templates" / "_helpers.tpl").read_text(

@@ -10,8 +10,7 @@ End-to-end source-aware curation. The worker:
 5. Recomputes the MinHash signature (cheap, ~us/doc) and tests the
    :class:`LSHBloomIndex` near-dup index.
 6. Dispatches by source family: FinePDFs Edu v2 for papers, FineWeb-Edu for
-   rendered web pages, and versioned transparent rules for code, peer reviews,
-   and structured API/OAI metadata.
+   Hugging Face cards and web prose, and a discovery-only metadata policy.
 7. Runs the PII regex pack plus Presidio.
 8. Runs the Decon-Gate (n-gram Bloom + E5-small-v2 embedding sketch).
 9. Emits a trainable :class:`GoldRecord` on ``docs.curated``.
@@ -50,7 +49,6 @@ from processor.model_client import (
     RemoteQualityClassifier,
 )
 from processor.operators.c4 import C4Filter
-from processor.operators.code_quality import CodeQualityPolicy
 from processor.operators.gopher import GopherFilter
 from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
 from processor.operators.lshbloom import LSHBloomIndex
@@ -77,8 +75,8 @@ from schemas.silver import SilverRecord, SilverSegment
 
 POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
-CURATOR_FLOW_NAME = "s2p-curate-live-v4"
-CURATOR_RECOVERY_NAME = "curate-live-v4"
+CURATOR_FLOW_NAME = "s2p-curate-live-v5"
+CURATOR_RECOVERY_NAME = "curate-live-v5"
 
 
 class QualityScorer(Protocol):
@@ -109,7 +107,6 @@ class CurateState:
     lsh: LSHBloomIndex
     finepdfs_quality: QualityScorer
     fineweb_quality: QualityScorer
-    code_quality: CodeQualityPolicy
     metadata_discovery: MetadataDiscoveryPolicy
     pii: PiiScanner
     decon: DeconGate
@@ -205,7 +202,6 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         lsh=lsh,
         finepdfs_quality=finepdfs_quality,
         fineweb_quality=fineweb_quality,
-        code_quality=CodeQualityPolicy(),
         metadata_discovery=MetadataDiscoveryPolicy(),
         pii=pii,
         decon=decon,
@@ -268,13 +264,10 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         extraction_pipeline=silver.extraction_pipeline,
     )
     is_scientific = source_policy.family == "scientific_paper"
-    is_code = source_policy.family == "source_code"
     is_metadata = not source_policy.training_text
     uses_fineweb = source_policy.quality_profile == "fineweb_edu"
     primary_quality: QualityScorer
-    if is_code:
-        primary_quality = state.code_quality
-    elif is_scientific:
+    if is_scientific:
         primary_quality = state.finepdfs_quality
     elif is_metadata:
         primary_quality = state.metadata_discovery
@@ -321,11 +314,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         segment_perplexity: float | None = None
         segment_bucket: str | None = None
         if segment.segment_id in sampled_ids:
-            quality_result = (
-                state.code_quality.score(segment.text, path=str(silver.url))
-                if is_code
-                else primary_quality.score(segment.text)
-            )
+            quality_result = primary_quality.score(segment.text)
             comparison_result = (
                 comparison_quality.score(segment.text) if comparison_quality is not None else None
             )
@@ -388,11 +377,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     ]
     if kept_segments and not measured_kept:
         fallback_segment = kept_segments[0]
-        quality_result = (
-            state.code_quality.score(fallback_segment.text, path=str(silver.url))
-            if is_code
-            else primary_quality.score(fallback_segment.text)
-        )
+        quality_result = primary_quality.score(fallback_segment.text)
         comparison_result = (
             comparison_quality.score(fallback_segment.text)
             if comparison_quality is not None
@@ -441,7 +426,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     runtime_excluded.extend(structured_exclusions)
     text = _training_projection(silver, kept_segments, structured_text=structured_text)
     reject: list[RejectReason] = []
-    minimum_words = 20 if is_code else 50
+    minimum_words = 50
     if is_metadata:
         reject.append("metadata_only")
     if len(model_text.split()) < minimum_words:
@@ -490,13 +475,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     )
     if source_policy.kenlm_mode == "gate" and tail_fraction >= 0.75 and perplexity > 2000:
         reject.append("high_perplexity")
-
-    if is_code:
-        code_issues = state.code_quality.rejection_reasons(model_text, path=str(silver.url))
-        if "credential_like_secret" in code_issues:
-            reject.append("secret_detected")
-        if any(issue != "credential_like_secret" for issue in code_issues):
-            reject.append("code_quality_filter")
 
     retained_view = silver.model_copy(
         update={

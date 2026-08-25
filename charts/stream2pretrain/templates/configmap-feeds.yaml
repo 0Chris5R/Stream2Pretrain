@@ -36,13 +36,6 @@ data:
         "license_default": {{ .Values.sources.arxiv.rss.licenseDefault | quote }}
       }
     }
-  github-repos.json: |-
-    {
-      "releases": {
-        "repos": {{ toJson .Values.sources.github.releases.repos }},
-        "poll_interval_seconds": {{ .Values.sources.github.releases.pollIntervalSeconds }}
-      }
-    }
   hf.json: |-
     {
       "models": {

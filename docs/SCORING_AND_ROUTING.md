@@ -53,14 +53,7 @@ second headline score. General web/blog content uses FineWeb-Edu as its primary
 educational score and follows the model-card recommendation to retain scores 3
 and above.
 
-Code records do not run either prose classifier. They use
-`stack-v2-dolma-code-rules-v2`, a visible 0 to 5 source-quality signal grounded
-in the Stack v2 and Dolma filter families. Binary and undecodable content,
-generated/vendor/minified paths, extreme lines, low alphanumeric density,
-implausible alphabetic-character-per-token ratios, broken syntax signals, and
-credential-like secrets are source-specific blockers.
-
-Hugging Face cards and repository documentation remove front matter and fenced
+Hugging Face cards remove front matter and fenced
 code before FineWeb-Edu scoring. The score remains an audit signal because the
 ordinary-web threshold was not calibrated for structured Markdown. Discovery
 metadata has no educational classifier and cannot reach Gold.
@@ -89,12 +82,11 @@ measured retained sections are in the tail and the weighted median is above
 2,000. KenLM measures language-model typicality. It is not a correctness or
 scientific-value score.
 
-Scientific papers, cards, repository documentation, code, peer reviews, and
+Scientific papers and cards, along with
 discovery metadata do not receive a KenLM value. Their persisted scorer is
 `not-applicable`, and typicality is removed from the composite instead of
 substituting an artificial value. Gopher and C4 are hard gates only for
-ordinary web prose. Natural-language ID also does not gate source code, whose
-programming language comes from the file extension. Every trainable profile
+ordinary web prose. Every trainable profile
 retains privacy, licence, exact/near-duplicate, validity, and benchmark checks.
 
 ### 3.3 Language, privacy, deduplication, and decontamination
@@ -192,8 +184,8 @@ read-only compatibility labels for historical snapshots. Current curation
 never creates them.
 
 The low-quality blocker uses the official FineWeb-Edu score 3 boundary only for
-ordinary web prose. Scientific papers, cards, repository documentation, code,
-and reviews use their source-specific blockers and do not inherit that web
+ordinary web prose. Scientific papers and cards use their
+source-specific blockers and do not inherit that web
 threshold.
 
 ## 7. Content taxonomy

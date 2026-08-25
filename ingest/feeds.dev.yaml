@@ -83,13 +83,3 @@ feeds:
       secret_name: hf-token
       secret_key: token
     egress_allow: ["huggingface.co", "hf.co"]
-
-  - name: github-releases
-    protocol: atom
-    endpoint: https://github.com
-    poll_interval_seconds: 7200
-    rate_limit:
-      requests_per_second: 2.0
-      burst: 4
-    license_default: per-record
-    egress_allow: ["github.com", "api.github.com"]

@@ -13,18 +13,16 @@ flowchart LR
 
   subgraph EDGE [Edge - SourceFeed Pollers]
     direction TB
-    rss[RSS / Atom pollers]
-    oai[OAI-PMH poller]
-    gh[GitHub events + releases]
-    hf[HF Hub poller]
-    site[Sitemap poller]
-    tarball[release tarball fetcher]
+    rss[arXiv RSS discovery]
+    oai[arXiv OAI-PMH discovery]
+    arxiv[arXiv full-text fetcher]
+    hfModels[HF model cards]
+    hfDatasets[HF dataset cards]
   end
 
   subgraph BUS [Redpanda]
     direction TB
     raw[(raw.fetched)]
-    releaseJobs[(github.release.jobs)]
     norm[(docs.normalized)]
     cur[(docs.curated)]
     att[(decon.attest)]
@@ -55,14 +53,11 @@ flowchart LR
     ui[Next.js 14 UI]
   end
 
-  rss --> raw
-  oai --> raw
-  gh --> raw
-  gh --> releaseJobs
-  releaseJobs --> tarball
-  tarball --> raw
-  hf --> raw
-  site --> raw
+  rss --> arxiv
+  oai --> arxiv
+  arxiv --> raw
+  hfModels --> raw
+  hfDatasets --> raw
 
   raw --> fetch
   fetch --> extract
@@ -84,8 +79,8 @@ flowchart LR
   duckdb --> ui
   att --> ui
 
-  class rss,oai,gh,hf,site,tarball edge
-  class raw,releaseJobs,norm,cur,att bus
+  class rss,oai,arxiv,hfModels,hfDatasets edge
+  class raw,norm,cur,att bus
   class fetch,extract,tags,score,decon,valid,iceberg engine
   class minio,silver,gold,polaris store
   class duckdb,ui serve

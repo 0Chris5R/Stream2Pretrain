@@ -27,6 +27,7 @@ _LICENSE_POLICY_SQL = LICENSE_POLICY_REVISION.replace("'", "''")
 _REMOVED_CORPUS_SOURCES = (
     "github-events",
     "github-releases",
+    "github-release-tarballs",
     "hf-daily-papers",
     "oai-arxiv-cs",
     "rss-openai-news",

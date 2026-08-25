@@ -3,15 +3,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from processor.common import ProcessorConfig
 from processor.mixture_controller.controller import (
     _BUILTIN_SOURCES,
     MixtureController,
     _cron_schedule,
+    _source_egress_class,
     _source_job_runtime,
     _sourcefeed_status,
 )
-from schemas.sourcefeed import MixtureRecipeSpec
+from schemas.sourcefeed import MixtureRecipeSpec, SourceFeedSpec
 
 
 def test_sourcefeed_status_maps_kubernetes_crd_shape() -> None:
@@ -60,7 +63,7 @@ def test_source_job_runtime_prefers_latest_attempt_and_retains_last_success() ->
     ) -> SimpleNamespace:
         return SimpleNamespace(
             metadata=SimpleNamespace(
-                labels={"stream2pretrain.io/source-feed": "rss-bair-blog"},
+                labels={"stream2pretrain.io/source-feed": "rss-arxiv-cs-lg"},
                 creation_timestamp=started,
             ),
             status=SimpleNamespace(
@@ -80,7 +83,7 @@ def test_source_job_runtime_prefers_latest_attempt_and_retains_last_success() ->
             job(started=first, succeeded=1, completed=first),
             job(started=latest, active=1),
         ]
-    )["rss-bair-blog"]
+    )["rss-arxiv-cs-lg"]
 
     assert runtime["phase"] == "Polling"
     assert runtime["last_attempt_at"] == latest.isoformat()
@@ -89,10 +92,10 @@ def test_source_job_runtime_prefers_latest_attempt_and_retains_last_success() ->
 
 def test_sourcefeed_status_uses_observed_job_runtime() -> None:
     item = {
-        "metadata": {"name": "rss-bair-blog"},
+        "metadata": {"name": "rss-arxiv-cs-lg"},
         "spec": {
             "protocol": "rss",
-            "endpoint": "https://bair.berkeley.edu/blog/feed.xml",
+            "endpoint": "https://rss.arxiv.org/rss/cs.LG",
             "pollIntervalSeconds": 86400,
             "rateLimit": {"requestsPerSecond": 1.0, "burst": 2},
             "licenseDefault": "per-record",
@@ -117,12 +120,28 @@ def test_sourcefeed_status_uses_observed_job_runtime() -> None:
     assert status["last_error"] == "DeadlineExceeded"
 
 
+def test_sourcefeed_egress_rejects_unreviewed_hosts() -> None:
+    source = SourceFeedSpec.model_validate(
+        {
+            "name": "unreviewed-feed",
+            "protocol": "rss",
+            "endpoint": "https://example.com/feed.xml",
+            "pollIntervalSeconds": 3600,
+            "rateLimit": {"requestsPerSecond": 1.0, "burst": 1},
+            "licenseDefault": "per-record",
+            "enabled": True,
+        }
+    )
+
+    with pytest.raises(ValueError, match="unsupported SourceFeed endpoint host"):
+        _source_egress_class(source)
+
+
 def test_builtin_inventory_excludes_removed_discovery_and_backfill_sources() -> None:
     names = {str(item["name"]) for item in _BUILTIN_SOURCES}
 
     assert names == {
         "arxiv-html-fetcher",
-        "github-release-tarballs",
         "hf-models",
         "hf-datasets",
     }

@@ -13,7 +13,6 @@ from processor.fetcher import (
     PdfProcessingTemporarilyDisabled,
     RawObjectEmpty,
     RawObjectMissing,
-    _is_non_release_github_record,
     _markdown_prose_projection,
     fetch_raw_bytes,
     fetcher_input_topics,
@@ -49,29 +48,6 @@ class _FakeS3:
         if self._gzip:
             headers["ContentEncoding"] = "gzip"
         return headers
-
-
-@pytest.mark.parametrize(
-    "ref",
-    [b"viable/strict/1787664910", b"viable%2Fstrict%2F1787664910", b"ciflow/test"],
-)
-def test_historical_ci_refs_are_not_corpus_records(ref: bytes) -> None:
-    class Message:
-        def __init__(self) -> None:
-            self.headers = [("source_feed", b"github-releases"), ("github_ref", ref)]
-
-    assert _is_non_release_github_record(Message()) is True
-
-
-def test_real_github_release_ref_is_not_filtered() -> None:
-    class Message:
-        def __init__(self) -> None:
-            self.headers = [
-                ("source_feed", b"github-releases"),
-                ("github_ref", b"v2.8.0"),
-            ]
-
-    assert _is_non_release_github_record(Message()) is False
 
 
 def _state(s3: _FakeS3, *, bucket: str = "bronze") -> FetcherState:
@@ -220,25 +196,6 @@ def test_normalize_returns_silver(bronze_record: BronzeRecord) -> None:
     }
 
 
-def test_normalize_code_bronze_decodes_plain_text(bronze_record: BronzeRecord) -> None:
-    state = _state(_FakeS3(b""))
-    code_bronze = bronze_record.model_copy(
-        update={
-            "url": "https://github.com/org/repo/blob/v1/src/foo.py",
-            "source_format": "code",
-            "extraction_pipeline": "github-release-tarball-2026-06",
-            "spdx_license": "Apache-2.0",
-            "spdx_license_source": "github_api",
-        }
-    )
-    silver = normalize(state, code_bronze, b"def fit_model(x):\n    return x\n")
-    assert silver is not None
-    assert silver.source_format == "code"
-    assert silver.extraction_pipeline == "github-release-tarball-2026-06"
-    assert silver.spdx_license == "Apache-2.0"
-    assert "def fit_model" in silver.text
-
-
 def test_normalize_structured_metadata_extracts_human_text(bronze_record: BronzeRecord) -> None:
     state = _state(_FakeS3(b""))
     metadata_bronze = bronze_record.model_copy(
@@ -312,23 +269,6 @@ def test_missing_non_code_license_stops_before_minio_and_processing(
     state = _state(s3)
     unlicensed = bronze_record.model_copy(
         update={"spdx_license": None, "spdx_license_source": "unknown"}
-    )
-
-    assert process_bronze_payload(state, unlicensed.model_dump_json().encode()) is None
-    assert s3.calls == []
-
-
-def test_missing_code_license_stops_before_minio_and_processing(
-    bronze_record: BronzeRecord,
-) -> None:
-    s3 = _FakeS3(b"must not be read")
-    state = _state(s3)
-    unlicensed = bronze_record.model_copy(
-        update={
-            "source_format": "code",
-            "spdx_license": None,
-            "spdx_license_source": "unknown",
-        }
     )
 
     assert process_bronze_payload(state, unlicensed.model_dump_json().encode()) is None

@@ -591,8 +591,6 @@
           "minhash_backend_mismatch",
           "insufficient_body",
           "insufficient_scientific_body",
-          "code_quality_filter",
-          "secret_detected",
           "incomplete_scientific_extraction"
         ],
         "type": "string"
@@ -700,7 +698,6 @@
         "pdf",
         "latex",
         "markdown",
-        "code",
         "web",
         "metadata"
       ],
@@ -731,7 +728,6 @@
       "default": "unknown",
       "description": "Where the SPDX id was read from.",
       "enum": [
-        "github_api",
         "file_header",
         "http_link",
         "html_meta",
@@ -746,16 +742,6 @@
         "unknown"
       ],
       "title": "Spdx License Source",
-      "type": "string"
-    },
-    "training_usage": {
-      "default": "pretrain_and_posttrain",
-      "description": "Purpose boundary inherited from the pre-fetch item licence decision.",
-      "enum": [
-        "pretrain_and_posttrain",
-        "posttrain_transform_only"
-      ],
-      "title": "Training Usage",
       "type": "string"
     },
     "structural_quality_score": {
@@ -790,6 +776,16 @@
       "description": "W3C trace-id (lowercase hex, 32 chars).",
       "pattern": "^[0-9a-f]{32}$",
       "title": "Trace Id",
+      "type": "string"
+    },
+    "training_usage": {
+      "default": "pretrain_and_posttrain",
+      "description": "Purpose boundary inherited from the pre-fetch item licence decision.",
+      "enum": [
+        "pretrain_and_posttrain",
+        "posttrain_transform_only"
+      ],
+      "title": "Training Usage",
       "type": "string"
     },
     "training_word_count": {

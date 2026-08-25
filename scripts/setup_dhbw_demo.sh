@@ -176,7 +176,6 @@ required_secrets() {
     stream2pretrain/stream2pretrain-minio/secretKey \
     stream2pretrain/stream2pretrain-polaris/credential \
     stream2pretrain/stream2pretrain-polaris/scope \
-    stream2pretrain/stream2pretrain-github/token \
     stream2pretrain/stream2pretrain-hf/token \
     stream2pretrain/stream2pretrain-decon-signing/ed25519.key; do
     namespace="${item%%/*}"
@@ -259,7 +258,7 @@ ensure_topics() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local topic
   for topic in \
-    raw.fetched raw.smoke github.release.jobs \
+    raw.fetched raw.smoke \
     docs.normalized docs.normalized.smoke \
     docs.curated docs.curated.smoke \
     curation.decisions curation.decisions.smoke \
@@ -284,7 +283,7 @@ required_topics() {
   local missing=0
   local topic
   for topic in \
-    raw.fetched raw.smoke github.release.jobs \
+    raw.fetched raw.smoke \
     docs.normalized docs.normalized.smoke \
     docs.curated docs.curated.smoke \
     curation.decisions curation.decisions.smoke \

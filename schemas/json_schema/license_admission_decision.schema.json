@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "One fail-closed licence decision made before content retrieval.",
+  "description": "One purpose-aware licence decision made before content retrieval.",
   "properties": {
     "content_fetch_started": {
       "const": false,
@@ -19,6 +19,47 @@
       "title": "Doc Id",
       "type": "string"
     },
+    "evidence_revision": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Revision"
+    },
+    "evidence_scope": {
+      "default": "unknown",
+      "enum": [
+        "item",
+        "file",
+        "repository_ref",
+        "source_terms",
+        "dataset_wrapper",
+        "unknown"
+      ],
+      "title": "Evidence Scope",
+      "type": "string"
+    },
+    "evidence_url": {
+      "anyOf": [
+        {
+          "format": "uri",
+          "maxLength": 2083,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Url"
+    },
     "license_id": {
       "maxLength": 128,
       "minLength": 1,
@@ -31,14 +72,6 @@
       "title": "License Source",
       "type": "string"
     },
-    "raw_license": {
-      "anyOf": [
-        {"maxLength": 512, "type": "string"},
-        {"type": "null"}
-      ],
-      "default": null,
-      "title": "Raw License"
-    },
     "normalized_license": {
       "default": "unknown",
       "maxLength": 128,
@@ -46,33 +79,9 @@
       "title": "Normalized License",
       "type": "string"
     },
-    "resolver": {
-      "default": "legacy",
-      "maxLength": 128,
-      "minLength": 1,
-      "title": "Resolver",
-      "type": "string"
-    },
-    "evidence_url": {
-      "anyOf": [
-        {"format": "uri", "maxLength": 2083, "minLength": 1, "type": "string"},
-        {"type": "null"}
-      ],
-      "default": null,
-      "title": "Evidence Url"
-    },
-    "evidence_revision": {
-      "anyOf": [
-        {"maxLength": 256, "type": "string"},
-        {"type": "null"}
-      ],
-      "default": null,
-      "title": "Evidence Revision"
-    },
-    "evidence_scope": {
-      "default": "unknown",
-      "enum": ["item", "file", "repository_ref", "source_terms", "dataset_wrapper", "unknown"],
-      "title": "Evidence Scope",
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
       "type": "string"
     },
     "policy_revision": {
@@ -82,23 +91,43 @@
       "title": "Policy Revision",
       "type": "string"
     },
-    "resolved_at": {
+    "raw_license": {
       "anyOf": [
-        {"format": "date-time", "type": "string"},
-        {"type": "null"}
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
       ],
       "default": null,
-      "title": "Resolved At"
-    },
-    "observed_at": {
-      "format": "date-time",
-      "title": "Observed At",
-      "type": "string"
+      "title": "Raw License"
     },
     "reason": {
       "maxLength": 512,
       "minLength": 1,
       "title": "Reason",
+      "type": "string"
+    },
+    "resolved_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Resolved At"
+    },
+    "resolver": {
+      "default": "legacy",
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Resolver",
       "type": "string"
     },
     "source_feed": {
@@ -110,10 +139,19 @@
     "source_format": {
       "anyOf": [
         {
-          "enum": ["html", "pdf", "latex", "code", "web", "metadata", "markdown"],
+          "enum": [
+            "html",
+            "pdf",
+            "latex",
+            "markdown",
+            "web",
+            "metadata"
+          ],
           "type": "string"
         },
-        {"type": "null"}
+        {
+          "type": "null"
+        }
       ],
       "default": null,
       "title": "Source Format"

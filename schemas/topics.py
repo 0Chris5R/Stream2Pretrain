@@ -20,7 +20,6 @@ from typing import Final
 # k8s manifests, rpk scripts, and OpenTelemetry span attributes.
 RAW_FETCHED: Final[str] = "raw.fetched"
 RAW_SMOKE: Final[str] = "raw.smoke"
-GITHUB_RELEASE_JOBS: Final[str] = "github.release.jobs"
 DOCS_NORMALIZED: Final[str] = "docs.normalized"
 DOCS_NORMALIZED_SMOKE: Final[str] = "docs.normalized.smoke"
 DOCS_CURATED: Final[str] = "docs.curated"
@@ -34,20 +33,9 @@ FOUNDRY_JOBS: Final[str] = "foundry.jobs"
 FOUNDRY_EVENTS: Final[str] = "foundry.events"
 FOUNDRY_ARTIFACTS: Final[str] = "foundry.artifacts"
 
-# v0.2.0 deliberately does NOT add a ``docs.code`` topic. Per-file code
-# records produced by ``ingest/github_release_tarball_fetcher`` ride the same
-# ``raw.fetched`` topic and carry ``source_format='code'`` on the BronzeRecord;
-# Silver/Gold equivalents likewise ride ``docs.normalized`` / ``docs.curated``.
-# Downstream operators dispatch on the ``source_format`` column. This keeps
-# the shared document topics stable. ``curation.decisions`` is an audit stream,
-# not another document-format stream: every accepted or rejected score result
-# is published there so attestations and quarantine storage are complete.
-CODE_SOURCE_FORMAT: Final[str] = "code"
-
 ALL_TOPICS: Final[tuple[str, ...]] = (
     RAW_FETCHED,
     RAW_SMOKE,
-    GITHUB_RELEASE_JOBS,
     DOCS_NORMALIZED,
     DOCS_NORMALIZED_SMOKE,
     DOCS_CURATED,
@@ -112,12 +100,6 @@ def dev_topic_configs() -> list[TopicConfig]:
             RAW_SMOKE, partitions=4, replication_factor=1, retention_ms=_SMOKE_RETENTION_MS
         ),
         TopicConfig(
-            GITHUB_RELEASE_JOBS,
-            partitions=4,
-            replication_factor=1,
-            retention_ms=_DEV_RETENTION_MS,
-        ),
-        TopicConfig(
             DOCS_NORMALIZED, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
@@ -180,12 +162,6 @@ def prod_topic_configs() -> list[TopicConfig]:
         ),
         TopicConfig(
             RAW_SMOKE, partitions=3, replication_factor=3, retention_ms=_SMOKE_RETENTION_MS
-        ),
-        TopicConfig(
-            GITHUB_RELEASE_JOBS,
-            partitions=12,
-            replication_factor=3,
-            retention_ms=_PROD_RETENTION_MS,
         ),
         TopicConfig(
             DOCS_NORMALIZED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS

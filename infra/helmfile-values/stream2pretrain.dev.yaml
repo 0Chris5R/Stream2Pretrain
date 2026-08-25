@@ -145,5 +145,3 @@ ingest:
     maxRecordsPerLoop: 0
   hf:
     replicas: 1
-  githubTarballFetcher:
-    enabled: true

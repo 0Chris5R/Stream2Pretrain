@@ -32,8 +32,6 @@ Each source family must implement the metadata lookup appropriate to it:
 
 - arXiv RSS and OAI-PMH are internal scheduling messages. The full-text worker
   resolves the individual paper licence before body retrieval.
-- GitHub release discovery is internal. The tarball worker retains repository,
-  exact ref, path, licence blob SHA, and any per-file SPDX provenance.
 - Hugging Face model and dataset cards use an exact commit and either explicit
   README rights or the versioned public-repository terms. This never grants
   rights in weights, dataset rows, or linked artifacts.
@@ -78,9 +76,7 @@ threshold rationale, and fallback behavior.
 
 Distinct policies are required for the active content families:
 
-- scientific papers and peer-reviewed full text;
-- source code and repository documentation;
-- peer reviews;
+- scientific papers;
 - model and dataset cards.
 
 FinePDFs Edu v2 remains the scientific-quality default unless same-sample
@@ -100,7 +96,6 @@ All configured sources run through a dedicated, tested path:
 
 - four arXiv RSS categories and current-frontier OAI-PMH schedule one canonical
   arXiv full-text artifact with bounded CPU PDF fallback;
-- GitHub Releases Atom schedules exact-ref release tarball code and docs;
 - Hugging Face Hub model and dataset cards retain exact-revision README prose;
 
 Redundant discovery sources, sources without a useful corpus projection, blog

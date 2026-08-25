@@ -186,18 +186,6 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         + 0.10 * float(bool(silver.text.strip())),
     )
     structural = max(0.0, min(5.0, 5.0 * completeness))
-    if source_policy.family == "source_code":
-        text = silver.model_text or silver.text
-        reasoning = min(
-            1.0,
-            0.15
-            + 0.15 * float("def " in text or "function " in text)
-            + 0.15 * float("class " in text)
-            + 0.10 * float("test" in (silver.title or "").lower())
-            + 0.15 * (quality_score / 5.0),
-        )
-        tags = ["systems_implementation", "methods_procedures"]
-        return ScientificScores(completeness, structural, reasoning, 0.0, tags)
     if not source_policy.training_text:
         return ScientificScores(
             completeness,

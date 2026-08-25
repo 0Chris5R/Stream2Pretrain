@@ -1,9 +1,8 @@
 """Single source-of-truth dispatch for extraction and curation profiles.
 
 Wire format is not a quality domain. For example, an arXiv HTML document and
-an AI-lab HTML page need different classifiers, while a Hugging Face card and
-a GitHub README are Markdown documents whose prose can use the web classifier
-only after card/front-matter and code blocks are removed.
+an ordinary web page need different classifiers, while Hugging Face cards use
+their own Markdown projection before card prose is scored.
 
 The resolver is deliberately dependency-free so ingest, fetcher, curator, UI
 metadata, and tests can share the same decisions without loading any model.
@@ -19,8 +18,6 @@ from typing import Literal
 SourceFamily = Literal[
     "scientific_paper",
     "web_prose",
-    "repository_documentation",
-    "source_code",
     "hf_model_card",
     "hf_dataset_card",
     "discovery_metadata",
@@ -28,7 +25,6 @@ SourceFamily = Literal[
 QualityProfile = Literal[
     "finepdfs_edu_v2",
     "fineweb_edu",
-    "stack_v2_dolma_rules",
     "not_applicable",
 ]
 KenlmMode = Literal["gate", "diagnostic", "off"]
@@ -70,26 +66,13 @@ WEB_PROSE = SourceProcessingPolicy(
     web_heuristic_gate=True,
     kenlm_mode="gate",
 )
-REPOSITORY_DOCUMENTATION = SourceProcessingPolicy(
-    policy_id="repository-docs-fineweb",
-    family="repository_documentation",
+TECHNICAL_DOCUMENTATION = SourceProcessingPolicy(
+    policy_id="technical-docs-fineweb",
+    family="web_prose",
     extraction_profile="markdown-prose",
     quality_profile="fineweb_edu",
     training_text=True,
     language_gate=True,
-    # Cards and READMEs legitimately contain lists, front matter, templates,
-    # and fenced code. Common-Crawl page-shape gates are not valid blockers.
-    web_heuristic_gate=False,
-    kenlm_mode="off",
-)
-SOURCE_CODE = SourceProcessingPolicy(
-    policy_id="code-stack-v2-dolma",
-    family="source_code",
-    extraction_profile="repository-file",
-    quality_profile="stack_v2_dolma_rules",
-    training_text=True,
-    # Natural-language ID is not a valid source-language classifier.
-    language_gate=False,
     web_heuristic_gate=False,
     kenlm_mode="off",
 )
@@ -138,8 +121,8 @@ def resolve_source_policy(
 ) -> SourceProcessingPolicy:
     """Resolve a stable policy from record provenance.
 
-    Explicit wire formats win over names so legacy scientific artifacts cannot
-    make a replayed review or code record inherit the paper classifier.
+    Explicit wire formats win over names so legacy metadata cannot inherit the
+    paper classifier.
     """
     feed = source_feed.lower()
     pipeline = extraction_pipeline.lower()
@@ -147,24 +130,16 @@ def resolve_source_policy(
 
     if source_format == "metadata":
         return DISCOVERY_METADATA
-    if source_format == "code":
-        return SOURCE_CODE
-
     if "hf-model-card" in pipeline or feed == "hf-models":
         return HF_MODEL_CARD
     if "hf-dataset-card" in pipeline or feed == "hf-datasets":
         return HF_DATASET_CARD
-    if any(
-        marker in pipeline
-        for marker in ("github-readme", "repository-readme", "repository-documentation")
-    ):
-        return REPOSITORY_DOCUMENTATION
     # The synthetic cluster canary is technical documentation, not randomly
     # crawled web prose. It still exercises the real FineWeb-Edu service, but
     # uses the documentation policy where that score is an audit signal rather
     # than an out-of-domain hard gate.
     if feed == "cluster-smoke":
-        return REPOSITORY_DOCUMENTATION
+        return TECHNICAL_DOCUMENTATION
 
     if source_format in {"pdf", "latex", "markdown"}:
         return SCIENTIFIC_PAPER
@@ -178,8 +153,7 @@ def source_policy_catalog() -> tuple[SourceProcessingPolicy, ...]:
     return (
         SCIENTIFIC_PAPER,
         WEB_PROSE,
-        REPOSITORY_DOCUMENTATION,
-        SOURCE_CODE,
+        TECHNICAL_DOCUMENTATION,
         HF_MODEL_CARD,
         HF_DATASET_CARD,
         DISCOVERY_METADATA,

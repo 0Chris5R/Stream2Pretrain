@@ -324,9 +324,11 @@ def _bind_source_config(
 
 
 def _source_egress_class(source: SourceFeedSpec) -> str:
-    """Select the chart's broad external-egress policy for a dynamic source."""
+    """Allow only the audited arXiv discovery endpoints in SourceFeed CRDs."""
     endpoint_host = str(source.endpoint.host or "").lower()
-    return "arxiv" if endpoint_host.endswith("arxiv.org") else "blogs"
+    if endpoint_host.endswith("arxiv.org"):
+        return "arxiv"
+    raise ValueError(f"unsupported SourceFeed endpoint host: {endpoint_host}")
 
 
 def _reconcile_source_schedule(source: SourceFeedSpec, *, namespace: str, owner_uid: str) -> None:
@@ -554,16 +556,6 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "quality": "FinePDFs Edu v2 on structured full text",
         "license": "arXiv item rights before full-text fetch",
         "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
-    },
-    {
-        "name": "github-release-tarballs",
-        "component": "ingest-github-tarball-fetcher",
-        "kind": "deployment",
-        "protocol": "rest-json",
-        "endpoint": "https://api.github.com/repos",
-        "quality": "Stack v2 / Dolma code rules; FineWeb-Edu audit for docs",
-        "license": "SPDX file header, then tagged repository ref",
-        "stages": ["license", "fetch", "extract", "classify", "route"],
     },
     {
         "name": "hf-models",

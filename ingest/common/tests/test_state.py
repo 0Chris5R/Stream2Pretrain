@@ -50,12 +50,12 @@ def test_state_keys_are_portable_file_names(tmp_path: Path) -> None:
 
 
 def test_legacy_state_file_is_read_during_filename_migration(tmp_path: Path) -> None:
-    legacy = tmp_path / "github-releases_huggingface_transformers.json"
+    legacy = tmp_path / "rss-arxiv_cs_ai.json"
     legacy.write_text('{"etag": "old"}', encoding="utf-8")
 
     store = FeedStateStore(tmp_path)
 
-    assert store.get("github-releases/huggingface_transformers") == {"etag": "old"}
+    assert store.get("rss-arxiv/cs_ai") == {"etag": "old"}
 
 
 class _S3Error(Exception):
@@ -102,13 +102,13 @@ def test_s3_round_trip_uses_component_scoped_objects(monkeypatch) -> None:
         s3_client=fake,
     )
 
-    assert store.get("rss-bair-blog") == {}
-    store.put("rss-bair-blog", {"etag": "abc"})
+    assert store.get("rss-arxiv-cs-ai") == {}
+    store.put("rss-arxiv-cs-ai", {"etag": "abc"})
 
-    assert store.get("rss-bair-blog") == {"etag": "abc"}
+    assert store.get("rss-arxiv-cs-ai") == {"etag": "abc"}
     assert (
         "s2p-state",
-        "ingest-cursors/ingest-rss/rss-bair-blog.json",
+        "ingest-cursors/ingest-rss/rss-arxiv-cs-ai.json",
     ) in fake.objects
 
 

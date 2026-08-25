@@ -251,8 +251,8 @@ jobs:
                   "fetcher",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-live-v4",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-live-v4",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-live-v5",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-live-v5",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -262,8 +262,8 @@ jobs:
                   "curate",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-live-v4",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-live-v4",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-live-v5",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-live-v5",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -605,10 +605,6 @@ jobs:
             context: .
             dockerfile: ingest/oaipmh_poller/Dockerfile
             inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/oaipmh_poller
-          - image: ingest-github-releases
-            context: .
-            dockerfile: ingest/github_releases/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_releases
           - image: ingest-hf
             context: .
             dockerfile: ingest/hf_poller/Dockerfile
@@ -617,10 +613,6 @@ jobs:
             context: .
             dockerfile: ingest/arxiv_html_fetcher/Dockerfile
             inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher
-          - image: ingest-github-tarball-fetcher
-            context: .
-            dockerfile: ingest/github_release_tarball_fetcher/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_release_tarball_fetcher
           - image: processor
             context: .
             dockerfile: processor/Dockerfile.app
@@ -808,10 +800,8 @@ jobs:
     outputs:
       ingest_rss: ${{ steps.pin.outputs.ingest_rss }}
       ingest_oaipmh: ${{ steps.pin.outputs.ingest_oaipmh }}
-      ingest_github_releases: ${{ steps.pin.outputs.ingest_github_releases }}
       ingest_hf: ${{ steps.pin.outputs.ingest_hf }}
       ingest_arxiv_html: ${{ steps.pin.outputs.ingest_arxiv_html }}
-      ingest_github_tarball_fetcher: ${{ steps.pin.outputs.ingest_github_tarball_fetcher }}
       processor: ${{ steps.pin.outputs.processor }}
       processor_foundry: ${{ steps.pin.outputs.processor_foundry }}
       processor_quality_model: ${{ steps.pin.outputs.processor_quality_model }}
@@ -854,10 +844,8 @@ jobs:
           }
           pin_component ingest_rss ingest-rss
           pin_component ingest_oaipmh ingest-oaipmh
-          pin_component ingest_github_releases ingest-github-releases
           pin_component ingest_hf ingest-hf
           pin_component ingest_arxiv_html ingest-arxiv-html
-          pin_component ingest_github_tarball_fetcher ingest-github-tarball-fetcher
           pin_component processor processor
           pin_component processor_foundry processor-foundry
           pin_component processor_quality_model processor-quality-model
@@ -900,10 +888,8 @@ jobs:
       REDPANDA_CHANGED: ${{ needs.changes.outputs.redpanda }}
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
-      IMAGE_DIGEST_INGEST_GITHUB_RELEASES: ${{ needs.image-pin.outputs.ingest_github_releases }}
       IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
       IMAGE_DIGEST_INGEST_ARXIV_HTML: ${{ needs.image-pin.outputs.ingest_arxiv_html }}
-      IMAGE_DIGEST_INGEST_GITHUB_TARBALL: ${{ needs.image-pin.outputs.ingest_github_tarball_fetcher }}
       IMAGE_DIGEST_PROCESSOR: ${{ needs.image-pin.outputs.processor }}
       IMAGE_DIGEST_PROCESSOR_FOUNDRY: ${{ needs.image-pin.outputs.processor_foundry }}
       IMAGE_DIGEST_PROCESSOR_QUALITY: ${{ needs.image-pin.outputs.processor_quality_model }}
@@ -1127,24 +1113,73 @@ jobs:
           # the broker frontier committed here. The marker makes this action
           # impossible to repeat accidentally on later deployments.
           frontier_reset_applied=false
-          source_noise_reset_applied=false
           curator_frontier_reset_active=false
+          github_removal_applied=false
+          github_removal_marker=stream2pretrain-github-source-removed-20260825
+          if [[ "$DEPLOY_MODE" == "deploy" ]] \
+             && ! kubectl -n stream2pretrain get "configmap/$github_removal_marker" \
+                  >/dev/null 2>&1; then
+            echo "::group::Remove GitHub source and discard its shared-topic backlog"
+            kubectl -n stream2pretrain patch \
+              cronjob/stream2pretrain-ingest-github-releases \
+              --type=merge -p '{"spec":{"suspend":true}}' 2>/dev/null || true
+            kubectl -n stream2pretrain annotate \
+              scaledobject/stream2pretrain-ingest-github-tarball-fetcher \
+              autoscaling.keda.sh/paused=true --overwrite 2>/dev/null || true
+            for target in \
+              deployment/stream2pretrain-ingest-github-tarball-fetcher \
+              deployment/stream2pretrain-ingest-github-events \
+              deployment/stream2pretrain-processor-fetcher \
+              statefulset/stream2pretrain-processor-curate; do
+              if kubectl -n stream2pretrain get "$target" >/dev/null 2>&1; then
+                kubectl -n stream2pretrain scale "$target" --replicas=0 --timeout=180s
+              fi
+            done
+            for selector in \
+              app.kubernetes.io/component=ingest-github-tarball-fetcher \
+              app.kubernetes.io/component=processor-fetcher \
+              app.kubernetes.io/component=processor-curate; do
+              if kubectl -n stream2pretrain get pod -l "$selector" -o name | grep -q .; then
+                kubectl -n stream2pretrain wait --for=delete pod \
+                  -l "$selector" --timeout=240s
+              fi
+            done
+            kubectl -n redpanda exec statefulset/redpanda -- \
+              rpk group seek s2p-fetcher --to end --topics raw.fetched --allow-new-topics
+            kubectl -n redpanda exec statefulset/redpanda -- \
+              rpk group seek s2p-arxiv-html-fetcher-v2 --to end \
+                --topics raw.fetched --allow-new-topics
+            kubectl -n redpanda exec statefulset/redpanda -- \
+              rpk group seek s2p-curate --to end --topics docs.normalized --allow-new-topics
+            if kubectl -n redpanda exec statefulset/redpanda -- \
+              rpk topic list | awk 'NR > 1 {print $1}' | grep -Fxq github.release.jobs; then
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk topic delete github.release.jobs
+            fi
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+              python - < scripts/remove_github_source_objects.py
+            kubectl -n stream2pretrain delete \
+              deployment/stream2pretrain-ingest-github-tarball-fetcher \
+              deployment/stream2pretrain-ingest-github-events \
+              service/stream2pretrain-ingest-github-tarball-fetcher \
+              scaledobject/stream2pretrain-ingest-github-tarball-fetcher \
+              cronjob/stream2pretrain-ingest-github-releases \
+              secret/stream2pretrain-github \
+              --ignore-not-found --wait=true
+            kubectl -n stream2pretrain create configmap "$github_removal_marker" \
+              --from-literal=removed-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --from-literal=git-sha="$GITHUB_SHA" \
+              --from-literal=policy="remove-github-source-and-shared-backlog" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            github_removal_applied=true
+            curator_frontier_reset_active=true
+            echo "::endgroup::"
+          fi
           frontier_reset_marker=stream2pretrain-live-frontier-20260825
           if [[ "$DEPLOY_MODE" == "deploy" ]] \
              && ! kubectl -n stream2pretrain get "configmap/$frontier_reset_marker" \
                   >/dev/null 2>&1; then
             echo "::group::Reset historical backlog to the current live frontier"
-            # KEDA would immediately recreate the lag-driven GitHub worker
-            # while the historical release-job backlog still exists. Pause
-            # its controller before scaling consumers down; the normal Helm
-            # success path removes all KEDA pause annotations below.
-            if kubectl -n stream2pretrain get \
-              scaledobject/stream2pretrain-ingest-github-tarball-fetcher \
-              >/dev/null 2>&1; then
-              kubectl -n stream2pretrain annotate \
-                scaledobject/stream2pretrain-ingest-github-tarball-fetcher \
-                autoscaling.keda.sh/paused=true --overwrite
-            fi
             scale_to_zero_if_present() {
               local kind="$1"
               local name="$2"
@@ -1158,14 +1193,12 @@ jobs:
             scale_to_zero_if_present deployment stream2pretrain-processor-fetcher
             scale_to_zero_if_present deployment stream2pretrain-processor-iceberg-writer
             scale_to_zero_if_present deployment stream2pretrain-ingest-arxiv-html
-            scale_to_zero_if_present deployment stream2pretrain-ingest-github-tarball-fetcher
             scale_to_zero_if_present statefulset stream2pretrain-processor-curate
             for selector in \
               app.kubernetes.io/component=processor-fetcher \
               app.kubernetes.io/component=processor-curate \
               app.kubernetes.io/component=processor-iceberg-writer \
-              app.kubernetes.io/component=ingest-arxiv-html \
-              app.kubernetes.io/component=ingest-github-tarball-fetcher; do
+              app.kubernetes.io/component=ingest-arxiv-html; do
               if kubectl -n stream2pretrain get pod -l "$selector" -o name \
                 | grep -q .; then
                 kubectl -n stream2pretrain wait --for=delete pod \
@@ -1204,7 +1237,6 @@ jobs:
             seek_to_live_frontier s2p-iceberg-writer curation.decisions
             seek_to_live_frontier s2p-iceberg-writer-licenses license.admissions
             seek_to_live_frontier s2p-arxiv-html-fetcher-v2 raw.fetched
-            seek_to_live_frontier s2p-github-tarball-fetcher github.release.jobs
             kubectl -n stream2pretrain create configmap "$frontier_reset_marker" \
               --from-literal=reset-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               --from-literal=git-sha="$GITHUB_SHA" \
@@ -1215,61 +1247,12 @@ jobs:
             echo "::endgroup::"
           fi
 
-          # The first frontier reset was followed by two PyTorch CI pseudo-
-          # release refs that produced tens of thousands of non-release files.
-          # The producer filter now excludes those refs. Perform one bounded,
-          # auditable reset of only the fetcher frontier and start a new
-          # recovery identity, preserving the previous recovery directory.
-          source_noise_reset_marker=stream2pretrain-github-noise-frontier-20260825
-          if [[ "$DEPLOY_MODE" == "deploy" ]] \
-             && ! kubectl -n stream2pretrain get "configmap/$source_noise_reset_marker" \
-                  >/dev/null 2>&1; then
-            if [[ "$frontier_reset_applied" == "true" ]]; then
-              echo "The full live-frontier reset already covers GitHub source noise."
-            else
-              echo "::group::Discard invalid GitHub CI source noise"
-              if kubectl -n stream2pretrain get \
-                deployment/stream2pretrain-processor-fetcher >/dev/null 2>&1; then
-                kubectl -n stream2pretrain scale \
-                  deployment/stream2pretrain-processor-fetcher \
-                  --replicas=0 --timeout=180s
-              fi
-              if kubectl -n stream2pretrain get pod \
-                -l app.kubernetes.io/component=processor-fetcher -o name \
-                | grep -q .; then
-                kubectl -n stream2pretrain wait --for=delete pod \
-                  -l app.kubernetes.io/component=processor-fetcher --timeout=240s
-              fi
-              for _ in $(seq 1 60); do
-                if ! kubectl -n stream2pretrain get pod \
-                  -l app.kubernetes.io/component=processor-fetcher -o name \
-                  | grep -q .; then
-                  break
-                fi
-                sleep 2
-              done
-              if kubectl -n stream2pretrain get pod \
-                -l app.kubernetes.io/component=processor-fetcher -o name \
-                | grep -q .; then
-                echo "The fetcher is still running; refusing to move its frontier." >&2
-                exit 1
-              fi
-              kubectl -n redpanda exec statefulset/redpanda -- \
-                rpk group seek s2p-fetcher --to end --topics raw.fetched \
-                  --allow-new-topics
-              kubectl -n redpanda exec statefulset/redpanda -- \
-                rpk group describe s2p-fetcher
-              echo "::endgroup::"
-            fi
-            source_noise_reset_applied=true
-          fi
-
           # The source-noise reset moved the raw fetcher frontier but retained
           # the already-normalized GitHub catch-up behind the curator. Discard
           # that explicitly approved one-time backlog before measuring whether
           # one correctly running live worker can keep pace. The v3 recovery
           # directory and its global dedup state remain retained on the PVC;
-          # the v4 flow starts from the broker frontier recorded here.
+          # the v5 flow starts from the broker frontier recorded here.
           curator_frontier_reset_marker=stream2pretrain-curator-live-frontier-20260825
           if [[ "$DEPLOY_MODE" == "deploy" ]]; then
             if kubectl -n stream2pretrain get \
@@ -1424,16 +1407,11 @@ jobs:
               exit 1
             fi
             kubectl -n stream2pretrain rollout status \
-              deployment/stream2pretrain-ingest-github-tarball-fetcher --timeout=180s
-            kubectl -n stream2pretrain rollout status \
               deployment/stream2pretrain-ingest-hf-cards --timeout=180s
             kubectl -n stream2pretrain rollout status \
               deployment/stream2pretrain-ingest-arxiv-html --timeout=180s
 
-            cronjobs=(
-              stream2pretrain-ingest-github-releases
-              stream2pretrain-iceberg-maintenance
-            )
+            cronjobs=(stream2pretrain-iceberg-maintenance)
             while read -r cronjob; do
               [[ -n "$cronjob" ]] || continue
               cronjobs+=("${cronjob#cronjob.batch/}")
@@ -1541,8 +1519,6 @@ jobs:
               echo "HF model source completed but admitted no licensed model" >&2
               exit 1
             }
-            kubectl -n stream2pretrain logs \
-              deployment/stream2pretrain-ingest-github-tarball-fetcher --tail=240
             kubectl -n stream2pretrain logs \
               deployment/stream2pretrain-ingest-arxiv-html --tail=240
             kubectl -n stream2pretrain rollout status \
@@ -2472,7 +2448,7 @@ jobs:
           # recovery names or the release fails closed.
           if [[ ("$CORE_CHANGED" == "true" || "$SOURCES_CHANGED" == "true") \
              && "$frontier_reset_applied" != "true" \
-             && "$source_noise_reset_applied" != "true" ]]; then
+             && "$github_removal_applied" != "true" ]]; then
           legacy_fetcher_checkpoint="$(
             kubectl -n stream2pretrain get deployment \
               stream2pretrain-processor-fetcher -o json 2>/dev/null \
@@ -2498,7 +2474,7 @@ jobs:
                 ' \
               || true
           )"
-          if [[ "$existing_fetcher_flow" == "s2p-fetcher-live-v4" ]]; then
+          if [[ "$existing_fetcher_flow" == "s2p-fetcher-live-v5" ]]; then
             echo "Fetcher already declares the stable live Bytewax identity."
           elif [[ "$legacy_fetcher_checkpoint" == "true" ]]; then
             fetcher_pod="$(
@@ -2523,8 +2499,8 @@ jobs:
               S2P_CUTOVER_COMPONENT=fetcher
               S2P_CUTOVER_TOPIC=raw.fetched
               S2P_CONSUMER_GROUP=s2p-fetcher
-              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-live-v4
-              S2P_BYTEWAX_RECOVERY_NAME=fetcher-live-v4
+              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-live-v5
+              S2P_BYTEWAX_RECOVERY_NAME=fetcher-live-v5
               S2P_BYTEWAX_RECOVERY_PARTITIONS=4
             )
             set +e
@@ -2598,7 +2574,7 @@ jobs:
                 ' \
               || true
           )"
-          if [[ "$existing_curator_flow" != "s2p-curate-live-v4" \
+          if [[ "$existing_curator_flow" != "s2p-curate-live-v5" \
              && -n "$curator_exists" \
              && -z "$curator_pod" ]]; then
             curator_claim="checkpoint-stream2pretrain-processor-curate-0"
@@ -2673,7 +2649,7 @@ jobs:
             curator_pod="$curator_migration_pod"
             echo "Mounted the scaled-zero curator recovery PVC in $curator_migration_pod."
           fi
-          if [[ "$existing_curator_flow" == "s2p-curate-live-v4" ]]; then
+          if [[ "$existing_curator_flow" == "s2p-curate-live-v5" ]]; then
             echo "Curator already declares the stable live Bytewax identity."
           elif [[ -n "$curator_pod" ]]; then
             curator_cutover_env=(
@@ -2682,8 +2658,8 @@ jobs:
               S2P_CUTOVER_COMPONENT=curate
               S2P_CUTOVER_TOPIC=docs.normalized
               S2P_CONSUMER_GROUP=s2p-curate
-              S2P_BYTEWAX_FLOW_NAME=s2p-curate-live-v4
-              S2P_BYTEWAX_RECOVERY_NAME=curate-live-v4
+              S2P_BYTEWAX_FLOW_NAME=s2p-curate-live-v5
+              S2P_BYTEWAX_RECOVERY_NAME=curate-live-v5
               S2P_BYTEWAX_RECOVERY_PARTITIONS=4
             )
             set +e
@@ -2734,10 +2710,8 @@ jobs:
 
           : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
           : "${IMAGE_DIGEST_INGEST_OAIPMH:?Missing pinned ingest-oaipmh digest}"
-          : "${IMAGE_DIGEST_INGEST_GITHUB_RELEASES:?Missing pinned GitHub releases digest}"
           : "${IMAGE_DIGEST_INGEST_HF:?Missing pinned HF digest}"
           : "${IMAGE_DIGEST_INGEST_ARXIV_HTML:?Missing pinned arXiv HTML digest}"
-          : "${IMAGE_DIGEST_INGEST_GITHUB_TARBALL:?Missing pinned GitHub tarball digest}"
           : "${IMAGE_DIGEST_PROCESSOR:?Missing pinned processor digest}"
           : "${IMAGE_DIGEST_PROCESSOR_FOUNDRY:?Missing pinned Foundry digest}"
           : "${IMAGE_DIGEST_PROCESSOR_QUALITY:?Missing pinned quality digest}"
@@ -2752,10 +2726,8 @@ jobs:
             --set "image.pullPolicy=IfNotPresent"
             --set "ingest.rss.image=stream2pretrain/ingest-rss@${IMAGE_DIGEST_INGEST_RSS}"
             --set "ingest.oaipmh.image=stream2pretrain/ingest-oaipmh@${IMAGE_DIGEST_INGEST_OAIPMH}"
-            --set "ingest.githubReleases.image=stream2pretrain/ingest-github-releases@${IMAGE_DIGEST_INGEST_GITHUB_RELEASES}"
             --set "ingest.hf.image=stream2pretrain/ingest-hf@${IMAGE_DIGEST_INGEST_HF}"
             --set "ingest.arxivHtmlFetcher.image=stream2pretrain/ingest-arxiv-html@${IMAGE_DIGEST_INGEST_ARXIV_HTML}"
-            --set "ingest.githubTarballFetcher.image=stream2pretrain/ingest-github-tarball-fetcher@${IMAGE_DIGEST_INGEST_GITHUB_TARBALL}"
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
             --set "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
@@ -3037,7 +3009,6 @@ jobs:
                   "configmap/$source_policy_marker" >/dev/null 2>&1; then
             NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
             kubectl -n stream2pretrain delete \
-              deployment/stream2pretrain-ingest-github-events \
               cronjob/stream2pretrain-ingest-hf-daily-papers \
               job/stream2pretrain-ingest-openreview-backfill \
               --ignore-not-found --wait=true
@@ -3175,14 +3146,6 @@ jobs:
           curator_canary_job=""
           else
             echo "Skipping the core curator canary: core pipeline inputs are unchanged."
-          fi
-          if [[ "$source_noise_reset_applied" == "true" ]]; then
-            kubectl -n stream2pretrain create configmap "$source_noise_reset_marker" \
-              --from-literal=reset-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --from-literal=git-sha="$GITHUB_SHA" \
-              --from-literal=policy="discard-invalid-github-ci-source-noise" \
-              --dry-run=client -o yaml \
-              | kubectl apply -f -
           fi
           finish_phase "Core canary"
           deploy_finished_at="$(date +%s)"

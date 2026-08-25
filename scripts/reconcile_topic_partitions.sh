@@ -48,7 +48,6 @@ smoke_curated_topic="${S2P_SMOKE_CURATED_TOPIC:-docs.curated.smoke}"
 smoke_decisions_topic="${S2P_SMOKE_DECISIONS_TOPIC:-curation.decisions.smoke}"
 smoke_license_admissions_topic="${S2P_SMOKE_LICENSE_ADMISSIONS_TOPIC:-license.admissions.smoke}"
 license_admissions_topic="${S2P_LICENSE_ADMISSIONS_TOPIC:-license.admissions}"
-github_release_jobs_topic="${S2P_GITHUB_RELEASE_JOBS_TOPIC:-github.release.jobs}"
 smoke_topics=(
   "$smoke_topic"
   "$smoke_normalized_topic"
@@ -58,7 +57,6 @@ smoke_topics=(
 )
 core_topics=(
   raw.fetched
-  "$github_release_jobs_topic"
   docs.normalized
   docs.curated
   curation.decisions
@@ -78,28 +76,13 @@ if ! [[ "$license_partitions" =~ ^[1-9][0-9]*$ ]]; then
   echo "Licence admission topic is missing or has no partitions: $license_admissions_topic" >&2
   exit 1
 fi
-missing_core=()
 missing_smoke=()
-for managed_topic in "$github_release_jobs_topic" "${smoke_topics[@]}"; do
+for managed_topic in "${smoke_topics[@]}"; do
   if ! awk -v topic="$managed_topic" 'NR > 1 && $1 == topic {found=1} END {exit !found}' \
     <<<"$topic_inventory"; then
-    if [[ "$managed_topic" == "$github_release_jobs_topic" ]]; then
-      missing_core+=("$managed_topic")
-    else
-      missing_smoke+=("$managed_topic")
-    fi
+    missing_smoke+=("$managed_topic")
   fi
 done
-if [[ "${#missing_core[@]}" -gt 0 ]]; then
-  echo "Creating managed core topics: ${missing_core[*]}"
-  kubectl_retry -n redpanda exec statefulset/redpanda -- \
-    rpk topic create "${missing_core[@]}" \
-      --partitions "$target" \
-      --replicas 1 \
-      --topic-config "retention.ms=$core_retention_ms" \
-      --topic-config cleanup.policy=delete \
-      --topic-config "max.message.bytes=$max_message_bytes"
-fi
 if [[ "${#missing_smoke[@]}" -gt 0 ]]; then
   echo "Creating managed smoke topics: ${missing_smoke[*]}"
   kubectl_retry -n redpanda exec statefulset/redpanda -- \

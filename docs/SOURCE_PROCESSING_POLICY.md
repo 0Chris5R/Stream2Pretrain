@@ -22,9 +22,6 @@ fabricated zero.
 | arXiv RSS `cs.CV` | ArXiv id only | None. Internal scheduling only. | Schedules one canonical paper. |
 | arXiv OAI-PMH `set=cs` | ArXiv id only | None. Internal current-frontier scheduling only. | Schedules one canonical paper; canonical ids deduplicate overlap with RSS. |
 | arXiv full paper | Native arXiv HTML, ar5iv fallback, then bounded CPU Docling PDF fallback. Retain main sections, equations, tables, figure captions, selected OCR, and provenance. Remove authors, references, navigation, and excluded sections from the training projection. | FinePDFs Edu v2 at revision `90ddef285f67230389057c14b2f6bbfeb70d40ea`; structured scientific completeness and reasoning signals; CPU language ID; segment-level privacy removal; exact/MinHash dedup; E5 benchmark decontamination. FineWeb-Edu is comparison-only and KenLM/C4 web gates are off for scientific text. | Permissive clean papers can enter pretraining and, when methods/results evidence is sufficient, the paper Foundry. Posttrain-only clean papers can enter only the Foundry. |
-| GitHub Releases Atom, each curated repository | Repository plus exact tag only | None. Internal scheduling only. | Schedules one tarball job. |
-| GitHub source code | UTF-8, non-generated, non-vendored allowlisted files; preserve repo, tag, path, language, and licence provenance. | Stack v2 and Dolma-grounded path and shape rules, syntax signal, secret/credential detection, applicable privacy checks, exact/MinHash dedup, and E5 benchmark decontamination. FinePDFs, FineWeb-Edu, natural-language ID, C4, Gopher, and KenLM are off. | Permissive clean code can enter pretraining. The current paper Foundry does not consume code. |
-| GitHub README/docs | Narrative prose after front matter and fenced-code removal. | FineWeb-Edu as an audit signal, CPU language ID, privacy, dedup, and E5 decontamination. Common-Crawl page-shape and KenLM gates are off because repository documentation legitimately contains lists and templates. | Permissive clean documentation can enter pretraining. It is not a paper Foundry candidate. |
 | Hugging Face model card | Exact-revision README prose after card metadata and fenced-code removal. | FineWeb-Edu audit signal, CPU language ID, privacy, dedup, and E5 decontamination. FinePDFs, code, C4/Gopher, and KenLM gates are off. | Pretraining only. |
 | Hugging Face dataset card | Exact-revision README prose after card metadata and fenced-code removal. | Same dedicated card policy as model cards. Dataset rows are out of scope. | Pretraining only. |
 
@@ -35,9 +32,8 @@ fabricated zero.
 - A permissive item can be eligible for pretraining. Only a structured
   scientific paper can additionally become a current Foundry candidate.
 - Grey-area or missing rights remove the pretraining route. A structured
-  scientific paper may still enter the Foundry. Other transform-only families
-  remain preserved by the licence decision but are not sent to a generator
-  that cannot consume them.
+  scientific paper may still enter the Foundry. Hugging Face cards are admitted
+  only as pretraining prose under their exact public-repository terms.
 - Explicit incompatible rights, blocking privacy findings, benchmark
   contamination, or failed source-specific quality gates quarantine the item.
 - Post-training benchmark allocation occurs after SFT/RL generation, never in

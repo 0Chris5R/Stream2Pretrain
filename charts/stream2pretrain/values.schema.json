@@ -47,11 +47,10 @@
         "authSecret": {"type": "string"},
         "topics": {
           "type": "object",
-          "required": ["rawFetched", "smokeRaw", "githubReleaseJobs", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "docsCuratedSmoke", "curationDecisions", "curationDecisionsSmoke", "licenseAdmissions", "licenseAdmissionsSmoke", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
+          "required": ["rawFetched", "smokeRaw", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "docsCuratedSmoke", "curationDecisions", "curationDecisionsSmoke", "licenseAdmissions", "licenseAdmissionsSmoke", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
           "properties": {
             "rawFetched": {"type": "string"},
             "smokeRaw": {"type": "string"},
-            "githubReleaseJobs": {"type": "string"},
             "docsNormalized": {"type": "string"},
             "docsNormalizedSmoke": {"type": "string"},
             "docsCurated": {"type": "string"},
@@ -128,7 +127,7 @@
     },
     "sources": {
       "type": "object",
-      "required": ["arxiv", "github", "huggingface"],
+      "required": ["arxiv", "huggingface"],
       "properties": {
         "arxiv": {
           "type": "object",
@@ -165,26 +164,6 @@
               "properties": {
                 "enabled": {"type": "boolean"},
                 "feedName": {"type": "string", "minLength": 1, "maxLength": 128}
-              }
-            }
-          }
-        },
-        "github": {
-          "type": "object",
-          "required": ["enabled", "releases"],
-          "properties": {
-            "enabled": {"type": "boolean"},
-            "releases": {
-              "type": "object",
-              "required": ["name", "pollIntervalSeconds", "schedule", "tokenSecret", "tokenSecretKey", "repos"],
-              "properties": {
-                "name": {"type": "string"},
-                "pollIntervalSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-                "kind": {"type": "string", "enum": ["cronjob", "deployment"]},
-                "schedule": {"type": "string"},
-                "tokenSecret": {"type": "string"},
-                "tokenSecretKey": {"type": "string"},
-                "repos": {"type": "array", "items": {"type": "string"}, "minItems": 1}
               }
             }
           }
@@ -247,53 +226,6 @@
             "consumerGroup": {"type": "string", "minLength": 1},
             "autoOffsetReset": {"type": "string", "enum": ["earliest", "latest"]},
             "maxRecordsPerLoop": {"type": "integer", "minimum": 0},
-            "resources": {"type": "object"}
-          }
-        },
-        "githubTarballFetcher": {
-          "type": "object",
-          "required": [
-            "enabled",
-            "image",
-            "replicas",
-            "consumerGroup",
-            "allowedExtensions",
-            "maxFileSizeBytes",
-            "excludedTagPrefixes",
-            "maxPollIntervalMilliseconds",
-            "requestRatePerSecond",
-            "requestBurst",
-            "keda",
-            "resources"
-          ],
-          "properties": {
-            "enabled": {"type": "boolean"},
-            "image": {"type": "string", "minLength": 1},
-            "replicas": {"type": "integer", "minimum": 0},
-            "consumerGroup": {"type": "string", "minLength": 1},
-            "allowedExtensions": {
-              "type": "array",
-              "minItems": 1,
-              "items": {"type": "string", "pattern": "^\\.[A-Za-z0-9]+$"}
-            },
-            "maxFileSizeBytes": {"type": "integer", "minimum": 1},
-            "excludedTagPrefixes": {
-              "type": "array",
-              "minItems": 1,
-              "items": {"type": "string", "minLength": 1}
-            },
-            "maxPollIntervalMilliseconds": {"type": "integer", "minimum": 300000},
-            "requestRatePerSecond": {"type": "number", "exclusiveMinimum": 0},
-            "requestBurst": {"type": "integer", "minimum": 1},
-            "keda": {
-              "type": "object",
-              "required": ["minReplicas", "maxReplicas", "lagThreshold"],
-              "properties": {
-                "minReplicas": {"type": "integer", "minimum": 0},
-                "maxReplicas": {"type": "integer", "minimum": 1},
-                "lagThreshold": {"type": "integer", "minimum": 1}
-              }
-            },
             "resources": {"type": "object"}
           }
         }

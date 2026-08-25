@@ -23,7 +23,6 @@ def cfg(tmp_path: Any) -> IngestConfig:
         minio_bronze_bucket="bronze",
         otel_endpoint=None,
         otel_protocol="grpc",
-        github_token="ghp_test",
         hf_token="hf_test",
         user_agent="Stream2Pretrain-Test/0.1",
         http_timeout_seconds=5.0,

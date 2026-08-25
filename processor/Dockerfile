@@ -46,11 +46,9 @@ WORKDIR /src
 COPY pyproject.toml uv.lock README.md /src/
 COPY ingest/common/pyproject.toml /src/ingest/common/pyproject.toml
 COPY ingest/rss_poller/pyproject.toml /src/ingest/rss_poller/pyproject.toml
-COPY ingest/github_releases/pyproject.toml /src/ingest/github_releases/pyproject.toml
 COPY ingest/hf_poller/pyproject.toml /src/ingest/hf_poller/pyproject.toml
 COPY ingest/oaipmh_poller/pyproject.toml /src/ingest/oaipmh_poller/pyproject.toml
 COPY ingest/arxiv_html_fetcher/pyproject.toml /src/ingest/arxiv_html_fetcher/pyproject.toml
-COPY ingest/github_release_tarball_fetcher/pyproject.toml /src/ingest/github_release_tarball_fetcher/pyproject.toml
 COPY processor/pyproject.toml /src/processor/pyproject.toml
 COPY tests/pyproject.toml /src/tests/pyproject.toml
 

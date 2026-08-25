@@ -66,7 +66,7 @@ shard count is independent of the four Kafka topic partitions and deliberately
 matches the existing cloud checkpoint.
 
 KEDA remains appropriate for independently committing ingest consumers with a
-dedicated input topic, such as the GitHub tarball fetcher. It is disabled for
+dedicated input topic. It is disabled for
 the arXiv HTML fetcher because that worker consumes and republishes on the
 shared `raw.fetched` topic, making Kafka lag a self-amplifying signal rather
 than an arXiv backlog. Keep that worker at one replica until a source-specific

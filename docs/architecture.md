@@ -40,7 +40,6 @@ Deployment depending on cadence):
 |---|---|---|---|
 | `rss-arxiv-cs-*` (4 feeds) | per-SourceFeed `ingest-rss` CronJob | 2h conditional GET | `raw.fetched` |
 | `oai-arxiv-cs` | `ingest-oaipmh` CronJob | 2h with resumption tokens | `raw.fetched` |
-| `github-releases` | `ingest-github-releases` Deployment | 2h ETag-conditional | `github.release.jobs` discovery only |
 | `hf-models`, `hf-datasets` | `ingest-hf-cards` Deployment | 10-15 min | exact-revision README prose to `raw.fetched` |
 
 Every content poller writes the **raw bytes** to MinIO under
@@ -51,14 +50,8 @@ emits a `BronzeRecord` pointer (defined in `schemas/bronze.py`) onto
 `fetched_at`.
 
 Discovery is not training content. OAI and arXiv RSS schedule an exact paper;
-Hub list responses schedule an exact README revision; GitHub release feeds
-schedule an exact release tarball. Metadata-only envelopes are excluded before
+Hub list responses schedule an exact README revision. Metadata-only envelopes are excluded before
 body extraction, never create corpus decisions, and cannot reach Gold directly.
-
-GitHub release metadata is dual-published to the bounded
-`github.release.jobs` control topic. Tarball workers scale on that topic's
-consumer lag and emit extracted code to `raw.fetched`; separating work from
-output prevents an extracted tarball from inflating its own scaling signal.
 
 ### Bus: Redpanda
 
@@ -95,16 +88,14 @@ A Python streaming dataflow with the Rust core. The pipeline is wired in
 6. `lshbloom` - band-partitioned Bloom near-dup index (RocksDB-checkpointed).
 7. `quality_classifier` - source-aware CPU inference: pinned FinePDFs Edu v2
    for scientific HTML/PDF, pinned FineWeb-Edu for ordinary web prose and as
-   an audit-only signal for card/documentation prose, and Stack v2/Dolma-
-   grounded rules for source code. Structured discovery metadata has no
+   an audit-only signal for card prose. Structured discovery metadata has no
    educational score.
 8. `kenlm_perplexity` - mmap'd binary KenLM model gated only on ordinary web
-   prose. Scientific text, code, metadata, cards, and repository
-   documentation bypass this web-domain signal.
+   prose. Scientific text, metadata, and cards bypass this web-domain signal.
 9. `pii_regex` - email / phone / SSN / credit-card / IP scan.
 10. `decon_gate` - 13-gram Bloom + E5 embedding sketch plus signed attestation API.
 11. `validity_interval_enricher` - populates `[valid_from, valid_to)` from
-    `http_last_modified`, `schema.org datePublished`, Wayback first-seen,
+    `http_last_modified`, `schema.org datePublished`,
     license effective date, retraction date. Precedence rule documented in
     [`data-model.md`](./data-model.md).
 12. `decision publisher` - emits every scored row, with the complete signal
@@ -178,16 +169,15 @@ histograms, and safe read-only query routes. The Next.js App Router app exposes:
 ```mermaid
 flowchart LR
   subgraph edge[Edge - SourceFeed Pollers]
-    rss[RSS / Atom pollers]
-    oai[OAI-PMH poller]
-    gh[GitHub events / releases]
-    hf[HF Hub poller]
-    tarball[release tarball fetcher]
+    rss[arXiv RSS discovery]
+    oai[arXiv OAI-PMH discovery]
+    arxiv[arXiv full-text fetcher]
+    hfModels[HF model cards]
+    hfDatasets[HF dataset cards]
   end
 
   subgraph bus[Redpanda]
     raw[(raw.fetched)]
-    releaseJobs[(github.release.jobs)]
     norm[(docs.normalized)]
     decisions[(curation.decisions)]
     cur[(docs.curated)]
@@ -216,13 +206,11 @@ flowchart LR
     ui[Next.js UI]
   end
 
-  rss --> raw
-  oai --> raw
-  gh --> raw
-  gh --> releaseJobs
-  releaseJobs --> tarball
-  tarball --> raw
-  hf --> raw
+  rss --> arxiv
+  oai --> arxiv
+  arxiv --> raw
+  hfModels --> raw
+  hfDatasets --> raw
   raw --> fetch --> extract --> tags --> score --> decon --> valid
   valid --> decisions --> iceberg
   valid --> cur
