@@ -2961,6 +2961,7 @@ jobs:
           )
           rollout_pids=()
           rollout_logs=()
+          rollout_workloads=()
           for workload in "${changed_workloads[@]}"; do
             [[ -n "$workload" ]] || continue
             workload_timeout=60
@@ -2979,11 +2980,13 @@ jobs:
             ) >"$log" 2>&1 &
             rollout_pids+=("$!")
             rollout_logs+=("$log")
+            rollout_workloads+=("$workload")
           done
           rollout_failed=false
           for index in "${!rollout_pids[@]}"; do
             if ! wait "${rollout_pids[$index]}"; then
               rollout_failed=true
+              echo "::error title=Rollout failed::${rollout_workloads[$index]} did not become ready before its deployment timeout"
             fi
             cat "${rollout_logs[$index]}"
           done
