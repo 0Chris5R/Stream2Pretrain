@@ -1173,8 +1173,21 @@ jobs:
                 kubectl -n stream2pretrain wait --for=delete pod \
                   -l "$selector" --timeout=240s
               fi
+              # `kubectl wait -l` snapshots matching objects. A terminating
+              # ReplicaSet Pod can disappear from that snapshot while the API
+              # list cache still exposes it briefly. Require the selector to
+              # converge to an empty set before touching broker offsets.
+              for _ in $(seq 1 60); do
+                if ! kubectl -n stream2pretrain get pod -l "$selector" -o name \
+                  | grep -q .; then
+                  break
+                fi
+                sleep 2
+              done
               if kubectl -n stream2pretrain get pod -l "$selector" -o name \
                 | grep -q .; then
+                kubectl -n stream2pretrain get pod -l "$selector" \
+                  -o wide >&2 || true
                 echo "A reset-target consumer is still running: $selector" >&2
                 exit 1
               fi
