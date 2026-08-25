@@ -18,8 +18,7 @@ def test_processor_metrics_render_dashboard_contract() -> None:
     body = metrics.render_prometheus().decode("utf-8")
 
     assert (
-        's2p_processor_received_total{namespace="stream2pretrain",source="arxiv-rss"} 1.0'
-        in body
+        's2p_processor_received_total{namespace="stream2pretrain",source="arxiv-rss"} 1.0' in body
     )
     assert (
         's2p_processor_ingested_total{namespace="stream2pretrain",source="arxiv-rss"} 1.0' in body
