@@ -125,6 +125,18 @@ rechecks independently of source arrivals. Its 60-second poll interval and the
 00:00 UTC run-hour default are operational starting values marked
 `needs-measurement`; neither is a throughput claim.
 
+Candidate admission reads and validates the exact structured scientific JSON
+referenced by Gold, then snapshots those bytes beside the Gold payload in the
+durable queue. Provider work therefore does not depend on later MinIO reads of
+an artifact that was already acknowledged at admission. Queue rows written by
+older versions are migrated lazily from their recorded URI. If such an old URI
+is permanently missing, malformed, identity-mismatched, or lacks a retained
+scientific body, the worker writes a replay-safe terminal `REJECTED` preflight
+job containing the document ID and safe bucket/key audit fields, advances the
+run counter, and continues with the next ranked paper. It never fabricates a
+scientific artifact from the flat Gold text. Transient object-store failures
+remain retryable and do not discard the candidate.
+
 Every accepted paper-family package is assigned independently within its SFT
 or RL pool. Four consecutive paper packages go to `train` and the fifth goes
 to `benchmark`, giving an exact 80/20 allocation in each complete block of
@@ -249,6 +261,13 @@ minute-quota exhaustion leave the paper and daily run resumable. Daily quota
 exhaustion closes the run while keeping the current paper and remaining
 candidates queued for the next UTC day. Semantic or legal failures produce
 explicit rejection states.
+
+On worker restart, abandoned quota reservations are charged conservatively.
+Every prior `CALL_PLANNED` or `CALL_STARTED` event without a matching terminal
+call event is then closed with an auditable restart-recovery `CALL_FAILED`
+event before the queue resumes. Cached complete provider results remain
+idempotent, while an actually interrupted request receives a new call attempt;
+the UI no longer presents the prior process's call as live indefinitely.
 
 The API client performs real SSE streaming and saves reconstructable partial
 text hashes. It rejects invalid JSON, an unapproved exact returned route, a

@@ -20,6 +20,24 @@ from schemas.gold import GoldRecord
 from schemas.scientific import ScientificDocument, ScientificSection
 
 
+class ScientificArtifactUnavailableError(ValueError):
+    """A referenced scientific artifact cannot ever satisfy foundry preflight."""
+
+    def __init__(
+        self,
+        *,
+        uri: str,
+        bucket: str,
+        key: str,
+        reason: str,
+    ) -> None:
+        self.uri = uri
+        self.bucket = bucket
+        self.key = key
+        self.reason = reason
+        super().__init__(f"scientific artifact {reason}: s3://{bucket}/{key}")
+
+
 def paper_bundle_from_gold(
     gold: GoldRecord,
     scientific: ScientificDocument,
@@ -165,15 +183,101 @@ def paper_bundle_from_gold(
 
 
 def load_scientific_artifact(gold: GoldRecord, *, s3_client: object) -> ScientificDocument:
+    document, _ = load_scientific_artifact_payload(gold, s3_client=s3_client)
+    return document
+
+
+def load_scientific_artifact_payload(
+    gold: GoldRecord,
+    *,
+    s3_client: object,
+) -> tuple[ScientificDocument, bytes]:
+    """Load and validate the exact structured artifact referenced by Gold.
+
+    Missing objects and malformed immutable artifacts are permanent candidate
+    failures. Other storage exceptions remain transient so the stream runtime
+    can retry them without silently discarding a valid paper.
+    """
     uri = gold.scientific_artifact_s3_uri
     if not uri:
-        raise ValueError("post-training candidates require a scientific artifact")
+        raise ScientificArtifactUnavailableError(
+            uri="",
+            bucket="unknown",
+            key="unknown",
+            reason="URI is absent",
+        )
     parsed = urlparse(uri)
     if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
-        raise ValueError(f"invalid scientific artifact URI: {uri}")
-    response = s3_client.get_object(Bucket=parsed.netloc, Key=parsed.path.lstrip("/"))  # type: ignore[attr-defined]
-    payload = response["Body"].read()
-    return ScientificDocument.model_validate_json(payload)
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=parsed.netloc or "unknown",
+            key=parsed.path.lstrip("/") or "unknown",
+            reason="URI is invalid",
+        )
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+    try:
+        response = s3_client.get_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]
+    except Exception as exc:
+        response_data = getattr(exc, "response", None)
+        error = response_data.get("Error", {}) if isinstance(response_data, dict) else {}
+        code = str(error.get("Code", ""))
+        if code in {"NoSuchKey", "404", "NotFound"} or exc.__class__.__name__ == "NoSuchKey":
+            raise ScientificArtifactUnavailableError(
+                uri=uri,
+                bucket=bucket,
+                key=key,
+                reason="object is missing",
+            ) from exc
+        raise
+    payload = bytes(response["Body"].read())
+    return validate_scientific_artifact_payload(gold, payload)
+
+
+def validate_scientific_artifact_payload(
+    gold: GoldRecord,
+    payload: bytes,
+) -> tuple[ScientificDocument, bytes]:
+    """Validate a queue-cached artifact under the same immutable URI contract."""
+    uri = gold.scientific_artifact_s3_uri or ""
+    parsed = urlparse(uri)
+    bucket = parsed.netloc or "unknown"
+    key = parsed.path.lstrip("/") or "unknown"
+    try:
+        document = ScientificDocument.model_validate_json(payload)
+    except Exception as exc:
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=bucket,
+            key=key,
+            reason="payload is invalid",
+        ) from exc
+    if document.doc_id != gold.doc_id:
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=bucket,
+            key=key,
+            reason="document identity does not match Gold",
+        )
+    has_training_body = any(
+        section.include_in_training
+        and (
+            any(
+                paragraph.include_in_training and paragraph.text.strip()
+                for paragraph in section.paragraphs
+            )
+            or section.text.strip()
+        )
+        for section in document.sections
+    )
+    if not has_training_body:
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=bucket,
+            key=key,
+            reason="payload has no retained scientific body",
+        )
+    return document, payload
 
 
 def _stable_spans(sections: Iterable[ScientificSection]) -> Iterable[StableSpan]:

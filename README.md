@@ -291,7 +291,6 @@ kubectl -n stream2pretrain create configmap stream2pretrain-decon-benchmarks \
 
 Required Secret names are:
 
-- `monitoring/grafana-admin`
 - `polaris/polaris-bootstrap`
 - `polaris/polaris-minio`
 - `stream2pretrain/stream2pretrain-minio`

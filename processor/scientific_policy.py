@@ -280,13 +280,35 @@ def route_document(
         )
     eligible: list[CorpusRoute] = ["pretrain"]
     reasons = ["clean body projection passed privacy, quality, dedup, and decontamination gates"]
-    if reasoning_score >= 0.55:
+    posttrain_ready = posttrain_candidate_eligible(silver)
+    if reasoning_score >= 0.55 and posttrain_ready:
         eligible.append("posttrain_candidate")
         reasons.append("methods/results and structured evidence support post-training use")
 
-    if reasoning_score >= 0.55:
+    if reasoning_score >= 0.55 and posttrain_ready:
         return RouteDecision("posttrain_candidate", eligible, reasons)
     return RouteDecision("pretrain", eligible, reasons)
+
+
+def posttrain_candidate_eligible(silver: SilverRecord) -> bool:
+    """Return whether the current paper Foundry can consume this record.
+
+    The current Foundry contract is deliberately paper-specific. Its durable
+    input must name a successfully persisted ``ScientificDocument`` and expose
+    at least one stable retained section. Web prose, cards, reviews, code, and
+    legacy scientific rows without that artifact remain valid pretraining
+    material, but cannot be mislabeled as runnable paper environments.
+    """
+    policy = resolve_source_policy(
+        source_feed=silver.source_feed,
+        source_format=silver.source_format,
+        extraction_pipeline=silver.extraction_pipeline,
+    )
+    return (
+        policy.family == "scientific_paper"
+        and silver.scientific_artifact_s3_uri is not None
+        and any(segment.text.strip() for segment in silver.segments)
+    )
 
 
 def _content_tags(silver: SilverRecord, roles: Set[str]) -> list[str]:

@@ -65,6 +65,8 @@ def test_evidence_rich_paper_is_pretrain_and_posttrain_eligible() -> None:
         update={
             "source_feed": "arxiv-html-live",
             "url": "https://arxiv.org/html/2608.00001",
+            "scientific_artifact_s3_uri": "s3://silver/scientific/a/document.json",
+            "segments": [_segment("methods", "methods", 100)],
         }
     )
 
@@ -98,7 +100,9 @@ def test_lower_reasoning_document_is_pretrain_only() -> None:
 def test_upstream_curation_never_allocates_a_benchmark_split() -> None:
     silver = _silver("scientific body " * 100).model_copy(
         update={
-            "source_feed": "local-benchmark-reserve-canary",
+            "source_feed": "arxiv-html-live",
+            "scientific_artifact_s3_uri": "s3://silver/scientific/a/document.json",
+            "segments": [_segment("results", "results", 100)],
         }
     )
 
@@ -110,6 +114,36 @@ def test_upstream_curation_never_allocates_a_benchmark_split() -> None:
 
     assert decision.route == "posttrain_candidate"
     assert "benchmark_candidate" not in decision.eligible_routes
+
+
+def test_non_scientific_high_reasoning_record_is_never_a_paper_candidate() -> None:
+    silver = _silver("review body " * 100).model_copy(
+        update={
+            "source_feed": "openreview-live",
+            "source_format": "review",
+            "scientific_artifact_s3_uri": "s3://silver/legacy/document.json",
+            "segments": [_segment("review", "other", 100)],
+        }
+    )
+
+    decision = route_document(silver=silver, reject_reasons=[], reasoning_score=1.0)
+
+    assert decision.route == "pretrain"
+    assert decision.eligible_routes == ["pretrain"]
+
+
+def test_scientific_record_without_durable_artifact_is_not_a_candidate() -> None:
+    silver = _silver("scientific body " * 100).model_copy(
+        update={
+            "source_feed": "arxiv-html-live",
+            "segments": [_segment("methods", "methods", 100)],
+        }
+    )
+
+    decision = route_document(silver=silver, reject_reasons=[], reasoning_score=1.0)
+
+    assert decision.route == "pretrain"
+    assert decision.eligible_routes == ["pretrain"]
 
 
 def test_composite_does_not_substitute_non_applicable_web_signals() -> None:

@@ -64,7 +64,6 @@ Required externally managed objects for enabled components:
 
 | Namespace | Object | Required keys |
 | --- | --- | --- |
-| `monitoring` | Secret `grafana-admin` | `admin-user`, `admin-password` |
 | `polaris` | Secret `polaris-bootstrap` | `credentials` |
 | `polaris` | Secret `polaris-minio` | `accessKey`, `secretKey` |
 | `stream2pretrain` | Secret `stream2pretrain-minio` | `accessKey`, `secretKey` |
@@ -77,6 +76,16 @@ Required externally managed objects for enabled components:
 
 Use Sealed Secrets, External Secrets, or another team-approved mechanism. The
 repository intentionally contains no example credential values.
+
+Grafana is the exception: its Helm subchart owns a random administrator
+password in a Kubernetes Secret so a malformed external Secret cannot prevent
+the monitoring stack from starting. Retrieve it without writing it to disk:
+
+```bash
+kubectl -n monitoring get secret kube-prometheus-stack-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 --decode
+printf '\n'
+```
 
 ## Commands
 

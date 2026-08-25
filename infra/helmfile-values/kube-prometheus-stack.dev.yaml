@@ -20,10 +20,15 @@ alertmanager:
         memory: 256Mi
 grafana:
   enabled: true
-  admin:
-    existingSecret: grafana-admin
-    userKey: admin-user
-    passwordKey: admin-password
+  # Let the Grafana subchart own a randomly generated Kubernetes Secret.
+  # An empty value selects the chart's generator instead of the insecure
+  # kube-prometheus-stack default password. Retrieve it with the documented
+  # command when an operator needs to log in.
+  adminPassword: ""
+  # This development cluster runs one Grafana replica. Recreate avoids an
+  # unavailable legacy ReplicaSet blocking a corrected Secret configuration.
+  deploymentStrategy:
+    type: Recreate
   defaultDashboardsTimezone: utc
   serviceMonitor:
     enabled: true
@@ -47,6 +52,10 @@ prometheus:
     retentionSize: 5GiB
     walCompression: true
     serviceMonitorSelectorNilUsesHelmValues: false
+    # Redpanda owns its ServiceMonitor in the redpanda namespace. An explicit
+    # empty selector lets this Prometheus instance discover ServiceMonitors in
+    # every namespace rather than only monitoring.
+    serviceMonitorNamespaceSelector: {}
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
     probeSelectorNilUsesHelmValues: false

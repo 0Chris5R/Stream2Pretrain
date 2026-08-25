@@ -456,8 +456,8 @@ def test_review_uses_peer_review_policy_even_for_openreview_feed(
         assert gold.segment_scores[0].fineweb_edu_score is None
         assert "peer_review" in gold.content_tags
         assert gold.perplexity_scorer == "not-applicable"
-        assert gold.route == "posttrain_candidate"
-        assert gold.eligible_routes == ["pretrain", "posttrain_candidate"]
+        assert gold.route == "pretrain"
+        assert gold.eligible_routes == ["pretrain"]
     finally:
         state.close()
 
@@ -510,6 +510,73 @@ def test_permissive_substantive_review_remains_pretrain_eligible(
         assert "insubstantial_review" not in gold.reject_reasons
         assert gold.route == "pretrain"
         assert gold.eligible_routes == ["pretrain"]
+    finally:
+        state.close()
+
+
+def test_transform_only_review_is_not_mislabelled_as_a_paper_candidate(
+    cfg: ProcessorConfig,
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(
+            "[FIELD summary]\nThe submission presents a clear empirical comparison.",
+            doc_id="sha256:" + "6" * 64,
+        ).model_copy(
+            update={
+                "source_format": "review",
+                "source_feed": "openreview",
+                "source_metadata_text": ("invitation: ICLR.cc/2026/Conference/-/Official_Review"),
+                "spdx_license": "CC-BY-NC-4.0",
+                "spdx_license_source": "openreview_terms",
+                "training_usage": "posttrain_transform_only",
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert gold.route == "quarantine"
+        assert gold.eligible_routes == ["quarantine"]
+        assert "current paper Foundry" in gold.route_reasons[0]
+        assert not is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_transform_only_scientific_artifact_reaches_paper_foundry(
+    cfg: ProcessorConfig,
+    long_english_text: str,
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(long_english_text, doc_id="sha256:" + "5" * 64).model_copy(
+            update={
+                "source_feed": "arxiv-html-fetcher",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "training_usage": "posttrain_transform_only",
+                "spdx_license": "arxiv-non-exclusive-distribution",
+                "spdx_license_source": "arxiv_api",
+                "scientific_artifact_s3_uri": "s3://silver/scientific/5/document.json",
+                "segments": [
+                    SilverSegment(
+                        segment_id="methods",
+                        title="Methods",
+                        role="methods",
+                        text=long_english_text,
+                        word_count=len(long_english_text.split()),
+                    )
+                ],
+                "included_section_count": 1,
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert gold.route == "posttrain_candidate"
+        assert gold.eligible_routes == ["posttrain_candidate"]
+        assert "verbatim pretraining export is forbidden" in gold.route_reasons[0]
+        assert is_trainable_gold(gold)
     finally:
         state.close()
 

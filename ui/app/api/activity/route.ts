@@ -16,13 +16,13 @@ const WINDOWS = {
 
 const METRICS = {
   fetched:
-    'redpanda_kafka_records_produced_total{redpanda_namespace="kafka",redpanda_topic="raw.fetched"}',
+    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="raw.fetched"})',
   extracted:
-    'redpanda_kafka_records_produced_total{redpanda_namespace="kafka",redpanda_topic="docs.normalized"}',
+    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="docs.normalized"})',
   decided:
-    'redpanda_kafka_records_produced_total{redpanda_namespace="kafka",redpanda_topic="curation.decisions"}',
+    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="curation.decisions"})',
   training:
-    'redpanda_kafka_records_produced_total{redpanda_namespace="kafka",redpanda_topic="docs.curated"}',
+    'sum(redpanda_kafka_max_offset{redpanda_namespace="kafka",redpanda_topic="docs.curated"})',
 } as const;
 
 type Stage = keyof typeof METRICS;
@@ -65,10 +65,10 @@ async function stageSeries(
   const buckets = new Map<number, number>();
   for (let ts = start; ts <= end; ts += step) buckets.set(ts, 0);
 
-  // Prometheus increase() extrapolates to the whole range when a counter was
-  // created part-way through it. That is useful for rates but wrong for the
-  // exact document counts shown here. Compute observed deltas per labelled
-  // series and treat a decrease as a process-counter reset.
+  // Redpanda's public metrics expose each topic's partition high-water marks,
+  // not a records-produced counter. Their summed observed deltas
+  // are the records appended inside the visible window. Treat a decrease as
+  // topic recreation rather than reporting a negative count.
   for (const series of body.data?.result ?? []) {
     let previous: number | null = null;
     for (const [ts, raw] of series.values ?? []) {

@@ -6,10 +6,12 @@ import gzip
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from processor.fetcher import (
     FetcherState,
     PdfProcessingTemporarilyDisabled,
+    RawObjectMissing,
     _markdown_prose_projection,
     _review_payload_text,
     fetch_raw_bytes,
@@ -156,6 +158,40 @@ def test_fetch_raw_bytes_rejects_oversized_gzip_expansion(
     state = _state(s3)
 
     with pytest.raises(ValueError, match="expanded raw object exceeds the configured bound"):
+        fetch_raw_bytes(state, bronze_record)
+
+
+def test_missing_raw_object_is_a_record_local_durable_failure(
+    bronze_record: BronzeRecord,
+) -> None:
+    class _MissingS3:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": f"missing {Bucket}/{Key}"}},
+                "GetObject",
+            )
+
+    state = _state(_FakeS3(b""))
+    state.s3 = _MissingS3()
+
+    with pytest.raises(RawObjectMissing, match=bronze_record.doc_id):
+        fetch_raw_bytes(state, bronze_record)
+
+
+def test_transient_raw_object_failure_remains_retryable(
+    bronze_record: BronzeRecord,
+) -> None:
+    class _UnavailableS3:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+            raise ClientError(
+                {"Error": {"Code": "SlowDown", "Message": f"retry {Bucket}/{Key}"}},
+                "GetObject",
+            )
+
+    state = _state(_FakeS3(b""))
+    state.s3 = _UnavailableS3()
+
+    with pytest.raises(RuntimeError, match="raw object read failed"):
         fetch_raw_bytes(state, bronze_record)
 
 

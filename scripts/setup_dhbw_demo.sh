@@ -219,14 +219,6 @@ required_secrets() {
   return "$missing"
 }
 
-required_platform_secret() {
-  export KUBECONFIG="$KUBECONFIG_PATH"
-  if ! kubectl get secret -n monitoring grafana-admin >/dev/null 2>&1; then
-    printf 'Missing required Secret: monitoring/grafana-admin\n' >&2
-    return 1
-  fi
-}
-
 required_catalog_secret() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local missing=0
@@ -328,7 +320,6 @@ case "$COMMAND" in
     ;;
   platform)
     validate
-    required_platform_secret
     apply_edge
     apply_tier "$COMMAND"
     ;;

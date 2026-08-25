@@ -43,6 +43,8 @@ jobs:
       helm: ${{ steps.scope.outputs.helm }}
       core: ${{ steps.scope.outputs.core }}
       sources: ${{ steps.scope.outputs.sources }}
+      monitoring: ${{ steps.scope.outputs.monitoring }}
+      redpanda: ${{ steps.scope.outputs.redpanda }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -60,6 +62,8 @@ jobs:
             echo "helm=false" >> "$GITHUB_OUTPUT"
             echo "core=false" >> "$GITHUB_OUTPUT"
             echo "sources=false" >> "$GITHUB_OUTPUT"
+            echo "monitoring=false" >> "$GITHUB_OUTPUT"
+            echo "redpanda=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           before="${{ github.event.before }}"
@@ -74,6 +78,8 @@ jobs:
           deploy=false
           core=false
           sources=false
+          monitoring=false
+          redpanda=false
           if grep -Eq \
             '^(schemas/|ingest/|processor/|tests/|scripts/.*\.py$|pyproject\.toml$|uv\.lock$|[^/]+/pyproject\.toml$)' \
             "$changed"; then
@@ -103,6 +109,16 @@ jobs:
             "$changed"; then
             sources=true
           fi
+          if grep -Eq \
+            '^(infra/helmfile-values/kube-prometheus-stack\.dev\.yaml|helmfile\.yaml)$' \
+            "$changed"; then
+            monitoring=true
+          fi
+          if grep -Eq \
+            '^(infra/helmfile-values/redpanda\.dev\.yaml|helmfile\.yaml)$' \
+            "$changed"; then
+            redpanda=true
+          fi
           echo "Changed files:"
           sed 's/^/  /' "$changed"
           echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
@@ -110,6 +126,8 @@ jobs:
           echo "helm=$helm" >> "$GITHUB_OUTPUT"
           echo "core=$core" >> "$GITHUB_OUTPUT"
           echo "sources=$sources" >> "$GITHUB_OUTPUT"
+          echo "monitoring=$monitoring" >> "$GITHUB_OUTPUT"
+          echo "redpanda=$redpanda" >> "$GITHUB_OUTPUT"
 
   validate:
     name: Validate repository
@@ -291,6 +309,72 @@ jobs:
             --file helmfile.yaml \
             --environment dev \
             lint
+          redpanda_rendered="$RUNNER_TEMP/redpanda-rendered.yaml"
+          monitoring_rendered="$RUNNER_TEMP/monitoring-rendered.yaml"
+          helmfile \
+            --helm-binary "$(command -v helm)" \
+            --file helmfile.yaml \
+            --environment dev \
+            --selector name=redpanda \
+            template > "$redpanda_rendered"
+          helmfile \
+            --helm-binary "$(command -v helm)" \
+            --file helmfile.yaml \
+            --environment dev \
+            --selector name=kube-prometheus-stack \
+            template > "$monitoring_rendered"
+          uv run python - "$redpanda_rendered" "$monitoring_rendered" <<'PY'
+          import sys
+
+          import yaml
+
+
+          def resources(path):
+              with open(path) as stream:
+                  return [item for item in yaml.safe_load_all(stream) if item]
+
+
+          redpanda = resources(sys.argv[1])
+          monitor = next(
+              item
+              for item in redpanda
+              if item.get("kind") == "ServiceMonitor"
+              and item.get("metadata", {}).get("name") == "redpanda"
+          )
+          endpoint = monitor["spec"]["endpoints"][0]
+          if monitor["metadata"].get("namespace") != "redpanda":
+              raise SystemExit("Redpanda ServiceMonitor must live in redpanda")
+          if endpoint.get("path") != "/public_metrics" or endpoint.get("port") != "admin":
+              raise SystemExit("Redpanda ServiceMonitor must scrape admin/public_metrics")
+
+          monitoring = resources(sys.argv[2])
+          prometheus = next(
+              item
+              for item in monitoring
+              if item.get("kind") == "Prometheus"
+              and item.get("metadata", {}).get("name") == "kps-prometheus"
+          )
+          if prometheus["spec"].get("serviceMonitorNamespaceSelector") != {}:
+              raise SystemExit("Prometheus must discover cross-namespace ServiceMonitors")
+          grafana_secret = next(
+              item
+              for item in monitoring
+              if item.get("kind") == "Secret"
+              and item.get("metadata", {}).get("name")
+              == "kube-prometheus-stack-grafana"
+          )
+          if not {"admin-user", "admin-password"} <= set(grafana_secret.get("data", {})):
+              raise SystemExit("Grafana chart-owned Secret keys are incomplete")
+          grafana = next(
+              item
+              for item in monitoring
+              if item.get("kind") == "Deployment"
+              and item.get("metadata", {}).get("name")
+              == "kube-prometheus-stack-grafana"
+          )
+          if grafana["spec"].get("strategy", {}).get("type") != "Recreate":
+              raise SystemExit("Single-replica Grafana must use Recreate")
+          PY
 
   processor-base:
     name: Build processor base (${{ matrix.profile }})
@@ -829,6 +913,8 @@ jobs:
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
       CORE_CHANGED: ${{ needs.changes.outputs.core }}
       SOURCES_CHANGED: ${{ needs.changes.outputs.sources }}
+      MONITORING_CHANGED: ${{ needs.changes.outputs.monitoring }}
+      REDPANDA_CHANGED: ${{ needs.changes.outputs.redpanda }}
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
       IMAGE_DIGEST_INGEST_SITEMAP: ${{ needs.image-pin.outputs.ingest_sitemap }}
@@ -1861,11 +1947,19 @@ jobs:
             if [[ "$prometheus_ready" == true ]]; then
               curl --fail --silent --show-error \
                 http://127.0.0.1:19090/api/v1/label/__name__/values \
-                | jq '{redpanda_record_metrics: [.data[] | select(test("redpanda.*record|record.*redpanda"))]}' \
+                | jq '{
+                    redpanda_metric_count: ([
+                      .data[] | select(startswith("redpanda_"))
+                    ] | length),
+                    activity_metric_present: any(
+                      .data[]; . == "redpanda_kafka_max_offset"
+                    )
+                  }' \
                 || true
               for query in \
                 'up{namespace="redpanda"}' \
-                'redpanda_kafka_records_produced_total{redpanda_namespace="kafka"}' \
+                'redpanda_application_uptime_seconds_total' \
+                'redpanda_kafka_max_offset{redpanda_namespace="kafka"}' \
                 's2p_processor_ingested_total' \
                 's2p_processor_routed_total'; do
                 echo "Prometheus query: $query"
@@ -1921,6 +2015,196 @@ jobs:
           registry="ghcr.io/${owner}"
 
           kubectl create namespace stream2pretrain --dry-run=client -o yaml | kubectl apply -f -
+
+          cleanup_stale_monitoring_pods() {
+            local pod
+            local -a stale_pods
+            mapfile -t stale_pods < <(
+              kubectl -n monitoring get pods -o json 2>/dev/null \
+                | jq -r '
+                    .items[]
+                    | select(
+                        .metadata.deletionTimestamp != null
+                        or .status.phase == "Failed"
+                        or .status.phase == "Succeeded"
+                        or any(
+                          .status.containerStatuses[]?;
+                          .state.terminated.reason == "ContainerStatusUnknown"
+                        )
+                      )
+                    | .metadata.name
+                  ' \
+                || true
+            )
+            for pod in "${stale_pods[@]}"; do
+              [[ -n "$pod" ]] || continue
+              echo "Deleting terminal monitoring Pod: $pod"
+              kubectl -n monitoring delete "pod/$pod" \
+                --ignore-not-found --wait=false
+            done
+          }
+
+          if [[ "$MONITORING_CHANGED" == "true" ]]; then
+            echo "::group::Reconcile kube-prometheus-stack"
+            cleanup_stale_monitoring_pods
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=kube-prometheus-stack \
+              sync \
+              --reset-values \
+              --wait=false \
+              --timeout 600 \
+              --suppress-secrets
+
+            # Recreate marks the superseded, unavailable ReplicaSet Pods for
+            # deletion. Remove only those terminal objects so they cannot keep
+            # polluting health reports after the worker has recovered.
+            sleep 2
+            cleanup_stale_monitoring_pods
+            grafana_secret_keys="$(
+              kubectl -n monitoring get secret kube-prometheus-stack-grafana \
+                -o json | jq -c '.data | keys | sort'
+            )"
+            echo "Grafana administrator Secret keys: $grafana_secret_keys"
+            for required_key in admin-user admin-password; do
+              if ! jq -e --arg key "$required_key" \
+                '.data | has($key)' \
+                < <(kubectl -n monitoring get secret \
+                  kube-prometheus-stack-grafana -o json) >/dev/null; then
+                echo "Grafana chart-owned Secret is missing key: $required_key" >&2
+                exit 1
+              fi
+            done
+            kubectl -n monitoring rollout status \
+              deployment/kube-prometheus-stack-grafana --timeout=300s
+            kubectl -n monitoring wait \
+              --for=condition=Ready pod/prometheus-kps-prometheus-0 \
+              --timeout=300s
+            grafana_addresses="$(
+              kubectl -n monitoring get endpointslice \
+                -l kubernetes.io/service-name=kube-prometheus-stack-grafana \
+                -o json \
+                | jq '[
+                    .items[].endpoints[]?
+                    | select(.conditions.ready == true)
+                    | .addresses[]?
+                  ] | length'
+            )"
+            if [[ "$grafana_addresses" -lt 1 ]]; then
+              echo "Grafana has no Ready service endpoint." >&2
+              exit 1
+            fi
+            kubectl get --raw \
+              '/api/v1/namespaces/monitoring/services/http:kube-prometheus-stack-grafana:80/proxy/api/health' \
+              | jq -e '.database == "ok"' >/dev/null
+            cleanup_stale_monitoring_pods
+            echo "::endgroup::"
+            finish_phase "Monitoring reconciliation"
+          else
+            echo "Keeping kube-prometheus-stack unchanged."
+          fi
+
+          if [[ "$REDPANDA_CHANGED" == "true" ]]; then
+            echo "::group::Reconcile Redpanda monitoring"
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=redpanda \
+              sync \
+              --reset-values \
+              --wait=false \
+              --timeout 600 \
+              --suppress-secrets
+            kubectl -n redpanda rollout status statefulset/redpanda --timeout=300s
+            kubectl -n redpanda wait --for=condition=Ready pod/redpanda-0 \
+              --timeout=300s
+            kubectl -n redpanda get servicemonitor redpanda -o name
+            echo "::endgroup::"
+            finish_phase "Redpanda reconciliation"
+          else
+            echo "Keeping Redpanda unchanged."
+          fi
+
+          if [[ "$MONITORING_CHANGED" == "true" \
+             || "$REDPANDA_CHANGED" == "true" ]]; then
+            echo "::group::Verify Redpanda Prometheus target"
+            kubectl -n monitoring port-forward \
+              service/kps-prometheus 19090:9090 \
+              >"$RUNNER_TEMP/prometheus-platform-port-forward.log" 2>&1 &
+            prometheus_port_forward_pid=$!
+            prometheus_ready=false
+            for _ in $(seq 1 60); do
+              if curl --fail --silent http://127.0.0.1:19090/-/ready >/dev/null; then
+                prometheus_ready=true
+                break
+              fi
+              if ! kill -0 "$prometheus_port_forward_pid" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$prometheus_ready" != "true" ]]; then
+              cat "$RUNNER_TEMP/prometheus-platform-port-forward.log" >&2 || true
+              exit 1
+            fi
+
+            redpanda_target_ready=false
+            for _ in $(seq 1 60); do
+              active_targets="$(
+                curl --fail --silent --show-error \
+                  'http://127.0.0.1:19090/api/v1/targets?state=active'
+              )"
+              if jq -e '
+                  any(
+                    .data.activeTargets[]?;
+                    .health == "up"
+                    and (
+                      .labels.namespace == "redpanda"
+                      or .discoveredLabels.__meta_kubernetes_namespace == "redpanda"
+                    )
+                    and (
+                      (.labels.job // "" | test("redpanda"))
+                      or .discoveredLabels.__meta_kubernetes_service_name == "redpanda"
+                    )
+                  )
+                ' <<<"$active_targets" >/dev/null; then
+                redpanda_target_ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [[ "$redpanda_target_ready" != "true" ]]; then
+              jq '{
+                  activeRedpandaTargets: [
+                    .data.activeTargets[]?
+                    | select(
+                        .labels.namespace == "redpanda"
+                        or .discoveredLabels.__meta_kubernetes_namespace == "redpanda"
+                      )
+                    | {labels, health, lastError, scrapeUrl}
+                  ]
+                }' <<<"$active_targets" >&2
+              exit 1
+            fi
+            redpanda_metric_count="$(
+              curl --fail --silent --show-error \
+                http://127.0.0.1:19090/api/v1/label/__name__/values \
+                | jq '[.data[] | select(startswith("redpanda_"))] | length'
+            )"
+            if [[ "$redpanda_metric_count" -lt 1 ]]; then
+              echo "Prometheus target is up but exposes no redpanda_* series." >&2
+              exit 1
+            fi
+            echo "Redpanda Prometheus target is up with $redpanda_metric_count metric names."
+            kill "$prometheus_port_forward_pid" 2>/dev/null || true
+            wait "$prometheus_port_forward_pid" 2>/dev/null || true
+            prometheus_port_forward_pid=""
+            echo "::endgroup::"
+            finish_phase "Redpanda metrics verification"
+          fi
 
           report_deploy_failure() {
             echo "::group::Kubernetes deployment diagnostics"

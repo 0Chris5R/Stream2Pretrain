@@ -24,7 +24,7 @@ from processor.foundry.oracle_build import tree_hash
 from processor.foundry.oracles import kubernetes_job_manifest
 from processor.foundry.packaging import EnvironmentPackager
 from processor.foundry.paper_adapter import bundle_json, bundle_prompt_json
-from processor.foundry.pipeline import _validate_sft
+from processor.foundry.pipeline import PipelineResult, _validate_sft
 from processor.foundry.providers import (
     OpenAICompatibleProvider,
     ProviderBudgetExhaustedError,
@@ -75,6 +75,8 @@ from schemas.foundry import (
     VerifierPredicate,
     VerifierSpec,
 )
+from schemas.gold import GoldRecord
+from schemas.scientific import ScientificDocument, ScientificParagraph, ScientificSection
 
 FIXED_TIME = datetime(2026, 8, 19, tzinfo=UTC)
 
@@ -117,6 +119,65 @@ def _bundle() -> PaperBundle:
         ],
         source_gold_hash=sha256("gold"),
         scientific_artifact_hash=sha256("scientific"),
+    )
+
+
+def _gold_candidate() -> GoldRecord:
+    doc_id = f"sha256:{'a' * 64}"
+    return GoldRecord(
+        doc_id=doc_id,
+        text="A retained scientific result with enough supporting body text.",
+        lang="en",
+        tokens=10,
+        quality_score=4.0,
+        edu_score=4.0,
+        reasoning_score=0.9,
+        route="posttrain_candidate",
+        eligible_routes=["posttrain_candidate"],
+        license="CC-BY-4.0",
+        license_source="manual",
+        risk_tier=1,
+        valid_from=FIXED_TIME,
+        scoring_version="test-v1",
+        classifier_revision="test-v1",
+        policy_revision="git:test",
+        trace_id="a" * 32,
+        source_feed="arxiv-html-fetcher",
+        source_format="html",
+        extraction_pipeline="arxiv-html-test",
+        training_word_count=10,
+        included_section_count=1,
+        scientific_artifact_s3_uri=(
+            f"s3://silver/scientific/{doc_id.removeprefix('sha256:')}/document.json"
+        ),
+    )
+
+
+def _scientific_document() -> ScientificDocument:
+    gold = _gold_candidate()
+    paragraph = ScientificParagraph(
+        paragraph_id="results.p1",
+        text="A retained result is supported by the measured scientific evidence.",
+    )
+    return ScientificDocument(
+        doc_id=gold.doc_id,
+        source_url="https://arxiv.org/html/2608.00001",
+        source_identifier="2608.00001v1",
+        text_sha256="a" * 64,
+        extraction_pipeline="arxiv-html-test",
+        training_word_count=10,
+        included_section_count=1,
+        sections=[
+            ScientificSection(
+                section_id="results",
+                level=2,
+                title="Results",
+                text=paragraph.text,
+                role="results",
+                word_count=10,
+                paragraphs=[paragraph],
+            )
+        ],
     )
 
 
@@ -1031,6 +1092,185 @@ def test_candidate_queue_updates_changed_payload_and_removes_only_waiting_rows(
     assert store.queued_candidates() == 1
     store.remove_queued_candidate("paper")
     assert store.queued_candidates() == 0
+
+
+def test_candidate_queue_retains_validated_scientific_projection(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    scientific_payload = _scientific_document().model_dump_json().encode()
+    store.enqueue_candidate(
+        doc_id="paper",
+        payload=b"gold",
+        scientific_payload=scientific_payload,
+        reasoning_score=1.0,
+        quality_score=5.0,
+        valid_from=FIXED_TIME,
+    )
+
+    assert store.claim_candidate(cutoff_at=datetime.now(UTC) + timedelta(seconds=1)) == (
+        "paper",
+        b"gold",
+    )
+    assert store.candidate_scientific_payload("paper") == scientific_payload
+
+
+def test_missing_legacy_artifact_is_audited_and_does_not_pin_manual_run(
+    tmp_path: Path,
+) -> None:
+    class ObjectMissingError(Exception):
+        def __init__(self) -> None:
+            self.response = {"Error": {"Code": "NoSuchKey"}}
+
+    class MissingS3:
+        def get_object(self, **_: Any) -> None:
+            raise ObjectMissingError
+
+    class KafkaSink:
+        def __init__(self) -> None:
+            self.jobs: list[dict[str, Any]] = []
+
+        def event(self, _event: Any) -> None:
+            pass
+
+        def artifact(self, _artifact: Any) -> None:
+            pass
+
+        def job(self, value: dict[str, Any]) -> None:
+            self.jobs.append(value)
+
+        def flush(self) -> None:
+            pass
+
+    class LakehouseSink:
+        def add_event(self, _event: Any) -> None:
+            pass
+
+        def add_artifact(self, _artifact: Any) -> None:
+            pass
+
+        def flush(self) -> None:
+            pass
+
+    gold = _gold_candidate()
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    store.enqueue_candidate(
+        doc_id=gold.doc_id,
+        payload=gold.model_dump_json().encode(),
+        reasoning_score=gold.reasoning_score,
+        quality_score=gold.quality_score,
+        valid_from=gold.valid_from,
+    )
+    requested, _ = store.request_manual_run()
+    claimed_run = store.claim_manual_run()
+    assert claimed_run is not None
+
+    runtime = object.__new__(WorkerRuntime)
+    runtime.config = FoundryConfig(providers={}, queue_poll_seconds=5)
+    runtime.store = store
+    runtime.s3 = MissingS3()
+    runtime.kafka = KafkaSink()
+    runtime.lakehouse = LakehouseSink()
+    runtime.oracle_registry = SimpleNamespace(load=lambda _paper_id: [])
+    runtime.pipeline = SimpleNamespace(
+        process=lambda *_args, **_kwargs: PipelineResult(
+            job_id="unexpected",
+            paper_id="unexpected",
+            final_state="REJECTED",
+            artifacts=[],
+        )
+    )
+    runtime._drain_lock = threading.Lock()
+    runtime._drain_stop = threading.Event()
+    log = SimpleNamespace(info=lambda *_args, **_kwargs: None)
+
+    runtime._run_manual_snapshot(claimed_run, log)
+
+    run = next(item for item in store.manual_runs() if item["run_id"] == requested["run_id"])
+    assert run["state"] == "completed"
+    assert run["processed_count"] == 1
+    assert store.queued_candidates() == 0
+    assert runtime.kafka.jobs[-1]["status"] == "posttrain_preflight_rejected"
+    assert runtime.kafka.jobs[-1]["scientific_artifact_bucket"] == "silver"
+    assert runtime.kafka.jobs[-1]["scientific_artifact_key"].endswith("/document.json")
+    rejected = store.jobs(state="REJECTED")
+    assert len(rejected) == 1
+    assert rejected[0]["reason"].startswith("scientific artifact object is missing")
+
+
+def test_candidate_without_structured_uri_is_an_auditable_rejection(tmp_path: Path) -> None:
+    gold = _gold_candidate().model_copy(update={"scientific_artifact_s3_uri": None})
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    published_jobs: list[dict[str, Any]] = []
+    runtime = object.__new__(WorkerRuntime)
+    runtime.config = FoundryConfig(providers={})
+    runtime.store = store
+    runtime.kafka = SimpleNamespace(
+        event=lambda _event: None,
+        artifact=lambda _artifact: None,
+        job=published_jobs.append,
+        flush=lambda: None,
+    )
+    runtime.lakehouse = SimpleNamespace(
+        add_event=lambda _event: None,
+        add_artifact=lambda _artifact: None,
+        flush=lambda: None,
+    )
+
+    result = runtime.process(gold.model_dump_json().encode())
+
+    assert result["status"] == "posttrain_preflight_rejected"
+    assert result["state"] == "REJECTED"
+    assert result["rejection_reason"].startswith("scientific artifact URI is absent")
+    assert len(store.jobs(state="REJECTED")) == 1
+    assert len(published_jobs) == 1
+    assert published_jobs[0]["job_id"] == result["job_id"]
+    assert published_jobs[0]["status"] == "posttrain_preflight_rejected"
+
+
+def test_interrupted_provider_calls_are_identified_until_terminal(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _ = store.start_job(
+        paper_id="paper",
+        paper_hash=sha256("paper"),
+        doc_id=f"sha256:{'b' * 64}",
+        policy_version="v1",
+    )
+    metadata = {"provider": "hetzner", "role": "solver_a"}
+    store.append_event(
+        job_id=job_id,
+        paper_id="paper",
+        state="CALL_PLANNED",
+        metadata=metadata,
+        attempt=1,
+        idempotency_suffix="solver_a:CALL_PLANNED",
+    )
+    store.append_event(
+        job_id=job_id,
+        paper_id="paper",
+        state="CALL_STARTED",
+        metadata=metadata,
+        attempt=1,
+        idempotency_suffix="solver_a:CALL_STARTED",
+    )
+
+    assert store.interrupted_provider_calls() == [
+        {
+            "job_id": job_id,
+            "paper_id": "paper",
+            "attempt": 1,
+            "role": "solver_a",
+            "provider": "hetzner",
+            "was_started": True,
+        }
+    ]
+    store.append_event(
+        job_id=job_id,
+        paper_id="paper",
+        state="CALL_FAILED",
+        metadata=metadata,
+        attempt=1,
+        idempotency_suffix="restart-recovery:solver_a",
+    )
+    assert store.interrupted_provider_calls() == []
 
 
 def test_only_worker_startup_recovers_processing_candidates(tmp_path: Path) -> None:

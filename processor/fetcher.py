@@ -62,6 +62,18 @@ class PdfProcessingTemporarilyDisabled(common.DeterministicProcessingError):
     """
 
 
+class RawObjectMissing(common.DeterministicProcessingError):
+    """The immutable Bronze pointer names an object that no longer exists.
+
+    S3 and MinIO provide read-after-write consistency for object creation. A
+    confirmed ``NoSuchKey`` response is therefore not repaired by restarting
+    the Bytewax execution at the same Kafka offset. Record it in the durable
+    processing-failure ledger and advance so one expired Bronze body cannot
+    block every later source record in that partition. Transport, permission,
+    timeout, and server failures remain retryable and still stop the flow.
+    """
+
+
 @dataclass(slots=True)
 class FetcherState:
     """Per-worker state for extraction and normalization.
@@ -139,7 +151,12 @@ def fetch_raw_bytes(state: FetcherState, bronze: BronzeRecord) -> bytes:
         if isinstance(content_length, int) and content_length > max_object_bytes:
             raise ValueError(f"raw object exceeds the configured bound for {bronze.doc_id}")
         body = cast(bytes, resp["Body"].read(max_object_bytes + 1))
-    except (BotoCoreError, ClientError) as exc:
+    except ClientError as exc:
+        error_code = str(exc.response.get("Error", {}).get("Code", ""))
+        if error_code in {"404", "NoSuchKey", "NoSuchObject", "NotFound"}:
+            raise RawObjectMissing(f"raw object is missing for {bronze.doc_id}") from exc
+        raise RuntimeError(f"raw object read failed for {bronze.doc_id}") from exc
+    except BotoCoreError as exc:
         raise RuntimeError(f"raw object read failed for {bronze.doc_id}") from exc
     if len(body) > max_object_bytes:
         raise ValueError(f"raw object exceeds the configured bound for {bronze.doc_id}")

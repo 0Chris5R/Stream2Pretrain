@@ -145,7 +145,8 @@ class FoundryStore:
               valid_from TEXT NOT NULL DEFAULT '',
               enqueue_ordinal INTEGER NOT NULL DEFAULT 0,
               enqueued_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              scientific_payload BLOB
             );
             CREATE TABLE IF NOT EXISTS daily_runs (
               run_date TEXT PRIMARY KEY,
@@ -207,6 +208,7 @@ class FoundryStore:
             "benchmark_score": "REAL NOT NULL DEFAULT 0",
             "valid_from": "TEXT NOT NULL DEFAULT ''",
             "enqueue_ordinal": "INTEGER NOT NULL DEFAULT 0",
+            "scientific_payload": "BLOB",
         }
         for name, declaration in additions.items():
             if name not in existing:
@@ -630,6 +632,7 @@ class FoundryStore:
         reasoning_score: float,
         quality_score: float,
         valid_from: datetime,
+        scientific_payload: bytes | None = None,
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._lock:
@@ -647,8 +650,8 @@ class FoundryStore:
                     """
                     INSERT INTO candidate_queue
                     (doc_id,payload,state,reasoning_score,quality_score,benchmark_score,
-                     valid_from,enqueue_ordinal,enqueued_at,updated_at)
-                    VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?)
+                     valid_from,enqueue_ordinal,enqueued_at,updated_at,scientific_payload)
+                    VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?)
                     ON CONFLICT(doc_id) DO UPDATE SET
                       payload=excluded.payload,
                       reasoning_score=excluded.reasoning_score,
@@ -656,9 +659,14 @@ class FoundryStore:
                       valid_from=excluded.valid_from,
                       enqueue_ordinal=excluded.enqueue_ordinal,
                       enqueued_at=excluded.enqueued_at,
-                      updated_at=excluded.updated_at
+                      updated_at=excluded.updated_at,
+                      scientific_payload=excluded.scientific_payload
                     WHERE candidate_queue.state='queued'
-                      AND candidate_queue.payload<>excluded.payload
+                      AND (
+                        candidate_queue.payload<>excluded.payload
+                        OR COALESCE(candidate_queue.scientific_payload, X'')<>
+                           COALESCE(excluded.scientific_payload, X'')
+                      )
                     """,
                     (
                         doc_id,
@@ -669,6 +677,7 @@ class FoundryStore:
                         sequence,
                         now,
                         now,
+                        scientific_payload,
                     ),
                 )
                 self._conn.commit()
@@ -711,6 +720,77 @@ class FoundryStore:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def candidate_scientific_payload(
+        self,
+        doc_id: str,
+        *,
+        expected_gold_payload: bytes | None = None,
+    ) -> bytes | None:
+        row = self._conn.execute(
+            "SELECT payload,scientific_payload FROM candidate_queue WHERE doc_id=?",
+            (doc_id,),
+        ).fetchone()
+        if row is None or row["scientific_payload"] is None:
+            return None
+        if expected_gold_payload is not None and bytes(row["payload"]) != expected_gold_payload:
+            return None
+        return bytes(row["scientific_payload"])
+
+    def cache_candidate_scientific_payload(self, doc_id: str, payload: bytes) -> None:
+        """Persist the validated source projection before provider work begins."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE candidate_queue SET scientific_payload=?,updated_at=?
+                WHERE doc_id=? AND state='processing'
+                """,
+                (payload, datetime.now(UTC).isoformat(), doc_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"candidate is not processing: {doc_id}")
+
+    def interrupted_provider_calls(self) -> list[dict[str, Any]]:
+        """Return calls left without a terminal event by the prior worker."""
+        rows = self._conn.execute(
+            """
+            SELECT events.event_json FROM events
+            JOIN jobs ON jobs.job_id=events.job_id
+            WHERE jobs.state NOT IN ('ACCEPTED_SFT','ACCEPTED_RL','REJECTED','DEPRECATED')
+              AND events.state IN (
+              'CALL_PLANNED','CALL_STARTED','CALL_SUCCEEDED','CALL_FAILED','CALL_RATE_LIMITED'
+            )
+            ORDER BY events.job_id,events.sequence
+            """
+        ).fetchall()
+        planned: dict[tuple[str, int, str], FoundryEvent] = {}
+        started: set[tuple[str, int, str]] = set()
+        terminal: set[tuple[str, int, str]] = set()
+        for row in rows:
+            event = FoundryEvent.model_validate_json(row["event_json"])
+            role = str(event.metadata.get("role", "unknown"))
+            key = (event.job_id, event.attempt, role)
+            if event.state == "CALL_PLANNED":
+                planned[key] = event
+            elif event.state == "CALL_STARTED":
+                started.add(key)
+            else:
+                terminal.add(key)
+        result: list[dict[str, Any]] = []
+        for key, event in planned.items():
+            if key in terminal:
+                continue
+            result.append(
+                {
+                    "job_id": event.job_id,
+                    "paper_id": event.paper_id,
+                    "attempt": event.attempt,
+                    "role": key[2],
+                    "provider": str(event.metadata.get("provider", "unknown")),
+                    "was_started": key in started,
+                }
+            )
+        return result
 
     def start_daily_run(self, day: date) -> dict[str, Any]:
         now = datetime.now(UTC)

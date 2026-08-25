@@ -279,9 +279,11 @@ async def fetch_repo_license_evidence(
         )
     except httpx.HTTPError as exc:
         log.warning("tarball.license_fetch_failed", repo=ref.full_name, err=str(exc))
-        return None
+        raise
     if resp.status_code >= 400:
         log.warning("tarball.license_bad_status", repo=ref.full_name, status=resp.status_code)
+        if resp.status_code in {408, 425, 429} or resp.status_code >= 500:
+            resp.raise_for_status()
         return None
     payload = resp.json()
     if not isinstance(payload, dict):
@@ -324,7 +326,7 @@ async def fetch_tarball(
         )
     except httpx.HTTPError as exc:
         log.warning("tarball.fetch_failed", repo=ref.full_name, tag=ref.tag, err=str(exc))
-        return None
+        raise
     if resp.status_code >= 400:
         log.warning(
             "tarball.bad_status",
@@ -332,6 +334,8 @@ async def fetch_tarball(
             tag=ref.tag,
             status=resp.status_code,
         )
+        if resp.status_code not in {404, 410, 422}:
+            resp.raise_for_status()
         return None
     return resp.content
 
@@ -764,6 +768,10 @@ async def _consume_loop(
                 tag=ref.tag,
                 err=str(exc),
             )
+            # Do not continue to a later job. A later commit would advance the
+            # consumer-group position past this failed release and silently
+            # lose it despite ``enable_auto_commit=False``.
+            raise
         finally:
             if metrics is not None:
                 metrics.release_finished(emitted=emitted, failed=not succeeded)

@@ -67,6 +67,7 @@ from processor.scientific_policy import (
     RouteDecision,
     aggregate_segment_scores,
     composite_quality_score,
+    posttrain_candidate_eligible,
     route_document,
     source_scores,
 )
@@ -587,14 +588,24 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         "quarantine",
         "retry",
     }:
-        route = RouteDecision(
-            route="posttrain_candidate",
-            eligible_routes=["posttrain_candidate"],
-            reasons=[
-                "source is restricted to derived post-training generation; "
-                "verbatim pretraining export is forbidden"
-            ],
-        )
+        if posttrain_candidate_eligible(silver):
+            route = RouteDecision(
+                route="posttrain_candidate",
+                eligible_routes=["posttrain_candidate"],
+                reasons=[
+                    "source is restricted to derived post-training generation; "
+                    "verbatim pretraining export is forbidden"
+                ],
+            )
+        else:
+            route = RouteDecision(
+                route="quarantine",
+                eligible_routes=["quarantine"],
+                reasons=[
+                    "transform-only content has no durable scientific artifact "
+                    "compatible with the current paper Foundry"
+                ],
+            )
     risk = _risk_from_reject(reject, pii_flags)
     license_id = silver.spdx_license or "unknown"
     token_count = state.tokenizer.count(text)

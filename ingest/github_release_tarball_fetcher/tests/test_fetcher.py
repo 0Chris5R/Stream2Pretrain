@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import tarfile
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from ingest.github_release_tarball_fetcher.fetcher import (
     FetcherConfig,
     ReleaseRef,
     TarballMetrics,
+    _consume_loop,
     _is_tarball_job,
     code_object_key,
     code_s3_uri,
@@ -343,7 +345,7 @@ async def test_process_release_skips_when_license_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_release_handles_tarball_error() -> None:
+async def test_process_release_retries_transient_tarball_error() -> None:
     ref = ReleaseRef("hf", "transformers", "v9.9.9")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -363,20 +365,87 @@ async def test_process_release_handles_tarball_error() -> None:
     producer = _FakeCodeProducer()
     bucket = TokenBucket(rate=100.0, burst=8)
     try:
-        emitted = await process_release(
-            ref,
-            cfg=_cfg(),
-            fetcher_cfg=FetcherConfig(),
-            client=client,
-            minio=minio,
-            producer=producer,
-            bucket=bucket,
-            admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
-        )
+        with pytest.raises(httpx.HTTPStatusError, match="502"):
+            await process_release(
+                ref,
+                cfg=_cfg(),
+                fetcher_cfg=FetcherConfig(),
+                client=client,
+                minio=minio,
+                producer=producer,
+                bucket=bucket,
+                admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
+            )
     finally:
         await client.aclose()
-    assert emitted == 0
     assert producer.sent == []
+
+
+@pytest.mark.asyncio
+async def test_transient_license_api_failure_is_not_recorded_as_missing() -> None:
+    ref = ReleaseRef("hf", "transformers", "v9.9.9")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(httpx.HTTPStatusError, match="503"):
+            await fetch_repo_license_evidence(client, ref)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_release_cannot_be_skipped_by_a_later_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Message:
+        headers = (("source_feed", b"github-releases"),)
+        value = b'{"url":"https://github.com/huggingface/transformers/releases/tag/v5.0.0"}'
+        offset = 1
+
+    class _Consumer:
+        commits = 0
+
+        def __aiter__(self):
+            async def _messages():
+                yield _Message()
+                yield _Message()
+
+            return _messages()
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    calls = 0
+
+    async def fail_release(*_: object, **__: object) -> int:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("temporary GitHub timeout")
+
+    monkeypatch.setattr(
+        "ingest.github_release_tarball_fetcher.fetcher.process_release",
+        fail_release,
+    )
+    consumer = _Consumer()
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(httpx.ReadTimeout):
+            await _consume_loop(
+                _cfg(),
+                FetcherConfig(),
+                consumer=consumer,  # type: ignore[arg-type]
+                client=client,
+                producer=_FakeCodeProducer(),
+                minio=FakeMinio(),  # type: ignore[arg-type]
+                bucket=TokenBucket(rate=100.0, burst=8),
+                stop_event=asyncio.Event(),
+                admission_producer=_FakeAdmissionProducer(),  # type: ignore[arg-type]
+            )
+
+    assert calls == 1
+    assert consumer.commits == 0
 
 
 def test_release_ref_tarball_url() -> None:

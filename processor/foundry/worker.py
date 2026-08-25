@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import UTC, date, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from processor import common
 from processor.foundry.config import FoundryConfig
@@ -32,12 +33,16 @@ from processor.foundry.metrics import (
 )
 from processor.foundry.oracles import S3OracleRegistry, build_oracle_coordinator
 from processor.foundry.packaging import MinioPackageSink
-from processor.foundry.paper_adapter import load_scientific_artifact
+from processor.foundry.paper_adapter import (
+    ScientificArtifactUnavailableError,
+    load_scientific_artifact_payload,
+    validate_scientific_artifact_payload,
+)
 from processor.foundry.pipeline import FoundryPipeline
 from processor.foundry.providers import ProviderBudgetExhaustedError, build_providers
 from processor.foundry.quota import QuotaExceededError, QuotaLedger
 from processor.foundry.store import FoundryStore
-from processor.foundry.util import canonical_json
+from processor.foundry.util import canonical_json, sha256
 from processor.probes import start_probe_server
 from schemas.foundry import FoundryArtifactRecord, FoundryEvent
 from schemas.gold import GoldRecord
@@ -113,7 +118,7 @@ class WorkerRuntime:
             os.path.join(state_dir, "quota.sqlite3"),
             self.config.providers,
         )
-        self.quota.reconcile_abandoned_reservations()
+        abandoned_reservations = self.quota.reconcile_abandoned_reservations()
         self.providers = build_providers(
             self.config.providers,
             mode=self.config.provider_mode,
@@ -164,6 +169,7 @@ class WorkerRuntime:
                 else None
             ),
         )
+        self._recover_interrupted_calls(abandoned_reservations)
         self._drain_lock = threading.Lock()
         self._drain_stop = threading.Event()
         self._drain_thread = threading.Thread(
@@ -182,18 +188,49 @@ class WorkerRuntime:
             self.store.remove_queued_candidate(incoming.doc_id)
             return {"doc_id": incoming.doc_id, "status": "not_posttrain_candidate"}
         if not incoming.scientific_artifact_s3_uri or incoming.training_word_count < 1:
+            parsed_artifact_uri = urlparse(incoming.scientific_artifact_s3_uri or "")
+            exc = ScientificArtifactUnavailableError(
+                uri=incoming.scientific_artifact_s3_uri or "",
+                bucket=parsed_artifact_uri.netloc or "unknown",
+                key=parsed_artifact_uri.path.lstrip("/") or "unknown",
+                reason=(
+                    "URI is absent"
+                    if not incoming.scientific_artifact_s3_uri
+                    else "Gold has no retained scientific body"
+                ),
+            )
+            job_result = self._record_candidate_preflight_rejection(incoming, exc)
+            self._flush_job_outbox(job_result)
             self.store.remove_queued_candidate(incoming.doc_id)
-            return {
-                "doc_id": incoming.doc_id,
-                "status": "posttrain_preflight_rejected",
-                "reason": "structured scientific body is unavailable",
-            }
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            JOBS.labels(state=str(job_result["state"])).inc()
+            return {**job_result, "queued_candidates": self.store.queued_candidates()}
+        try:
+            scientific_payload = self.store.candidate_scientific_payload(
+                incoming.doc_id,
+                expected_gold_payload=payload,
+            )
+            if scientific_payload is None:
+                _, scientific_payload = load_scientific_artifact_payload(
+                    incoming,
+                    s3_client=self.s3,
+                )
+            else:
+                validate_scientific_artifact_payload(incoming, scientific_payload)
+        except ScientificArtifactUnavailableError as exc:
+            job_result = self._record_candidate_preflight_rejection(incoming, exc)
+            self._flush_job_outbox(job_result)
+            self.store.remove_queued_candidate(incoming.doc_id)
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            JOBS.labels(state=str(job_result["state"])).inc()
+            return {**job_result, "queued_candidates": self.store.queued_candidates()}
         self.store.enqueue_candidate(
             doc_id=incoming.doc_id,
             payload=payload,
             reasoning_score=incoming.reasoning_score,
             quality_score=incoming.quality_score,
             valid_from=incoming.valid_from,
+            scientific_payload=scientific_payload,
         )
         QUEUED_CANDIDATES.set(self.store.queued_candidates())
         return {
@@ -238,7 +275,21 @@ class WorkerRuntime:
         claimed_doc_id, claimed_payload = claimed
         try:
             gold = GoldRecord.model_validate_json(claimed_payload)
-            scientific = load_scientific_artifact(gold, s3_client=self.s3)
+            scientific_payload = self.store.candidate_scientific_payload(claimed_doc_id)
+            if scientific_payload is None:
+                scientific, scientific_payload = load_scientific_artifact_payload(
+                    gold,
+                    s3_client=self.s3,
+                )
+                self.store.cache_candidate_scientific_payload(
+                    claimed_doc_id,
+                    scientific_payload,
+                )
+            else:
+                scientific, _ = validate_scientific_artifact_payload(
+                    gold,
+                    scientific_payload,
+                )
             official_artifacts = self.oracle_registry.load(
                 scientific.source_identifier or gold.doc_id
             )
@@ -247,14 +298,6 @@ class WorkerRuntime:
                 scientific,
                 official_artifacts=official_artifacts,
             )
-            # SQLite is the durable outbox. Restage all job outputs so a worker
-            # restart after a sink failure cannot strand an accepted artifact.
-            for event in self.store.event_records(result.job_id):
-                self.kafka.event(event)
-                self.lakehouse.add_event(event)
-            for artifact in self.store.artifact_records(result.job_id):
-                self.kafka.artifact(artifact)
-                self.lakehouse.add_artifact(artifact)
             job_result = {
                 "job_id": result.job_id,
                 "paper_id": result.paper_id,
@@ -263,9 +306,18 @@ class WorkerRuntime:
                 "rejection_reason": result.rejection_reason,
                 "queued_candidates": self.store.queued_candidates(),
             }
-            self.kafka.job(job_result)
-            self.lakehouse.flush()
-            self.kafka.flush()
+        except ScientificArtifactUnavailableError as exc:
+            gold = GoldRecord.model_validate_json(claimed_payload)
+            job_result = self._record_candidate_preflight_rejection(gold, exc)
+        except Exception:
+            self.store.release_candidate(claimed_doc_id)
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            raise
+        # SQLite is the durable outbox. Restage all job outputs so a worker
+        # restart after a sink failure cannot strand an accepted artifact or
+        # an auditable terminal candidate preflight rejection.
+        try:
+            self._flush_job_outbox(job_result)
         except Exception:
             self.store.release_candidate(claimed_doc_id)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
@@ -278,8 +330,100 @@ class WorkerRuntime:
         if manual_run_id is not None:
             self.store.record_manual_processed(manual_run_id)
         QUEUED_CANDIDATES.set(self.store.queued_candidates())
-        JOBS.labels(state=result.final_state).inc()
+        JOBS.labels(state=str(job_result["state"])).inc()
         return {**job_result, "queued_candidates": self.store.queued_candidates()}
+
+    def _flush_job_outbox(self, job_result: dict[str, Any]) -> None:
+        job_id = str(job_result["job_id"])
+        for event in self.store.event_records(job_id):
+            self.kafka.event(event)
+            self.lakehouse.add_event(event)
+        for artifact in self.store.artifact_records(job_id):
+            self.kafka.artifact(artifact)
+            self.lakehouse.add_artifact(artifact)
+        self.kafka.job(job_result)
+        self.lakehouse.flush()
+        self.kafka.flush()
+
+    def _record_candidate_preflight_rejection(
+        self,
+        gold: GoldRecord,
+        exc: ScientificArtifactUnavailableError,
+    ) -> dict[str, Any]:
+        """Create a terminal, replay-safe audit job for an unusable candidate."""
+        paper_hash = sha256(
+            {
+                "doc_id": gold.doc_id,
+                "gold": sha256(gold),
+                "scientific_artifact_s3_uri": gold.scientific_artifact_s3_uri,
+                "stage": "candidate_preflight",
+            }
+        )
+        job_id, created = self.store.start_job(
+            paper_id=gold.doc_id,
+            paper_hash=paper_hash,
+            doc_id=gold.doc_id,
+            policy_version=f"{self.config.policy_version}:candidate-preflight-v1",
+        )
+        metadata = {
+            "stage": "candidate_preflight",
+            "source_feed": gold.source_feed,
+            "scientific_artifact_bucket": exc.bucket,
+            "scientific_artifact_key": exc.key,
+            "failure_kind": exc.reason,
+        }
+        received = self.store.append_event(
+            job_id=job_id,
+            paper_id=gold.doc_id,
+            state="RECEIVED",
+            metadata=metadata,
+            idempotency_suffix="candidate-preflight",
+        )
+        rejected = self.store.append_event(
+            job_id=job_id,
+            paper_id=gold.doc_id,
+            state="REJECTED",
+            reason=str(exc),
+            metadata=metadata,
+            idempotency_suffix="candidate-preflight",
+        )
+        if created:
+            STAGES.labels(state=received.state).inc()
+            STAGES.labels(state=rejected.state).inc()
+        return {
+            "job_id": job_id,
+            "paper_id": gold.doc_id,
+            "state": "REJECTED",
+            "artifacts": 0,
+            "status": "posttrain_preflight_rejected",
+            "rejection_reason": str(exc),
+            "scientific_artifact_bucket": exc.bucket,
+            "scientific_artifact_key": exc.key,
+        }
+
+    def _recover_interrupted_calls(self, abandoned_reservations: int) -> None:
+        """Close prior-process call events before the queue resumes them."""
+        recovered = self.store.interrupted_provider_calls()
+        for call in recovered:
+            event = self.store.append_event(
+                job_id=str(call["job_id"]),
+                paper_id=str(call["paper_id"]),
+                state="CALL_FAILED",
+                reason="worker restarted before the provider call reached a terminal state",
+                metadata={
+                    "provider": call["provider"],
+                    "role": call["role"],
+                    "restart_recovery": True,
+                    "was_started": call["was_started"],
+                    "abandoned_reservations_reconciled": abandoned_reservations,
+                },
+                attempt=int(call["attempt"]),
+                idempotency_suffix=f"restart-recovery:{call['role']}",
+            )
+            self._event(event)
+        if recovered:
+            self.lakehouse.flush()
+            self.kafka.flush()
 
     def _queue_loop(self) -> None:
         import structlog

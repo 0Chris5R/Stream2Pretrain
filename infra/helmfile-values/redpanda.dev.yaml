@@ -58,9 +58,14 @@ resources:
   memory:
     container:
       max: 2Gi
-serviceMonitor:
+# Redpanda chart 5.9.5 creates its ServiceMonitor from `monitoring`, not the
+# legacy `serviceMonitor` key. Keep the release label aligned with the
+# kube-prometheus-stack selector convention as well.
+monitoring:
   enabled: true
-  namespace: monitoring
+  scrapeInterval: 30s
+  labels:
+    release: kube-prometheus-stack
 post_install_job:
   enabled: false
 post_upgrade_job:
