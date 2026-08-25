@@ -96,6 +96,14 @@ class _SplitModelClient:
         self.closed.append(self.base_url)
 
 
+class _LowQualityScorer:
+    revision = "test-low-quality"
+    backend = "test"
+
+    def score(self, _text: str) -> QualityScore:
+        return QualityScore(1.0, self.revision)
+
+
 def test_split_model_services_are_all_required_and_closed(
     cfg: ProcessorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -136,6 +144,29 @@ def test_curate_clean_text_passes(cfg: ProcessorConfig, long_english_text: str) 
         assert gold.tokens > 0
         assert gold.risk_tier == 1
         assert gold.reject_reasons == []
+        assert is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_cluster_smoke_observes_but_does_not_gate_on_fineweb_score(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        state.fineweb_quality = _LowQualityScorer()
+        silver = _silver(long_english_text).model_copy(
+            update={
+                "source_feed": "cluster-smoke",
+                "source_format": "html",
+                "extraction_pipeline": "cluster-smoke-1.0",
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert gold.segment_scores[0].fineweb_edu_score == 1.0
+        assert "low_quality_score" not in gold.reject_reasons
         assert is_trainable_gold(gold)
     finally:
         state.close()

@@ -110,6 +110,11 @@ def test_only_ordinary_web_enables_web_shape_and_kenlm_gates() -> None:
         source_format="web",
         extraction_pipeline="hf-model-card-markdown-v1",
     )
+    smoke = resolve_source_policy(
+        source_feed="cluster-smoke",
+        source_format="html",
+        extraction_pipeline="cluster-smoke-1.0",
+    )
 
     assert web.web_heuristic_gate is True
     assert web.kenlm_mode == "gate"
@@ -117,3 +122,5 @@ def test_only_ordinary_web_enables_web_shape_and_kenlm_gates() -> None:
     assert scientific.kenlm_mode == "off"
     assert card.web_heuristic_gate is False
     assert card.kenlm_mode == "off"
+    assert smoke.web_heuristic_gate is False
+    assert smoke.kenlm_mode == "off"

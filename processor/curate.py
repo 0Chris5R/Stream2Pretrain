@@ -499,7 +499,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     # 3 and above. It is a grounded gate only for ordinary web prose. Hub
     # cards and repository documentation use the score as an audit signal
     # because their structured Markdown is outside that web-crawl threshold.
-    if source_policy.family == "web_prose" and edu_score < 3.0:
+    if source_policy.web_heuristic_gate and edu_score < 3.0:
         reject.append("low_quality_score")
     if source_policy.language_gate and (silver.lang != "en" or silver.lang_score < 0.5):
         reject.append("language_filter")
