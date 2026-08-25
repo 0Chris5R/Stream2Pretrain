@@ -295,6 +295,9 @@ def test_foundry_has_an_independent_application_image() -> None:
     assert "image: processor-foundry" in workflow
     assert "dockerfile: processor/Dockerfile.foundry.app" in workflow
     assert "processor/Dockerfile.foundry.app processor/__init__.py" in workflow
+    assert "processor/foundry docs/provider-terms" in workflow
+    foundry_dockerfile = (ROOT / "processor" / "Dockerfile.foundry.app").read_text()
+    assert "COPY docs/provider-terms             /app/docs/provider-terms" in foundry_dockerfile
 
 
 @pytest.mark.parametrize("package_dir", INGEST_PACKAGES, ids=lambda path: path.name)

@@ -639,7 +639,7 @@ jobs:
           - image: processor-foundry
             context: .
             dockerfile: processor/Dockerfile.foundry.app
-            inputs: .dockerignore schemas processor/Dockerfile.foundry.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/iceberg_catalog.py processor/probes.py processor/sign.py processor/foundry
+            inputs: .dockerignore schemas processor/Dockerfile.foundry.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/iceberg_catalog.py processor/probes.py processor/sign.py processor/foundry docs/provider-terms
           - image: processor-quality-model
             model_profile: quality
             context: .

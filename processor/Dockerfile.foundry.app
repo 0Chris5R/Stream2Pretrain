@@ -10,6 +10,7 @@ COPY processor/iceberg_catalog.py    /app/processor/iceberg_catalog.py
 COPY processor/probes.py             /app/processor/probes.py
 COPY processor/sign.py               /app/processor/sign.py
 COPY processor/foundry               /app/processor/foundry
+COPY docs/provider-terms             /app/docs/provider-terms
 COPY --chmod=0555 processor/container_entrypoint.sh /usr/local/bin/s2p-entrypoint
 
 WORKDIR /app
