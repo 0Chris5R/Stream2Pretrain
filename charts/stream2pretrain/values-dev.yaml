@@ -8,8 +8,6 @@ ingest:
     replicas: 1
   oaipmh:
     replicas: 1
-  sitemap:
-    replicas: 1
   githubReleases:
     replicas: 1
   hf:

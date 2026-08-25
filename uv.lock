@@ -45,7 +45,6 @@ members = [
     "stream2pretrain-oaipmh-poller",
     "stream2pretrain-processor",
     "stream2pretrain-rss-poller",
-    "stream2pretrain-sitemap-poller",
     "stream2pretrain-tests",
 ]
 
@@ -5007,7 +5006,6 @@ dev = [
     { name = "stream2pretrain-oaipmh-poller" },
     { name = "stream2pretrain-processor" },
     { name = "stream2pretrain-rss-poller" },
-    { name = "stream2pretrain-sitemap-poller" },
     { name = "stream2pretrain-tests" },
     { name = "types-pyyaml" },
 ]
@@ -5047,7 +5045,6 @@ dev = [
     { name = "stream2pretrain-oaipmh-poller", editable = "ingest/oaipmh_poller" },
     { name = "stream2pretrain-processor", editable = "processor" },
     { name = "stream2pretrain-rss-poller", editable = "ingest/rss_poller" },
-    { name = "stream2pretrain-sitemap-poller", editable = "ingest/sitemap_poller" },
     { name = "stream2pretrain-tests", editable = "tests" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]
@@ -5490,21 +5487,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "feedparser", specifier = ">=6.0.11" },
-    { name = "stream2pretrain", editable = "." },
-    { name = "stream2pretrain-ingest-common", editable = "ingest/common" },
-]
-
-[[package]]
-name = "stream2pretrain-sitemap-poller"
-version = "0.1.0"
-source = { editable = "ingest/sitemap_poller" }
-dependencies = [
-    { name = "stream2pretrain" },
-    { name = "stream2pretrain-ingest-common" },
-]
-
-[package.metadata]
-requires-dist = [
     { name = "stream2pretrain", editable = "." },
     { name = "stream2pretrain-ingest-common", editable = "ingest/common" },
 ]

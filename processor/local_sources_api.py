@@ -26,7 +26,6 @@ from ingest.common.license_admission import effective_license
 from ingest.oaipmh_poller.poller import _run as run_oaipmh
 from ingest.rss_poller.poller import discover_entries
 from ingest.rss_poller.poller import run_pass as run_rss
-from ingest.sitemap_poller.poller import run_pass as run_sitemap
 from schemas.sourcefeed import SourceFeedSpec
 
 STATE_PATH = Path(os.environ.get("S2P_LOCAL_SOURCES_STATE", "/var/lib/s2p/sources.json"))
@@ -234,8 +233,6 @@ async def _execute(store: LocalSourceStore, name: str, spec: SourceFeedSpec) -> 
             emitted, newly_seen = await _run_arxiv_rss(spec, cfg, seen_ids)
         elif spec.protocol in {"rss", "atom"}:
             emitted = await run_rss(cfg, [spec])
-        elif spec.protocol == "sitemap":
-            emitted = await run_sitemap(cfg, [spec])
         elif spec.protocol == "oai-pmh":
             emitted = await run_oaipmh(cfg, [spec], max_records=MAX_RECORDS)
         else:

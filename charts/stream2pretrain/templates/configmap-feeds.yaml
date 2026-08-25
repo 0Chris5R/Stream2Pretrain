@@ -54,11 +54,6 @@ data:
         "poll_interval_seconds": {{ .Values.sources.huggingface.datasets.pollIntervalSeconds }}
       }
     }
-  sitemap.json: |-
-    {
-      "feeds": {{ toJson .Values.sources.sitemap.feeds }},
-      "poll_interval_seconds": {{ .Values.sources.sitemap.pollIntervalSeconds }}
-    }
   topics.json: |-
     {
       "raw_fetched": {{ .Values.redpanda.topics.rawFetched | quote }},

@@ -55,7 +55,7 @@ catalog. Next.js routes under `ui/app/api` form the typed backend-for-frontend.
 In Kubernetes, writes target real `SourceFeed` CRDs and `Run once` creates a
 bounded Job from the appropriate poller template. In Podman, the compatible
 local source service persists specs in its named volume and runs RSS/Atom,
-OAI-PMH, or sitemap ingestion against the same local Redpanda and MinIO. The
+OAI-PMH ingestion against the same local Redpanda and MinIO. The
 default arXiv RSS source resolves current entry ids and fetches full native HTML
 or the bounded PDF fallback.
 

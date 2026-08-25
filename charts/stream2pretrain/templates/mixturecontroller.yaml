@@ -59,8 +59,6 @@ spec:
               value: {{ printf "%s-ingest-rss" (include "stream2pretrain.fullname" .) | quote }}
             - name: S2P_OAI_CRONJOB
               value: {{ printf "%s-ingest-oaipmh" (include "stream2pretrain.fullname" .) | quote }}
-            - name: S2P_SITEMAP_CRONJOB
-              value: {{ printf "%s-ingest-sitemap" (include "stream2pretrain.fullname" .) | quote }}
             - name: S2P_ICEBERG_BRANCH_SHADOW_A
               value: {{ .Values.iceberg.branches.shadowA | quote }}
             - name: S2P_ICEBERG_BRANCH_SHADOW_B

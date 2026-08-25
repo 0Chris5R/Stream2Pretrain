@@ -6,7 +6,6 @@ Subpackages:
   OTel tracer, content hashing, robots.txt cache, rate limiter, feed loader.
 - ``rss_poller``: RSS / Atom CronJob poller.
 - ``oaipmh_poller``: OAI-PMH 2.0 CronJob poller (arXiv default).
-- ``sitemap_poller``: optional sitemap adapter, absent from the active catalogue.
 - ``github_releases``: GitHub Releases Atom CronJob poller.
 - ``github_release_tarball_fetcher``: per-release source tarball fetcher
   emitting one ``CodeFileRecord`` per allow-listed file (v0.2.0).

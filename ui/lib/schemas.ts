@@ -32,7 +32,6 @@ export const SourceFeedProtocols = [
   'atom',
   'oai-pmh',
   'rest-json',
-  'sitemap',
   'manual',
 ] as const;
 

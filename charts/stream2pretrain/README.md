@@ -25,7 +25,6 @@ to `.Chart.AppVersion`. Producing those images is a CI job. Expected refs:
 
 - `<registry>/stream2pretrain/ingest-rss:<tag>`
 - `<registry>/stream2pretrain/ingest-oaipmh:<tag>`
-- `<registry>/stream2pretrain/ingest-sitemap:<tag>`
 - `<registry>/stream2pretrain/ingest-github-releases:<tag>`
 - `<registry>/stream2pretrain/ingest-hf:<tag>`
 - `<registry>/stream2pretrain/processor-fetcher:<tag>`

@@ -109,7 +109,7 @@ the host before the build.
 - MinHash uses `rensa`, and LSHBloom persists its index through `plyvel`
   (LevelDB). Strict startup rejects fallback state backends.
 - The local SourceFeed service persists source definitions, schedules enabled
-  feeds, and runs bounded RSS/Atom, OAI-PMH, sitemap, and native arXiv ingestion
+  feeds, and runs bounded RSS/Atom, OAI-PMH, and native arXiv ingestion
   against the same Redpanda/MinIO data plane. Kubernetes reconciles SourceFeed
   CRDs into per-feed CronJobs; Gatekeeper, NetworkPolicies, KEDA, and
   MixtureRecipe control remain Kubernetes demonstrations.

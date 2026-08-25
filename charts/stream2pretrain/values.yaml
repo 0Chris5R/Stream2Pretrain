@@ -229,14 +229,6 @@ sources:
       kind: deployment
       tokenSecret: stream2pretrain-hf
       tokenSecretKey: token
-  sitemap:
-    enabled: false
-    name: sitemap-poller
-    pollIntervalSeconds: 21600
-    kind: cronjob
-    schedule: "11 */6 * * *"
-    feeds: []
-
 # -----------------------------------------------------------------------------
 # Ingest components
 # -----------------------------------------------------------------------------
@@ -267,12 +259,6 @@ ingest:
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 512Mi}
-  sitemap:
-    image: stream2pretrain/ingest-sitemap
-    replicas: 1
-    resources:
-      requests: {cpu: 50m, memory: 128Mi}
-      limits: {cpu: 500m, memory: 256Mi}
   githubReleases:
     image: stream2pretrain/ingest-github-releases
     replicas: 1

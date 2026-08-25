@@ -46,7 +46,6 @@ WORKDIR /src
 COPY pyproject.toml uv.lock README.md /src/
 COPY ingest/common/pyproject.toml /src/ingest/common/pyproject.toml
 COPY ingest/rss_poller/pyproject.toml /src/ingest/rss_poller/pyproject.toml
-COPY ingest/sitemap_poller/pyproject.toml /src/ingest/sitemap_poller/pyproject.toml
 COPY ingest/github_releases/pyproject.toml /src/ingest/github_releases/pyproject.toml
 COPY ingest/hf_poller/pyproject.toml /src/ingest/hf_poller/pyproject.toml
 COPY ingest/oaipmh_poller/pyproject.toml /src/ingest/oaipmh_poller/pyproject.toml
@@ -245,7 +244,6 @@ COPY ingest/common                                      /app/ingest/common
 COPY ingest/arxiv_html_fetcher                          /app/ingest/arxiv_html_fetcher
 COPY ingest/oaipmh_poller                               /app/ingest/oaipmh_poller
 COPY ingest/rss_poller                                  /app/ingest/rss_poller
-COPY ingest/sitemap_poller                              /app/ingest/sitemap_poller
 COPY processor                                          /app/processor
 # The foundry records the reviewed provider-terms document path in its policy
 # audit. Keep only that required documentation subtree in the runtime image.

@@ -275,7 +275,6 @@ def _poller_cronjob_name(protocol: str) -> str:
         "rss": "S2P_RSS_CRONJOB",
         "atom": "S2P_RSS_CRONJOB",
         "oai-pmh": "S2P_OAI_CRONJOB",
-        "sitemap": "S2P_SITEMAP_CRONJOB",
     }.get(protocol)
     if key is None or not os.environ.get(key):
         raise ValueError(f"No poller is configured for {protocol} sources")
@@ -541,7 +540,7 @@ def _sourcefeed_status(
         "quality_policy": quality_policy,
         "license_resolver": license_resolver,
         "stages": stages,
-        "supports_run": spec.protocol in {"rss", "atom", "oai-pmh", "sitemap"},
+        "supports_run": spec.protocol in {"rss", "atom", "oai-pmh"},
     }
 
 

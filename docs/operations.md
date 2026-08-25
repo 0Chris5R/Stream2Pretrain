@@ -30,7 +30,7 @@ NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
 kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
 ```
 
-The chart-owned RSS, OAI-PMH, and sitemap CronJobs are suspended templates.
+The chart-owned RSS and OAI-PMH CronJobs are suspended templates.
 The SourceFeed controller creates the only active CronJob for each CRD. Do not
 unsuspend a template job: doing so would duplicate the per-source schedules.
 

@@ -214,7 +214,6 @@ jobs:
           for name in (
               "stream2pretrain-ingest-rss",
               "stream2pretrain-ingest-oaipmh",
-              "stream2pretrain-ingest-sitemap",
           ):
               resource = by_name.get(("CronJob", name))
               if resource is None:
@@ -606,10 +605,6 @@ jobs:
             context: .
             dockerfile: ingest/oaipmh_poller/Dockerfile
             inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/oaipmh_poller
-          - image: ingest-sitemap
-            context: .
-            dockerfile: ingest/sitemap_poller/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/sitemap_poller
           - image: ingest-github-releases
             context: .
             dockerfile: ingest/github_releases/Dockerfile
@@ -629,7 +624,7 @@ jobs:
           - image: processor
             context: .
             dockerfile: processor/Dockerfile.app
-            inputs: .dockerignore schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor/*.py processor/Dockerfile.app processor/container_entrypoint.sh processor/mixture_controller processor/operators docs/provider-terms
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller processor/*.py processor/Dockerfile.app processor/container_entrypoint.sh processor/mixture_controller processor/operators docs/provider-terms
           - image: processor-foundry
             context: .
             dockerfile: processor/Dockerfile.foundry.app
@@ -813,7 +808,6 @@ jobs:
     outputs:
       ingest_rss: ${{ steps.pin.outputs.ingest_rss }}
       ingest_oaipmh: ${{ steps.pin.outputs.ingest_oaipmh }}
-      ingest_sitemap: ${{ steps.pin.outputs.ingest_sitemap }}
       ingest_github_releases: ${{ steps.pin.outputs.ingest_github_releases }}
       ingest_hf: ${{ steps.pin.outputs.ingest_hf }}
       ingest_arxiv_html: ${{ steps.pin.outputs.ingest_arxiv_html }}
@@ -860,7 +854,6 @@ jobs:
           }
           pin_component ingest_rss ingest-rss
           pin_component ingest_oaipmh ingest-oaipmh
-          pin_component ingest_sitemap ingest-sitemap
           pin_component ingest_github_releases ingest-github-releases
           pin_component ingest_hf ingest-hf
           pin_component ingest_arxiv_html ingest-arxiv-html
@@ -907,7 +900,6 @@ jobs:
       REDPANDA_CHANGED: ${{ needs.changes.outputs.redpanda }}
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
-      IMAGE_DIGEST_INGEST_SITEMAP: ${{ needs.image-pin.outputs.ingest_sitemap }}
       IMAGE_DIGEST_INGEST_GITHUB_RELEASES: ${{ needs.image-pin.outputs.ingest_github_releases }}
       IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
       IMAGE_DIGEST_INGEST_ARXIV_HTML: ${{ needs.image-pin.outputs.ingest_arxiv_html }}
@@ -2758,7 +2750,6 @@ jobs:
 
           : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
           : "${IMAGE_DIGEST_INGEST_OAIPMH:?Missing pinned ingest-oaipmh digest}"
-          : "${IMAGE_DIGEST_INGEST_SITEMAP:?Missing pinned ingest-sitemap digest}"
           : "${IMAGE_DIGEST_INGEST_GITHUB_RELEASES:?Missing pinned GitHub releases digest}"
           : "${IMAGE_DIGEST_INGEST_HF:?Missing pinned HF digest}"
           : "${IMAGE_DIGEST_INGEST_ARXIV_HTML:?Missing pinned arXiv HTML digest}"
@@ -2777,7 +2768,6 @@ jobs:
             --set "image.pullPolicy=IfNotPresent"
             --set "ingest.rss.image=stream2pretrain/ingest-rss@${IMAGE_DIGEST_INGEST_RSS}"
             --set "ingest.oaipmh.image=stream2pretrain/ingest-oaipmh@${IMAGE_DIGEST_INGEST_OAIPMH}"
-            --set "ingest.sitemap.image=stream2pretrain/ingest-sitemap@${IMAGE_DIGEST_INGEST_SITEMAP}"
             --set "ingest.githubReleases.image=stream2pretrain/ingest-github-releases@${IMAGE_DIGEST_INGEST_GITHUB_RELEASES}"
             --set "ingest.hf.image=stream2pretrain/ingest-hf@${IMAGE_DIGEST_INGEST_HF}"
             --set "ingest.arxivHtmlFetcher.image=stream2pretrain/ingest-arxiv-html@${IMAGE_DIGEST_INGEST_ARXIV_HTML}"

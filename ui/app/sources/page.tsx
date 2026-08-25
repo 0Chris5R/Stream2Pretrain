@@ -35,7 +35,7 @@ import {
 import { formatInt, relativeTime } from '@/lib/utils';
 
 const SourceListSchema = z.array(SourceFeedStatusSchema);
-const runnableProtocols = ['rss', 'atom', 'oai-pmh', 'sitemap'] as const;
+const runnableProtocols = ['rss', 'atom', 'oai-pmh'] as const;
 
 async function fetchSources(): Promise<SourceFeedStatus[]> {
   return apiFetch('/api/sources', SourceListSchema);

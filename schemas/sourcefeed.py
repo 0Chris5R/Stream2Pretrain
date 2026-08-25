@@ -23,7 +23,6 @@ FeedProtocol = Literal[
     "atom",
     "oai-pmh",
     "rest-json",
-    "sitemap",
     "manual",
 ]
 

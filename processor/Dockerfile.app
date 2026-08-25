@@ -11,7 +11,6 @@ COPY ingest/common                                      /app/ingest/common
 COPY ingest/arxiv_html_fetcher                          /app/ingest/arxiv_html_fetcher
 COPY ingest/oaipmh_poller                               /app/ingest/oaipmh_poller
 COPY ingest/rss_poller                                  /app/ingest/rss_poller
-COPY ingest/sitemap_poller                              /app/ingest/sitemap_poller
 COPY processor                                          /app/processor
 COPY docs/provider-terms                                /app/docs/provider-terms
 COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entrypoint

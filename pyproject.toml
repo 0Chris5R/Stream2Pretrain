@@ -40,7 +40,6 @@ dev = [
     "pyarrow>=16.0",
     "stream2pretrain-ingest-common",
     "stream2pretrain-rss-poller",
-    "stream2pretrain-sitemap-poller",
     "stream2pretrain-arxiv-html-fetcher",
     "stream2pretrain-github-releases",
     "stream2pretrain-github-release-tarball-fetcher",
@@ -72,7 +71,6 @@ packages = ["schemas"]
 members = [
     "ingest/common",
     "ingest/rss_poller",
-    "ingest/sitemap_poller",
     "ingest/github_releases",
     "ingest/hf_poller",
     "ingest/oaipmh_poller",
@@ -86,7 +84,6 @@ members = [
 stream2pretrain = { workspace = true }
 stream2pretrain-ingest-common = { workspace = true }
 stream2pretrain-rss-poller = { workspace = true }
-stream2pretrain-sitemap-poller = { workspace = true }
 stream2pretrain-arxiv-html-fetcher = { workspace = true }
 stream2pretrain-github-releases = { workspace = true }
 stream2pretrain-github-release-tarball-fetcher = { workspace = true }
@@ -212,7 +209,6 @@ testpaths = [
     "processor/tests",
     "ingest/common/tests",
     "ingest/rss_poller/tests",
-    "ingest/sitemap_poller/tests",
     "ingest/github_releases/tests",
     "ingest/hf_poller/tests",
     "ingest/oaipmh_poller/tests",
