@@ -48,8 +48,8 @@ from processor.source_policy import resolve_source_policy
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
-FETCHER_FLOW_NAME = "s2p-fetcher-live-v3"
-FETCHER_RECOVERY_NAME = "fetcher-live-v3"
+FETCHER_FLOW_NAME = "s2p-fetcher-live-v4"
+FETCHER_RECOVERY_NAME = "fetcher-live-v4"
 
 _NON_RELEASE_GITHUB_REF_PREFIXES = ("ciflow/", "trunk/", "viable/")
 

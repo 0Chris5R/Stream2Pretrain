@@ -15,7 +15,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-CUTOVER_ID = "live-frontier-bytewax-v3"
+CUTOVER_ID = "live-frontier-bytewax-v4"
 SCHEMA_VERSION = 1
 
 

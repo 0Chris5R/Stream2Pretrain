@@ -252,8 +252,8 @@ jobs:
                   "fetcher",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-live-v3",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-live-v3",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-live-v4",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-live-v4",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -1142,6 +1142,7 @@ jobs:
           # the broker frontier committed here. The marker makes this action
           # impossible to repeat accidentally on later deployments.
           frontier_reset_applied=false
+          source_noise_reset_applied=false
           frontier_reset_marker=stream2pretrain-live-frontier-20260825
           if [[ "$DEPLOY_MODE" == "deploy" ]] \
              && ! kubectl -n stream2pretrain get "configmap/$frontier_reset_marker" \
@@ -1226,6 +1227,55 @@ jobs:
               | kubectl apply -f -
             frontier_reset_applied=true
             echo "::endgroup::"
+          fi
+
+          # The first frontier reset was followed by two PyTorch CI pseudo-
+          # release refs that produced tens of thousands of non-release files.
+          # The producer filter now excludes those refs. Perform one bounded,
+          # auditable reset of only the fetcher frontier and start a new
+          # recovery identity, preserving the previous recovery directory.
+          source_noise_reset_marker=stream2pretrain-github-noise-frontier-20260825
+          if [[ "$DEPLOY_MODE" == "deploy" ]] \
+             && ! kubectl -n stream2pretrain get "configmap/$source_noise_reset_marker" \
+                  >/dev/null 2>&1; then
+            if [[ "$frontier_reset_applied" == "true" ]]; then
+              echo "The full live-frontier reset already covers GitHub source noise."
+            else
+              echo "::group::Discard invalid GitHub CI source noise"
+              if kubectl -n stream2pretrain get \
+                deployment/stream2pretrain-processor-fetcher >/dev/null 2>&1; then
+                kubectl -n stream2pretrain scale \
+                  deployment/stream2pretrain-processor-fetcher \
+                  --replicas=0 --timeout=180s
+              fi
+              if kubectl -n stream2pretrain get pod \
+                -l app.kubernetes.io/component=processor-fetcher -o name \
+                | grep -q .; then
+                kubectl -n stream2pretrain wait --for=delete pod \
+                  -l app.kubernetes.io/component=processor-fetcher --timeout=240s
+              fi
+              for _ in $(seq 1 60); do
+                if ! kubectl -n stream2pretrain get pod \
+                  -l app.kubernetes.io/component=processor-fetcher -o name \
+                  | grep -q .; then
+                  break
+                fi
+                sleep 2
+              done
+              if kubectl -n stream2pretrain get pod \
+                -l app.kubernetes.io/component=processor-fetcher -o name \
+                | grep -q .; then
+                echo "The fetcher is still running; refusing to move its frontier." >&2
+                exit 1
+              fi
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group seek s2p-fetcher --to end --topics raw.fetched \
+                  --allow-new-topics
+              kubectl -n redpanda exec statefulset/redpanda -- \
+                rpk group describe s2p-fetcher
+              echo "::endgroup::"
+            fi
+            source_noise_reset_applied=true
           fi
 
           if [[ "$DEPLOY_MODE" == "repair-monitoring" ]]; then
@@ -2459,10 +2509,11 @@ jobs:
           # Preserve any pre-native Bytewax progress in the broker group before
           # the native-consumer-to-Bytewax cutback. The durable marker makes
           # this a one-time handoff even when the workflow or Helm deployment
-          # is retried. Marker identity must match the stable live-v3 flow and
+          # is retried. Marker identity must match the stable live flow and
           # recovery names or the release fails closed.
           if [[ ("$CORE_CHANGED" == "true" || "$SOURCES_CHANGED" == "true") \
-             && "$frontier_reset_applied" != "true" ]]; then
+             && "$frontier_reset_applied" != "true" \
+             && "$source_noise_reset_applied" != "true" ]]; then
           legacy_fetcher_checkpoint="$(
             kubectl -n stream2pretrain get deployment \
               stream2pretrain-processor-fetcher -o json 2>/dev/null \
@@ -2488,7 +2539,7 @@ jobs:
                 ' \
               || true
           )"
-          if [[ "$existing_fetcher_flow" == "s2p-fetcher-live-v3" ]]; then
+          if [[ "$existing_fetcher_flow" == "s2p-fetcher-live-v4" ]]; then
             echo "Fetcher already declares the stable live Bytewax identity."
           elif [[ "$legacy_fetcher_checkpoint" == "true" ]]; then
             fetcher_pod="$(
@@ -2513,8 +2564,8 @@ jobs:
               S2P_CUTOVER_COMPONENT=fetcher
               S2P_CUTOVER_TOPIC=raw.fetched
               S2P_CONSUMER_GROUP=s2p-fetcher
-              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-live-v3
-              S2P_BYTEWAX_RECOVERY_NAME=fetcher-live-v3
+              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-live-v4
+              S2P_BYTEWAX_RECOVERY_NAME=fetcher-live-v4
               S2P_BYTEWAX_RECOVERY_PARTITIONS=4
             )
             set +e
@@ -3177,6 +3228,14 @@ jobs:
           curator_canary_job=""
           else
             echo "Skipping the core curator canary: core pipeline inputs are unchanged."
+          fi
+          if [[ "$source_noise_reset_applied" == "true" ]]; then
+            kubectl -n stream2pretrain create configmap "$source_noise_reset_marker" \
+              --from-literal=reset-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --from-literal=git-sha="$GITHUB_SHA" \
+              --from-literal=policy="discard-invalid-github-ci-source-noise" \
+              --dry-run=client -o yaml \
+              | kubectl apply -f -
           fi
           finish_phase "Core canary"
           deploy_finished_at="$(date +%s)"

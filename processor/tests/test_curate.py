@@ -514,7 +514,7 @@ def test_permissive_substantive_review_remains_pretrain_eligible(
         state.close()
 
 
-def test_transform_only_review_is_not_sent_to_paper_foundry(
+def test_transform_only_review_stays_in_posttrain_pool_without_paper_generator(
     cfg: ProcessorConfig,
 ) -> None:
     state = build_state(cfg)
@@ -535,10 +535,10 @@ def test_transform_only_review_is_not_sent_to_paper_foundry(
 
         gold = curate_one(state, silver)
 
-        assert gold.route == "quarantine"
-        assert gold.eligible_routes == ["quarantine"]
-        assert "current paper Foundry" in gold.route_reasons[0]
-        assert not is_trainable_gold(gold)
+        assert gold.route == "posttrain_candidate"
+        assert gold.eligible_routes == ["posttrain_candidate"]
+        assert "no generator for this source family is enabled yet" in gold.route_reasons[0]
+        assert is_trainable_gold(gold)
     finally:
         state.close()
 

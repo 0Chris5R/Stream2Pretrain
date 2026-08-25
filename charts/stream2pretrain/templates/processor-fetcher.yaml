@@ -69,9 +69,9 @@ spec:
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
             - name: S2P_BYTEWAX_FLOW_NAME
-              value: "s2p-fetcher-live-v3"
+              value: "s2p-fetcher-live-v4"
             - name: S2P_BYTEWAX_RECOVERY_NAME
-              value: "fetcher-live-v3"
+              value: "fetcher-live-v4"
             - name: S2P_STATE_DIR
               value: /var/lib/s2p/checkpoint
             - name: S2P_CONSUMER_GROUP

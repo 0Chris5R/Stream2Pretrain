@@ -15,8 +15,8 @@ def _environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("S2P_CUTOVER_COMPONENT", "fetcher")
     monkeypatch.setenv("S2P_CUTOVER_TOPIC", "raw.fetched")
     monkeypatch.setenv("S2P_CONSUMER_GROUP", "s2p-fetcher")
-    monkeypatch.setenv("S2P_BYTEWAX_FLOW_NAME", "s2p-fetcher-live-v3")
-    monkeypatch.setenv("S2P_BYTEWAX_RECOVERY_NAME", "fetcher-live-v3")
+    monkeypatch.setenv("S2P_BYTEWAX_FLOW_NAME", "s2p-fetcher-live-v4")
+    monkeypatch.setenv("S2P_BYTEWAX_RECOVERY_NAME", "fetcher-live-v4")
     monkeypatch.setenv("S2P_BYTEWAX_RECOVERY_PARTITIONS", "4")
 
 
@@ -42,7 +42,7 @@ def test_marker_fails_closed_on_identity_drift(
     path = marker_path(tmp_path, "fetcher")
     ensure_marker(path, expected)
 
-    changed = {**expected, "flow_name": "s2p-fetcher-live-v4"}
+    changed = {**expected, "flow_name": "s2p-fetcher-live-v5"}
     with pytest.raises(RuntimeError, match="does not match"):
         ensure_marker(path, changed)
 
