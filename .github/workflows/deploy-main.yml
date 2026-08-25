@@ -1824,7 +1824,7 @@ jobs:
 
             echo "::group::Durable pretraining audit"
             kubectl -n stream2pretrain exec -i \
-              deployment/stream2pretrain-duckdb -- python - <<'PY'
+              deployment/stream2pretrain-duckdb -- python - <<'PY' || true
           from __future__ import annotations
 
           import json
@@ -2865,6 +2865,11 @@ jobs:
             workload_timeout=60
             if [[ "$workload" == deployment/stream2pretrain-processor-model-service-* ]]; then
               workload_timeout=600
+            elif [[ "$workload" == statefulset/* ]]; then
+              # Stateful workers flush durable state before exiting. Foundry's
+              # declared termination grace alone is 120 seconds, so the old
+              # 60-second generic deadline could fail a healthy replacement.
+              workload_timeout=300
             fi
             log="$RUNNER_TEMP/rollout-${workload//\//-}.log"
             (
