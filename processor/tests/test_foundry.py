@@ -1689,7 +1689,7 @@ def test_acceptance_suite_and_signed_package_are_reproducible(tmp_path: Path) ->
         # framework optional. CI runs this same test once with the exact pin so
         # the generated package must import, load, and execute its reward.
         if importlib.util.find_spec("verifiers") is not None:
-            archive.extractall(tmp_path)
+            archive.extractall(tmp_path, filter="data")
             environment_root = tmp_path / "paper_environment"
             export_root = environment_root / "prime_verifiers"
             sys.path[:0] = [str(environment_root), str(export_root)]
