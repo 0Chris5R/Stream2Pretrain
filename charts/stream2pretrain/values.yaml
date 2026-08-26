@@ -283,8 +283,11 @@ processor:
     doclingEnabled: false
     usePresidio: true
     resources:
-      requests: {cpu: 500m, memory: 1Gi}
-      limits: {cpu: 2, memory: 2Gi}
+      # The retained deduplication/recovery state was measured at about 1.8 GiB
+      # before Python and request buffers. A 2 GiB ceiling OOM-killed the live
+      # curator, so reserve its steady-state footprint and retain growth room.
+      requests: {cpu: 500m, memory: 2Gi}
+      limits: {cpu: 2, memory: 6Gi}
     checkpoint:
       storageClass: ""
       size: 20Gi

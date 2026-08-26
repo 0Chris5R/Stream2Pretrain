@@ -738,6 +738,58 @@ logic, metrics, and UI remain in the project Kubernetes cluster. Only the
 bounded training/evaluation job leaves the cluster. Cached inputs and outputs
 make the live demo independent of a last-minute external-provider failure.
 
+#### GPU execution and student-credit plan
+
+The intended experiment is not a one-off training demo. It repeatedly trains
+small proxy models, initially Pythia-160M or another fixed model of comparable
+size, on competing subsamples of the pretraining corpus. Every comparison uses
+the same initial checkpoint, tokenizer, optimizer, context length, seed set,
+token budget, and hardware. Jobs run sequentially on the same GPU when only one
+device is available. Promotion is based on loss and per-domain perplexity on a
+fresh, sealed evaluation window, never on incomparable training loss alone.
+
+There is no dependable general-purpose free tier that promises a T4-class GPU
+continuously. The implementation must therefore remain provider-neutral: one
+OCI image, object-store checkpoints, resumable jobs, and manifests that make a
+spot or credit-backed run reproducible. Credits are an execution budget, not an
+architectural dependency.
+
+Options recorded on 2026-08-26 and requiring revalidation before use:
+
+- Modal Academic Research Credits is the strongest grant route. Its published
+  programme offers up to USD 10,000, while the published T4 compute price was
+  USD 0.000164 per second. The normal Starter allowance was USD 30 per month.
+- Google Cloud's new-customer offer was USD 300 for 90 days. GPU use requires
+  activating a paid billing account, but remaining trial credits can still be
+  consumed. At the published T4 plus `n1-standard-4` rates, USD 300 represents
+  roughly 556 instance-hours before storage and network costs.
+- Google Cloud teaching credits advertised up to USD 50 per student and allow
+  credits to be pooled in a group billing account. Four or five approved team
+  members would therefore represent roughly 370 or 463 hours at the same
+  T4 plus `n1-standard-4` rate.
+- AWS advertised up to USD 200 of new-customer credits. At the then-current
+  `g4dn.xlarge` on-demand price, that is roughly 380 T4 instance-hours, subject
+  to regional GPU quota approval.
+- Azure for Students advertised USD 100. This is only a theoretical route for
+  roughly 190 T4 instance-hours because student subscriptions commonly begin
+  with zero GPU quota and approval is not guaranteed.
+- Oracle Cloud advertised USD 300 for 30 days. Its published A10 GPU price made
+  this roughly 114 GPU-hours, so it is useful for a short experiment rather
+  than continuous operation.
+
+The first implementation should apply for Modal academic credits and Google
+teaching credits in parallel, then use whichever is approved. A single T4 is
+enough for the intended sequential tiny-model experiments; two simultaneous
+GPUs improve iteration time but are not required for a fair A/B comparison.
+Actual tokens per second, checkpoint size, rolling-window duration, storage
+growth, and credit consumption remain `needs-measurement` on the final image.
+
+Prime Intellect Hosted Training is a separate post-training opportunity, not
+the N3 pretraining evaluator. If its currently zero-priced trainable model is
+still available when this phase starts, it can provide an additional live RL
+acceptance test using an exported Foundry environment. It must not replace the
+fixed small-model, equal-budget N3 comparison.
+
 Why this is unusually strong: it evaluates a data recipe by measured model
 behavior rather than by classifier scores alone. FineWeb-Edu, KenLM, heuristics,
 and deduplication remain useful document-level signals; N3 tests whether one
