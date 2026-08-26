@@ -3155,8 +3155,28 @@ jobs:
               ' \
             | kubectl apply -f -
 
-          kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
-            python - < scripts/cluster_smoke.py
+          # The record-level timeout must measure curation, not a cold canary
+          # Pod waiting for model services and initialising Presidio. The live
+          # curator took longer than that startup allowance after the measured
+          # memory resize even though it resumed and routed records correctly.
+          if ! kubectl -n stream2pretrain wait \
+            --for=condition=Ready \
+            "pod" \
+            -l "job-name=$curator_canary_job" \
+            --timeout=300s; then
+            kubectl -n stream2pretrain describe "job/$curator_canary_job" || true
+            kubectl -n stream2pretrain logs "job/$curator_canary_job" \
+              --all-containers --prefix || true
+            exit 1
+          fi
+          if ! kubectl -n stream2pretrain exec -i \
+            deployment/stream2pretrain-duckdb -- \
+            python - < scripts/cluster_smoke.py; then
+            kubectl -n stream2pretrain describe "job/$curator_canary_job" || true
+            kubectl -n stream2pretrain logs "job/$curator_canary_job" \
+              --all-containers --prefix || true
+            exit 1
+          fi
           kubectl -n stream2pretrain logs "job/$curator_canary_job" \
             --all-containers --prefix || true
           kubectl -n stream2pretrain delete "job/$curator_canary_job" \
