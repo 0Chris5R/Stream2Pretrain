@@ -243,6 +243,14 @@ _MARKDOWN_HTML = re.compile(r"<[^>]+>")
 
 
 def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
+    """Compatibility facade for tests and callers that only need prose."""
+    text, title, metadata, _ = _markdown_prose_sections(payload)
+    return text, title, metadata
+
+
+def _markdown_prose_sections(
+    payload: bytes,
+) -> tuple[str, str | None, str, list[SilverSegment]]:
     """Extract card/README prose while excluding YAML and fenced code.
 
     The immutable Bronze object remains the exact source. This projection is
@@ -260,6 +268,10 @@ def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
                 break
 
     prose: list[str] = []
+    section_lines: list[str] = []
+    section_title = "Overview"
+    section_index = 0
+    parsed_sections: list[SilverSegment] = []
     title: str | None = None
     in_fence = False
     fence_marker = ""
@@ -279,6 +291,7 @@ def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
             if prose and prose[-1] != "":
                 prose.append("")
             continue
+        is_heading = stripped.startswith("#")
         cleaned = stripped.lstrip("#> ").strip()
         cleaned = re.sub(r"^[-*+]\s+", "", cleaned)
         cleaned = _MARKDOWN_LINK.sub(lambda match: match.group(1), cleaned)
@@ -286,11 +299,38 @@ def _markdown_prose_projection(payload: bytes) -> tuple[str, str | None, str]:
         cleaned = " ".join(cleaned.split())
         if not cleaned:
             continue
-        if title is None and stripped.startswith("#"):
+        if title is None and is_heading:
             title = cleaned
+        if is_heading:
+            if section_lines:
+                section_text = "\n".join(section_lines).strip()
+                parsed_sections.append(
+                    SilverSegment(
+                        segment_id=f"card-section-{section_index}",
+                        title=section_title,
+                        text=section_text,
+                        word_count=len(section_text.split()),
+                    )
+                )
+                section_index += 1
+                section_lines = []
+            section_title = cleaned
+            prose.append(cleaned)
+            continue
         prose.append(cleaned)
+        section_lines.append(cleaned)
+    if section_lines:
+        section_text = "\n".join(section_lines).strip()
+        parsed_sections.append(
+            SilverSegment(
+                segment_id=f"card-section-{section_index}",
+                title=section_title,
+                text=section_text,
+                word_count=len(section_text.split()),
+            )
+        )
     text = "\n".join(prose).strip()
-    return text, title, "\n".join(metadata_lines)[:32768]
+    return text, title, "\n".join(metadata_lines)[:32768], parsed_sections
 
 
 def uses_scientific_extraction(bronze: BronzeRecord) -> bool:
@@ -332,8 +372,9 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
     elif bronze.source_format == "web" and "markdown" in bronze.content_type.lower():
-        text, title, source_metadata_text = _markdown_prose_projection(raw_html)
+        text, title, source_metadata_text, segments = _markdown_prose_sections(raw_html)
         model_text = text
+        projection_version = "hf-card-prose-v2"
         extracted_with = bronze.extraction_pipeline
         extraction_pipeline = bronze.extraction_pipeline
     elif bronze.source_format in {"latex", "markdown"}:
@@ -435,7 +476,7 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         source_word_count = len(text.split())
         training_word_count = len(model_text.split())
         included_section_count = 1 if model_text else 0
-        if model_text:
+        if model_text and not segments:
             segments = [
                 SilverSegment(
                     segment_id="document",
@@ -444,6 +485,7 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
                     word_count=len(model_text.split()),
                 )
             ]
+        included_section_count = len(segments)
     lang_result = state.lang_id.identify(model_text or text)
     sig = state.minhasher.signature(text)
     html_text = (
@@ -496,6 +538,11 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
         spdx_license=bronze.spdx_license,
         spdx_license_source=bronze.spdx_license_source,
         training_usage=bronze.training_usage,
+        raw_html_s3_uri=bronze.raw_html_s3_uri,
+        source_content_type=bronze.content_type,
+        source_http_status=bronze.http_status,
+        source_fetched_at=bronze.fetched_at,
+        source_http_last_modified=bronze.http_last_modified,
         scientific_artifact_s3_uri=artifact_uri,
         figure_count=figure_count,
         table_count=table_count,

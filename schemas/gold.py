@@ -28,7 +28,17 @@ from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId, Trai
 #   2 = caution (heuristic uncertainty, restricted licence, partial PII)
 #   3 = drop (explicit dirty signal; should not enter training mixture)
 RiskTier = Literal[1, 2, 3]
-PiiFlag = Literal["email", "phone", "ssn", "credit_card", "ipv4", "ipv6", "passport"]
+PiiFlag = Literal[
+    "email",
+    "phone",
+    "ssn",
+    "credit_card",
+    "iban",
+    "ipv4",
+    "ipv6",
+    "passport",
+    "secret",
+]
 CorpusRoute = Literal[
     "pretrain",
     # Read compatibility for snapshots written before the route was renamed.
@@ -57,6 +67,7 @@ RejectReason = Literal[
     "insufficient_body",
     "insufficient_scientific_body",
     "incomplete_scientific_extraction",
+    "hf_card_quality_filter",
 ]
 
 
@@ -161,7 +172,13 @@ class GoldRecord(BaseModel):
     pii_flags: list[PiiFlag] = Field(default_factory=list)
     metadata_pii_flags: list[PiiFlag] = Field(default_factory=list)
     removed_body_pii_flags: list[PiiFlag] = Field(default_factory=list)
-    pii_action: Literal["none", "metadata_removed", "segments_removed", "body_quarantine"] = "none"
+    pii_action: Literal[
+        "none",
+        "metadata_removed",
+        "body_redacted",
+        "segments_removed",
+        "body_quarantine",
+    ] = "none"
     pii_scanner_revision: str = "regex-only"
 
     # Decontamination.

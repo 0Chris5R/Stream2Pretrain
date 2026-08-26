@@ -8,8 +8,10 @@ Two layers:
 2. Optional Microsoft Presidio analyzer plug. Loaded lazily; only used if
    the wheel is installed and the env-var ``S2P_USE_PRESIDIO`` is truthy.
 
-Output: a sorted list of :class:`schemas.gold.PiiFlag` strings on the
-``GoldRecord.pii_flags`` field.
+Ordinary contact information is replaced by typed placeholders. Credentials,
+financial identifiers, and government identifiers are classified as high risk
+and force the containing artifact to quarantine. Only flag names and counts are
+persisted: matched values never enter Gold audit metadata.
 """
 
 from __future__ import annotations
@@ -41,6 +43,24 @@ _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _IPV6 = re.compile(r"\b(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{1,4}\b")
 _PASSPORT = re.compile(r"\b[A-Z]{1,2}\d{6,9}\b")
+_SECRET = re.compile(
+    r"(?ix)(?:"
+    r"-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+    r"|\b(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|password)\b\s*[:=]\s*['\"]?[A-Za-z0-9_+/.=-]{16,}"
+    r"|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b"
+    r"|\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"
+    r")"
+)
+
+_REDACTION_TOKENS: dict[PiiFlag, str] = {
+    "email": "[EMAIL]",
+    "phone": "[PHONE]",
+    "ipv4": "[IP_ADDRESS]",
+    "ipv6": "[IP_ADDRESS]",
+}
+_HIGH_RISK_FLAGS: frozenset[PiiFlag] = frozenset(
+    {"credit_card", "iban", "ssn", "passport", "secret"}
+)
 
 _MIN_DIGITS_PHONE = 9
 # Operational NLP chunk bound. Peak RSS on the target cluster remains
@@ -51,10 +71,23 @@ _DEFAULT_PRESIDIO_CHUNK_CHARS = 32_768
 
 @dataclass(frozen=True, slots=True)
 class PiiHit:
-    """A single match - useful for forensic dumps in the UI."""
+    """A private in-memory match. The snippet must never be persisted."""
 
     flag: PiiFlag
     snippet: str
+    start: int = -1
+    end: int = -1
+
+
+@dataclass(frozen=True, slots=True)
+class PiiSanitization:
+    """Safe projection plus the minimum audit information needed downstream."""
+
+    text: str
+    flags: tuple[PiiFlag, ...]
+    redacted_flags: tuple[PiiFlag, ...]
+    blocking_flags: tuple[PiiFlag, ...]
+    redaction_count: int
 
 
 def luhn_ok(digits: str) -> bool:
@@ -173,42 +206,52 @@ class PiiScanner:
         snippet = text[: self._max_text_chars]
         hits: list[PiiHit] = []
         for m in _EMAIL.finditer(snippet):
-            hits.append(PiiHit("email", m.group(0)))
+            hits.append(PiiHit("email", m.group(0), m.start(), m.end()))
         for m in _PHONE.finditer(snippet):
             digits = "".join(c for c in m.group(0) if c.isdigit())
             if len(digits) >= _MIN_DIGITS_PHONE:
-                hits.append(PiiHit("phone", m.group(0)))
+                hits.append(PiiHit("phone", m.group(0), m.start(), m.end()))
         for m in _CC.finditer(snippet):
             digits = "".join(c for c in m.group(0) if c.isdigit())
             if 13 <= len(digits) <= 19 and luhn_ok(digits):
-                hits.append(PiiHit("credit_card", m.group(0)))
+                hits.append(PiiHit("credit_card", m.group(0), m.start(), m.end()))
         for m in _IBAN.finditer(snippet):
-            hits.append(PiiHit("credit_card", m.group(0))) if False else None
-            # IBAN does not have its own PiiFlag; intentionally noop here.
-            # We surface IBANs through the ``credit_card`` channel only when
-            # the Luhn-validated CC regex above matches - keeping flags well-
-            # defined on the gold schema. IBAN-only cases stay surfaced via
-            # Presidio if enabled.
+            hits.append(PiiHit("iban", m.group(0), m.start(), m.end()))
         for m in _SSN.finditer(snippet):
-            hits.append(PiiHit("ssn", m.group(0)))
+            hits.append(PiiHit("ssn", m.group(0), m.start(), m.end()))
         for m in _IPV4.finditer(snippet):
             if is_valid_ipv4(m.group(0)):
-                hits.append(PiiHit("ipv4", m.group(0)))
+                hits.append(PiiHit("ipv4", m.group(0), m.start(), m.end()))
         for m in _IPV6.finditer(snippet):
-            hits.append(PiiHit("ipv6", m.group(0)))
+            hits.append(PiiHit("ipv6", m.group(0), m.start(), m.end()))
         for m in _PASSPORT.finditer(snippet):
-            hits.append(PiiHit("passport", m.group(0)))
+            context = snippet[max(0, m.start() - 48) : m.end() + 48].lower()
+            if "passport" in context:
+                hits.append(PiiHit("passport", m.group(0), m.start(), m.end()))
+        for m in _SECRET.finditer(snippet):
+            hits.append(PiiHit("secret", m.group(0), m.start(), m.end()))
         if self._presidio is not None:
             try:
+                chunk_search_start = 0
                 for chunk in _bounded_text_chunks(snippet, self._presidio_chunk_chars):
+                    chunk_start = snippet.find(chunk, chunk_search_start)
+                    if chunk_start < 0:
+                        chunk_start = chunk_search_start
+                    chunk_search_start = chunk_start + len(chunk)
                     results = self._presidio.analyze(  # type: ignore[union-attr]
                         text=chunk,
                         language="en",
                     )
                     for r in results:
-                        flag = self._presidio_flag(r.entity_type)
+                        value = chunk[r.start : r.end]
+                        flag = (
+                            "ipv6"
+                            if r.entity_type == "IP_ADDRESS" and ":" in value
+                            else self._presidio_flag(r.entity_type)
+                        )
                         if flag:
-                            hits.append(PiiHit(flag, chunk[r.start : r.end]))
+                            start = chunk_start + r.start
+                            hits.append(PiiHit(flag, value, start, chunk_start + r.end))
             except Exception:
                 if not self._allow_fallback:
                     raise
@@ -219,34 +262,43 @@ class PiiScanner:
         return sorted({h.flag for h in self.scan(text)})
 
     def blocking_flags(self, text: str) -> list[PiiFlag]:
-        """Return high-confidence findings that may block a training export.
+        """Return findings that cannot safely be handled by contact redaction."""
+        return sorted(set(self.flags(text)) & _HIGH_RISK_FLAGS)
 
-        Email addresses, Luhn-valid payment-card numbers, and SSN-shaped
-        values are sufficiently precise to remove their containing part.
-        Phone numbers use the strict syntax above. IP-looking values and
-        Presidio-only phone/passport guesses remain audit signals because
-        dotted experiment identifiers, section numbers, and tensor shapes
-        are common in scientific text.
+    def sanitize(self, text: str) -> PiiSanitization:
+        """Redact ordinary contact data and report high-risk identifiers.
+
+        High-risk values are also replaced in this safe projection so a
+        quarantined Gold decision cannot expose the matched secret through its
+        text field. Callers must quarantine whenever ``blocking_flags`` is not
+        empty.
         """
-        if not text:
-            return []
-        snippet = text[: self._max_text_chars]
-        blocking: set[PiiFlag] = set()
-        if _EMAIL.search(snippet):
-            blocking.add("email")
-        if _SSN.search(snippet):
-            blocking.add("ssn")
-        if _PHONE.search(snippet):
-            blocking.add("phone")
-        for match in _CC.finditer(snippet):
-            digits = "".join(character for character in match.group(0) if character.isdigit())
-            if 13 <= len(digits) <= 19 and luhn_ok(digits):
-                blocking.add("credit_card")
-        for match in _PASSPORT.finditer(snippet):
-            context = snippet[max(0, match.start() - 48) : match.end() + 48].lower()
-            if "passport" in context:
-                blocking.add("passport")
-        return sorted(blocking)
+        hits = self.scan(text)
+        spans: list[tuple[int, int, str, PiiFlag]] = []
+        for hit in hits:
+            if hit.start < 0 or hit.end <= hit.start:
+                continue
+            replacement = _REDACTION_TOKENS.get(hit.flag, f"[{hit.flag.upper()}]")
+            spans.append((hit.start, hit.end, replacement, hit.flag))
+        # Resolve overlaps deterministically, then replace from right to left.
+        chosen: list[tuple[int, int, str, PiiFlag]] = []
+        for span in sorted(spans, key=lambda value: (value[0], -(value[1] - value[0]))):
+            if chosen and span[0] < chosen[-1][1]:
+                continue
+            chosen.append(span)
+        sanitized = text
+        for start, end, replacement, _ in reversed(chosen):
+            sanitized = sanitized[:start] + replacement + sanitized[end:]
+        flags = tuple(sorted({hit.flag for hit in hits}))
+        blocking = tuple(sorted(set(flags) & _HIGH_RISK_FLAGS))
+        redacted = tuple(sorted({span[3] for span in chosen}))
+        return PiiSanitization(
+            text=sanitized,
+            flags=flags,
+            redacted_flags=redacted,
+            blocking_flags=blocking,
+            redaction_count=len(chosen),
+        )
 
     @staticmethod
     def _presidio_flag(entity_type: str) -> PiiFlag | None:

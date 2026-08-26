@@ -33,6 +33,16 @@ def test_credit_card_with_luhn() -> None:
     assert "credit_card" in flags
 
 
+def test_iban_is_a_high_risk_financial_identifier() -> None:
+    scanner = PiiScanner(use_presidio=False)
+    value = "DE89370400440532013000"
+
+    result = scanner.sanitize(f"Transfer to {value} only.")
+
+    assert result.text == "Transfer to [IBAN] only."
+    assert result.blocking_flags == ("iban",)
+
+
 def test_ssn_detection() -> None:
     flags = PiiScanner().flags("My SSN is 123-45-6789, please don't share.")
     assert "ssn" in flags
@@ -53,7 +63,18 @@ def test_scientific_tensor_shape_is_not_a_phone_number() -> None:
 def test_explicit_international_phone_number_is_blocking() -> None:
     scanner = PiiScanner(use_presidio=False)
 
-    assert "phone" in scanner.blocking_flags("Telephone: +49 30 1234 5678")
+    result = scanner.sanitize("Telephone: +49 30 1234 5678")
+    assert result.text == "Telephone: [PHONE]"
+    assert result.blocking_flags == ()
+
+
+def test_secret_is_redacted_and_blocks_the_artifact() -> None:
+    scanner = PiiScanner(use_presidio=False)
+
+    result = scanner.sanitize("api_key = abcdefghijklmnopqrstuvwxyz123456")
+
+    assert "abcdefghijklmnopqrstuvwxyz" not in result.text
+    assert result.blocking_flags == ("secret",)
 
 
 def test_clean_text_has_no_flags(long_english_text: str) -> None:

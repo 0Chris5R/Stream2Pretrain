@@ -12,6 +12,7 @@ from processor.common import ProcessorConfig, gold_loads, silver_dumps
 from processor.curate import (
     build_state,
     curate_one,
+    extraction_retry_payload,
     is_trainable_gold,
     process_silver_decision_payload,
     process_silver_payload,
@@ -180,10 +181,10 @@ def test_curate_flags_pii(cfg: ProcessorConfig, long_english_text: str) -> None:
         assert "email" in gold.removed_body_pii_flags
         assert "email" not in gold.pii_flags
         assert "john.doe@example.com" not in gold.text
-        assert gold.pii_action == "body_quarantine"
-        assert "pii_detected" in gold.reject_reasons
-        assert gold.risk_tier == 3
-        assert not is_trainable_gold(gold)
+        assert gold.pii_action == "body_redacted"
+        assert "pii_detected" not in gold.reject_reasons
+        assert gold.risk_tier == 1
+        assert is_trainable_gold(gold)
     finally:
         state.close()
 
@@ -200,7 +201,7 @@ def test_curate_flags_curly_brace(cfg: ProcessorConfig) -> None:
         state.close()
 
 
-def test_curate_removes_only_the_sensitive_section(
+def test_curate_redacts_contact_details_without_removing_the_section(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
     state = build_state(cfg)
@@ -235,10 +236,10 @@ def test_curate_removes_only_the_sensitive_section(
 
         assert "author@example.invalid" not in gold.text
         assert "email" in gold.removed_body_pii_flags
-        assert gold.pii_action == "segments_removed"
+        assert gold.pii_action == "body_redacted"
         assert "pii_detected" not in gold.reject_reasons
         assert any(
-            score.segment_id == "contact" and score.decision == "excluded"
+            score.segment_id == "contact" and score.decision == "included"
             for score in gold.segment_scores
         )
         assert any(
@@ -311,6 +312,7 @@ def test_scientific_lorem_signal_is_diagnostic_not_a_web_filter(cfg: ProcessorCo
             update={
                 "scientific_artifact_s3_uri": "s3://silver/scientific/e/document.json",
                 "source_feed": "arxiv-html-fetcher",
+                "url": "https://arxiv.org/html/2608.12345",
                 "source_format": "html",
                 "extraction_pipeline": "arxiv-html-scientific-v1",
                 "model_text": text,
@@ -335,7 +337,7 @@ def test_scientific_lorem_signal_is_diagnostic_not_a_web_filter(cfg: ProcessorCo
         state.close()
 
 
-def test_structured_evidence_with_email_is_removed_before_final_projection(
+def test_structured_evidence_with_email_is_redacted_before_final_projection(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
     state = build_state(cfg)
@@ -363,7 +365,8 @@ def test_structured_evidence_with_email_is_removed_before_final_projection(
         assert "author@example.invalid" not in gold.text
         assert "email" in gold.removed_body_pii_flags
         assert "pii_detected" not in gold.reject_reasons
-        assert gold.pii_action == "segments_removed"
+        assert "[EMAIL]" in gold.text
+        assert gold.pii_action == "body_redacted"
         assert is_trainable_gold(gold)
     finally:
         state.close()
@@ -442,6 +445,7 @@ def test_transform_only_scientific_artifact_reaches_paper_foundry(
         silver = _silver(long_english_text, doc_id="sha256:" + "5" * 64).model_copy(
             update={
                 "source_feed": "arxiv-html-fetcher",
+                "url": "https://arxiv.org/html/2608.54321",
                 "source_format": "html",
                 "extraction_pipeline": "arxiv-html-scientific-v1",
                 "training_usage": "posttrain_transform_only",
@@ -509,6 +513,46 @@ def test_short_web_page_is_quarantined_instead_of_retried(cfg: ProcessorConfig) 
         state.close()
 
 
+def test_scientific_extraction_retry_reuses_admitted_body_and_is_bounded(
+    cfg: ProcessorConfig,
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver("brief paper body", doc_id="sha256:" + "c" * 64).model_copy(
+            update={
+                "source_feed": "arxiv-html-fetcher",
+                "url": "https://arxiv.org/html/2608.99999",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "raw_html_s3_uri": "s3://bronze/arxiv/paper.html",
+                "source_content_type": "text/html",
+                "source_fetched_at": datetime(2026, 8, 26, tzinfo=UTC),
+            }
+        )
+
+        first = curate_one(state, silver)
+        assert first.route == "retry"
+        payload = extraction_retry_payload(silver, first)
+        assert payload is not None
+        retry = common.bronze_loads(payload)
+        assert retry.raw_html_s3_uri == "s3://bronze/arxiv/paper.html"
+        assert retry.source_feed == "arxiv-extraction-retry"
+        assert retry.source_format == "metadata"
+        assert retry.extraction_pipeline == "arxiv-pdf-retry-v1|curation-retry=1"
+
+        exhausted = curate_one(
+            state,
+            silver.model_copy(
+                update={"extraction_pipeline": "arxiv-html-scientific-v1|curation-retry=2"}
+            ),
+        )
+        assert exhausted.route == "quarantine"
+        assert "bounded alternate retry" in exhausted.route_reasons[0]
+        assert extraction_retry_payload(silver, exhausted) is None
+    finally:
+        state.close()
+
+
 def test_process_silver_payload_returns_bytes(cfg: ProcessorConfig, long_english_text: str) -> None:
     state = build_state(cfg)
     try:
@@ -520,14 +564,39 @@ def test_process_silver_payload_returns_bytes(cfg: ProcessorConfig, long_english
         state.close()
 
 
-def test_process_silver_payload_drops_rejected_rows(
+def test_process_silver_payload_redacts_contact_details_without_dropping_document(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
     state = build_state(cfg)
     try:
         text = long_english_text + " contact me at john.doe@example.com please."
         payload = silver_dumps(_silver(text, doc_id="sha256:" + "5" * 64))
-        assert process_silver_payload(state, payload) is None
+        output = process_silver_payload(state, payload)
+        assert output is not None
+        gold = gold_loads(output)
+        assert "john.doe@example.com" not in gold.text
+        assert "[EMAIL]" in gold.text
+        assert gold.pii_action == "body_redacted"
+        assert gold.removed_body_pii_flags == ["email"]
+        assert "pii_detected" not in gold.reject_reasons
+    finally:
+        state.close()
+
+
+def test_process_silver_payload_quarantines_secret_bearing_document(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        text = long_english_text + " api_key = abcdefghijklmnopqrstuvwxyz123456"
+        payload = silver_dumps(_silver(text, doc_id="sha256:" + "7" * 64))
+        decision_payload, trainable = process_silver_decision_payload(state, payload)
+        gold = gold_loads(decision_payload)
+        assert not trainable
+        assert "abcdefghijklmnopqrstuvwxyz" not in gold.text
+        assert "secret" in gold.pii_flags
+        assert "pii_detected" in gold.reject_reasons
+        assert gold.pii_action == "body_quarantine"
     finally:
         state.close()
 

@@ -177,6 +177,12 @@ spec:
               value: {{ .Values.processor.curate.minHashRowsPerBand | quote }}
             - name: S2P_CONSUMER_GROUP
               value: s2p-curate
+            - name: S2P_CURATOR_RETRY_TOPIC
+              value: {{ .Values.redpanda.topics.rawFetched | quote }}
+            - name: S2P_CURATOR_MAX_EXTRACTION_RETRIES
+              value: "2"
+            - name: S2P_CURATOR_CLASSIFIER_CONCURRENCY
+              value: "6"
             - name: S2P_DECON_SIGNING_KEY
               value: {{ printf "%s/%s" $signingMount .Values.processor.deconGate.signingKeyKey | quote }}
             - name: S2P_DECON_SIGNING_CERT

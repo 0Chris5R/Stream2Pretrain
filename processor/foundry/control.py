@@ -8,6 +8,7 @@ from typing import Any
 from processor.foundry.config import FoundryConfig
 from processor.foundry.providers import (
     ProviderBudgetExhaustedError,
+    ProviderError,
     ProviderRateLimitedError,
     StructuredProvider,
 )
@@ -19,6 +20,10 @@ from schemas.foundry import FoundryEvent, ProviderTrace
 
 
 class ProviderDiscoveryError(RuntimeError):
+    pass
+
+
+class ProviderContextWindowError(ProviderError):
     pass
 
 
@@ -72,6 +77,17 @@ class ProviderControlPlane:
         provider_name = provider_for_role(role)
         provider = self.providers[provider_name]
         suffix = call_key or role
+        # Qwen's exact tokenizer is provider-side. Three characters per token
+        # is deliberately conservative for mixed prose, LaTeX, and JSON. The
+        # bounded bundle projection prevents this guard from becoming a paper-
+        # quality or candidate-ranking penalty.
+        estimated_input = max(1, (len(system) + len(user) + 2) // 3)
+        available_output = self.config.provider_context_window_tokens - estimated_input
+        if available_output <= 0:
+            raise ProviderContextWindowError(
+                f"projected {role} prompt exceeds the configured provider context window"
+            )
+        effective_max_output = min(max_output_tokens, available_output)
         request_hash = sha256(
             {
                 "provider": provider_name,
@@ -80,7 +96,7 @@ class ProviderControlPlane:
                 "system": system,
                 "user": user,
                 "prompt_version": self.config.prompt_version,
-                "max_output_tokens": max_output_tokens,
+                "max_output_tokens": effective_max_output,
                 "temperature": temperature,
                 "seed": seed,
             }
@@ -97,7 +113,6 @@ class ProviderControlPlane:
         ):
             return cached
         resolved_attempt = attempt or self.store.next_provider_call_attempt(job_id)
-        estimated_input = max(1, (len(system) + len(user) + 3) // 4)
         self._event(
             job_id=job_id,
             paper_id=paper_id,
@@ -106,7 +121,8 @@ class ProviderControlPlane:
                 "provider": provider_name,
                 "role": role,
                 "estimated_input_tokens": estimated_input,
-                "max_output_tokens": max_output_tokens,
+                "requested_max_output_tokens": max_output_tokens,
+                "effective_max_output_tokens": effective_max_output,
             },
             attempt=resolved_attempt,
             suffix=suffix,
@@ -114,7 +130,7 @@ class ProviderControlPlane:
         reservation = self.quota.reserve(
             provider_name,
             input_tokens=estimated_input,
-            output_tokens=max_output_tokens,
+            output_tokens=effective_max_output,
             requests=self.config.max_retries + 1,
         )
         self._event(
@@ -173,7 +189,7 @@ class ProviderControlPlane:
                 system=system,
                 user=user,
                 prompt_version=self.config.prompt_version,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=effective_max_output,
                 temperature=temperature,
                 seed=seed,
                 checkpoint=checkpoint,
@@ -265,4 +281,8 @@ class ProviderControlPlane:
         return event
 
 
-__all__ = ["ProviderControlPlane", "ProviderDiscoveryError"]
+__all__ = [
+    "ProviderContextWindowError",
+    "ProviderControlPlane",
+    "ProviderDiscoveryError",
+]

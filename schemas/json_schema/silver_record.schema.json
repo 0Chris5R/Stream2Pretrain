@@ -218,6 +218,20 @@
       "title": "Projection Version",
       "type": "string"
     },
+    "raw_html_s3_uri": {
+      "anyOf": [
+        {
+          "pattern": "^s3://[^/]+/.+",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Original admitted Bronze body used only for bounded extraction retry.",
+      "title": "Raw Html S3 Uri"
+    },
     "scientific_artifact_s3_uri": {
       "anyOf": [
         {
@@ -239,6 +253,11 @@
       "title": "Segments",
       "type": "array"
     },
+    "source_content_type": {
+      "default": "application/octet-stream",
+      "title": "Source Content Type",
+      "type": "string"
+    },
     "source_feed": {
       "default": "unknown",
       "description": "SourceFeed CRD name propagated from Bronze.",
@@ -246,6 +265,19 @@
       "minLength": 1,
       "title": "Source Feed",
       "type": "string"
+    },
+    "source_fetched_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Fetched At"
     },
     "source_format": {
       "default": "html",
@@ -260,6 +292,26 @@
       ],
       "title": "Source Format",
       "type": "string"
+    },
+    "source_http_last_modified": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Http Last Modified"
+    },
+    "source_http_status": {
+      "default": 200,
+      "maximum": 599,
+      "minimum": 100,
+      "title": "Source Http Status",
+      "type": "integer"
     },
     "source_metadata_text": {
       "default": "",

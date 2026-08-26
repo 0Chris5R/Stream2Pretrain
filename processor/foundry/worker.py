@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -240,6 +240,10 @@ class WorkerRuntime:
             quality_score=incoming.quality_score,
             valid_from=incoming.valid_from,
             scientific_payload=scientific_payload,
+            ranking_score=_candidate_ranking_score(incoming),
+            domain_key=(
+                incoming.content_tags[0] if incoming.content_tags else "general_scientific"
+            ),
         )
         QUEUED_CANDIDATES.set(self.store.queued_candidates())
         return {
@@ -278,6 +282,7 @@ class WorkerRuntime:
         claimed = self.store.claim_candidate(
             cutoff_at=cutoff_at,
             cutoff_ordinal=cutoff_ordinal,
+            daily_run_date=run_day,
         )
         if claimed is None:
             return {"doc_id": fallback_doc_id, "status": "queue_empty"}
@@ -441,13 +446,10 @@ class WorkerRuntime:
         while not self._drain_stop.wait(self.config.queue_poll_seconds):
             if self._run_pending_manual(log):
                 continue
-            now = datetime.now(UTC)
-            if now.hour < self.config.daily_run_hour_utc:
-                continue
-            run_day = now.date()
-            run = self.store.start_daily_run(run_day)
-            if run["state"] == "waiting":
-                continue
+            run_day, boundary_at = _daily_cohort_boundary(
+                datetime.now(UTC), self.config.daily_run_hour_utc
+            )
+            run = self.store.start_daily_run(run_day, boundary_at=boundary_at)
             if run["state"] in {"completed", "quota_exhausted"}:
                 continue
             self._run_daily_snapshot(run_day, run, log)
@@ -464,6 +466,24 @@ class WorkerRuntime:
         cutoff_at = datetime.fromisoformat(str(run["cutoff_at"]))
         cutoff_ordinal = int(run["cutoff_ordinal"])
         while not self._drain_stop.is_set():
+            current_day, _ = _daily_cohort_boundary(
+                datetime.now(UTC), getattr(self.config, "daily_run_hour_utc", 0)
+            )
+            if current_day > run_day:
+                self.store.finish_daily_run(
+                    run_day,
+                    state="completed",
+                    reason="replaced at the next 24-hour cohort boundary",
+                )
+                return
+            current = self.store.daily_run(run_day) or run
+            if int(current["processed_count"]) >= int(current["candidate_count"]):
+                self.store.finish_daily_run(
+                    run_day,
+                    state="completed",
+                    reason="ranked 24-hour candidate cohort completed",
+                )
+                return
             # Provider calls are not interrupted, but a bounded manual run must
             # not wait behind the rest of a potentially large daily snapshot.
             if self._run_pending_manual(log):
@@ -657,6 +677,34 @@ class WorkerRuntime:
             MUTATION_KILL_RATE.labels(task_family=artifact.family).observe(
                 validation.mutation_killed / validation.mutation_total
             )
+
+
+def _candidate_ranking_score(record: GoldRecord) -> float:
+    """Equal-weight quality rank without cost or context-size features."""
+    evidence_richness = (
+        sum(count > 0 for count in (record.equation_count, record.table_count, record.figure_count))
+        / 3.0
+    )
+    signals = (
+        record.quality_score / 5.0,
+        record.edu_score / 5.0,
+        record.structural_quality_score / 5.0,
+        record.extraction_completeness,
+        record.reasoning_score,
+        evidence_richness,
+    )
+    return sum(signals) / len(signals)
+
+
+def _daily_cohort_boundary(now: datetime, hour_utc: int) -> tuple[date, datetime]:
+    """Return the most recent configured UTC cohort boundary."""
+    if now.tzinfo is None:
+        raise ValueError("daily cohort clock must be timezone-aware")
+    utc_now = now.astimezone(UTC)
+    boundary = utc_now.replace(hour=hour_utc, minute=0, second=0, microsecond=0)
+    if utc_now < boundary:
+        boundary -= timedelta(days=1)
+    return boundary.date(), boundary
 
 
 def build_dataflow(cfg: common.ProcessorConfig | None = None) -> object:

@@ -69,13 +69,20 @@ class VerifierCompiler:
             max_output_tokens=8_000,
             call_key=f"verifier_compiler:{task.task_id}",
         )
-        spec = VerifierSpec.model_validate(data)
-        spec = normalize_spec(
-            spec,
-            task,
-            bundle,
-            graph,
-        )
+        compiler_findings: list[dict[str, Any]] = []
+        try:
+            raw_spec = VerifierSpec.model_validate(data)
+            spec = normalize_spec(raw_spec, task, bundle, graph)
+        except (TypeError, ValueError) as exc:
+            compiler_findings.append(
+                {
+                    "stage": "compiler_normalization",
+                    "accepted": False,
+                    "findings": [str(exc)],
+                    "action": "deterministic_fallback",
+                }
+            )
+            spec = deterministic_verifier(task, bundle, graph)
         critique_data, critic_trace = self.control.call(
             job_id=job_id,
             paper_id=bundle.paper_id,
@@ -86,6 +93,7 @@ class VerifierCompiler:
             call_key=f"verifier_critic:{task.task_id}",
         )
         critique = VerifierCritique.model_validate(critique_data)
+        critic_audit = [*compiler_findings, _critic_audit("initial", critique)]
         traces = [compiler_trace, critic_trace]
         if not critique.accepted:
             repair_data, repair_trace = self.control.call(
@@ -98,12 +106,23 @@ class VerifierCompiler:
                 call_key=f"verifier_repair:{task.task_id}",
             )
             traces.append(repair_trace)
-            spec = normalize_spec(
-                VerifierSpec.model_validate(repair_data),
-                task,
-                bundle,
-                graph,
-            )
+            try:
+                spec = normalize_spec(
+                    VerifierSpec.model_validate(repair_data),
+                    task,
+                    bundle,
+                    graph,
+                )
+            except ValueError as exc:
+                critic_audit.append(
+                    {
+                        "stage": "repair_normalization",
+                        "accepted": False,
+                        "findings": [str(exc)],
+                        "action": "deterministic_fallback",
+                    }
+                )
+                spec = deterministic_verifier(task, bundle, graph)
             recheck_data, recheck_trace = self.control.call(
                 job_id=job_id,
                 paper_id=bundle.paper_id,
@@ -115,9 +134,21 @@ class VerifierCompiler:
             )
             traces.append(recheck_trace)
             recheck = VerifierCritique.model_validate(recheck_data)
+            critic_audit.append(_critic_audit("post_repair", recheck))
             if not recheck.accepted:
-                raise ValueError("independent verifier critic rejected the bounded repair")
-        return spec, traces
+                # A model critic may identify a real risk, but it is not itself
+                # a deterministic verifier. Fall back to the task-derived
+                # verifier and let the complete executable suite decide.
+                spec = deterministic_verifier(task, bundle, graph)
+                critic_audit.append(
+                    {
+                        "stage": "post_repair",
+                        "accepted": False,
+                        "findings": ["bounded repair rejected by independent critic"],
+                        "action": "deterministic_fallback",
+                    }
+                )
+        return spec.model_copy(update={"critic_audit": critic_audit}), traces
 
 
 def normalize_spec(
@@ -208,28 +239,63 @@ def normalize_spec(
                     "targets": list(task.hidden_targets.required_qualifications),
                 }
             )
-        elif predicate.type == "numeric_tolerance" and predicate.target in expected_values:
-            expected = expected_values[str(predicate.target)]
-            if not isinstance(expected, (int, float)) or isinstance(expected, bool):
-                raise ValueError(
-                    f"numeric predicate {predicate.id} targets non-numeric expected value"
+        elif predicate.type == "numeric_tolerance":
+            numeric_ids = [
+                key
+                for key, value in expected_values.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            target = predicate.target
+            if target not in expected_values and len(numeric_ids) == 1:
+                target = numeric_ids[0]
+            expected = expected_values.get(str(target)) if target else None
+            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                numeric_expected = float(expected)
+                predicate = predicate.model_copy(
+                    update={
+                        "target": target,
+                        "expected": numeric_expected,
+                        "tolerance": _numeric_tolerance(numeric_expected),
+                    }
                 )
-            predicate = predicate.model_copy(update={"expected": float(expected)})
-        elif predicate.type == "symbolic_equivalence" and predicate.target in expected_values:
-            expected = expected_values[str(predicate.target)]
+            elif isinstance(expected, str) and task.family == "derivation_completion":
+                predicate = VerifierPredicate(
+                    id=predicate.id,
+                    type="symbolic_equivalence",
+                    target=str(target),
+                    expected=expected,
+                    weight=predicate.weight,
+                    required=predicate.required,
+                )
+            elif isinstance(expected, str):
+                predicate = VerifierPredicate(
+                    id=predicate.id,
+                    type="configuration_constraints",
+                    weight=predicate.weight,
+                    required=predicate.required,
+                    config={"constraints": {"required_values": {str(target): expected}}},
+                )
+            else:
+                continue
+        elif predicate.type == "symbolic_equivalence":
+            symbolic_ids = [key for key, value in expected_values.items() if isinstance(value, str)]
+            target = predicate.target
+            if target not in expected_values and len(symbolic_ids) == 1:
+                target = symbolic_ids[0]
+            if target not in expected_values:
+                continue
+            expected = expected_values[str(target)]
             if not isinstance(expected, str):
-                raise ValueError(
-                    f"symbolic predicate {predicate.id} targets non-symbolic expected value"
-                )
+                continue
             if task.family == "derivation_completion":
-                predicate = predicate.model_copy(update={"expected": expected})
+                predicate = predicate.model_copy(update={"target": target, "expected": expected})
             else:
                 predicate = VerifierPredicate(
                     id=predicate.id,
                     type="configuration_constraints",
                     weight=predicate.weight,
                     required=predicate.required,
-                    config={"constraints": {"required_values": {predicate.target: expected}}},
+                    config={"constraints": {"required_values": {str(target): expected}}},
                 )
         elif predicate.type == "fault_identification":
             if not task.hidden_targets.required_faults:
@@ -373,10 +439,18 @@ def normalize_spec(
         if isinstance(expected, (int, float)) and not isinstance(expected, bool)
     }
     missing_numeric_targets = required_numeric_targets - numeric_targets
-    if missing_numeric_targets:
-        raise ValueError(
-            "verifier omitted numeric predicates for expected targets: "
-            + ", ".join(sorted(missing_numeric_targets))
+    for target in sorted(missing_numeric_targets):
+        expected = float(expected_values[target])
+        predicates.append(
+            VerifierPredicate(
+                id=f"hard:numeric:{target}",
+                type="numeric_tolerance",
+                target=target,
+                expected=expected,
+                tolerance=_numeric_tolerance(expected),
+                weight=1.0,
+                required=True,
+            )
         )
     if task.family == "derivation_completion":
         symbolic_targets = {
@@ -407,7 +481,30 @@ def normalize_spec(
                 ) from exc
     predicates.extend(predicate for key, predicate in baseline.items() if key not in existing_types)
     if not any(predicate.weight > 0 for predicate in predicates):
-        raise ValueError("verifier needs at least one weighted outcome predicate")
+        outcome_order = (
+            "numeric_tolerance",
+            "symbolic_equivalence",
+            "required_relations",
+            "method_partial_order",
+            "required_nodes",
+            "evidence_coverage",
+            "fault_identification",
+            "configuration_constraints",
+            "report_manifest_consistency",
+            "manifest_required",
+        )
+        selected_index = next(
+            (
+                index
+                for predicate_type in outcome_order
+                for index, predicate in enumerate(predicates)
+                if predicate.type == predicate_type
+            ),
+            None,
+        )
+        if selected_index is None:
+            raise ValueError("verifier has no executable outcome predicate")
+        predicates[selected_index] = predicates[selected_index].model_copy(update={"weight": 1.0})
     return spec.model_copy(
         update={
             "verifier_id": stable_id("verifier", task.task_id, "v1"),
@@ -419,6 +516,43 @@ def normalize_spec(
             "determinism_seed": _task_seed(task.task_id),
         }
     )
+
+
+def deterministic_verifier(
+    task: TaskSpec,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+) -> VerifierSpec:
+    """Compile the hidden TaskSpec contract without another model call."""
+    return normalize_spec(
+        VerifierSpec(
+            verifier_id="deterministic-task-contract",
+            task_id=task.task_id,
+            version=1,
+            predicates=[],
+            runtime_dependencies=[],
+            network_required=False,
+            determinism_seed=0,
+        ),
+        task,
+        bundle,
+        graph,
+    )
+
+
+def _numeric_tolerance(expected: float) -> float:
+    return max(1e-9, abs(expected) * 1e-6)
+
+
+def _critic_audit(stage: str, critique: VerifierCritique) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "accepted": critique.accepted,
+        "findings": list(critique.findings),
+        "false_positive_risks": list(critique.false_positive_risks),
+        "false_negative_risks": list(critique.false_negative_risks),
+        "repair_instructions": list(critique.repair_instructions),
+    }
 
 
 def evaluate(
@@ -745,6 +879,7 @@ __all__ = [
     "RewardResult",
     "VerifierCompiler",
     "VerifierCritique",
+    "deterministic_verifier",
     "evaluate",
     "normalize_spec",
 ]

@@ -74,6 +74,7 @@ class FoundryConfig:
     replay_fixture: str | None = None
     max_retries: int = 2
     timeout_seconds: float = 180.0
+    provider_context_window_tokens: int = 262_144
     policy_version: str = "posttrain-policy-v3"
     prompt_version: str = "paper-foundry-prompts-v3"
 
@@ -92,6 +93,9 @@ class FoundryConfig:
             replay_fixture=os.environ.get("S2P_FOUNDRY_REPLAY_FIXTURE") or None,
             max_retries=_bounded_int("S2P_FOUNDRY_MAX_RETRIES", 2, 0, 5),
             timeout_seconds=_bounded_float("S2P_FOUNDRY_TIMEOUT_SECONDS", 180.0, 10.0, 600.0),
+            provider_context_window_tokens=_bounded_int(
+                "S2P_FOUNDRY_CONTEXT_WINDOW_TOKENS", 262_144, 1, 10_000_000
+            ),
         )
 
 

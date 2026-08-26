@@ -26,6 +26,7 @@ import hashlib
 import os
 import re
 from collections.abc import Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any, Protocol, cast
@@ -50,6 +51,7 @@ from processor.model_client import (
 )
 from processor.operators.c4 import C4Filter
 from processor.operators.gopher import GopherFilter
+from processor.operators.hf_card_quality import assess_hf_card
 from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
 from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher
@@ -69,6 +71,7 @@ from processor.scientific_policy import (
 )
 from processor.source_policy import resolve_source_policy
 from processor.tokenize import Tokenizer
+from schemas.bronze import BronzeRecord
 from schemas.decon import BenchmarkName
 from schemas.gold import GoldRecord, PiiFlag, RejectReason, RiskTier, SegmentScore
 from schemas.silver import SilverRecord, SilverSegment
@@ -77,6 +80,10 @@ POLICY_REVISION_ENV = "S2P_POLICY_REVISION"
 SCORING_VERSION_ENV = "S2P_SCORING_VERSION"
 CURATOR_FLOW_NAME = "s2p-curate-live-v5"
 CURATOR_RECOVERY_NAME = "curate-live-v5"
+_ARXIV_CONTENT_URL = re.compile(
+    r"^https?://(?:arxiv\.org/(?:html|pdf)|ar5iv\.labs\.arxiv\.org/html)/",
+    re.IGNORECASE,
+)
 
 
 class QualityScorer(Protocol):
@@ -121,6 +128,13 @@ class CurateState:
         self.lsh.close()
         for model_client in self.model_clients:
             model_client.close()
+
+
+@dataclass(frozen=True, slots=True)
+class _SegmentModelSignals:
+    quality: QualityScore
+    comparison: QualityScore | None
+    perplexity: PerplexityResult | None
 
 
 def build_state(cfg: common.ProcessorConfig) -> CurateState:
@@ -244,6 +258,45 @@ def _load_benchmark_corpus(path: str | None) -> dict[BenchmarkName, list[str]] |
     return {cast(BenchmarkName, k): list(v) for k, v in data.items() if k in valid}
 
 
+def _score_segment_models(
+    segments: Sequence[SilverSegment],
+    *,
+    primary_quality: QualityScorer,
+    comparison_quality: QualityScorer | None,
+    kenlm: PerplexityScorer,
+    use_kenlm: bool,
+) -> dict[str, _SegmentModelSignals]:
+    """Run independent stateless model calls across the available replicas."""
+    concurrency = max(1, int(os.environ.get("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "1")))
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        pending: dict[
+            str,
+            tuple[
+                Future[QualityScore],
+                Future[QualityScore] | None,
+                Future[PerplexityResult] | None,
+            ],
+        ] = {}
+        for segment in segments:
+            pending[segment.segment_id] = (
+                executor.submit(primary_quality.score, segment.text),
+                (
+                    executor.submit(comparison_quality.score, segment.text)
+                    if comparison_quality is not None
+                    else None
+                ),
+                executor.submit(kenlm.score, segment.text) if use_kenlm else None,
+            )
+        return {
+            segment_id: _SegmentModelSignals(
+                quality=quality.result(),
+                comparison=comparison.result() if comparison is not None else None,
+                perplexity=perplexity.result() if perplexity is not None else None,
+            )
+            for segment_id, (quality, comparison, perplexity) in pending.items()
+        }
+
+
 def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     """Run the full curation pipeline on one silver record.
 
@@ -264,6 +317,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         extraction_pipeline=silver.extraction_pipeline,
     )
     is_scientific = source_policy.family == "scientific_paper"
+    is_hf_card = source_policy.family in {"hf_model_card", "hf_dataset_card"}
     is_metadata = not source_policy.training_text
     uses_fineweb = source_policy.quality_profile == "fineweb_edu"
     primary_quality: QualityScorer
@@ -273,22 +327,45 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         primary_quality = state.metadata_discovery
     else:
         primary_quality = state.fineweb_quality
-    comparison_quality: QualityScorer | None = state.fineweb_quality if is_scientific else None
-    # Every retained segment is classified. Representative sampling was a
-    # pilot cost shortcut and could make a document-level decision from only a
-    # subset of the actual training projection.
-    sampled_ids = {segment.segment_id for segment in source_segments}
+    comparison_quality: QualityScorer | None = (
+        state.fineweb_quality if is_scientific else state.finepdfs_quality if is_hf_card else None
+    )
+    # Every segment is classified. The calls are stateless and may run across
+    # independent model-service replicas, while this Bytewax worker remains the
+    # sole owner of ordered curation state and recovery.
+    sanitized_segments = [
+        (segment, state.pii.sanitize(segment.text)) for segment in source_segments
+    ]
+    safe_segments = [
+        segment.model_copy(
+            update={
+                "text": sanitization.text,
+                "word_count": len(sanitization.text.split()),
+            }
+        )
+        for segment, sanitization in sanitized_segments
+    ]
+    model_signals = _score_segment_models(
+        safe_segments,
+        primary_quality=primary_quality,
+        comparison_quality=comparison_quality,
+        kenlm=state.kenlm,
+        use_kenlm=source_policy.kenlm_mode != "off",
+    )
     segment_scores: list[SegmentScore] = []
     kept_segments: list[SilverSegment] = []
     runtime_excluded: list[str] = []
     removed_body_pii: list[PiiFlag] = []
+    blocking_artifact_pii: list[PiiFlag] = []
     removed_for_c4 = False
-    high_confidence_pii: set[PiiFlag] = {"email", "ssn", "credit_card"}
 
-    for segment in source_segments:
-        segment_c4 = state.c4.stats(segment.text)
-        segment_pii = state.pii.flags(segment.text)
-        segment_blocking_pii = state.pii.blocking_flags(segment.text)
+    for (segment, sanitization), safe_segment in zip(
+        sanitized_segments, safe_segments, strict=True
+    ):
+        segment_c4 = state.c4.stats(safe_segment.text)
+        segment_pii = list(sanitization.flags)
+        removed_body_pii.extend(sanitization.redacted_flags)
+        blocking_artifact_pii.extend(sanitization.blocking_flags)
         exclusion_reasons: list[str] = []
         if source_policy.web_heuristic_gate and not segment_c4.curly_brace_pass:
             exclusion_reasons.append("C4 curly-brace signal isolated to this section")
@@ -296,16 +373,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         if source_policy.web_heuristic_gate and not segment_c4.lorem_ipsum_pass:
             exclusion_reasons.append("placeholder boilerplate isolated to this section")
             removed_for_c4 = True
-        sensitive = sorted(set(segment_blocking_pii) & high_confidence_pii)
-        if "phone" in segment_blocking_pii:
-            sensitive.append("phone")
-        if "passport" in segment_blocking_pii:
-            sensitive.append("passport")
-        sensitive = sorted(set(sensitive))
-        if sensitive:
-            exclusion_reasons.append("high-confidence PII isolated to this section")
-            removed_body_pii.extend(sensitive)
-
         edu_score: float | None = None
         finepdfs_edu_score: float | None = None
         fineweb_edu_score: float | None = None
@@ -313,30 +380,32 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         comparison_classifier_revision: str | None = None
         segment_perplexity: float | None = None
         segment_bucket: str | None = None
-        if segment.segment_id in sampled_ids:
-            quality_result = primary_quality.score(segment.text)
-            comparison_result = (
-                comparison_quality.score(segment.text) if comparison_quality is not None else None
+        signals = model_signals[segment.segment_id]
+        quality_result = signals.quality
+        comparison_result = signals.comparison
+        perplexity_result = signals.perplexity
+        edu_score = quality_result.edu_score
+        quality_classifier_revision = quality_result.revision
+        if is_scientific:
+            finepdfs_edu_score = quality_result.edu_score
+            fineweb_edu_score = (
+                comparison_result.edu_score if comparison_result is not None else None
             )
-            perplexity_result = (
-                state.kenlm.score(segment.text) if source_policy.kenlm_mode != "off" else None
+            comparison_classifier_revision = (
+                comparison_result.revision if comparison_result is not None else None
             )
-            edu_score = quality_result.edu_score
-            quality_classifier_revision = quality_result.revision
-            if is_scientific:
-                finepdfs_edu_score = quality_result.edu_score
-                fineweb_edu_score = (
-                    comparison_result.edu_score if comparison_result is not None else None
-                )
-                comparison_classifier_revision = (
-                    comparison_result.revision if comparison_result is not None else None
-                )
-            elif uses_fineweb:
-                fineweb_edu_score = quality_result.edu_score
-            segment_perplexity = (
-                perplexity_result.perplexity if perplexity_result is not None else None
+        elif is_hf_card:
+            fineweb_edu_score = quality_result.edu_score
+            finepdfs_edu_score = (
+                comparison_result.edu_score if comparison_result is not None else None
             )
-            segment_bucket = perplexity_result.bucket if perplexity_result is not None else None
+            comparison_classifier_revision = (
+                comparison_result.revision if comparison_result is not None else None
+            )
+        elif uses_fineweb:
+            fineweb_edu_score = quality_result.edu_score
+        segment_perplexity = perplexity_result.perplexity if perplexity_result is not None else None
+        segment_bucket = perplexity_result.bucket if perplexity_result is not None else None
 
         decision = "excluded" if exclusion_reasons else "included"
         segment_scores.append(
@@ -344,7 +413,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
                 segment_id=segment.segment_id,
                 title=segment.title,
                 role=segment.role,
-                word_count=segment.word_count,
+                word_count=safe_segment.word_count,
                 edu_score=edu_score,
                 finepdfs_edu_score=finepdfs_edu_score,
                 fineweb_edu_score=fineweb_edu_score,
@@ -365,55 +434,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         if exclusion_reasons:
             runtime_excluded.append(f"{segment.title}: {'; '.join(exclusion_reasons)}")
         else:
-            kept_segments.append(segment)
-
-    # If every representative segment happened to be excluded while later
-    # sections remain, score one retained section so aggregate signals never
-    # silently describe removed text.
-    measured_kept = [
-        score
-        for score in segment_scores
-        if score.decision == "included" and score.edu_score is not None
-    ]
-    if kept_segments and not measured_kept:
-        fallback_segment = kept_segments[0]
-        quality_result = primary_quality.score(fallback_segment.text)
-        comparison_result = (
-            comparison_quality.score(fallback_segment.text)
-            if comparison_quality is not None
-            else None
-        )
-        perplexity_result = (
-            state.kenlm.score(fallback_segment.text) if source_policy.kenlm_mode != "off" else None
-        )
-        segment_scores = [
-            score.model_copy(
-                update={
-                    "edu_score": quality_result.edu_score,
-                    "finepdfs_edu_score": quality_result.edu_score if is_scientific else None,
-                    "fineweb_edu_score": (
-                        comparison_result.edu_score
-                        if comparison_result is not None
-                        else None
-                        if not uses_fineweb
-                        else quality_result.edu_score
-                    ),
-                    "quality_classifier_revision": quality_result.revision,
-                    "comparison_classifier_revision": comparison_result.revision
-                    if comparison_result is not None
-                    else None,
-                    "perplexity": (
-                        perplexity_result.perplexity if perplexity_result is not None else None
-                    ),
-                    "perplexity_bucket": (
-                        perplexity_result.bucket if perplexity_result is not None else None
-                    ),
-                }
-            )
-            if score.segment_id == fallback_segment.segment_id
-            else score
-            for score in segment_scores
-        ]
+            kept_segments.append(safe_segment)
 
     model_text = "\n\n".join(segment.text.strip() for segment in kept_segments).strip()
     (
@@ -423,6 +444,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         structured_exclusions,
     ) = _filter_structured_projection(state.pii, silver.structured_text)
     removed_body_pii.extend(structured_pii_flags)
+    blocking_artifact_pii.extend(structured_audit_pii_flags)
     runtime_excluded.extend(structured_exclusions)
     text = _training_projection(silver, kept_segments, structured_text=structured_text)
     reject: list[RejectReason] = []
@@ -431,7 +453,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         reject.append("metadata_only")
     if len(model_text.split()) < minimum_words:
         reject.append("insufficient_scientific_body" if is_scientific else "insufficient_body")
-    if removed_body_pii and not kept_segments:
+    if blocking_artifact_pii:
         reject.append("pii_detected")
     if removed_for_c4 and not kept_segments:
         reject.append("c4_nopunc_filter")
@@ -484,6 +506,16 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         }
     )
     structure = source_scores(retained_view, quality_score=edu_score)
+    hf_assessment = (
+        assess_hf_card(
+            kind="model" if source_policy.family == "hf_model_card" else "dataset",
+            title=silver.title,
+            text=model_text,
+            segments=kept_segments,
+        )
+        if is_hf_card
+        else None
+    )
     quality_score = composite_quality_score(
         edu_score=edu_score,
         structural_quality_score=structure.structural_quality_score,
@@ -501,6 +533,8 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     # because their structured Markdown is outside that web-crawl threshold.
     if source_policy.web_heuristic_gate and edu_score < 3.0:
         reject.append("low_quality_score")
+    if hf_assessment is not None and not hf_assessment.accepted:
+        reject.append("hf_card_quality_filter")
     if source_policy.language_gate and (silver.lang != "en" or silver.lang_score < 0.5):
         reject.append("language_filter")
     if _license_reject_reason(silver) is not None:
@@ -512,12 +546,9 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     ):
         reject.append("incomplete_scientific_extraction")
 
-    # Blocking PII was already evaluated on every source segment and every
-    # structured evidence block. Sensitive inputs were removed from ``text``
-    # above, so another whole-paper scan would add no coverage.
-    pii_flags: list[PiiFlag] = []
-    if pii_flags:
-        reject.append("pii_detected")
+    # The projection has already been sanitized. Only high-risk findings remain
+    # blocking; ordinary contact details are represented by typed placeholders.
+    pii_flags = sorted(set(blocking_artifact_pii))
     metadata_pii_flags = state.pii.flags(silver.source_metadata_text)
     pii_review_flags = sorted(
         (
@@ -550,6 +581,24 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         reject_reasons=list(reject),
         reasoning_score=structure.reasoning_score,
     )
+    retry_attempt = _extraction_retry_attempt(silver.extraction_pipeline)
+    max_extraction_retries = int(os.environ.get("S2P_CURATOR_MAX_EXTRACTION_RETRIES", "2"))
+    if route.route == "retry" and (
+        silver.raw_html_s3_uri is None
+        or retry_attempt >= max_extraction_retries
+        or not _ARXIV_CONTENT_URL.match(str(silver.url))
+    ):
+        route = RouteDecision(
+            route="quarantine",
+            eligible_routes=["quarantine"],
+            reasons=[
+                "scientific extraction remained incomplete after bounded alternate retry"
+                if retry_attempt >= max_extraction_retries
+                else "scientific extraction retry currently requires an arXiv content URL"
+                if not _ARXIV_CONTENT_URL.match(str(silver.url))
+                else "scientific extraction cannot retry because the admitted Bronze pointer is absent"
+            ],
+        )
     if silver.training_usage == "posttrain_transform_only" and route.route not in {
         "quarantine",
         "retry",
@@ -571,7 +620,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     pii_action = (
         "body_quarantine"
         if "pii_detected" in reject
-        else "segments_removed"
+        else "body_redacted"
         if removed_body_pii
         else "metadata_removed"
         if metadata_pii_flags
@@ -591,7 +640,10 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         route=route.route,
         eligible_routes=route.eligible_routes,
         route_reasons=[*route.reasons, *runtime_excluded, *pii_review_notes],
-        content_tags=structure.content_tags,
+        content_tags=[
+            *structure.content_tags,
+            *(hf_assessment.categories if hf_assessment is not None else ()),
+        ],
         segment_scores=segment_scores,
         projection_version=silver.projection_version,
         source_word_count=silver.source_word_count,
@@ -708,12 +760,7 @@ _STRUCTURED_BLOCK_START = re.compile(r"(?=\[(?:TABLE|EQUATION|FIGURE)\])")
 def _filter_structured_projection(
     scanner: PiiScanner, structured_text: str
 ) -> tuple[str, list[PiiFlag], list[PiiFlag], list[str]]:
-    """Remove only structured evidence blocks containing blocking PII.
-
-    The full table/figure/equation remains in the immutable scientific
-    artifact for provenance, while its text surrogate is kept out of the
-    training projection.
-    """
+    """Sanitize structured evidence and report any artifact-blocking finding."""
     if not structured_text.strip():
         return "", [], [], []
     blocks = [
@@ -724,15 +771,14 @@ def _filter_structured_projection(
     audit_flags: list[PiiFlag] = []
     exclusions: list[str] = []
     for index, block in enumerate(blocks, start=1):
-        flags = scanner.blocking_flags(block)
-        if flags:
-            removed.extend(flags)
+        sanitization = scanner.sanitize(block)
+        removed.extend(sanitization.redacted_flags)
+        if sanitization.blocking_flags:
+            audit_flags.extend(sanitization.blocking_flags)
             exclusions.append(
-                f"structured evidence block {index}: high-confidence PII removed from training projection"
+                f"structured evidence block {index}: high-risk identifier quarantines artifact"
             )
-        else:
-            kept.append(block)
-            audit_flags.extend(scanner.flags(block))
+        kept.append(sanitization.text)
     return (
         "\n\n".join(kept),
         sorted(set(removed)),
@@ -850,6 +896,42 @@ def process_silver_decision_payload(
     return decision, trainable
 
 
+def extraction_retry_payload(silver: SilverRecord, gold: GoldRecord) -> bytes | None:
+    """Requeue an admitted Bronze body for a bounded full extraction rerun."""
+    if (
+        gold.route != "retry"
+        or silver.raw_html_s3_uri is None
+        or not _ARXIV_CONTENT_URL.match(str(silver.url))
+    ):
+        return None
+    attempt = _extraction_retry_attempt(silver.extraction_pipeline) + 1
+    record = BronzeRecord(
+        doc_id=silver.doc_id,
+        url=silver.url,
+        fetched_at=silver.source_fetched_at or silver.valid_from,
+        http_status=silver.source_http_status,
+        http_last_modified=silver.source_http_last_modified,
+        content_type=silver.source_content_type,
+        raw_html_s3_uri=silver.raw_html_s3_uri,
+        source_feed="arxiv-extraction-retry",
+        trace_id=silver.trace_id,
+        # This is a control envelope, not another copy of the original body.
+        # The arXiv fulltext worker consumes it and deliberately refetches the
+        # PDF; the core fetcher skips metadata before touching the pointer.
+        source_format="metadata",
+        extraction_pipeline=(f"arxiv-pdf-retry-v1|curation-retry={attempt}"),
+        spdx_license=silver.spdx_license,
+        spdx_license_source=silver.spdx_license_source,
+        training_usage=silver.training_usage,
+    )
+    return record.model_dump_json().encode("utf-8")
+
+
+def _extraction_retry_attempt(extraction_pipeline: str) -> int:
+    match = re.search(r"\|curation-retry=(\d+)$", extraction_pipeline)
+    return int(match.group(1)) if match else 0
+
+
 def build_dataflow(
     cfg: common.ProcessorConfig,
     *,
@@ -869,11 +951,14 @@ def build_dataflow(
         raise RuntimeError("S2P_CURATOR_INPUT_TOPIC must not be empty")
     decision_topic = os.environ.get("S2P_CURATOR_DECISIONS_TOPIC", cfg.decisions_topic).strip()
     curated_topic = os.environ.get("S2P_CURATOR_CURATED_TOPIC", cfg.curated_topic).strip()
-    if not decision_topic or not curated_topic:
-        raise RuntimeError("curator decision and curated output topics must not be empty")
+    retry_topic = os.environ.get("S2P_CURATOR_RETRY_TOPIC", cfg.raw_topic).strip()
+    if not decision_topic or not curated_topic or not retry_topic:
+        raise RuntimeError("curator decision, curated, and retry output topics must not be empty")
     smoke_input = os.environ.get("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke").strip()
     if input_topic == smoke_input and (
-        decision_topic == cfg.decisions_topic or curated_topic == cfg.curated_topic
+        decision_topic == cfg.decisions_topic
+        or curated_topic == cfg.curated_topic
+        or retry_topic == cfg.raw_topic
     ):
         raise RuntimeError("smoke curator outputs must not target production topics")
     state = build_state(cfg)
@@ -897,7 +982,7 @@ def build_dataflow(
 
     def _step(
         msg: object,
-    ) -> tuple[KafkaSinkMessage, KafkaSinkMessage | None] | None:
+    ) -> tuple[KafkaSinkMessage, KafkaSinkMessage | None, KafkaSinkMessage | None] | None:
         with tracer.start_as_current_span("curate.process") as span:
             payload = getattr(msg, "value", None)
             if payload is None:
@@ -905,6 +990,7 @@ def build_dataflow(
                 PROCESSOR_METRICS.record_failure(stage="curate", reason="kafka_tombstone")
                 return None
             try:
+                silver = common.silver_loads(payload)
                 decision, trainable = process_silver_decision_payload(
                     state, payload, metrics=PROCESSOR_METRICS
                 )
@@ -927,7 +1013,13 @@ def build_dataflow(
             key = getattr(msg, "key", None) or b""
             decision_message = KafkaSinkMessage(key=key, value=decision)
             curated_message = KafkaSinkMessage(key=key, value=decision) if trainable else None
-            return decision_message, curated_message
+            retry_payload = extraction_retry_payload(silver, common.gold_loads(decision))
+            retry_message = (
+                KafkaSinkMessage(key=key, value=retry_payload)
+                if retry_payload is not None
+                else None
+            )
+            return decision_message, curated_message, retry_message
 
     mapped = op.map("curate_run", inp, _step)
     filtered = op.filter("curate_drop_none", mapped, lambda m: m is not None)
@@ -946,6 +1038,14 @@ def build_dataflow(
         add_config=common.kafka_producer_config(),
     )
     op.output("curate_sink", accepted, curated_sink)
+    retry_pairs = op.filter("curate_retry_only", filtered, lambda pair: pair[2] is not None)
+    retries = op.map("curate_retry_message", retry_pairs, lambda pair: pair[2])
+    retry_sink = KafkaSink(
+        brokers=cfg.redpanda_brokers.split(","),
+        topic=retry_topic,
+        add_config=common.kafka_producer_config(),
+    )
+    op.output("curate_retry_sink", retries, retry_sink)
     return flow
 
 

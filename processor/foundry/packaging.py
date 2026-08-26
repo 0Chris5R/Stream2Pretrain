@@ -285,7 +285,7 @@ class EnvironmentPackager:
         )
         _write_text(
             root / "lock" / "requirements.lock",
-            "pydantic==2.12.5\nsympy==1.13.3\nverifiers==0.1.14\n",
+            "pydantic==2.12.5\nsympy==1.13.3\nverifiers==0.3.1\n",
         )
         if verifier is not None:
             self._write_prime_export(root)
@@ -435,12 +435,15 @@ _PRIME_INIT = (
 _PRIME_TASKSET = r'''from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import verifiers.v1 as vf
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _runtime():
@@ -523,13 +526,18 @@ class PaperFoundryTaskset(vf.Taskset[PaperFoundryTask, PaperFoundryConfig]):
         )
         return [
             PaperFoundryTask(
-                PaperFoundryData(idx=0, prompt=instruction, root=str(ROOT)),
+                PaperFoundryData(
+                    idx=0,
+                    prompt=instruction,
+                    root=str(ROOT),
+                    network_allow=[],
+                ),
                 self.config.task,
             )
         ]
 '''
 
-_PRIME_PYPROJECT = """[project]\nname = \"stream2train-paper-foundry\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11,<3.14\"\ndependencies = [\"verifiers==0.1.14\", \"sympy==1.13.3\"]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"paper_foundry\"]\n"""
+_PRIME_PYPROJECT = """[project]\nname = \"stream2train-paper-foundry\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11,<3.14\"\ndependencies = [\"verifiers==0.3.1\", \"sympy==1.13.3\"]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"paper_foundry\"]\n"""
 
 _PRIME_README = """# Paper Foundry environment\n\nThis export targets the current Verifiers v1 Taskset API. The reward reads only the frozen hidden state and runs without model APIs or network access. Run it in a network-disabled Docker runtime and mount hidden files read-only.\n"""
 

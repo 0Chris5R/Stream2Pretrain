@@ -174,6 +174,15 @@ class SilverRecord(BaseModel):
         default="pretrain_and_posttrain",
         description="Purpose boundary propagated from the pre-fetch licence decision.",
     )
+    raw_html_s3_uri: str | None = Field(
+        default=None,
+        pattern=r"^s3://[^/]+/.+",
+        description="Original admitted Bronze body used only for bounded extraction retry.",
+    )
+    source_content_type: str = "application/octet-stream"
+    source_http_status: int = Field(default=200, ge=100, le=599)
+    source_fetched_at: datetime | None = None
+    source_http_last_modified: datetime | None = None
 
     # Structured scientific artifact. The full nested object remains in
     # MinIO; compact counts and its pointer travel with every downstream row.

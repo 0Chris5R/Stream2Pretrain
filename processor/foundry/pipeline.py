@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,9 +19,10 @@ from processor.foundry.store import FoundryStore
 from processor.foundry.tasking import SolvedTask, TaskFactory, TaskOutputError
 from processor.foundry.util import canonical_json, sha256, stable_id
 from processor.foundry.validation import run_acceptance_suite, suite_passes
-from processor.foundry.verifier import VerifierCompiler
+from processor.foundry.verifier import VerifierCompiler, deterministic_verifier
 from schemas.foundry import (
     DatasetSplit,
+    FoundryAnswer,
     FoundryArtifactRecord,
     FoundryEvent,
     OfficialArtifact,
@@ -297,12 +297,12 @@ class FoundryPipeline:
                 )
                 continue
             if value.task.route == "sft":
-                report, trajectories = _validate_sft(
+                report, trajectories, validation_cases = _validate_sft(
                     value,
                     bundle,
                     graph,
                 )
-                if not report.positive_pass:
+                if not suite_passes(report):
                     artifacts.append(
                         self._rejected_artifact(
                             job_id=job_id,
@@ -329,6 +329,7 @@ class FoundryPipeline:
                     verifier=None,
                     pool=pool,
                     dataset_split=dataset_split,
+                    validation_cases=validation_cases,
                     oracle_results=oracle_results,
                 )
                 uri = self.package_sink.write(
@@ -597,93 +598,36 @@ def _validate_sft(
     value: SolvedTask,
     bundle: PaperBundle,
     graph: PaperEvidenceGraph,
-) -> tuple[ValidationReport, list[Trajectory]]:
-    span_ids = {span.span_id for span in bundle.stable_spans}
-    node_ids = {node.id for node in graph.nodes}
-    public_span_ids = {
-        *value.task.public_context_policy.included_spans,
-        *value.task.public_context_policy.same_paper_distractors,
-    }
-    required_nodes = set(value.task.hidden_targets.required_nodes)
-    required_relations = {
-        (edge.source, edge.relation, edge.target)
-        for edge in value.task.hidden_targets.required_relations
-    }
-    accepted_evidence_sets = [
-        set(item) for item in value.task.hidden_targets.accepted_evidence_sets
-    ]
-    numeric_targets = {
-        key: float(expected)
-        for key, expected in value.task.hidden_targets.expected_values.items()
-        if isinstance(expected, (int, float)) and not isinstance(expected, bool)
-    }
-    validated: list[Trajectory] = []
-    for trajectory in value.trajectories:
-        manifest = trajectory.answer.answer_manifest
-        manifest_node_ids = {
-            value
-            for value in [
-                *manifest.claims,
-                *manifest.method_nodes,
-                *manifest.faults,
-                *manifest.qualifications,
-                *(eq.id for eq in manifest.equations),
-            ]
-            if value in node_ids
-        }
-        submitted_evidence = set(manifest.evidence)
-        submitted_relations = {
-            (edge.source, edge.relation, edge.target) for edge in manifest.relations
-        }
-        numeric_results = {result.id: result.value for result in manifest.numeric_results}
-        checks = {
-            "report_present": bool(trajectory.answer.report.strip()),
-            "manifest_present": bool(manifest_node_ids or submitted_evidence),
-            "evidence_resolves": bool(submitted_evidence)
-            and submitted_evidence <= span_ids
-            and submitted_evidence <= public_span_ids,
-            "evidence_covers_target": not accepted_evidence_sets
-            or any(expected <= submitted_evidence for expected in accepted_evidence_sets),
-            "required_nodes": required_nodes <= manifest_node_ids,
-            "required_relations": required_relations <= submitted_relations,
-            "numeric_targets": all(
-                key in numeric_results
-                and math.isclose(
-                    numeric_results[key],
-                    expected,
-                    rel_tol=1e-6,
-                    abs_tol=1e-9,
-                )
-                for key, expected in numeric_targets.items()
-            ),
-            "tool_execution": all(call.error is None for call in trajectory.tool_calls),
-        }
-        passed = all(checks.values())
-        validated.append(
-            trajectory.model_copy(
-                update={
-                    "accepted": passed,
-                    "reward": 1.0 if passed else 0.0,
-                    "validation": checks,
-                }
-            )
-        )
-    positive = bool(validated) and all(value.accepted for value in validated)
-    report = ValidationReport(
-        task_id=value.task.task_id,
-        positive_pass=positive,
-        equivalent_pass=True,
-        adversarial_pass=True,
-        mutation_killed=0,
-        mutation_total=0,
-        metamorphic_pass=True,
-        replay_pass=True,
-        security_pass=True,
-        false_positive_count=0,
-        false_negative_count=sum(not item.accepted for item in validated),
-        details={"route": "sft", "grounding_critic": value.critic.model_dump(mode="json")},
+) -> tuple[ValidationReport, list[Trajectory], dict[str, list[FoundryAnswer]]]:
+    """Run the same executable safety contract used for RL acceptance.
+
+    SFT does not ship a reward environment, but its generated trajectories must
+    still pass positive, equivalent, adversarial, mutation, metamorphic,
+    replay, and static security checks. No gate is represented as passed unless
+    it actually executed.
+    """
+    verifier = deterministic_verifier(value.task, bundle, graph)
+    report, validated, validation_cases = run_acceptance_suite(
+        task=value.task,
+        spec=verifier,
+        bundle=bundle,
+        graph=graph,
+        trajectories=value.trajectories,
     )
-    return report, validated
+    return (
+        report.model_copy(
+            update={
+                "details": {
+                    **report.details,
+                    "route": "sft",
+                    "grounding_critic": value.critic.model_dump(mode="json"),
+                    "validation_verifier": verifier.model_dump(mode="json"),
+                }
+            }
+        ),
+        validated,
+        validation_cases,
+    )
 
 
 def _family_for_role(traces: list[ProviderTrace], role: str) -> str:

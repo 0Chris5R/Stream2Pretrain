@@ -354,39 +354,93 @@ def bundle_json(bundle: PaperBundle) -> bytes:
     return canonical_json(bundle)
 
 
-def bundle_prompt_json(bundle: PaperBundle) -> bytes:
-    """Losslessly compact duplicate scientific representations for model prompts.
+def bundle_prompt_json(
+    bundle: PaperBundle,
+    *,
+    span_ids: set[str] | None = None,
+    section_roles: set[str] | None = None,
+    max_bytes: int = 450_000,
+) -> bytes:
+    """Build a bounded, non-duplicated scientific prompt projection.
 
     The durable PaperBundle remains unchanged. The prompt projection keeps every
-    training span and scientific object while choosing one equation encoding,
-    one table encoding, and the object-local caption instead of sending large
-    duplicate representations through the model context window.
+    selected stable span and its scientific objects while removing the duplicate
+    full section bodies. Oversized papers are covered by role-sharded graph
+    passes and task-specific projections rather than rejected or ranked lower.
     """
     payload = bundle.model_dump(mode="json")
-    payload["prompt_projection"] = "paper-bundle-model-view-v1"
+    payload["prompt_projection"] = "paper-bundle-model-view-v2"
     payload.pop("captions", None)
+    payload["sections"] = [
+        {
+            key: value
+            for key, value in section.items()
+            if key in {"section_id", "title", "role", "ordinal"}
+        }
+        for section in payload.get("sections", [])
+    ]
+    candidates = [
+        span
+        for span in bundle.stable_spans
+        if (span_ids is None or span.span_id in span_ids)
+        and (section_roles is None or span.section_role in section_roles)
+    ]
+    if not candidates and span_ids is not None:
+        candidates = [span for span in bundle.stable_spans if span.span_id in span_ids]
+    selected_spans: list[dict[str, object]] = []
+    payload["stable_spans"] = selected_spans
+    payload["equations"] = []
+    payload["tables"] = []
+    payload["figures"] = []
+    for span in sorted(candidates, key=lambda value: (value.ordinal, value.span_id)):
+        candidate = span.model_dump(mode="json")
+        selected_spans.append(candidate)
+        if len(canonical_json(payload)) > max_bytes:
+            selected_spans.pop()
+    selected_ids = {str(span["span_id"]) for span in selected_spans}
     payload["equations"] = [
         {
-            "equation_id": equation["equation_id"],
-            "representation_format": "latex" if equation.get("latex") else "mathml",
-            "representation": equation.get("latex") or equation.get("mathml"),
-            "source_span_ids": equation.get("source_span_ids", []),
+            "equation_id": equation.equation_id,
+            "representation_format": "latex" if equation.latex else "mathml",
+            "representation": equation.latex or equation.mathml,
+            "source_span_ids": equation.source_span_ids,
         }
-        for equation in payload.get("equations", [])
+        for equation in bundle.equations
+        if set(equation.source_span_ids) & selected_ids
     ]
     payload["tables"] = [
         {
-            "table_id": table["table_id"],
-            "caption": table.get("caption"),
-            "rows": table.get("rows", []),
-            "source_span_ids": table.get("source_span_ids", []),
+            "table_id": table.table_id,
+            "caption": table.caption,
+            "rows": table.rows,
+            "source_span_ids": table.source_span_ids,
         }
-        for table in payload.get("tables", [])
+        for table in bundle.tables
+        if set(table.source_span_ids) & selected_ids
     ]
     payload["figures"] = [
-        {key: value for key, value in figure.items() if key not in {"asset_uri", "image_hash"}}
-        for figure in payload.get("figures", [])
+        {
+            key: value
+            for key, value in figure.model_dump(mode="json").items()
+            if key not in {"asset_uri", "image_hash"}
+        }
+        for figure in bundle.figures
+        if set(figure.source_span_ids) & selected_ids
     ]
+    # Objects can themselves be large. Add them in stable order only while the
+    # complete JSON remains inside the window-derived projection budget.
+    for key in ("equations", "tables", "figures"):
+        values = list(payload[key])
+        payload[key] = []
+        for value in values:
+            payload[key].append(value)
+            if len(canonical_json(payload)) > max_bytes:
+                payload[key].pop()
+    payload["projection_coverage"] = {
+        "selected_spans": len(selected_spans),
+        "available_spans": len(candidates),
+        "selection": "stable-complete-spans-with-role-sharding",
+    }
     return canonical_json(payload)
 
 

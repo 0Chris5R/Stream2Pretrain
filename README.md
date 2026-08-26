@@ -121,7 +121,7 @@ Quality is source-aware:
 
 - Scientific HTML, PDF, and LaTeX use the FinePDFs profile.
 - General web text uses the FineWeb-Edu profile.
-- Hugging Face cards use a Markdown prose projection and retain FineWeb-Edu as an audit signal without Common-Crawl page-shape gates.
+- Hugging Face cards use a Markdown prose projection, a deterministic card-structure gate, and FineWeb-Edu plus FinePDFs comparison signals without Common-Crawl page-shape gates.
 - RSS, OAI, and Hub-list envelopes are internal discovery messages and never become training text or UI corpus rows.
 
 The DHBW chart fails closed on missing models. FinePDFs,
@@ -136,8 +136,8 @@ can reach pretraining. Grey-area licences, arXiv's non-exclusive distribution
 grant, and missing item rights can only reach the derived post-training route.
 Explicit incompatible, no-derivatives, contradictory, or provider-prohibited
 rights quarantine. The
-curator also applies PII detection, licence policy, and MinHash near-duplicate
-detection. Language confidence gates natural-language profiles. Gopher, C4,
+curator also redacts ordinary contact PII, quarantines high-risk identifiers,
+applies licence policy, and performs MinHash near-duplicate detection. Language confidence gates natural-language profiles. Gopher, C4,
 and KenLM gates apply only to ordinary web prose, where those
 web-derived signals are meaningful.
 
@@ -156,8 +156,9 @@ An experimental foundry can turn selected `posttrain_candidate` papers into
 grounded SFT trajectories and signed RL-verifiable environments. The same
 resumable worker, durable queue, validation gates, MinIO packages, and audit UI
 run locally or as a single-writer Kubernetes StatefulSet; the daily path ranks
-candidates and continues until the provider reports that its budget is
-exhausted. It generates datasets but does not train a model. See
+candidates received in the preceding 24 hours with no fixed paper cap, then
+continues until the cohort or provider capacity is exhausted. It generates
+datasets but does not train a model. See
 [`docs/POSTTRAIN_FOUNDRY.md`](docs/POSTTRAIN_FOUNDRY.md) for the design and
 operations guide.
 

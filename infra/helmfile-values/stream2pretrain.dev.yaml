@@ -79,9 +79,10 @@ processor:
     autoscaling:
       enabled: true
       minReplicas: 1
-      # Three 8 GB nodes were measured on 2026-08-23. Each model family can
-      # place one strict replica per worker, away from the stateful curator.
-      maxReplicas: 2
+      # Each stateless model family may use one replica per schedulable node.
+      # The stateful Bytewax curator remains a single recovery owner and sends
+      # bounded concurrent segment calls across these replicas.
+      maxReplicas: 3
       targetCPUUtilizationPercentage: 80
   iceberg:
     replicas: 1

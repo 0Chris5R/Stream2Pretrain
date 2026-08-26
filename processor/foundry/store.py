@@ -142,6 +142,8 @@ class FoundryStore:
               reasoning_score REAL NOT NULL DEFAULT 0,
               quality_score REAL NOT NULL DEFAULT 0,
               benchmark_score REAL NOT NULL DEFAULT 0,
+              ranking_score REAL NOT NULL DEFAULT 0,
+              domain_key TEXT NOT NULL DEFAULT 'general_scientific',
               valid_from TEXT NOT NULL DEFAULT '',
               enqueue_ordinal INTEGER NOT NULL DEFAULT 0,
               enqueued_at TEXT NOT NULL,
@@ -158,6 +160,13 @@ class FoundryStore:
               candidate_count INTEGER NOT NULL,
               processed_count INTEGER NOT NULL DEFAULT 0,
               stop_reason TEXT
+            );
+            CREATE TABLE IF NOT EXISTS daily_run_candidates (
+              run_date TEXT NOT NULL REFERENCES daily_runs(run_date),
+              rank INTEGER NOT NULL,
+              doc_id TEXT NOT NULL,
+              PRIMARY KEY(run_date,doc_id),
+              UNIQUE(run_date,rank)
             );
             CREATE TABLE IF NOT EXISTS manual_runs (
               run_id TEXT PRIMARY KEY,
@@ -206,6 +215,8 @@ class FoundryStore:
             "reasoning_score": "REAL NOT NULL DEFAULT 0",
             "quality_score": "REAL NOT NULL DEFAULT 0",
             "benchmark_score": "REAL NOT NULL DEFAULT 0",
+            "ranking_score": "REAL NOT NULL DEFAULT 0",
+            "domain_key": "TEXT NOT NULL DEFAULT 'general_scientific'",
             "valid_from": "TEXT NOT NULL DEFAULT ''",
             "enqueue_ordinal": "INTEGER NOT NULL DEFAULT 0",
             "scientific_payload": "BLOB",
@@ -633,6 +644,8 @@ class FoundryStore:
         quality_score: float,
         valid_from: datetime,
         scientific_payload: bytes | None = None,
+        ranking_score: float | None = None,
+        domain_key: str = "general_scientific",
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._lock:
@@ -650,12 +663,15 @@ class FoundryStore:
                     """
                     INSERT INTO candidate_queue
                     (doc_id,payload,state,reasoning_score,quality_score,benchmark_score,
-                     valid_from,enqueue_ordinal,enqueued_at,updated_at,scientific_payload)
-                    VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?)
+                     ranking_score,domain_key,valid_from,enqueue_ordinal,enqueued_at,updated_at,
+                     scientific_payload)
+                    VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(doc_id) DO UPDATE SET
                       payload=excluded.payload,
                       reasoning_score=excluded.reasoning_score,
                       quality_score=excluded.quality_score,
+                      ranking_score=excluded.ranking_score,
+                      domain_key=excluded.domain_key,
                       valid_from=excluded.valid_from,
                       enqueue_ordinal=excluded.enqueue_ordinal,
                       enqueued_at=excluded.enqueued_at,
@@ -673,6 +689,10 @@ class FoundryStore:
                         payload,
                         reasoning_score,
                         quality_score,
+                        ranking_score
+                        if ranking_score is not None
+                        else (reasoning_score + quality_score / 5.0) / 2.0,
+                        domain_key,
                         valid_from.isoformat(),
                         sequence,
                         now,
@@ -690,6 +710,7 @@ class FoundryStore:
         *,
         cutoff_at: datetime,
         cutoff_ordinal: int | None = None,
+        daily_run_date: date | None = None,
     ) -> tuple[str, bytes] | None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -698,16 +719,30 @@ class FoundryStore:
                 boundary_value: int | str = (
                     cutoff_ordinal if cutoff_ordinal is not None else cutoff_at.isoformat()
                 )
-                row = self._conn.execute(
-                    f"""
-                    SELECT doc_id,payload FROM candidate_queue
-                    WHERE state='queued' AND {boundary}
-                    ORDER BY reasoning_score DESC, quality_score DESC,
-                             valid_from DESC, doc_id ASC
-                    LIMIT 1
-                    """,
-                    (boundary_value,),
-                ).fetchone()
+                if daily_run_date is not None:
+                    row = self._conn.execute(
+                        f"""
+                        SELECT candidate_queue.doc_id,candidate_queue.payload
+                        FROM daily_run_candidates
+                        JOIN candidate_queue USING(doc_id)
+                        WHERE daily_run_candidates.run_date=?
+                          AND candidate_queue.state='queued' AND {boundary}
+                        ORDER BY daily_run_candidates.rank ASC
+                        LIMIT 1
+                        """,
+                        (daily_run_date.isoformat(), boundary_value),
+                    ).fetchone()
+                else:
+                    row = self._conn.execute(
+                        f"""
+                        SELECT doc_id,payload FROM candidate_queue
+                        WHERE state='queued' AND {boundary}
+                        ORDER BY ranking_score DESC, reasoning_score DESC,
+                                 quality_score DESC,valid_from DESC,doc_id ASC
+                        LIMIT 1
+                        """,
+                        (boundary_value,),
+                    ).fetchone()
                 if row is None:
                     self._conn.rollback()
                     return None
@@ -792,8 +827,19 @@ class FoundryStore:
             )
         return result
 
-    def start_daily_run(self, day: date) -> dict[str, Any]:
+    def start_daily_run(
+        self,
+        day: date,
+        *,
+        boundary_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Freeze the ranked cohort from the 24 hours ending at ``boundary_at``."""
         now = datetime.now(UTC)
+        cutoff_at = boundary_at or now
+        if cutoff_at.tzinfo is None:
+            raise ValueError("daily cohort boundary must be timezone-aware")
+        cutoff_at = cutoff_at.astimezone(UTC)
+        window_start = cutoff_at - timedelta(hours=24)
         day_text = day.isoformat()
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -813,42 +859,59 @@ class FoundryStore:
                 if existing is not None:
                     self._conn.commit()
                     return dict(existing)
-                candidate_count = int(
-                    self._conn.execute(
-                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
-                    ).fetchone()["n"]
-                )
                 cutoff_ordinal = int(
                     self._conn.execute(
                         "SELECT value FROM control_sequences WHERE name='candidate_enqueue'"
                     ).fetchone()["value"]
                 )
-                if candidate_count == 0:
-                    self._conn.commit()
-                    return {
-                        "run_date": day_text,
-                        "state": "waiting",
-                        "cutoff_at": now.isoformat(),
-                        "cutoff_ordinal": cutoff_ordinal,
-                        "started_at": now.isoformat(),
-                        "completed_at": None,
-                        "candidate_count": 0,
-                        "processed_count": 0,
-                        "stop_reason": None,
-                    }
+                # The daily cohort is intentionally fresh-only. Unprocessed
+                # older rows are removed instead of accumulating a permanent
+                # backlog that can starve new research.
+                self._conn.execute(
+                    "DELETE FROM candidate_queue WHERE state='queued' AND enqueued_at<=?",
+                    (window_start.isoformat(),),
+                )
+                ranked_rows = self._conn.execute(
+                    """
+                    SELECT doc_id,ranking_score,reasoning_score,quality_score,
+                           valid_from,domain_key
+                    FROM candidate_queue
+                    WHERE state='queued' AND enqueue_ordinal<=?
+                      AND enqueued_at>? AND enqueued_at<=?
+                    ORDER BY ranking_score DESC,reasoning_score DESC,quality_score DESC,
+                             valid_from DESC,doc_id ASC
+                    """,
+                    (cutoff_ordinal, window_start.isoformat(), cutoff_at.isoformat()),
+                ).fetchall()
+                selected_ids = [str(row["doc_id"]) for row in ranked_rows]
+                candidate_count = len(selected_ids)
+                state = "running" if candidate_count else "completed"
+                completed_at = None if candidate_count else now.isoformat()
+                stop_reason = None if candidate_count else "ranked 24-hour cohort is empty"
                 self._conn.execute(
                     """
                     INSERT OR IGNORE INTO daily_runs(
-                      run_date,state,cutoff_at,cutoff_ordinal,started_at,candidate_count
-                    ) VALUES (?, 'running', ?, ?, ?, ?)
+                      run_date,state,cutoff_at,cutoff_ordinal,started_at,completed_at,
+                      candidate_count,stop_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         day_text,
-                        now.isoformat(),
+                        state,
+                        cutoff_at.isoformat(),
                         cutoff_ordinal,
                         now.isoformat(),
+                        completed_at,
                         candidate_count,
+                        stop_reason,
                     ),
+                )
+                self._conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO daily_run_candidates(run_date,rank,doc_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(day_text, rank, doc_id) for rank, doc_id in enumerate(selected_ids, start=1)],
                 )
                 row = self._conn.execute(
                     "SELECT * FROM daily_runs WHERE run_date=?", (day_text,)

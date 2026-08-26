@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import io
 import json
+import sys
 import tarfile
 import threading
 from dataclasses import replace
@@ -499,8 +502,16 @@ def test_sft_validation_accepts_grounded_ids_alongside_readable_claim_text() -> 
         traces=[],
         critic=GroundingCritique(accepted=True),
     )
-    report, validated = _validate_sft(solved, _bundle(), _graph())
+    report, validated, cases = _validate_sft(solved, _bundle(), _graph())
     assert report.positive_pass
+    assert report.equivalent_pass
+    assert report.adversarial_pass
+    assert report.mutation_total > 0
+    assert report.mutation_killed == report.mutation_total
+    assert report.metamorphic_pass
+    assert report.replay_pass
+    assert report.security_pass
+    assert cases["adversarial"]
     assert validated[0].accepted
 
 
@@ -1040,18 +1051,19 @@ def test_abandoned_reservation_is_conservatively_reconciled_after_restart(
     assert recovered.reconcile_abandoned_reservations() == 0
 
 
-def test_candidate_queue_ranks_snapshot_lexicographically(tmp_path: Path) -> None:
+def test_candidate_queue_ranks_snapshot_by_composite_score(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
-    for doc_id, reasoning, quality in (
-        ("low-reasoning", 0.7, 5.0),
-        ("high-reasoning", 0.9, 3.0),
-        ("quality-tie-break", 0.9, 4.0),
+    for doc_id, reasoning, quality, ranking in (
+        ("low-reasoning", 0.7, 5.0, 0.1),
+        ("high-reasoning", 0.9, 3.0, 0.2),
+        ("quality-tie-break", 0.9, 4.0, 0.3),
     ):
         store.enqueue_candidate(
             doc_id=doc_id,
             payload=doc_id.encode(),
             reasoning_score=reasoning,
             quality_score=quality,
+            ranking_score=ranking,
             valid_from=FIXED_TIME,
         )
 
@@ -1329,10 +1341,13 @@ def test_only_worker_startup_recovers_processing_candidates(tmp_path: Path) -> N
     assert restarted_worker.claim_candidate(cutoff_at=cutoff) == ("paper", b"paper")
 
 
-def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> None:
+def test_daily_run_freezes_even_an_empty_24_hour_cohort(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     run_day = date(2026, 8, 19)
-    assert store.start_daily_run(run_day)["state"] == "waiting"
+    boundary = datetime.now(UTC)
+    empty = store.start_daily_run(run_day, boundary_at=boundary)
+    assert empty["state"] == "completed"
+    assert empty["candidate_count"] == 0
     store.enqueue_candidate(
         doc_id="first",
         payload=b"first",
@@ -1340,7 +1355,10 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
         quality_score=5.0,
         valid_from=FIXED_TIME,
     )
-    first = store.start_daily_run(run_day)
+    assert store.start_daily_run(run_day, boundary_at=boundary)["state"] == "completed"
+
+    next_day = run_day + timedelta(days=1)
+    first = store.start_daily_run(next_day, boundary_at=boundary + timedelta(days=1))
     assert first["state"] == "running"
     assert first["candidate_count"] == 1
     cutoff = datetime.fromisoformat(str(first["cutoff_at"]))
@@ -1358,7 +1376,7 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
     )
     assert store.claim_candidate(cutoff_at=cutoff, cutoff_ordinal=cutoff_ordinal) is None
     store.finish_candidate("first")
-    store.finish_daily_run(run_day, state="completed", reason="test")
+    store.finish_daily_run(next_day, state="completed", reason="test")
     store.enqueue_candidate(
         doc_id="later",
         payload=b"later",
@@ -1366,7 +1384,10 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
         quality_score=5.0,
         valid_from=FIXED_TIME,
     )
-    assert store.start_daily_run(run_day)["state"] == "completed"
+    assert (
+        store.start_daily_run(next_day, boundary_at=boundary + timedelta(days=1))["state"]
+        == "completed"
+    )
 
 
 def test_manual_run_snapshots_queue_and_coalesces_clicks(tmp_path: Path) -> None:
@@ -1426,6 +1447,7 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
     runtime = object.__new__(WorkerRuntime)
     runtime.config = SimpleNamespace(queue_poll_seconds=0)
     runtime._drain_stop = threading.Event()
+    current = datetime.now(UTC)
     calls: list[str] = []
     manual = {
         "run_id": "manual-1",
@@ -1437,6 +1459,7 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
     claims = iter([manual, None])
     runtime.store = SimpleNamespace(
         claim_manual_run=lambda: next(claims),
+        daily_run=lambda _day: {"candidate_count": 1, "processed_count": 0},
         finish_daily_run=lambda *_args, **_kwargs: calls.append("daily-finished"),
     )
     runtime._run_manual_snapshot = lambda _run, _log: calls.append("manual")
@@ -1448,8 +1471,8 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
     runtime._drain_one = drain_one
 
     runtime._run_daily_snapshot(
-        FIXED_TIME.date(),
-        {"cutoff_at": FIXED_TIME.isoformat(), "cutoff_ordinal": 1},
+        current.date(),
+        {"cutoff_at": current.isoformat(), "cutoff_ordinal": 1},
         SimpleNamespace(),
     )
 
@@ -1594,7 +1617,7 @@ def test_every_foundry_role_uses_the_single_hetzner_route() -> None:
     assert set(ROLE_PROVIDER.values()) == {"hetzner"}
 
 
-def test_acceptance_suite_and_signed_package_are_reproducible() -> None:
+def test_acceptance_suite_and_signed_package_are_reproducible(tmp_path: Path) -> None:
     bundle = _bundle()
     task = _task()
     graph = _graph()
@@ -1661,6 +1684,38 @@ def test_acceptance_suite_and_signed_package_are_reproducible() -> None:
         assert mutation is not None and mutation.read().strip()
         assert taskset is not None and b"class PaperFoundryTools" in taskset.read()
         assert "paper_environment/hidden/verifier.py" in names
+
+        # The normal project test environment keeps the sizeable training
+        # framework optional. CI runs this same test once with the exact pin so
+        # the generated package must import, load, and execute its reward.
+        if importlib.util.find_spec("verifiers") is not None:
+            archive.extractall(tmp_path)
+            environment_root = tmp_path / "paper_environment"
+            export_root = environment_root / "prime_verifiers"
+            sys.path[:0] = [str(environment_root), str(export_root)]
+            try:
+                from paper_foundry.taskset import PaperFoundryConfig, PaperFoundryTaskset
+
+                config = PaperFoundryConfig()
+                loaded = PaperFoundryTaskset(config).load()
+                assert len(loaded) == 1
+                assert loaded[0].data.network_allow == []
+                reward = asyncio.run(
+                    loaded[0].scientific_reward(
+                        SimpleNamespace(
+                            last_reply=validated[0].answer.model_dump_json(),
+                            tool_messages=[],
+                        )
+                    )
+                )
+                assert reward == 1.0
+            finally:
+                del sys.path[:2]
+                for module_name in tuple(sys.modules):
+                    if module_name == "paper_foundry" or module_name.startswith(
+                        ("paper_foundry.", "public_tools", "hidden")
+                    ):
+                        sys.modules.pop(module_name, None)
 
 
 def test_relation_only_required_nodes_produce_effective_mutations() -> None:

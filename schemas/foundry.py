@@ -337,6 +337,7 @@ class VerifierSpec(FrozenModel):
     runtime_dependencies: list[str] = Field(default_factory=list)
     network_required: Literal[False] = False
     determinism_seed: int = Field(..., ge=0)
+    critic_audit: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SubmittedEquation(FrozenModel):

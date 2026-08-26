@@ -76,6 +76,7 @@ def test_stream_source_filter_matches_deployed_feed_names() -> None:
     assert _is_arxiv_source_feed("oai-arxiv-cs", None)
     assert _is_arxiv_source_feed("rss-arxiv-cs-lg", None)
     assert _is_arxiv_source_feed("arxiv-oai-cs", None)
+    assert _is_arxiv_source_feed("arxiv-extraction-retry", None)
     assert _is_arxiv_source_feed("custom-arxiv", ("custom-arxiv",))
 
 
@@ -460,6 +461,36 @@ async def test_fetch_one_uses_pdf_when_both_html_sources_are_missing() -> None:
     assert outcome.extraction_pipeline == "docling-pdf-cpu-2.114.0"
 
 
+@pytest.mark.asyncio
+async def test_extraction_retry_fetches_pdf_without_repeating_html() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        assert "/pdf/" in request.url.path
+        return httpx.Response(
+            200,
+            content=b"%PDF-1.7\nretry",
+            headers={"content-type": "application/pdf"},
+        )
+
+    client = build_async_client(_cfg(), transport=httpx.MockTransport(handler))
+    try:
+        outcome = await fetch_one(
+            "2401.12345",
+            client,
+            bucket=TokenBucket(rate=64.0, burst=64),
+            min_sleep_s=0.0,
+            force_pdf=True,
+        )
+    finally:
+        await client.aclose()
+
+    assert calls == ["https://arxiv.org/pdf/2401.12345"]
+    assert outcome.source_format == "pdf"
+    assert outcome.extraction_pipeline == "docling-pdf-cpu-2.114.0"
+
+
 def test_make_bronze_record_html_branch() -> None:
     from datetime import datetime
 
@@ -601,6 +632,48 @@ async def test_run_for_ids_emits_one_record_per_id() -> None:
     assert {r.source_format for r in producer.records} == {"html"}
     assert {r.extraction_pipeline for r in producer.records} == {"arxiv-html-2026-06"}
     assert len(minio.objects) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_for_ids_preserves_bounded_pdf_retry_attempt() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "/abs/" in request.url.path:
+            return httpx.Response(
+                200,
+                text=(
+                    '<div class="abs-license"><a '
+                    'href="https://creativecommons.org/licenses/by/4.0/">license</a></div>'
+                ),
+            )
+        if "/pdf/" in request.url.path:
+            return httpx.Response(
+                200,
+                content=b"%PDF-1.7\nretry",
+                headers={"content-type": "application/pdf"},
+            )
+        raise AssertionError(f"unexpected retry URL: {request.url}")
+
+    minio = _FakeMinio()
+    producer = _FakeProducer()
+    emitted = await run_for_ids(
+        [ArxivCandidate("2401.12345", force_pdf=True, retry_attempt=2)],
+        _cfg(),
+        feed_name="arxiv-html-fetcher",
+        rate_per_second=64.0,
+        burst=64,
+        min_sleep_s=0.0,
+        transport=httpx.MockTransport(handler),
+        producer_override=producer,  # type: ignore[arg-type]
+        minio_override=minio,  # type: ignore[arg-type]
+    )
+
+    assert emitted == 1
+    assert all("/html/" not in url for url in calls)
+    assert producer.records[0].source_format == "pdf"
+    assert producer.records[0].extraction_pipeline.endswith("|curation-retry=2")
 
 
 @pytest.mark.asyncio

@@ -117,9 +117,11 @@
               "phone",
               "ssn",
               "credit_card",
+              "iban",
               "ipv4",
               "ipv6",
-              "passport"
+              "passport",
+              "secret"
             ],
             "type": "string"
           },
@@ -460,9 +462,11 @@
           "phone",
           "ssn",
           "credit_card",
+          "iban",
           "ipv4",
           "ipv6",
-          "passport"
+          "passport",
+          "secret"
         ],
         "type": "string"
       },
@@ -523,6 +527,7 @@
       "enum": [
         "none",
         "metadata_removed",
+        "body_redacted",
         "segments_removed",
         "body_quarantine"
       ],
@@ -536,9 +541,11 @@
           "phone",
           "ssn",
           "credit_card",
+          "iban",
           "ipv4",
           "ipv6",
-          "passport"
+          "passport",
+          "secret"
         ],
         "type": "string"
       },
@@ -591,7 +598,8 @@
           "minhash_backend_mismatch",
           "insufficient_body",
           "insufficient_scientific_body",
-          "incomplete_scientific_extraction"
+          "incomplete_scientific_extraction",
+          "hf_card_quality_filter"
         ],
         "type": "string"
       },
@@ -605,9 +613,11 @@
           "phone",
           "ssn",
           "credit_card",
+          "iban",
           "ipv4",
           "ipv6",
-          "passport"
+          "passport",
+          "secret"
         ],
         "type": "string"
       },

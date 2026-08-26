@@ -795,16 +795,36 @@ def _deterministic_corruption_task(
 
 
 def _select_diverse_tasks(tasks: list[TaskSpec], *, limit: int) -> list[TaskSpec]:
+    family_priority = {
+        "derivation_completion": 0,
+        "figure_table_reasoning": 1,
+        "assumption_consequence": 2,
+        "corruption_diagnosis": 3,
+        "claim_evidence": 4,
+        "single_paper_research": 5,
+        "method_dag": 6,
+        "grounded_explanation": 7,
+        "experiment_configuration": 8,
+        "result_reproduction": 9,
+    }
+    ranked = sorted(
+        tasks,
+        key=lambda task: (
+            family_priority.get(task.family, len(family_priority)),
+            -task.difficulty.estimated,
+            task.task_id,
+        ),
+    )
     selected: list[TaskSpec] = []
     seen_families: set[str] = set()
-    for task in tasks:
+    for task in ranked:
         if task.family in seen_families:
             continue
         selected.append(task)
         seen_families.add(task.family)
         if len(selected) >= limit:
             return selected
-    for task in tasks:
+    for task in ranked:
         if task not in selected:
             selected.append(task)
         if len(selected) >= limit:
@@ -818,7 +838,9 @@ def _designer_system() -> str:
 Return strict JSON {{"tasks": [...]}}. Use only supplied stable spans. Propose the requested mixture
 across claim/evidence, derivation, method DAG, figure/table, corruption diagnosis,
 assumption/consequence, long single-paper research, and grounded SFT reasoning where evidence
-permits. When audited official artifacts are present, also consider experiment configuration and
+permits. Prefer answerable formula derivations, scaling-law calculations, numeric transformations,
+factorizations, approximations, and figure/table synthesis over another routine method DAG when the
+paper supports them. When audited official artifacts are present, also consider experiment configuration and
 result reproduction. Separate public context from hidden targets, add same-paper distractors only,
 avoid answer leakage, and reject underspecified families rather than inventing. The response must
 validate exactly against REQUIRED_JSON_SCHEMA.
@@ -858,13 +880,14 @@ def _designer_prompt(
     count: int,
     oracle_result_ids: set[str],
 ) -> str:
+    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
         f"Propose exactly {count} materially different TaskSpecs. Cover the strongest supported "
         "families, including the five deterministic RL templates and a long paper-local tool task. "
         "Configuration or result-reproduction tasks require an audited official artifact. Route "
         "valuable but non-finite work to SFT.\n"
         f"AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:\n{canonical_json(sorted(oracle_result_ids)).decode()}\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}"
     )
 
@@ -884,8 +907,16 @@ def _answerability_prompt(
     graph: PaperEvidenceGraph,
     tasks: list[TaskSpec],
 ) -> str:
+    task_spans = {
+        span_id
+        for task in tasks
+        for span_id in [
+            *task.public_context_policy.included_spans,
+            *task.public_context_policy.same_paper_distractors,
+        ]
+    }
     return (
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=task_spans).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}\n"
         f"TASKS:\n{canonical_json(tasks).decode()}"
     )
@@ -1005,8 +1036,12 @@ def _grounding_prompt(
     task: TaskSpec,
     trajectories: list[Trajectory],
 ) -> str:
+    task_spans = {
+        *task.public_context_policy.included_spans,
+        *task.public_context_policy.same_paper_distractors,
+    }
     return (
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=task_spans).decode()}\n"
         f"GRAPH:\n{canonical_json(graph).decode()}\nTASK:\n{canonical_json(task).decode()}\n"
         f"SOLUTIONS:\n{canonical_json(trajectories).decode()}"
     )

@@ -101,7 +101,7 @@ export default function PostTrainingPage() {
         <h1 className="text-2xl font-semibold tracking-tight">Post-training</h1>
         <div className="flex flex-wrap items-center gap-2 sm:justify-end">
           <Badge variant="outline">
-            Daily · {String(data?.daily_run_hour_utc ?? 0).padStart(2, '0')}:00 UTC
+            Daily cohort · {String(data?.daily_run_hour_utc ?? 0).padStart(2, '0')}:00 UTC
           </Badge>
           <Button
             size="sm"

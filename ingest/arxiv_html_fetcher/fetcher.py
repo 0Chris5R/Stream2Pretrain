@@ -83,6 +83,8 @@ class ArxivCandidate:
     arxiv_id: str
     license_value: str | None = None
     license_source: str = "unknown"
+    force_pdf: bool = False
+    retry_attempt: int = 0
 
 
 # ``2401.12345``, ``2401.12345v2`` (new scheme) and ``cs/0703123`` (legacy).
@@ -166,6 +168,7 @@ async def fetch_one(
     *,
     bucket: TokenBucket,
     min_sleep_s: float = _DEFAULT_MIN_SLEEP_S,
+    force_pdf: bool = False,
 ) -> FetchOutcome:
     """Fetch a single arXiv id, falling back to ar5iv on 404.
 
@@ -173,6 +176,14 @@ async def fetch_one(
     that into a Bronze record - this function does **not** touch MinIO or
     the producer so it stays trivially testable with httpx mocks.
     """
+    if force_pdf:
+        return await _fetch_pdf(
+            arxiv_id,
+            client,
+            bucket=bucket,
+            min_sleep_s=min_sleep_s,
+        )
+
     primary_url = canonical_arxiv_url(arxiv_id, mirror="arxiv")
     await bucket.acquire()
     if min_sleep_s > 0:
@@ -256,6 +267,22 @@ async def fetch_one(
             source_format="metadata",
         )
 
+    return await _fetch_pdf(
+        arxiv_id,
+        client,
+        bucket=bucket,
+        min_sleep_s=min_sleep_s,
+    )
+
+
+async def _fetch_pdf(
+    arxiv_id: str,
+    client: httpx.AsyncClient,
+    *,
+    bucket: TokenBucket,
+    min_sleep_s: float,
+) -> FetchOutcome:
+    """Fetch the immutable PDF path used by fallback and curation retry."""
     pdf_url = f"{ARXIV_PDF_BASE}/{arxiv_id}"
     await bucket.acquire()
     if min_sleep_s > 0:
@@ -447,10 +474,14 @@ async def stream_ids_from_topic(
             arxiv_id = _arxiv_id_from_url(url) or body.get("arxiv_id")
             if not arxiv_id or not is_valid_arxiv_id(arxiv_id):
                 continue
+            pipeline = str(body.get("extraction_pipeline", ""))
+            retry_match = re.search(r"\|curation-retry=(\d+)$", pipeline)
             yield ArxivCandidate(
                 arxiv_id=arxiv_id,
                 license_value=body.get("spdx_license") or body.get("license"),
                 license_source=body.get("spdx_license_source") or "unknown",
+                force_pdf=pipeline.startswith("arxiv-pdf-retry-v1"),
+                retry_attempt=int(retry_match.group(1)) if retry_match else 0,
             )
             emitted += 1
             if max_records is not None and emitted >= max_records:
@@ -467,6 +498,7 @@ def _is_arxiv_source_feed(source: str, sources_filter: Iterable[str] | None) -> 
         "oai-arxiv-cs",
         "arxiv-oai-cs",
         "arxiv-rss-cs",
+        "arxiv-extraction-retry",
     } or source.startswith("rss-arxiv-cs-")
 
 
@@ -596,6 +628,7 @@ async def run_for_ids(
                         client,
                         bucket=bucket,
                         min_sleep_s=min_sleep_s,
+                        force_pdf=candidate.force_pdf,
                     )
                 except httpx.HTTPError as exc:
                     log.exception(
@@ -606,6 +639,10 @@ async def run_for_ids(
                     if raise_on_fetch_error:
                         raise
                     continue
+                if candidate.force_pdf:
+                    outcome.extraction_pipeline = (
+                        f"{outcome.extraction_pipeline}|curation-retry={candidate.retry_attempt}"
+                    )
 
                 fetched_license = (
                     outcome.extracted.spdx_license if outcome.extracted is not None else None

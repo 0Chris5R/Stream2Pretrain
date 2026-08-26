@@ -36,6 +36,11 @@ _REMOVED_CORPUS_SOURCES = (
     "rss-bair-blog",
     "rss-eleuther-blog",
 )
+_LEGACY_DISPLAY_REJECTIONS = (
+    "metadata_only",
+    "c4_nopunc_filter",
+    "gopher_filter",
+)
 
 
 def _visible_source_predicate(
@@ -59,6 +64,22 @@ def _visible_source_predicate(
         )
     )
     return " AND ".join(clauses)
+
+
+def _current_decision_predicate(
+    source_column: str = "source_feed",
+    reject_column: str = "reject_reasons",
+    *,
+    include_fixtures: bool = False,
+) -> str:
+    """Hide superseded policy rows from every normal product view."""
+    historical = " OR ".join(
+        f"LIST_CONTAINS({reject_column}, '{reason}')" for reason in _LEGACY_DISPLAY_REJECTIONS
+    )
+    return (
+        f"{_visible_source_predicate(source_column, include_fixtures=include_fixtures)} "
+        f"AND NOT ({historical})"
+    )
 
 
 class DuckDBConnection(Protocol):
@@ -148,7 +169,7 @@ class DuckDBQueryService:
           CAST(FLOOR(quality_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
         FROM {self._gold}
-        WHERE {_visible_source_predicate()}
+        WHERE {_current_decision_predicate()}
         GROUP BY score
         ORDER BY score ASC
         """
@@ -157,7 +178,7 @@ class DuckDBQueryService:
           CAST(FLOOR(edu_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
         FROM {self._gold}
-        WHERE {_visible_source_predicate()}
+        WHERE {_current_decision_predicate()}
         GROUP BY score
         ORDER BY score ASC
         """
@@ -177,7 +198,7 @@ class DuckDBQueryService:
           CAST(COALESCE(AVG(quality_score), 0) AS DOUBLE) AS mean_quality,
           CAST(COALESCE(AVG(edu_score), 0) AS DOUBLE) AS mean_edu
         FROM {self._decisions}
-        WHERE {_visible_source_predicate()}
+        WHERE {_current_decision_predicate()}
         GROUP BY route
         ORDER BY documents DESC, route ASC
         """
@@ -228,7 +249,7 @@ class DuckDBQueryService:
             f"""
             SELECT CAST(COUNT(*) AS BIGINT) AS durable_decisions
             FROM {self._decisions}
-            WHERE {_visible_source_predicate()}
+            WHERE {_current_decision_predicate()}
             """,
             [],
             relation=self._decisions,
@@ -237,7 +258,7 @@ class DuckDBQueryService:
             f"""
             SELECT CAST(COUNT(*) AS BIGINT) AS training_export_documents
             FROM {self._gold}
-            WHERE {_visible_source_predicate()}
+            WHERE {_current_decision_predicate()}
             """,
             [],
             relation=self._gold,
@@ -246,7 +267,7 @@ class DuckDBQueryService:
             f"""
             SELECT reason, CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._decisions}, UNNEST(reject_reasons) AS rejected(reason)
-            WHERE {_visible_source_predicate()}
+            WHERE {_current_decision_predicate()}
             GROUP BY 1
             ORDER BY count DESC, reason ASC
             """,
@@ -257,7 +278,7 @@ class DuckDBQueryService:
             f"""
             SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
             FROM {self._decisions}
-            WHERE {_visible_source_predicate()}
+            WHERE {_current_decision_predicate()}
             GROUP BY source_feed
             ORDER BY source_feed ASC
             """,
@@ -553,7 +574,7 @@ class DuckDBQueryService:
             scientific_artifact_s3_uri,
             FALSE AS admission_only
           FROM {self._decisions}
-          WHERE {_visible_source_predicate()}
+          WHERE {_current_decision_predicate()}
           UNION ALL
           SELECT
             admission.doc_id,
@@ -654,6 +675,7 @@ class DuckDBQueryService:
             self._prepare_relation(self._decisions)
             self._prepare_relation(self._license_admissions)
         fixture_clause = f"WHERE {_visible_source_predicate(include_fixtures=include_fixtures)}"
+        current_decisions = _current_decision_predicate(include_fixtures=include_fixtures)
         admission_rows = f"""
           SELECT admission.source_feed,
                  COALESCE(admission.source_format, 'unfetched') AS source_format,
@@ -673,7 +695,7 @@ class DuckDBQueryService:
             f"""
             SELECT DISTINCT source_feed AS value
             FROM (
-              SELECT source_feed FROM {self._decisions}
+              SELECT source_feed FROM {self._decisions} WHERE {current_decisions}
               UNION ALL
               SELECT source_feed FROM ({admission_rows}) AS early
             ) AS source_rows
@@ -688,6 +710,7 @@ class DuckDBQueryService:
             SELECT DISTINCT source_format AS value
             FROM (
               SELECT source_feed, source_format FROM {self._decisions}
+              WHERE {current_decisions}
               UNION ALL
               SELECT source_feed, source_format FROM ({admission_rows}) AS early
             ) AS format_rows
@@ -700,8 +723,8 @@ class DuckDBQueryService:
         conjunction = "WHERE" if not fixture_clause else "AND"
         tags = self._rows(
             f"SELECT DISTINCT tag AS value FROM {self._decisions}, "
-            f"UNNEST(content_tags) AS values(tag) {fixture_clause} "
-            f"{conjunction} tag IS NOT NULL ORDER BY value",
+            f"UNNEST(content_tags) AS values(tag) WHERE {current_decisions} "
+            f"AND tag IS NOT NULL ORDER BY value",
             [],
             relation=self._decisions,
         )
@@ -711,6 +734,7 @@ class DuckDBQueryService:
             FROM (
               SELECT source_feed, reason
               FROM {self._decisions}, UNNEST(reject_reasons) AS values(reason)
+              WHERE {current_decisions}
               UNION ALL
               SELECT source_feed, reason FROM ({admission_rows}) AS early
             ) AS reason_rows
@@ -899,7 +923,7 @@ class DuckDBQueryService:
         min_quality: float | None = None,
         max_quality: float | None = None,
     ) -> tuple[str, list[Any]]:
-        clauses: list[str] = [_visible_source_predicate(include_fixtures=include_fixtures)]
+        clauses: list[str] = [_current_decision_predicate(include_fixtures=include_fixtures)]
         params: list[Any] = []
         if search and search.strip():
             clauses.append(
@@ -975,7 +999,7 @@ class DuckDBQueryService:
           decon_semantic_matches, decon_max_similarity, decon_ngram_size,
           decon_embedding_revision, benchmark_set_version
         FROM {self._decisions}
-        WHERE doc_id = ?
+        WHERE doc_id = ? AND {_current_decision_predicate()}
         ORDER BY valid_from DESC
         LIMIT 1
         """

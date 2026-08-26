@@ -32,19 +32,19 @@ adaptations:
 4. The former `reasoning_candidate` route is now `posttrain_candidate`.
    Historical snapshots remain readable only through an explicit legacy flag.
    The foundry consumes the new route by default.
-5. Post-training uses one ranked UTC-day snapshot rather than a fixed paper
-   cap. After the configured UTC hour, candidates are ordered by reasoning
-   evidence, composite quality, recency, and document ID.
-   They run serially until the snapshot is exhausted or a published provider
-   limit is reached. Unprocessed candidates remain durable and compete in
-   the next daily ranking. This spends the available API budget on the
-   strongest current candidates without inventing a paper limit.
+5. Post-training has no fixed paper cap. At the configured UTC boundary it
+   removes unprocessed queue entries older than 24 hours, freezes every
+   candidate received during the preceding 24 hours, and processes that cohort
+   in descending quality rank. New arrivals wait for the next boundary. Work
+   stops only when the cohort is exhausted, provider capacity is unavailable,
+   or the next boundary replaces it. Old work never accumulates into a backlog
+   that can starve fresh research.
 6. Redpanda, Bytewax, MinIO, Iceberg, Polaris, Prometheus, Grafana, and the
    existing Next.js UI remain the control and data plane. A second workflow
    engine and W&B are unnecessary for the required semantics.
 7. Prime Intellect Verifiers export uses its current v1 `Taskset`, `TaskData`,
    reward, and `Toolset` interfaces. The generated environment is pinned to
-   `verifiers==0.1.14`. NeMo Gym remains a later export target, as in the
+   `verifiers==0.3.1`. NeMo Gym remains a later export target, as in the
    supplied plan.
 8. Official repositories, datasets, and checkpoints are optional inputs. They
    run only when an audited manifest supplies a permissive licence, immutable
@@ -109,15 +109,23 @@ These conditions rely on the upstream guarantee that only licence-admitted
 Gold records reach `docs.curated`. There is no post-training licence stage,
 licence hash, licence ledger, or second legal decision.
 
-At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC`, a one-replica scheduler freezes the day's
-candidate cutoff and ranks that snapshot lexicographically by
-`reasoning_score DESC`, `quality_score DESC`, `valid_from DESC`, and
-`doc_id ASC`. Lexicographic ordering avoids an
-unvalidated weighted score. Papers run one after another. Daily quota
-exhaustion closes the run; minute-window exhaustion pauses it until capacity
-resets. New arrivals after the cutoff wait for the next day. If no candidate
-exists at the scheduled time, no empty run is committed and the first later
-arrival may start that day's snapshot.
+At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC`, a one-replica scheduler commits exactly one
+cohort, including an empty cohort. It first drops unprocessed entries at or
+before the prior 24-hour boundary, then freezes all queued candidates received
+after that boundary and no later than the current boundary. Papers are ranked
+by an equal-weight combination of normalized composite quality, education
+quality, scientific structure, extraction completeness, reasoning suitability,
+and the presence of equation, table, and figure evidence. Context length and
+predicted API cost are deliberately excluded. Ties use reasoning, composite
+quality, recency, and document ID. The current auditable formula is explicitly
+a bootstrap policy and will be superseded by a trained artifact-yield ranker
+once reviewed accepted and rejected artifacts provide enough labels.
+
+The worker processes the frozen rank order serially. A provider-capacity stop
+does not admit older papers at the next boundary: any unfinished cohort members
+are removed, and only the newly completed 24-hour arrival window may compete.
+New arrivals after the cutoff wait for the next cohort. `Run now` remains a
+manual diagnostic snapshot and does not alter the daily cohort boundary.
 
 The control store resets interrupted `processing` rows to `queued` after
 restart and resumes the same daily cutoff. A serialized background drain loop
@@ -257,10 +265,11 @@ Every possible transport attempt is reserved up front. Successful calls
 reconcile their exact attempt count and reported usage; failed calls or
 missing usage reconcile conservatively at the reserved maximum.
 Transport retry keeps the same route and semantic request. Provider errors and
-minute-quota exhaustion leave the paper and daily run resumable. Daily quota
-exhaustion closes the run while keeping the current paper and remaining
-candidates queued for the next UTC day. Semantic or legal failures produce
-explicit rejection states.
+minute-window exhaustion leave the current cohort resumable while it is still
+current. If provider capacity prevents completion before the next cohort
+boundary, unfinished papers expire with the old cohort rather than competing
+against newly arrived research. Semantic failures produce explicit rejection
+states.
 
 On worker restart, abandoned quota reservations are charged conservatively.
 Every prior `CALL_PLANNED` or `CALL_STARTED` event without a matching terminal

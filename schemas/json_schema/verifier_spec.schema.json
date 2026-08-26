@@ -110,6 +110,14 @@
   },
   "additionalProperties": false,
   "properties": {
+    "critic_audit": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Critic Audit",
+      "type": "array"
+    },
     "determinism_seed": {
       "minimum": 0,
       "title": "Determinism Seed",

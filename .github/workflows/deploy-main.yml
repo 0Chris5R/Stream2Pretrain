@@ -45,6 +45,7 @@ jobs:
       sources: ${{ steps.scope.outputs.sources }}
       monitoring: ${{ steps.scope.outputs.monitoring }}
       redpanda: ${{ steps.scope.outputs.redpanda }}
+      foundry_package: ${{ steps.scope.outputs.foundry_package }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -64,6 +65,7 @@ jobs:
             echo "sources=false" >> "$GITHUB_OUTPUT"
             echo "monitoring=false" >> "$GITHUB_OUTPUT"
             echo "redpanda=false" >> "$GITHUB_OUTPUT"
+            echo "foundry_package=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           before="${{ github.event.before }}"
@@ -80,6 +82,7 @@ jobs:
           sources=false
           monitoring=false
           redpanda=false
+          foundry_package=false
           if grep -Eq \
             '^(schemas/|ingest/|processor/|tests/|scripts/.*\.py$|pyproject\.toml$|uv\.lock$|[^/]+/pyproject\.toml$)' \
             "$changed"; then
@@ -119,6 +122,11 @@ jobs:
             "$changed"; then
             redpanda=true
           fi
+          if grep -Eq \
+            '^(processor/foundry/(packaging|standalone_verifier)\.py|schemas/foundry\.py)$' \
+            "$changed"; then
+            foundry_package=true
+          fi
           echo "Changed files:"
           sed 's/^/  /' "$changed"
           echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
@@ -128,6 +136,7 @@ jobs:
           echo "sources=$sources" >> "$GITHUB_OUTPUT"
           echo "monitoring=$monitoring" >> "$GITHUB_OUTPUT"
           echo "redpanda=$redpanda" >> "$GITHUB_OUTPUT"
+          echo "foundry_package=$foundry_package" >> "$GITHUB_OUTPUT"
 
   validate:
     name: Validate repository
@@ -178,6 +187,13 @@ jobs:
           uv run ruff check schemas ingest processor tests scripts
           uv run ruff format --check schemas ingest processor tests scripts
           uv run pytest
+
+      - name: Execute generated Prime Verifiers package
+        if: needs.changes.outputs.foundry_package == 'true'
+        run: >-
+          uv run --with verifiers==0.3.1 pytest
+          processor/tests/test_foundry.py
+          -k acceptance_suite_and_signed_package_are_reproducible
 
       - name: Lint Helm chart and release graph
         if: needs.changes.outputs.helm == 'true'
@@ -3097,6 +3113,7 @@ jobs:
                                         and .name != "S2P_CURATOR_INPUT_TOPIC"
                                         and .name != "S2P_CURATOR_DECISIONS_TOPIC"
                                         and .name != "S2P_CURATOR_CURATED_TOPIC"
+                                        and .name != "S2P_CURATOR_RETRY_TOPIC"
                                         and .name != "S2P_KAFKA_START_OFFSET"
                                         and .name != "S2P_BYTEWAX_FLOW_NAME"
                                         and .name != "S2P_BYTEWAX_RECOVERY_NAME"
@@ -3111,6 +3128,7 @@ jobs:
                                       {name: "S2P_CURATOR_INPUT_TOPIC", value: "docs.normalized.smoke"},
                                       {name: "S2P_CURATOR_DECISIONS_TOPIC", value: "curation.decisions.smoke"},
                                       {name: "S2P_CURATOR_CURATED_TOPIC", value: "docs.curated.smoke"},
+                                      {name: "S2P_CURATOR_RETRY_TOPIC", value: "raw.smoke"},
                                       {name: "S2P_KAFKA_START_OFFSET", value: "beginning"},
                                       {name: "S2P_BYTEWAX_FLOW_NAME", value: "s2p-curate-smoke-v1"},
                                       {name: "S2P_BYTEWAX_RECOVERY_NAME", value: "curate-smoke-v1"},

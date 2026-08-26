@@ -298,9 +298,15 @@ def _pass_prompt(
     instruction: str,
     oracle_results: list[OracleResult],
 ) -> str:
+    role_focus = {
+        "claim": {"abstract", "introduction", "results", "discussion", "conclusion"},
+        "method": {"abstract", "methods", "results"},
+        "quantitative": {"methods", "results", "discussion", "other"},
+        "conflict": {"results", "discussion", "limitations", "conclusion"},
+    }.get(pass_name)
     return (
         f"PASS: {pass_name}\nINSTRUCTION: {instruction}\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, section_roles=role_focus).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"CURRENT_GRAPH:\n{canonical_json(graph).decode()}"
     )
@@ -311,8 +317,9 @@ def _critic_prompt(
     graph: PaperEvidenceGraph,
     oracle_results: list[OracleResult],
 ) -> str:
+    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"CANDIDATE_GRAPH:\n{canonical_json(graph).decode()}"
     )
@@ -324,10 +331,11 @@ def _repair_prompt(
     critique: GraphCritique,
     oracle_results: list[OracleResult],
 ) -> str:
+    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
         "Return only a bounded delta against GRAPH that resolves the CRITIQUE; do not restate "
         "unchanged graph content.\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"GRAPH:\n{canonical_json(graph).decode()}\n"
         f"CRITIQUE:\n{canonical_json(critique).decode()}"
