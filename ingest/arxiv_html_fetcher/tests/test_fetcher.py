@@ -15,6 +15,8 @@ dependency.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +27,7 @@ import pytest
 from ingest.arxiv_html_fetcher import fetcher as fetcher_module
 from ingest.arxiv_html_fetcher.fetcher import (
     ArxivCandidate,
+    ArxivStreamRecord,
     FetchOutcome,
     _is_arxiv_source_feed,
     build_metadata_stub,
@@ -86,18 +89,24 @@ async def test_stream_reuses_one_consumer_and_commits_each_handled_batch(
 ) -> None:
     class Consumer:
         def __init__(self) -> None:
-            self.commits = 0
+            self.commits: list[dict[Any, int]] = []
 
-        async def commit(self) -> None:
-            self.commits += 1
+        async def commit(self, offsets: dict[Any, int]) -> None:
+            self.commits.append(offsets)
 
     consumer = Consumer()
     batches: list[int] = []
 
     async def candidates(*_args: Any, **kwargs: Any) -> Any:
+        assert kwargs["max_poll_interval_ms"] == 300_000
         kwargs["commit_callback"](consumer)
         for index in range(33):
-            yield ArxivCandidate(arxiv_id=f"2401.{index:05d}")
+            yield ArxivStreamRecord(
+                candidate=ArxivCandidate(arxiv_id=f"2401.{index:05d}"),
+                topic="raw.fetched",
+                partition=index % 2,
+                offset=index,
+            )
 
     async def run_batch(ids: list[ArxivCandidate], *_args: Any, **kwargs: Any) -> int:
         assert kwargs["raise_on_fetch_error"] is True
@@ -112,11 +121,17 @@ async def test_stream_reuses_one_consumer_and_commits_each_handled_batch(
         auto_offset_reset="latest",
         max_records=None,
         feed_name="arxiv-html-fetcher",
+        max_poll_interval_ms=300_000,
     )
 
     assert await fetcher_module._run_stream(args, _cfg()) == 33
     assert batches == [1] * 33
-    assert consumer.commits == 33
+    assert len(consumer.commits) == 33
+    committed = [
+        (next(iter(offsets)).topic, next(iter(offsets)).partition, next(iter(offsets.values())))
+        for offsets in consumer.commits
+    ]
+    assert committed == [("raw.fetched", index % 2, index + 1) for index in range(33)]
 
 
 @pytest.mark.asyncio
@@ -124,16 +139,22 @@ async def test_stream_commits_a_fully_quarantined_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Consumer:
-        commits = 0
+        def __init__(self) -> None:
+            self.commits: list[dict[Any, int]] = []
 
-        async def commit(self) -> None:
-            self.commits += 1
+        async def commit(self, offsets: dict[Any, int]) -> None:
+            self.commits.append(offsets)
 
     consumer = Consumer()
 
     async def candidates(*_args: Any, **kwargs: Any) -> Any:
         kwargs["commit_callback"](consumer)
-        yield ArxivCandidate(arxiv_id="2401.00001")
+        yield ArxivStreamRecord(
+            candidate=ArxivCandidate(arxiv_id="2401.00001"),
+            topic="raw.fetched",
+            partition=3,
+            offset=41,
+        )
 
     async def quarantine(*_args: Any, **_kwargs: Any) -> int:
         return 0
@@ -146,10 +167,224 @@ async def test_stream_commits_a_fully_quarantined_batch(
         auto_offset_reset="latest",
         max_records=None,
         feed_name="arxiv-html-fetcher",
+        max_poll_interval_ms=300_000,
     )
 
     assert await fetcher_module._run_stream(args, _cfg()) == 0
-    assert consumer.commits == 1
+    assert len(consumer.commits) == 1
+    committed_tp = next(iter(consumer.commits[0]))
+    assert (committed_tp.topic, committed_tp.partition) == ("raw.fetched", 3)
+    assert consumer.commits[0][committed_tp] == 42
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_commit_when_paper_processing_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Consumer:
+        def __init__(self) -> None:
+            self.commits: list[dict[Any, int]] = []
+
+        async def commit(self, offsets: dict[Any, int]) -> None:
+            self.commits.append(offsets)
+
+    consumer = Consumer()
+
+    async def candidates(*_args: Any, **kwargs: Any) -> Any:
+        kwargs["commit_callback"](consumer)
+        yield ArxivStreamRecord(
+            candidate=ArxivCandidate(arxiv_id="2401.00001"),
+            topic="raw.fetched",
+            partition=0,
+            offset=7,
+        )
+
+    async def fail(*_args: Any, **_kwargs: Any) -> int:
+        raise httpx.ReadTimeout("slow arXiv fallback")
+
+    monkeypatch.setattr(fetcher_module, "stream_ids_from_topic", candidates)
+    monkeypatch.setattr(fetcher_module, "run_for_ids", fail)
+    args = SimpleNamespace(
+        stream_topic="raw.fetched",
+        consumer_group="s2p-arxiv-html-fetcher-v2",
+        auto_offset_reset="earliest",
+        max_records=None,
+        feed_name="arxiv-html-fetcher",
+        max_poll_interval_ms=300_000,
+    )
+
+    with pytest.raises(httpx.ReadTimeout, match="slow arXiv fallback"):
+        await fetcher_module._run_stream(args, _cfg())
+
+    assert consumer.commits == []
+
+
+@pytest.mark.asyncio
+async def test_processing_liveness_poll_never_drains_an_assigned_partition() -> None:
+    from aiokafka import TopicPartition
+
+    assigned = TopicPartition("raw.fetched", 2)
+
+    class Consumer:
+        def __init__(self) -> None:
+            self.probes: list[tuple[tuple[Any, ...], int, int]] = []
+
+        async def getmany(
+            self,
+            *partitions: Any,
+            timeout_ms: int,
+            max_records: int,
+        ) -> dict[Any, list[Any]]:
+            self.probes.append((partitions, timeout_ms, max_records))
+            return {}
+
+    consumer = Consumer()
+    stopped = asyncio.Event()
+    task = asyncio.create_task(
+        fetcher_module._maintain_consumer_poll_liveness(
+            consumer,
+            topic="raw.fetched",
+            stop_event=stopped,
+            interval_seconds=0.001,
+        )
+    )
+    for _ in range(100):
+        if consumer.probes:
+            break
+        await asyncio.sleep(0.001)
+    stopped.set()
+    await task
+
+    assert consumer.probes
+    assert all(assigned not in partitions for partitions, _, _ in consumer.probes)
+    assert all(timeout_ms == 0 for _, timeout_ms, _ in consumer.probes)
+    assert all(max_records == 1 for _, _, max_records in consumer.probes)
+
+
+@pytest.mark.asyncio
+async def test_pinned_aiokafka_getmany_probe_resets_max_poll_timer() -> None:
+    """Lock the liveness probe to aiokafka 0.14's fetch-context contract."""
+    from aiokafka import TopicPartition
+    from aiokafka.consumer.consumer import AIOKafkaConsumer
+    from aiokafka.consumer.subscription_state import SubscriptionState
+
+    probe = TopicPartition("raw.fetched.__s2p_liveness__", 0)
+
+    class Coordinator:
+        def check_errors(self) -> None:
+            return None
+
+    class Fetcher:
+        async def fetched_records(
+            self,
+            partitions: tuple[Any, ...],
+            _timeout: float,
+            *,
+            max_records: int,
+        ) -> dict[Any, list[Any]]:
+            assert partitions == (probe,)
+            assert max_records == 1
+            return {}
+
+    consumer = object.__new__(AIOKafkaConsumer)
+    consumer._closed = False
+    consumer._coordinator = Coordinator()
+    consumer._subscription = SubscriptionState()
+    consumer._fetcher = Fetcher()
+    before = consumer._subscription._last_fetch_ended
+    await asyncio.sleep(0)
+
+    assert await consumer.getmany(probe, timeout_ms=0, max_records=1) == {}
+    assert consumer._subscription._last_fetch_ended > before
+    consumer._closed = True
+
+
+@pytest.mark.asyncio
+async def test_topic_stream_pauses_assignment_and_polls_during_slow_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aiokafka
+    from aiokafka import TopicPartition
+
+    topic_partition = TopicPartition("raw.fetched", 1)
+
+    class Message:
+        topic = "raw.fetched"
+        partition = 1
+        offset = 12
+        value = json.dumps(
+            {
+                "source_feed": "rss-arxiv-cs-ai",
+                "url": "https://arxiv.org/abs/2401.00001",
+            }
+        ).encode()
+
+    class Consumer:
+        instance: Any = None
+
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            type(self).instance = self
+            self.kwargs = kwargs
+            self.main_polls = 0
+            self.liveness_polls = 0
+            self.paused: set[Any] = set()
+            self.resumed: set[Any] = set()
+            self.stopped = False
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        def assignment(self) -> set[Any]:
+            return {topic_partition}
+
+        def pause(self, *partitions: Any) -> None:
+            self.paused.update(partitions)
+
+        def resume(self, *partitions: Any) -> None:
+            self.resumed.update(partitions)
+
+        async def getmany(
+            self,
+            *partitions: Any,
+            timeout_ms: int,
+            max_records: int,
+        ) -> dict[Any, list[Any]]:
+            if partitions:
+                self.liveness_polls += 1
+                assert topic_partition not in partitions
+                return {}
+            self.main_polls += 1
+            return {topic_partition: [Message()]}
+
+    monkeypatch.setattr(aiokafka, "AIOKafkaConsumer", Consumer)
+    records = fetcher_module.stream_ids_from_topic(
+        _cfg(),
+        topic="raw.fetched",
+        max_poll_interval_ms=30,
+        max_records=1,
+    )
+
+    record = await anext(records)
+    consumer = Consumer.instance
+    assert record == ArxivStreamRecord(
+        candidate=ArxivCandidate(arxiv_id="2401.00001"),
+        topic="raw.fetched",
+        partition=1,
+        offset=12,
+    )
+    assert consumer.kwargs["max_poll_records"] == 1
+    assert consumer.kwargs["max_poll_interval_ms"] == 30
+    assert consumer.paused == {topic_partition}
+    await asyncio.sleep(0.025)
+    assert consumer.liveness_polls >= 1
+
+    await records.aclose()
+
+    assert consumer.resumed == {topic_partition}
+    assert consumer.stopped is True
 
 
 def _atom_license(value: str) -> str:

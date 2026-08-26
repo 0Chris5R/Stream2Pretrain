@@ -71,6 +71,7 @@ ARXIV_PDF_BASE = "https://arxiv.org/pdf"
 _DEFAULT_RPS = 4.0
 _DEFAULT_BURST = 4
 _DEFAULT_MIN_SLEEP_S = 1.0
+_DEFAULT_MAX_POLL_INTERVAL_MS = 300_000
 # arXiv discovery is sparse and bursty outside the weekday announcement
 # window. A partially filled batch on a long-lived consumer would otherwise
 # wait forever. Process one complete paper at a time and commit only after its
@@ -85,6 +86,16 @@ class ArxivCandidate:
     license_source: str = "unknown"
     force_pdf: bool = False
     retry_attempt: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ArxivStreamRecord:
+    """One discovery record plus the exact Kafka offset to acknowledge."""
+
+    candidate: ArxivCandidate
+    topic: str
+    partition: int
+    offset: int
 
 
 # ``2401.12345``, ``2401.12345v2`` (new scheme) and ``cs/0703123`` (legacy).
@@ -430,25 +441,26 @@ async def stream_ids_from_topic(
     auto_offset_reset: str = "latest",
     sources_filter: Iterable[str] | None = None,
     max_records: int | None = None,
+    max_poll_interval_ms: int = _DEFAULT_MAX_POLL_INTERVAL_MS,
     commit_callback: Callable[[Any], None] | None = None,
-) -> AsyncIterator[ArxivCandidate]:
+) -> AsyncIterator[ArxivStreamRecord]:
     """Yield arXiv ids from discovery envelopes on ``raw.fetched``.
 
-    Offsets are NOT committed inside this generator: doing so would mean
-    a pod kill between commit and successful emit/persist permanently
-    drops the arXiv id (at-most-once semantics, contradicting the
-    streaming-curator durability claim). Instead the caller is given a
-    ``commit_callback`` it can invoke after :func:`run_for_ids` has
-    successfully landed the bronze record. ``commit_callback`` receives
-    the underlying ``aiokafka`` consumer; the caller picks the right
-    moment (e.g. after a batch has been fully emitted) to call
-    ``await consumer.commit()`` against it. Records that are filtered
-    out (wrong ``source_feed`` or unparseable JSON) are skipped without
-    yielding; the next successful commit_callback covers them too because
-    Kafka commits highest-seen-offset semantics.
+    Each yielded value retains its exact topic, partition, and offset. The
+    caller commits only that record after :func:`run_for_ids` has durably
+    handled it. This avoids both at-most-once loss and broad commits that can
+    acknowledge prefetched work from another partition.
+
+    While the caller performs slow HTML/ar5iv/PDF fallback, all assigned
+    partitions are paused and a lightweight polling task keeps Kafka's poll
+    liveness independent from body processing. The probe never requests an
+    assigned partition and therefore cannot drain or acknowledge future work.
+    aiokafka continues its normal group heartbeat task in parallel.
     """
     from aiokafka import AIOKafkaConsumer  # local import keeps tests light
 
+    if max_poll_interval_ms <= 0:
+        raise ValueError("max_poll_interval_ms must be positive")
     consumer = AIOKafkaConsumer(
         topic,
         bootstrap_servers=cfg.redpanda_brokers,
@@ -456,38 +468,104 @@ async def stream_ids_from_topic(
         enable_auto_commit=False,
         auto_offset_reset=auto_offset_reset,
         client_id=consumer_group,
+        max_poll_interval_ms=max_poll_interval_ms,
+        max_poll_records=_STREAM_BATCH_SIZE,
     )
     await consumer.start()
     emitted = 0
     if commit_callback is not None:
         commit_callback(consumer)
     try:
-        async for msg in consumer:
+        while True:
+            records = await consumer.getmany(timeout_ms=1_000, max_records=_STREAM_BATCH_SIZE)
+            if not records:
+                continue
+            msg = next(message for messages in records.values() for message in messages)
             try:
                 body = json.loads(msg.value)
             except (TypeError, ValueError, json.JSONDecodeError):
+                await _commit_consumed_record(consumer, msg.topic, msg.partition, msg.offset)
                 continue
             source = (body.get("source_feed") or "").strip()
             if not _is_arxiv_source_feed(source, sources_filter):
+                await _commit_consumed_record(consumer, msg.topic, msg.partition, msg.offset)
                 continue
             url = body.get("url") or body.get("source_url") or ""
             arxiv_id = _arxiv_id_from_url(url) or body.get("arxiv_id")
             if not arxiv_id or not is_valid_arxiv_id(arxiv_id):
+                await _commit_consumed_record(consumer, msg.topic, msg.partition, msg.offset)
                 continue
             pipeline = str(body.get("extraction_pipeline", ""))
             retry_match = re.search(r"\|curation-retry=(\d+)$", pipeline)
-            yield ArxivCandidate(
-                arxiv_id=arxiv_id,
-                license_value=body.get("spdx_license") or body.get("license"),
-                license_source=body.get("spdx_license_source") or "unknown",
-                force_pdf=pipeline.startswith("arxiv-pdf-retry-v1"),
-                retry_attempt=int(retry_match.group(1)) if retry_match else 0,
+            record = ArxivStreamRecord(
+                candidate=ArxivCandidate(
+                    arxiv_id=arxiv_id,
+                    license_value=body.get("spdx_license") or body.get("license"),
+                    license_source=body.get("spdx_license_source") or "unknown",
+                    force_pdf=pipeline.startswith("arxiv-pdf-retry-v1"),
+                    retry_attempt=int(retry_match.group(1)) if retry_match else 0,
+                ),
+                topic=msg.topic,
+                partition=msg.partition,
+                offset=msg.offset,
             )
+            paused = set(consumer.assignment())
+            if paused:
+                consumer.pause(*paused)
+            stop_liveness = asyncio.Event()
+            liveness_task = asyncio.create_task(
+                _maintain_consumer_poll_liveness(
+                    consumer,
+                    topic=topic,
+                    stop_event=stop_liveness,
+                    interval_seconds=max_poll_interval_ms / 3_000,
+                )
+            )
+            try:
+                yield record
+            finally:
+                stop_liveness.set()
+                await liveness_task
+                still_assigned = paused.intersection(consumer.assignment())
+                if still_assigned:
+                    consumer.resume(*still_assigned)
             emitted += 1
             if max_records is not None and emitted >= max_records:
                 return
     finally:
         await consumer.stop()
+
+
+async def _maintain_consumer_poll_liveness(
+    consumer: Any,
+    *,
+    topic: str,
+    stop_event: asyncio.Event,
+    interval_seconds: float,
+) -> None:
+    """Reset aiokafka's max-poll timer without draining assigned records."""
+    from aiokafka import TopicPartition
+
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    probe_partition = TopicPartition(f"{topic}.__s2p_liveness__", 0)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            await consumer.getmany(probe_partition, timeout_ms=0, max_records=1)
+
+
+async def _commit_consumed_record(
+    consumer: Any,
+    topic: str,
+    partition: int,
+    offset: int,
+) -> None:
+    """Commit exactly one completed record's next offset."""
+    from aiokafka import TopicPartition
+
+    await consumer.commit({TopicPartition(topic, partition): offset + 1})
 
 
 def _is_arxiv_source_feed(source: str, sources_filter: Iterable[str] | None) -> bool:
@@ -759,6 +837,15 @@ def _build_argparser() -> argparse.ArgumentParser:
         default="earliest",
         help="Initial offset for a new live consumer group.",
     )
+    p.add_argument(
+        "--max-poll-interval-ms",
+        type=int,
+        default=_DEFAULT_MAX_POLL_INTERVAL_MS,
+        help=(
+            "Kafka maximum processing interval. A paused-partition liveness poll "
+            "keeps group ownership while one paper is processed."
+        ),
+    )
     return p
 
 
@@ -774,43 +861,43 @@ async def _async_main(args: argparse.Namespace) -> int:
 
 
 async def _run_stream(args: argparse.Namespace, cfg: IngestConfig) -> int:
-    """Drain one long-lived Kafka consumer in durable, bounded batches."""
+    """Drain one long-lived Kafka consumer one durably acknowledged paper at a time."""
     consumer_ref: dict[str, Any] = {}
 
     def _capture_consumer(c: Any) -> None:
         consumer_ref["consumer"] = c
 
-    async def _drain(ids: list[ArxivCandidate]) -> int:
+    async def _drain(record: ArxivStreamRecord) -> int:
         emitted = await run_for_ids(
-            ids,
+            [record.candidate],
             cfg,
             feed_name=args.feed_name,
             raise_on_fetch_error=True,
         )
-        # A zero-emission batch can still be fully handled when every paper
-        # was durably written to the licence-admission ledger. Commit after
-        # successful batch handling, not only after an admitted paper.
+        # A zero-emission item can still be fully handled when its quarantine
+        # decision was durably written to the licence-admission ledger. Commit
+        # only this exact offset after successful handling.
         consumer = consumer_ref.get("consumer")
         if consumer is not None:
-            await consumer.commit()
+            await _commit_consumed_record(
+                consumer,
+                record.topic,
+                record.partition,
+                record.offset,
+            )
         return emitted
 
     total = 0
-    batch: list[ArxivCandidate] = []
-    async for candidate in stream_ids_from_topic(
+    async for record in stream_ids_from_topic(
         cfg,
         topic=args.stream_topic,
         consumer_group=args.consumer_group,
         auto_offset_reset=args.auto_offset_reset,
         max_records=args.max_records,
+        max_poll_interval_ms=args.max_poll_interval_ms,
         commit_callback=_capture_consumer,
     ):
-        batch.append(candidate)
-        if len(batch) >= _STREAM_BATCH_SIZE:
-            total += await _drain(batch)
-            batch = []
-    if batch:
-        total += await _drain(batch)
+        total += await _drain(record)
     return total
 
 

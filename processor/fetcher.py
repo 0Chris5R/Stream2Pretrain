@@ -300,7 +300,10 @@ def _markdown_prose_sections(
         if not cleaned:
             continue
         if title is None and is_heading:
-            title = cleaned
+            # README headings are untrusted, user-authored input. Keep the
+            # complete heading in the prose projection, but bound the compact
+            # title carried by SilverRecord to its declared schema limit.
+            title = cleaned[:2048]
         if is_heading:
             if section_lines:
                 section_text = "\n".join(section_lines).strip()
@@ -314,7 +317,7 @@ def _markdown_prose_sections(
                 )
                 section_index += 1
                 section_lines = []
-            section_title = cleaned
+            section_title = cleaned[:2048]
             prose.append(cleaned)
             continue
         prose.append(cleaned)
@@ -585,11 +588,27 @@ def process_bronze_payload(
         raise PdfProcessingTemporarilyDisabled(
             "PDF processing is temporarily disabled until the extraction node is resized"
         )
+    source_policy = resolve_source_policy(
+        source_feed=bronze.source_feed,
+        source_format=bronze.source_format,
+        extraction_pipeline=bronze.extraction_pipeline,
+    )
+    is_hf_card = source_policy.family in {"hf_model_card", "hf_dataset_card"}
     raw_html = fetch_raw_bytes(state, bronze)
     if not raw_html:
+        if is_hf_card:
+            # Empty public READMEs are valid Hub repository states but contain
+            # no corpus item. Skip them without recording a processing failure
+            # or fabricating a Silver/Gold document.
+            return None
         raise RawObjectEmpty(f"raw body is unavailable for {bronze.doc_id}")
     silver = normalize(state, bronze, raw_html)
     if silver is None:
+        if is_hf_card:
+            # Frontmatter-only, comment-only, and fenced-code-only cards have
+            # no admitted prose projection by design. This is an intentional
+            # source skip rather than a normalization defect.
+            return None
         raise ValueError(f"extraction produced no trainable body for {bronze.doc_id}")
     if silver is not None and metrics is not None:
         metrics.record_normalized(source_feed=silver.source_feed)

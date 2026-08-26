@@ -109,6 +109,16 @@ SECRET = "not training prose"
     assert "pipeline_tag" in metadata
 
 
+def test_hf_card_title_is_bounded_to_silver_schema_limit() -> None:
+    heading = "x" * 4096
+    text, title, _ = _markdown_prose_projection(
+        f"# {heading}\n\nDocumented model usage and evaluation details.".encode()
+    )
+
+    assert title == heading[:2048]
+    assert heading in text
+
+
 def test_fetch_raw_bytes_rejects_oversized_stored_object(
     bronze_record: BronzeRecord, monkeypatch: Any
 ) -> None:
@@ -156,6 +166,44 @@ def test_empty_raw_object_is_a_record_local_durable_failure(
 
     with pytest.raises(RawObjectEmpty, match=bronze_record.doc_id):
         process_bronze_payload(state, bronze_record.model_dump_json().encode("utf-8"))
+
+
+@pytest.mark.parametrize("source_feed", ["hf-models", "hf-datasets"])
+def test_empty_hf_card_is_an_intentional_source_skip(
+    bronze_record: BronzeRecord,
+    source_feed: str,
+) -> None:
+    state = _state(_FakeS3(b"", gzip_encoded=False))
+    card = bronze_record.model_copy(
+        update={
+            "source_feed": source_feed,
+            "source_format": "web",
+            "content_type": "text/markdown; charset=utf-8",
+            "extraction_pipeline": (
+                "hf-model-card-markdown-v1"
+                if source_feed == "hf-models"
+                else "hf-dataset-card-markdown-v1"
+            ),
+        }
+    )
+
+    assert process_bronze_payload(state, card.model_dump_json().encode("utf-8")) is None
+
+
+def test_frontmatter_only_hf_card_is_an_intentional_source_skip(
+    bronze_record: BronzeRecord,
+) -> None:
+    state = _state(_FakeS3(b"---\nlicense: apache-2.0\n---\n"))
+    card = bronze_record.model_copy(
+        update={
+            "source_feed": "hf-models",
+            "source_format": "web",
+            "content_type": "text/markdown; charset=utf-8",
+            "extraction_pipeline": "hf-model-card-markdown-v1",
+        }
+    )
+
+    assert process_bronze_payload(state, card.model_dump_json().encode("utf-8")) is None
 
 
 def test_transient_raw_object_failure_remains_retryable(

@@ -1421,6 +1421,41 @@ def test_manual_run_snapshots_queue_and_coalesces_clicks(tmp_path: Path) -> None
     assert completed["state"] == "completed"
 
 
+def test_manual_run_discards_stale_candidates_and_freezes_fresh_cohort(
+    tmp_path: Path,
+) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    for doc_id in ("stale", "fresh"):
+        store.enqueue_candidate(
+            doc_id=doc_id,
+            payload=doc_id.encode(),
+            reasoning_score=1.0,
+            quality_score=5.0,
+            valid_from=FIXED_TIME,
+        )
+    store._conn.execute(
+        "UPDATE candidate_queue SET enqueued_at=? WHERE doc_id='stale'",
+        ((datetime.now(UTC) - timedelta(hours=25)).isoformat(),),
+    )
+    store._conn.commit()
+
+    requested, created = store.request_manual_run()
+
+    assert created
+    assert requested["candidate_count"] == 1
+    assert (
+        store._conn.execute("SELECT COUNT(*) FROM candidate_queue WHERE doc_id='stale'").fetchone()[
+            0
+        ]
+        == 0
+    )
+    claimed = store.claim_candidate(
+        cutoff_at=datetime.fromisoformat(str(requested["cutoff_at"])),
+        cutoff_ordinal=int(requested["cutoff_ordinal"]),
+    )
+    assert claimed == ("fresh", b"fresh")
+
+
 def test_manual_run_can_bound_the_validation_snapshot(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     for index in range(3):

@@ -958,10 +958,16 @@ class FoundryStore:
     def request_manual_run(
         self, *, max_candidates: int | None = None
     ) -> tuple[dict[str, Any], bool]:
-        """Queue one ranked snapshot, coalescing concurrent button clicks."""
+        """Queue one ranked snapshot of the fresh 24-hour candidate cohort.
+
+        Manual operation follows the same freshness contract as the scheduled
+        run: old queued work is discarded and arrivals after the snapshot
+        boundary are deferred to the next cohort.
+        """
         if max_candidates is not None and max_candidates < 1:
             raise ValueError("max_candidates must be positive")
         now = datetime.now(UTC)
+        window_start = now - timedelta(hours=24)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -975,9 +981,17 @@ class FoundryStore:
                 if active is not None:
                     self._conn.commit()
                     return dict(active), False
+                self._conn.execute(
+                    "DELETE FROM candidate_queue WHERE state='queued' AND enqueued_at<=?",
+                    (window_start.isoformat(),),
+                )
                 queued_count = int(
                     self._conn.execute(
-                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
+                        """
+                        SELECT COUNT(*) AS n FROM candidate_queue
+                        WHERE state='queued' AND enqueued_at>? AND enqueued_at<=?
+                        """,
+                        (window_start.isoformat(), now.isoformat()),
                     ).fetchone()["n"]
                 )
                 cutoff_ordinal = int(
