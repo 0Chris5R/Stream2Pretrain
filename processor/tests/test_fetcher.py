@@ -119,6 +119,25 @@ def test_hf_card_title_is_bounded_to_silver_schema_limit() -> None:
     assert heading in text
 
 
+def test_hf_card_projection_removes_multiline_html_comments() -> None:
+    payload = b"""# Useful Model
+
+<!--
+https://example.invalid/tracking-asset.png
+-->
+
+## Evaluation
+
+Evaluation reports accuracy on a named benchmark.
+"""
+
+    text, title, _ = _markdown_prose_projection(payload)
+
+    assert title == "Useful Model"
+    assert "tracking-asset" not in text
+    assert "Evaluation reports accuracy" in text
+
+
 def test_fetch_raw_bytes_rejects_oversized_stored_object(
     bronze_record: BronzeRecord, monkeypatch: Any
 ) -> None:

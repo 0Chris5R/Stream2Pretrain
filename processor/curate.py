@@ -51,7 +51,7 @@ from processor.model_client import (
 )
 from processor.operators.c4 import C4Filter
 from processor.operators.gopher import GopherFilter
-from processor.operators.hf_card_quality import assess_hf_card
+from processor.operators.hf_card_quality import assess_hf_card, is_hf_placeholder_section
 from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
 from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher
@@ -367,6 +367,8 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         removed_body_pii.extend(sanitization.redacted_flags)
         blocking_artifact_pii.extend(sanitization.blocking_flags)
         exclusion_reasons: list[str] = []
+        if is_hf_card and is_hf_placeholder_section(safe_segment.text):
+            exclusion_reasons.append("unfilled Hugging Face template section isolated from corpus")
         if source_policy.web_heuristic_gate and not segment_c4.curly_brace_pass:
             exclusion_reasons.append("C4 curly-brace signal isolated to this section")
             removed_for_c4 = True
@@ -451,7 +453,8 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     minimum_words = 50
     if is_metadata:
         reject.append("metadata_only")
-    if len(model_text.split()) < minimum_words:
+    measured_body = text if is_hf_card else model_text
+    if len(measured_body.split()) < minimum_words:
         reject.append("insufficient_scientific_body" if is_scientific else "insufficient_body")
     if blocking_artifact_pii:
         reject.append("pii_detected")
@@ -746,8 +749,16 @@ def _training_projection(
     blocks: list[str] = []
     if silver.title:
         blocks.append(f"# {silver.title}")
-    for segment in segments:
-        blocks.append(f"## {segment.title}\n{segment.text.strip()}")
+    for index, segment in enumerate(segments):
+        duplicate_document_title = (
+            index == 0
+            and silver.title is not None
+            and segment.title.strip().casefold() == silver.title.strip().casefold()
+        )
+        if duplicate_document_title:
+            blocks.append(segment.text.strip())
+        else:
+            blocks.append(f"## {segment.title}\n{segment.text.strip()}")
     structured = silver.structured_text if structured_text is None else structured_text
     if structured.strip():
         blocks.append(structured.strip())

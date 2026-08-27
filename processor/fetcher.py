@@ -275,6 +275,7 @@ def _markdown_prose_sections(
     title: str | None = None
     in_fence = False
     fence_marker = ""
+    in_html_comment = False
     for raw_line in lines[start:]:
         stripped = raw_line.strip()
         if stripped.startswith(("```", "~~~")):
@@ -287,7 +288,20 @@ def _markdown_prose_sections(
             continue
         if in_fence:
             continue
-        if stripped.startswith("<!--") or not stripped:
+        if in_html_comment:
+            if "-->" not in stripped:
+                continue
+            stripped = stripped.split("-->", 1)[1].strip()
+            in_html_comment = False
+        if "<!--" in stripped:
+            before_comment, after_comment = stripped.split("<!--", 1)
+            if "-->" in after_comment:
+                after_comment = after_comment.split("-->", 1)[1]
+                stripped = f"{before_comment} {after_comment}".strip()
+            else:
+                stripped = before_comment.strip()
+                in_html_comment = True
+        if not stripped:
             if prose and prose[-1] != "":
                 prose.append("")
             continue

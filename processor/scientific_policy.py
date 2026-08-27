@@ -195,12 +195,16 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
             ["discovery_metadata"],
         )
     reasoning = min(0.45, 0.10 + 0.15 * (quality_score / 5.0) + 0.20 * completeness)
+    content_tag = {
+        "hf_model_card": "hf_model_documentation",
+        "hf_dataset_card": "hf_dataset_documentation",
+    }.get(source_policy.family, "educational_web")
     return ScientificScores(
         completeness,
         structural,
         reasoning,
         0.0,
-        ["educational_web"],
+        [content_tag],
     )
 
 

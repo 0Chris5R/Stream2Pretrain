@@ -73,6 +73,8 @@ _UPLOAD_STUBS = (
     "automatic model card",
     "this is a model card",
     "this should be a paper title",
+    "static quants of",
+    "weighted/imatrix quants of",
 )
 _MARKETING = (
     "revolutionary",
@@ -82,6 +84,17 @@ _MARKETING = (
     "join our discord",
     "contact us for pricing",
 )
+_GENERIC_BENCHMARK_MARKERS = (
+    "model1-v2",
+    "other leading models",
+    "benchmark evaluations, including mathematics, programming, and general logic",
+)
+_TRAINER_TEMPLATE_MARKERS = (
+    "this model is a fine-tuned version of",
+    "it has been trained using trl",
+    "framework versions",
+    "cite trl as",
+)
 _TECHNICAL_DIMENSIONS: dict[str, tuple[str, ...]] = {
     "architecture": ("architecture", "parameters", "layers", "attention", "backbone"),
     "training": ("training", "fine-tun", "optimizer", "learning rate", "epoch"),
@@ -89,6 +102,8 @@ _TECHNICAL_DIMENSIONS: dict[str, tuple[str, ...]] = {
     "data": ("dataset", "samples", "instances", "split", "collection", "annotation"),
     "usage": ("inference", "usage", "intended use", "input", "output"),
     "limitations": ("limitation", "bias", "risk", "out-of-scope", "failure mode"),
+    "artifact_format": ("safetensors", "checkpoint", "projection keys", "key-conversion"),
+    "runtime": ("automodelforcausallm", "vllm", "transformers", "pytorch", "onnx"),
 }
 
 
@@ -116,6 +131,10 @@ def assess_hf_card(
     placeholder = any(marker in normalized for marker in _PLACEHOLDERS)
     upload_stub = any(marker in normalized for marker in _UPLOAD_STUBS)
     marketing = any(marker in normalized for marker in _MARKETING)
+    generic_benchmark = sum(marker in normalized for marker in _GENERIC_BENCHMARK_MARKERS) >= 2
+    trainer_template = sum(
+        marker in normalized for marker in _TRAINER_TEMPLATE_MARKERS
+    ) >= 2 and not ({"architecture", "evaluation", "usage", "limitations"} & technical_dimensions)
     wrong_type = (
         kind == "model"
         and bool(headings & _DATASET_DETAILS)
@@ -133,6 +152,8 @@ def assess_hf_card(
     accepted = (
         not placeholder
         and not upload_stub
+        and not generic_benchmark
+        and not trainer_template
         and not wrong_type
         and not (marketing and not technically_grounded)
         and ((has_overview and bool(detail_sections)) or technically_grounded)
@@ -141,8 +162,12 @@ def assess_hf_card(
     categories: list[str] = []
     if placeholder:
         categories.append("template_boilerplate")
+    if trainer_template:
+        categories.append("template_boilerplate")
     if upload_stub or not normalized:
         categories.append("stub_checkpoint_upload")
+    if generic_benchmark:
+        categories.append("generic_marketing_benchmark")
     if marketing:
         categories.append("marketing")
     if wrong_type:
@@ -168,8 +193,14 @@ def assess_hf_card(
     )
 
 
+def is_hf_placeholder_section(text: str) -> bool:
+    """Return whether a complete card section is unfilled template prose."""
+    normalized = " ".join(text.lower().split())
+    return bool(normalized) and any(marker in normalized for marker in _PLACEHOLDERS)
+
+
 def _normalize_heading(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 -]+", "", value.lower())).strip()
 
 
-__all__ = ["HFCardAssessment", "assess_hf_card"]
+__all__ = ["HFCardAssessment", "assess_hf_card", "is_hf_placeholder_section"]

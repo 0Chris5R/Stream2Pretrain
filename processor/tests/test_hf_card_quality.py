@@ -59,3 +59,84 @@ def test_dataset_card_requires_dataset_specific_substance() -> None:
 
     assert result.accepted
     assert "substantive_technical_card" in result.categories
+
+
+def test_quantization_mirror_is_rejected() -> None:
+    segments = [
+        _segment(
+            "About",
+            "Static quants of a source checkpoint with weighted/imatrix quants of every size.",
+        ),
+        _segment("Usage", "Download the desired quantization file."),
+    ]
+
+    result = assess_hf_card(
+        kind="model",
+        title="Converted checkpoint",
+        text="\n".join(segment.text for segment in segments),
+        segments=segments,
+    )
+
+    assert not result.accepted
+    assert "stub_checkpoint_upload" in result.categories
+
+
+def test_generated_trainer_shell_without_unique_evidence_is_rejected() -> None:
+    segments = [
+        _segment(
+            "Training procedure",
+            "This model is a fine-tuned version of a base model. It has been trained using TRL.",
+        ),
+        _segment("Framework versions", "Transformers 4 and Datasets 3."),
+    ]
+
+    result = assess_hf_card(
+        kind="model",
+        title="Uploaded checkpoint",
+        text="\n".join(segment.text for segment in segments),
+        segments=segments,
+    )
+
+    assert not result.accepted
+    assert "template_boilerplate" in result.categories
+
+
+def test_generic_unidentified_benchmark_claims_are_rejected() -> None:
+    segments = [
+        _segment(
+            "Introduction",
+            "The model approaches other leading models after benchmark evaluations, including "
+            "mathematics, programming, and general logic.",
+        ),
+        _segment("Evaluation Results", "The comparison reports Model1-v2 without provenance."),
+    ]
+
+    result = assess_hf_card(
+        kind="model",
+        title="MyAwesomeModel",
+        text="\n".join(segment.text for segment in segments),
+        segments=segments,
+    )
+
+    assert not result.accepted
+    assert "generic_marketing_benchmark" in result.categories
+
+
+def test_concise_checkpoint_format_and_runtime_documentation_is_accepted() -> None:
+    segments = [
+        _segment(
+            "ConceptLM checkpoint",
+            "This artifact stores SafeTensors with dedicated projection keys. It loads through "
+            "AutoModelForCausalLM and the vLLM backend with lossless key-conversion evidence.",
+        )
+    ]
+
+    result = assess_hf_card(
+        kind="model",
+        title="ConceptLM checkpoint",
+        text=segments[0].text,
+        segments=segments,
+    )
+
+    assert result.accepted
+    assert "substantive_technical_card" in result.categories

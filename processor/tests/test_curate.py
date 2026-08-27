@@ -10,6 +10,7 @@ import pytest
 from processor import common
 from processor.common import ProcessorConfig, gold_loads, silver_dumps
 from processor.curate import (
+    _training_projection,
     build_state,
     curate_one,
     extraction_retry_payload,
@@ -168,6 +169,107 @@ def test_cluster_smoke_observes_but_does_not_gate_on_fineweb_score(
 
         assert gold.segment_scores[0].fineweb_edu_score == 1.0
         assert "low_quality_score" not in gold.reject_reasons
+        assert is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_training_projection_does_not_duplicate_matching_first_heading() -> None:
+    silver = _silver("technical documentation").model_copy(update={"title": "Useful Model"})
+    segment = SilverSegment(
+        segment_id="overview",
+        title="Useful Model",
+        text="Technical documentation with evaluation evidence.",
+        word_count=5,
+    )
+    projection = _training_projection(silver, [segment])
+
+    assert projection.count("Useful Model") == 1
+    assert segment.text in projection
+
+
+def test_hf_placeholder_section_is_excluded_without_rejecting_substantive_card(
+    cfg: ProcessorConfig,
+    long_english_text: str,
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(long_english_text).model_copy(
+            update={
+                "source_feed": "hf-models",
+                "source_format": "web",
+                "extraction_pipeline": "hf-model-card-markdown-v1",
+                "title": "Measured classifier",
+                "segments": [
+                    SilverSegment(
+                        segment_id="description",
+                        title="Model description",
+                        text=(
+                            long_english_text
+                            + " The transformer architecture is evaluated for accuracy on a named benchmark."
+                        ),
+                        word_count=len(long_english_text.split()) + 11,
+                    ),
+                    SilverSegment(
+                        segment_id="uses",
+                        title="Intended uses and limitations",
+                        text="More information needed.",
+                        word_count=3,
+                    ),
+                ],
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "hf_card_quality_filter" not in gold.reject_reasons
+        assert "More information needed" not in gold.text
+        assert any(
+            score.segment_id == "uses" and score.decision == "excluded"
+            for score in gold.segment_scores
+        )
+        assert "hf_model_documentation" in gold.content_tags
+        assert "educational_web" not in gold.content_tags
+    finally:
+        state.close()
+
+
+def test_hf_compact_documentation_counts_its_document_title(
+    cfg: ProcessorConfig,
+) -> None:
+    state = build_state(cfg)
+    try:
+        body = (
+            "This artifact stores one shared set of SafeTensors with dedicated Hugging Face "
+            "projection keys. It loads through AutoModelForCausalLM and through the ConceptLM "
+            "vLLM backend without a native weight copy. A conversion manifest records source "
+            "and lossless key-conversion evidence for the checkpoint. The documented runtime "
+            "supports deterministic loading."
+        )
+        title = "ConceptLM NCP Olmo Stage One Checkpoint"
+        assert len(body.split()) < 50
+        assert len(f"# {title}\n\n{body}".split()) >= 50
+        silver = _silver(body).model_copy(
+            update={
+                "source_feed": "hf-models",
+                "source_format": "web",
+                "extraction_pipeline": "hf-model-card-markdown-v1",
+                "title": title,
+                "segments": [
+                    SilverSegment(
+                        segment_id="overview",
+                        title=title,
+                        text=body,
+                        word_count=len(body.split()),
+                    )
+                ],
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "insufficient_body" not in gold.reject_reasons
+        assert "hf_card_quality_filter" not in gold.reject_reasons
         assert is_trainable_gold(gold)
     finally:
         state.close()
