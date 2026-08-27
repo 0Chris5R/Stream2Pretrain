@@ -112,9 +112,7 @@ licence hash, licence ledger, or second legal decision.
 At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC`, a one-replica scheduler commits exactly one
 cohort, including an empty cohort. It first drops unprocessed entries at or
 before the prior 24-hour boundary, then freezes all queued candidates received
-after that boundary and no later than the current boundary, retains the first
-`S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT` papers, and removes the remaining frozen
-queue entries rather than carrying them into tomorrow. Papers are ranked
+after that boundary and no later than the current boundary. Papers are ranked
 by an equal-weight combination of normalized composite quality, education
 quality, scientific structure, extraction completeness, reasoning suitability,
 and the presence of equation, table, and figure evidence. Context length and
@@ -126,7 +124,7 @@ once reviewed accepted and rejected artifacts provide enough labels.
 The production schedule is 14:00 UTC, corresponding to 16:00 Europe/Berlin
 while daylight-saving time is active. The initial deployment is anchored by
 `S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC=2026-08-27T14:00:00Z`, so changing the run
-hour cannot accidentally back-run the preceding day's cohort. The worker processes the frozen rank order serially. A provider-capacity stop
+hour cannot accidentally back-run the preceding day's cohort. The worker processes the entire frozen rank order serially until the next boundary. A provider-capacity stop
 does not admit older papers at the next boundary: any unfinished cohort members
 are removed, and only the newly completed 24-hour arrival window may compete.
 New arrivals after the cutoff wait for the next cohort. `Run now` remains a

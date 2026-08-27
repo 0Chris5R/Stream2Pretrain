@@ -473,7 +473,6 @@ class WorkerRuntime:
             run = self.store.start_daily_run(
                 run_day,
                 boundary_at=boundary_at,
-                candidate_limit=self.config.daily_candidate_limit,
             )
             if run["state"] not in {"completed", "quota_exhausted"}:
                 self._run_daily_snapshot(run_day, run, log)

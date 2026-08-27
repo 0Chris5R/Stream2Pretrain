@@ -59,8 +59,6 @@ spec:
             {{- end }}
             - name: S2P_FOUNDRY_DAILY_RUN_HOUR_UTC
               value: {{ .Values.processor.foundry.dailyRunHourUtc | quote }}
-            - name: S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT
-              value: {{ .Values.processor.foundry.dailyCandidateLimit | quote }}
             - name: S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC
               value: {{ .Values.processor.foundry.dailyNotBeforeUtc | quote }}
             - name: S2P_FOUNDRY_TASKS_PER_PAPER
@@ -119,8 +117,6 @@ spec:
               value: /var/lib/s2p/foundry
             - name: S2P_FOUNDRY_DAILY_RUN_HOUR_UTC
               value: {{ .Values.processor.foundry.dailyRunHourUtc | quote }}
-            - name: S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT
-              value: {{ .Values.processor.foundry.dailyCandidateLimit | quote }}
             - name: S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC
               value: {{ .Values.processor.foundry.dailyNotBeforeUtc | quote }}
             - name: S2P_FOUNDRY_CONTROL_TOKEN

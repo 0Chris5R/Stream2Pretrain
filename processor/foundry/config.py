@@ -66,7 +66,6 @@ class ProviderConfig:
 class FoundryConfig:
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     daily_run_hour_utc: int = 0
-    daily_candidate_limit: int = 20
     daily_not_before_utc: datetime | None = None
     tasks_per_paper: int = 6
     accepted_tasks_per_paper: int = 3
@@ -87,7 +86,6 @@ class FoundryConfig:
         return cls(
             providers=provider_configs(),
             daily_run_hour_utc=_bounded_int("S2P_FOUNDRY_DAILY_RUN_HOUR_UTC", 0, 0, 23),
-            daily_candidate_limit=_bounded_int("S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT", 20, 1, 1_000),
             daily_not_before_utc=_optional_utc_datetime("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC"),
             tasks_per_paper=_bounded_int("S2P_FOUNDRY_TASKS_PER_PAPER", 6, 1, 12),
             accepted_tasks_per_paper=_bounded_int("S2P_FOUNDRY_ACCEPTED_TASKS_PER_PAPER", 3, 1, 6),

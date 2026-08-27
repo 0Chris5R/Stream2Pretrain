@@ -40,9 +40,6 @@ def build_app(
         payload["quotas"] = [value.model_dump(mode="json") for value in quota_ledger.states()]
         payload["models"] = control_store.model_snapshots()
         payload["daily_run_hour_utc"] = int(os.environ.get("S2P_FOUNDRY_DAILY_RUN_HOUR_UTC", "0"))
-        payload["daily_candidate_limit"] = int(
-            os.environ.get("S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT", "20")
-        )
         payload["daily_not_before_utc"] = (
             os.environ.get("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC", "").strip() or None
         )

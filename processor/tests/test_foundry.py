@@ -1708,6 +1708,29 @@ def test_daily_run_keeps_only_ranked_limit_and_clears_frozen_queue(tmp_path: Pat
     assert first == ("paper-24", b"paper-24")
 
 
+def test_daily_run_has_no_production_candidate_cap(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    boundary = datetime.now(UTC) + timedelta(seconds=1)
+    for index in range(25):
+        store.enqueue_candidate(
+            doc_id=f"paper-{index:02d}",
+            payload=f"paper-{index:02d}".encode(),
+            reasoning_score=index / 25,
+            quality_score=5.0,
+            ranking_score=index / 25,
+            valid_from=FIXED_TIME,
+        )
+
+    run = store.start_daily_run(boundary.date(), boundary_at=boundary)
+
+    assert run["candidate_count"] == 25
+    queued = store._conn.execute(
+        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
+    ).fetchone()
+    assert queued is not None
+    assert int(queued["n"]) == 25
+
+
 def test_changed_daily_boundary_replaces_same_day_snapshot(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     moved_boundary = datetime.now(UTC) + timedelta(minutes=5)

@@ -832,10 +832,10 @@ class FoundryStore:
         day: date,
         *,
         boundary_at: datetime | None = None,
-        candidate_limit: int = 20,
+        candidate_limit: int | None = None,
     ) -> dict[str, Any]:
         """Freeze the ranked cohort from the 24 hours ending at ``boundary_at``."""
-        if candidate_limit < 1:
+        if candidate_limit is not None and candidate_limit < 1:
             raise ValueError("daily candidate limit must be positive")
         now = datetime.now(UTC)
         cutoff_at = boundary_at or now
@@ -899,7 +899,7 @@ class FoundryStore:
                         cutoff_ordinal,
                         window_start.isoformat(),
                         cutoff_at.isoformat(),
-                        candidate_limit,
+                        candidate_limit if candidate_limit is not None else -1,
                     ),
                 ).fetchall()
                 selected_ids = [str(row["doc_id"]) for row in ranked_rows]
