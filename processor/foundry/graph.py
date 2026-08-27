@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Hashable
+from typing import TypeVar
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from processor.foundry.control import ProviderControlPlane
@@ -16,6 +19,11 @@ from schemas.foundry import (
     PaperEvidenceGraph,
     ProviderTrace,
 )
+
+_MAX_PATCH_NODES = 24
+_MAX_PATCH_EDGES = 40
+_MAX_PATCH_NOTES = 12
+_T = TypeVar("_T")
 
 
 class GraphPatch(BaseModel):
@@ -32,12 +40,12 @@ class GraphPatch(BaseModel):
 class BoundedGraphPatch(GraphPatch):
     """One prioritized incremental compiler delta sized for structured output."""
 
-    nodes: list[EvidenceNode] = Field(default_factory=list, max_length=24)
-    edges: list[EvidenceEdge] = Field(default_factory=list, max_length=40)
-    uncertainties: list[str] = Field(default_factory=list, max_length=12)
-    conflicts: list[str] = Field(default_factory=list, max_length=12)
-    remove_node_ids: list[str] = Field(default_factory=list, max_length=24)
-    remove_edges: list[EvidenceEdge] = Field(default_factory=list, max_length=40)
+    nodes: list[EvidenceNode] = Field(default_factory=list, max_length=_MAX_PATCH_NODES)
+    edges: list[EvidenceEdge] = Field(default_factory=list, max_length=_MAX_PATCH_EDGES)
+    uncertainties: list[str] = Field(default_factory=list, max_length=_MAX_PATCH_NOTES)
+    conflicts: list[str] = Field(default_factory=list, max_length=_MAX_PATCH_NOTES)
+    remove_node_ids: list[str] = Field(default_factory=list, max_length=_MAX_PATCH_NODES)
+    remove_edges: list[EvidenceEdge] = Field(default_factory=list, max_length=_MAX_PATCH_EDGES)
 
 
 class GraphCritique(BaseModel):
@@ -119,8 +127,14 @@ class EvidenceGraphCompiler:
                 max_output_tokens=8_000,
             )
             traces.append(trace)
-            patch = BoundedGraphPatch.model_validate(data)
-            graph = _merge_patch(graph, patch, pass_name, trace)
+            patch, bounding_findings = _normalize_bounded_patch(data, graph)
+            graph = _merge_patch(
+                graph,
+                patch,
+                pass_name,
+                trace,
+                findings=bounding_findings,
+            )
             validate_graph_against_bundle(graph, bundle)
 
         critique_data, critic_trace = self.control.call(
@@ -160,13 +174,13 @@ class EvidenceGraphCompiler:
                 max_output_tokens=6_000,
             )
             traces.append(repair_trace)
-            repaired = BoundedGraphPatch.model_validate(repaired_data)
+            repaired, bounding_findings = _normalize_bounded_patch(repaired_data, graph)
             graph = _merge_patch(
                 graph,
                 repaired,
                 "repair",
                 repair_trace,
-                findings=critique.repair_instructions,
+                findings=[*critique.repair_instructions, *bounding_findings],
             )
             validate_graph_against_bundle(graph, bundle)
             recheck_data, recheck_trace = self.control.call(
@@ -190,6 +204,89 @@ class EvidenceGraphCompiler:
         if not graph.nodes:
             raise ValueError("evidence compiler produced an empty graph")
         return graph, traces
+
+
+def _normalize_bounded_patch(
+    data: object,
+    graph: PaperEvidenceGraph,
+) -> tuple[BoundedGraphPatch, list[str]]:
+    """Validate, deduplicate, and bound a provider patch without inventing content.
+
+    The compiler prompt requires the provider to return entries in priority order. Some
+    providers do not enforce JSON Schema array limits during generation, so validate the
+    complete unbounded shape first and preserve that declared order while retaining the
+    bounded prefix. Edges that cannot resolve after the same bounded patch are skipped
+    before they consume the edge budget.
+    """
+
+    raw = GraphPatch.model_validate(data)
+    nodes = _first_unique(raw.nodes, key=lambda node: node.id)[:_MAX_PATCH_NODES]
+    remove_node_ids = _first_unique(raw.remove_node_ids, key=lambda value: value)[:_MAX_PATCH_NODES]
+
+    node_ids = {node.id for node in graph.nodes}
+    node_ids.difference_update(remove_node_ids)
+    node_ids.update(node.id for node in nodes)
+    resolvable_edges = [
+        edge for edge in raw.edges if edge.source in node_ids and edge.target in node_ids
+    ]
+    edges = _first_unique(
+        resolvable_edges,
+        key=lambda edge: (edge.source, edge.relation, edge.target),
+    )[:_MAX_PATCH_EDGES]
+    remove_edges = _first_unique(
+        raw.remove_edges,
+        key=lambda edge: (edge.source, edge.relation, edge.target),
+    )[:_MAX_PATCH_EDGES]
+    uncertainties = _first_unique(raw.uncertainties, key=lambda value: value)[:_MAX_PATCH_NOTES]
+    conflicts = _first_unique(raw.conflicts, key=lambda value: value)[:_MAX_PATCH_NOTES]
+
+    patch = BoundedGraphPatch(
+        nodes=nodes,
+        edges=edges,
+        uncertainties=uncertainties,
+        conflicts=conflicts,
+        remove_node_ids=remove_node_ids,
+        remove_edges=remove_edges,
+    )
+    findings: list[str] = []
+    _record_bound(findings, "nodes", len(raw.nodes), len(nodes))
+    _record_bound(findings, "edges", len(raw.edges), len(edges))
+    _record_bound(findings, "uncertainties", len(raw.uncertainties), len(uncertainties))
+    _record_bound(findings, "conflicts", len(raw.conflicts), len(conflicts))
+    _record_bound(
+        findings,
+        "remove_node_ids",
+        len(raw.remove_node_ids),
+        len(remove_node_ids),
+    )
+    _record_bound(findings, "remove_edges", len(raw.remove_edges), len(remove_edges))
+    return patch, findings
+
+
+def _first_unique(
+    values: list[_T],
+    *,
+    key: Callable[[_T], Hashable],
+) -> list[_T]:
+    """Return exact provider values in their declared priority order once each."""
+
+    seen: set[Hashable] = set()
+    unique: list[_T] = []
+    for value in values:
+        identity = key(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(value)
+    return unique
+
+
+def _record_bound(findings: list[str], field: str, returned: int, retained: int) -> None:
+    if returned != retained:
+        findings.append(
+            f"deterministically bounded provider patch {field}: retained {retained} "
+            f"of {returned} returned entries"
+        )
 
 
 def validate_graph_against_bundle(graph: PaperEvidenceGraph, bundle: PaperBundle) -> None:

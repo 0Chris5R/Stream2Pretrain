@@ -353,6 +353,65 @@ def test_graph_pass_rejects_more_than_24_incremental_nodes() -> None:
         BoundedGraphPatch(nodes=nodes)
 
 
+def test_bounded_graph_patch_keeps_hard_edge_contract() -> None:
+    edges = [
+        EvidenceEdge(source="entity:1", relation="supports", target=f"entity:{index}")
+        for index in range(41)
+    ]
+
+    with pytest.raises(ValueError, match="at most 40 items"):
+        BoundedGraphPatch(edges=edges)
+
+
+def test_graph_compiler_bounds_provider_edges_in_declared_priority_order() -> None:
+    nodes = [
+        {
+            "id": f"entity:{index}",
+            "type": "artifact",
+            "canonical_text": f"Entity {index}",
+        }
+        for index in range(7)
+    ]
+    edges = [
+        {"source": source, "relation": "supports", "target": target}
+        for source in (node["id"] for node in nodes)
+        for target in (node["id"] for node in nodes)
+        if source != target
+    ]
+    assert len(edges) == 42
+
+    class OverlongEdgeControl:
+        config = SimpleNamespace(prompt_version="test-v1")
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.calls.append(kwargs)
+            role = kwargs["role"]
+            if role == "structure_compiler":
+                data: dict[str, Any] = {"nodes": nodes}
+            elif role == "dependency_compiler":
+                data = {"edges": edges}
+            elif role == "graph_critic":
+                data = {"accepted": True}
+            else:
+                data = {}
+            return data, _trace(f"trace:{len(self.calls)}")
+
+    graph, _ = EvidenceGraphCompiler(OverlongEdgeControl()).compile(  # type: ignore[arg-type]
+        job_id="job:overlong-edges",
+        bundle=_bundle(),
+    )
+
+    assert len(graph.edges) == 40
+    assert graph.edges == [EvidenceEdge.model_validate(edge) for edge in edges[:40]]
+    dependency_run = next(run for run in graph.compiler_runs if run.pass_name == "dependency")
+    assert dependency_run.findings == [
+        "deterministically bounded provider patch edges: retained 40 of 42 returned entries"
+    ]
+
+
 def test_graph_repair_is_a_bounded_delta_that_preserves_valid_nodes() -> None:
     class RepairControl:
         config = SimpleNamespace(prompt_version="test-v1")
