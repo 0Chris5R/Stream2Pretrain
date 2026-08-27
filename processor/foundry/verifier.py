@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from processor.foundry.control import ProviderControlPlane
+from processor.foundry.symbolic import (
+    symbolic_expression_is_checkable,
+    symbolically_equivalent,
+)
 from processor.foundry.util import canonical_json, stable_id
 from schemas.foundry import (
     FoundryAnswer,
@@ -166,6 +169,8 @@ def normalize_spec(
         for edge in task.hidden_targets.required_relations
         if edge.relation == "precedes"
     ]
+    node_types = {node.id: node.type for node in graph.nodes}
+    derivation_order = _derivation_order(task, node_types)
     predicates: list[VerifierPredicate] = []
     for raw_predicate in spec.predicates:
         predicate = raw_predicate
@@ -198,6 +203,8 @@ def normalize_spec(
                 }
             )
         elif predicate.type == "evidence_membership":
+            if task.family == "derivation_completion":
+                continue
             predicate = predicate.model_copy(
                 update={
                     "target": None,
@@ -206,6 +213,8 @@ def normalize_spec(
                 }
             )
         elif predicate.type == "evidence_coverage":
+            if task.family == "derivation_completion":
+                continue
             config = dict(predicate.config)
             if task.hidden_targets.accepted_evidence_sets:
                 config["accepted_sets"] = task.hidden_targets.accepted_evidence_sets
@@ -228,6 +237,16 @@ def normalize_spec(
                     "target": None,
                     "targets": [],
                     "config": {"precedes": method_order},
+                }
+            )
+        elif predicate.type == "derivation_partial_order":
+            if not derivation_order:
+                continue
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": [],
+                    "config": {"precedes": derivation_order},
                 }
             )
         elif predicate.type == "required_qualifications":
@@ -372,7 +391,7 @@ def normalize_spec(
             weight=0.0,
             required=True,
         )
-    if task.hidden_targets.accepted_evidence_sets:
+    if task.hidden_targets.accepted_evidence_sets and task.family != "derivation_completion":
         baseline["evidence_membership"] = VerifierPredicate(
             id="hard:evidence_membership",
             type="evidence_membership",
@@ -401,6 +420,14 @@ def normalize_spec(
                 weight=0.0,
                 required=True,
                 config={"precedes": method_order},
+            )
+        if task.family == "derivation_completion" and derivation_order:
+            baseline["derivation_partial_order"] = VerifierPredicate(
+                id="hard:derivation_partial_order",
+                type="derivation_partial_order",
+                weight=0.0,
+                required=True,
+                config={"precedes": derivation_order},
             )
     if task.hidden_targets.required_qualifications:
         baseline["required_qualifications"] = VerifierPredicate(
@@ -459,11 +486,42 @@ def normalize_spec(
             if predicate.type == "symbolic_equivalence" and predicate.target
         }
         for target, expected in expected_values.items():
-            if not isinstance(expected, str) or target in symbolic_targets:
+            if (
+                not isinstance(expected, str)
+                or target in symbolic_targets
+                or not symbolic_expression_is_checkable(expected)
+            ):
                 continue
             predicates.append(
                 VerifierPredicate(
                     id=f"hard:symbolic:{target}",
+                    type="symbolic_equivalence",
+                    target=target,
+                    expected=expected,
+                    weight=1.0,
+                    required=True,
+                )
+            )
+        graph_by_id = {node.id: node for node in graph.nodes}
+        symbolic_targets.update(
+            predicate.target
+            for predicate in predicates
+            if predicate.type == "symbolic_equivalence" and predicate.target
+        )
+        for target in task.hidden_targets.required_nodes:
+            node = graph_by_id.get(target)
+            expected = node.canonical_symbolic_form or node.latex if node is not None else None
+            if (
+                node is None
+                or node.type != "equation"
+                or target in symbolic_targets
+                or not expected
+                or not symbolic_expression_is_checkable(expected)
+            ):
+                continue
+            predicates.append(
+                VerifierPredicate(
+                    id=f"hard:symbolic-node:{target}",
                     type="symbolic_equivalence",
                     target=target,
                     expected=expected,
@@ -486,6 +544,7 @@ def normalize_spec(
             "symbolic_equivalence",
             "required_relations",
             "method_partial_order",
+            "derivation_partial_order",
             "required_nodes",
             "evidence_coverage",
             "fault_identification",
@@ -625,10 +684,17 @@ def _evaluate_predicate(
         details = f"{count} structured commitments"
     elif predicate.type in {"required_nodes", "required_dependency_nodes"}:
         targets = set(predicate.targets or ([predicate.target] if predicate.target else []))
-        overlap = targets & committed
-        passed = targets <= committed
-        score = len(overlap) / len(targets) if targets else 1.0
-        details = f"resolved {len(overlap)}/{len(targets)} required nodes"
+        resolved = targets & committed
+        if task.family == "derivation_completion":
+            node_types = {node.id: node.type for node in graph.nodes}
+            submitted_equations = {equation.id for equation in manifest.equations}
+            equation_targets = {
+                target for target in targets if node_types.get(target) == "equation"
+            }
+            resolved = (resolved - equation_targets) | (equation_targets & submitted_equations)
+        passed = targets <= resolved
+        score = len(resolved) / len(targets) if targets else 1.0
+        details = f"resolved {len(resolved)}/{len(targets)} required nodes"
     elif predicate.type == "forbidden_nodes":
         targets = set(predicate.targets)
         passed = not (targets & committed)
@@ -663,7 +729,7 @@ def _evaluate_predicate(
             if not predicate.target or equation.id == predicate.target
         ]
         passed = bool(expected) and any(
-            _symbolically_equivalent(value, str(expected)) for value in comparisons
+            symbolically_equivalent(value, str(expected)) for value in comparisons
         )
         score = float(passed)
         details = f"checked {len(comparisons)} submitted equations"
@@ -699,6 +765,15 @@ def _evaluate_predicate(
         passed = bool(checks) and all(checks)
         score = sum(checks) / len(checks) if checks else 0.0
         details = f"{sum(checks)}/{len(checks)} ordering edges valid"
+    elif predicate.type == "derivation_partial_order":
+        order = {equation.id: index for index, equation in enumerate(manifest.equations)}
+        pairs = predicate.config.get("precedes", [])
+        checks = [
+            left in order and right in order and order[left] < order[right] for left, right in pairs
+        ]
+        passed = bool(checks) and all(checks)
+        score = sum(checks) / len(checks) if checks else 0.0
+        details = f"{sum(checks)}/{len(checks)} derivation edges ordered"
     elif predicate.type == "fault_identification":
         targets = set(predicate.targets)
         forbidden = set(predicate.config.get("forbidden", []))
@@ -779,31 +854,20 @@ def _configuration_constraints(
     return all(checks), score, f"{sum(checks)}/{len(checks)} configuration checks passed"
 
 
-def _symbolically_equivalent(left: str, right: str) -> bool:
-    try:
-        import sympy
-
-        left_expr = _sympy_parse(left)
-        right_expr = _sympy_parse(right)
-        return bool(sympy.simplify(left_expr - right_expr) == 0)
-    except Exception:
-        return _normalize_expression(left) == _normalize_expression(right)
-
-
-def _sympy_parse(value: str) -> Any:
-    normalized = value.strip().strip("$")
-    if len(normalized) > 2_000:
-        raise ValueError("symbolic answer exceeds safe length bound")
-    try:
-        from sympy.parsing.latex import parse_latex
-
-        return parse_latex(normalized)
-    except Exception as exc:
-        raise ValueError("symbolic answer is not parseable LaTeX") from exc
-
-
-def _normalize_expression(value: str) -> str:
-    return re.sub(r"\s+|\\left|\\right|\$", "", value).replace("^", "**")
+def _derivation_order(task: TaskSpec, node_types: dict[str, str]) -> list[list[str]]:
+    pairs: list[list[str]] = []
+    for edge in task.hidden_targets.required_relations:
+        if node_types.get(edge.source) != "equation" or node_types.get(edge.target) != "equation":
+            continue
+        if edge.relation in {"precedes", "derives", "enables", "produces"}:
+            pair = [edge.source, edge.target]
+        elif edge.relation in {"depends_on", "uses"}:
+            pair = [edge.target, edge.source]
+        else:
+            continue
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs
 
 
 def _task_seed(task_id: str) -> int:
@@ -816,6 +880,7 @@ def _compiler_system() -> str:
 predicate types: nonempty_report, manifest_required, required_nodes, forbidden_nodes,
 required_dependency_nodes, evidence_membership, evidence_coverage, symbolic_equivalence,
 numeric_tolerance, method_partial_order, fault_identification, required_relations,
+derivation_partial_order,
 required_qualifications, configuration_constraints, report_manifest_consistency.
 Return one JSON VerifierSpec. Use finite hidden targets, hard gates,
 weighted outcome checks, no prose judgement, no network, and no executable model-generated code.

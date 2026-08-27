@@ -84,8 +84,15 @@ def _predicate(
         passed = bool(committed or evidence or numbers or relations or configuration)
         return passed, float(passed)
     if kind in {"required_nodes", "required_dependency_nodes"}:
-        overlap = targets & committed
-        return targets <= committed, len(overlap) / len(targets) if targets else 1.0
+        resolved = targets & committed
+        if task.get("family") == "derivation_completion":
+            node_types = {str(node["id"]): str(node["type"]) for node in graph["nodes"]}
+            submitted_equations = {str(item.get("id")) for item in equations}
+            equation_targets = {
+                target for target in targets if node_types.get(target) == "equation"
+            }
+            resolved = (resolved - equation_targets) | (equation_targets & submitted_equations)
+        return targets <= resolved, len(resolved) / len(targets) if targets else 1.0
     if kind == "forbidden_nodes":
         passed = not bool(targets & committed)
         return passed, float(passed)
@@ -115,6 +122,7 @@ def _predicate(
         passed = bool(expected) and any(
             _symbolically_equivalent(str(item.get("latex", "")), str(expected))
             for item in equations
+            if not predicate.get("target") or item.get("id") == predicate.get("target")
         )
         return passed, float(passed)
     if kind == "numeric_tolerance":
@@ -133,6 +141,17 @@ def _predicate(
         return passed, partial
     if kind == "method_partial_order":
         positions = {node: index for index, node in enumerate(method_nodes)}
+        checks = [
+            left in positions and right in positions and positions[left] < positions[right]
+            for left, right in config.get("precedes", [])
+        ]
+        return bool(checks) and all(checks), sum(checks) / len(checks) if checks else 0.0
+    if kind == "derivation_partial_order":
+        positions = {
+            str(item.get("id")): index
+            for index, item in enumerate(equations)
+            if isinstance(item, dict)
+        }
         checks = [
             left in positions and right in positions and positions[left] < positions[right]
             for left, right in config.get("precedes", [])
@@ -235,13 +254,22 @@ def _configuration_constraints(
 def _symbolically_equivalent(left: str, right: str) -> bool:
     try:
         import sympy
+        from sympy.core.relational import Equality
         from sympy.parsing.latex import parse_latex
 
         if len(left) > 2_000 or len(right) > 2_000:
             return False
-        a = parse_latex(left.strip("$"))
-        b = parse_latex(right.strip("$"))
-        return bool(sympy.simplify(a - b) == 0)
+        a = parse_latex(left.strip("$"), backend="lark")
+        b = parse_latex(right.strip("$"), backend="lark")
+        a_is_equation = isinstance(a, Equality)
+        b_is_equation = isinstance(b, Equality)
+        if a_is_equation != b_is_equation:
+            return False
+        a_residual = a.lhs - a.rhs if a_is_equation else a
+        b_residual = b.lhs - b.rhs if b_is_equation else b
+        if sympy.simplify(a_residual - b_residual) == 0:
+            return True
+        return bool(a_is_equation and sympy.simplify(a_residual + b_residual) == 0)
     except Exception:
 
         def normalize(value: str) -> str:

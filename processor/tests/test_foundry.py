@@ -37,20 +37,28 @@ from processor.foundry.providers import (
 from processor.foundry.quota import QuotaExceededError, QuotaLedger
 from processor.foundry.routing import ROLE_PROVIDER
 from processor.foundry.store import FoundryStore
+from processor.foundry.symbolic import symbolically_equivalent
 from processor.foundry.tasking import (
     GroundingCritique,
     SolvedTask,
     SolverTurn,
     TaskFactory,
     TaskOutputError,
+    _machine_verifiable,
     _normalize_solver_turn_data,
     _solution_contract_violations,
+    _solver_prompt,
     _validate_or_repair,
 )
 from processor.foundry.tools import PaperRuntime, ToolError
 from processor.foundry.util import sha256
 from processor.foundry.validation import run_acceptance_suite, suite_passes
-from processor.foundry.verifier import VerifierCompiler, evaluate, normalize_spec
+from processor.foundry.verifier import (
+    VerifierCompiler,
+    deterministic_verifier,
+    evaluate,
+    normalize_spec,
+)
 from processor.foundry.worker import WorkerRuntime
 from processor.sign import AttestationSigner, verify_signature
 from schemas.foundry import (
@@ -579,15 +587,233 @@ def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> 
         _graph(),
     )
     by_id = {predicate.id: predicate for predicate in normalized.predicates}
-    assert by_id["evidence"].allowed_spans == ["section-1.span1"]
-    assert by_id["evidence"].target is None
-    assert by_id["evidence"].targets == []
-    assert by_id["coverage"].config["accepted_sets"] == [["section-1.span1"]]
-    assert by_id["coverage"].target is None
+    assert "evidence" not in by_id
+    assert "coverage" not in by_id
     assert by_id["symbolic"].expected == "x + 1"
     assert by_id["numeric"].expected == 1.5
     assert by_id["report"].target is None
     assert by_id["report"].targets == []
+
+
+def test_derivation_solver_prompt_is_public_and_does_not_leak_hidden_targets() -> None:
+    graph = PaperEvidenceGraph(
+        graph_id="graph:derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="The result is x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "public_instruction": "Derive the final expression step by step.",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:result"],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"equation:result": "y=x+1"},
+            ),
+        }
+    )
+
+    prompt = _solver_prompt(_bundle(), graph, task, "independent derivation")
+
+    assert "hidden_targets" not in prompt
+    assert "CONSTRUCTION_TARGETS_FOR_REFERENCE_SOLVER_ONLY" not in prompt
+    assert '"y=x+1"' not in prompt
+    assert '"evidence_policy":"optional_internal_provenance"' in prompt
+    assert '"output_target_ids":["equation:result"]' in prompt
+
+
+def test_derivation_requires_checkable_expected_outcome_for_rl() -> None:
+    graph = PaperEvidenceGraph(
+        graph_id="graph:derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="The result is x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:result"],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"equation:result": "y=x+1"},
+            ),
+        }
+    )
+
+    assert _machine_verifiable(task, graph, _bundle())
+    assert not _machine_verifiable(
+        task.model_copy(
+            update={
+                "hidden_targets": task.hidden_targets.model_copy(update={"expected_values": {}})
+            }
+        ),
+        graph,
+        _bundle(),
+    )
+    assert not _machine_verifiable(
+        task.model_copy(
+            update={
+                "hidden_targets": task.hidden_targets.model_copy(
+                    update={"expected_values": {"equation:result": "x if condition else y"}}
+                )
+            }
+        ),
+        graph,
+        _bundle(),
+    )
+
+
+def test_derivation_manifest_does_not_require_public_span_ids() -> None:
+    graph = PaperEvidenceGraph(
+        graph_id="graph:derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="The result is x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:result"],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"equation:result": "y=x+1"},
+            ),
+        }
+    )
+    manifest = AnswerManifest(equations=[SubmittedEquation(id="equation:result", latex="y=x+1")])
+
+    assert _solution_contract_violations(manifest, task, graph) == []
+    assert symbolically_equivalent("y=x+1", "x+1=y")
+
+
+def test_derivation_verifier_checks_equations_and_step_order() -> None:
+    edge = EvidenceEdge(source="equation:start", relation="derives", target="equation:result")
+    graph = PaperEvidenceGraph(
+        graph_id="graph:ordered-derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:start",
+                type="equation",
+                canonical_text="Start from y minus one equals x.",
+                latex="y-1=x",
+                canonical_symbolic_form="y-1=x",
+                supporting_spans=["section-1.span1"],
+            ),
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="Rearrange to y equals x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[edge],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:start", "equation:result"],
+                required_relations=[edge],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"final": "y=x+1"},
+            ),
+        }
+    )
+    spec = deterministic_verifier(task, _bundle(), graph)
+    correct = FoundryAnswer(
+        report="Starting from the first equality, add one to both sides to obtain the result.",
+        answer_manifest=AnswerManifest(
+            equations=[
+                SubmittedEquation(id="equation:start", latex="x=y-1"),
+                SubmittedEquation(id="equation:result", latex="x+1=y"),
+                SubmittedEquation(id="final", latex="y=x+1"),
+            ],
+            relations=[edge],
+        ),
+    )
+
+    assert evaluate(spec, correct, task=task, graph=graph, bundle=_bundle()).passed
+    claims_only = correct.model_copy(
+        update={
+            "answer_manifest": correct.answer_manifest.model_copy(
+                update={
+                    "claims": ["equation:start", "equation:result"],
+                    "equations": [SubmittedEquation(id="final", latex="y=x+1")],
+                }
+            )
+        }
+    )
+    reversed_steps = correct.model_copy(
+        update={
+            "answer_manifest": correct.answer_manifest.model_copy(
+                update={"equations": list(reversed(correct.answer_manifest.equations))}
+            )
+        }
+    )
+
+    assert not evaluate(spec, claims_only, task=task, graph=graph, bundle=_bundle()).passed
+    assert not evaluate(spec, reversed_steps, task=task, graph=graph, bundle=_bundle()).passed
+
+
+def test_irrelevant_numeric_output_does_not_create_a_false_adversary() -> None:
+    answer = _answer().model_copy(
+        update={
+            "answer_manifest": _answer().answer_manifest.model_copy(
+                update={"numeric_results": [NumericResult(id="incidental", value=3.0)]}
+            )
+        }
+    )
+    report, _validated, _cases = run_acceptance_suite(
+        task=_task(),
+        spec=_spec(),
+        bundle=_bundle(),
+        graph=_graph(),
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:incidental-numeric",
+                task_id=_task().task_id,
+                provider_trace_id="trace:incidental-numeric",
+                answer=answer,
+                accepted=False,
+                reward=0.0,
+            )
+        ],
+    )
+
+    assert report.adversarial_pass
+    assert report.false_positive_count == 0
+    assert suite_passes(report)
 
 
 def test_verifier_critic_can_accept_with_documented_residual_risks() -> None:

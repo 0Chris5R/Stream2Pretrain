@@ -67,7 +67,7 @@ def run_acceptance_suite(
         if trajectories
         else FoundryAnswer(report="", answer_manifest=AnswerManifest())
     )
-    adversarial_answers = list(_adversarial_answers(base))
+    adversarial_answers = list(_adversarial_answers(base, spec))
     adversarial_results = [
         evaluate(spec, answer, task=task, graph=graph, bundle=bundle)
         for answer in adversarial_answers
@@ -161,16 +161,21 @@ def _equivalent_variant(answer: FoundryAnswer) -> FoundryAnswer:
     )
 
 
-def _adversarial_answers(valid: FoundryAnswer) -> Iterable[FoundryAnswer]:
+def _adversarial_answers(
+    valid: FoundryAnswer,
+    spec: VerifierSpec,
+) -> Iterable[FoundryAnswer]:
     yield FoundryAnswer(report="", answer_manifest=AnswerManifest())
     yield FoundryAnswer(report=valid.report, answer_manifest=AnswerManifest())
-    yield valid.model_copy(
-        update={
-            "answer_manifest": valid.answer_manifest.model_copy(
-                update={"evidence": ["external:invented-span"]}
-            )
-        }
-    )
+    predicate_types = {predicate.type for predicate in spec.predicates}
+    if predicate_types & {"evidence_membership", "evidence_coverage"}:
+        yield valid.model_copy(
+            update={
+                "answer_manifest": valid.answer_manifest.model_copy(
+                    update={"evidence": ["external:invented-span"]}
+                )
+            }
+        )
     yield valid.model_copy(
         update={
             "answer_manifest": valid.answer_manifest.model_copy(
@@ -186,9 +191,19 @@ def _adversarial_answers(valid: FoundryAnswer) -> Iterable[FoundryAnswer]:
             )
         }
     )
-    if valid.answer_manifest.numeric_results:
+    numeric_targets = {
+        predicate.target
+        for predicate in spec.predicates
+        if predicate.type == "numeric_tolerance" and predicate.target
+    }
+    targeted_numeric = [
+        result for result in valid.answer_manifest.numeric_results if result.id in numeric_targets
+    ]
+    if targeted_numeric:
         values = [
             result.model_copy(update={"value": -result.value})
+            if result.id in numeric_targets
+            else result
             for result in valid.answer_manifest.numeric_results
         ]
         yield valid.model_copy(
@@ -272,7 +287,20 @@ def _mutation_candidates(
                 )
             }
         )
-    for value in manifest.numeric_results if "numeric_tolerance" in predicate_types else []:
+    if len(manifest.equations) >= 2 and "derivation_partial_order" in predicate_types:
+        yield valid.model_copy(
+            update={
+                "answer_manifest": manifest.model_copy(
+                    update={"equations": list(reversed(manifest.equations))}
+                )
+            }
+        )
+    numeric_targets = {
+        predicate.target
+        for predicate in spec.predicates
+        if predicate.type == "numeric_tolerance" and predicate.target
+    }
+    for value in (item for item in manifest.numeric_results if item.id in numeric_targets):
         yield valid.model_copy(
             update={
                 "answer_manifest": manifest.model_copy(
@@ -289,7 +317,12 @@ def _mutation_candidates(
                 )
             }
         )
-    for equation in manifest.equations if "symbolic_equivalence" in predicate_types else []:
+    symbolic_targets = {
+        predicate.target
+        for predicate in spec.predicates
+        if predicate.type == "symbolic_equivalence" and predicate.target
+    }
+    for equation in (item for item in manifest.equations if item.id in symbolic_targets):
         yield valid.model_copy(
             update={
                 "answer_manifest": manifest.model_copy(
@@ -305,21 +338,49 @@ def _mutation_candidates(
             }
         )
     if manifest.relations and "required_relations" in predicate_types:
-        yield valid.model_copy(
-            update={
-                "answer_manifest": manifest.model_copy(
-                    update={"relations": manifest.relations[:-1]}
-                )
-            }
+        required = {
+            (edge.source, edge.relation, edge.target)
+            for edge in task.hidden_targets.required_relations
+        }
+        relation_to_remove = next(
+            (
+                edge
+                for edge in manifest.relations
+                if (edge.source, edge.relation, edge.target) in required
+            ),
+            None,
         )
+        if relation_to_remove is not None:
+            yield valid.model_copy(
+                update={
+                    "answer_manifest": manifest.model_copy(
+                        update={
+                            "relations": [
+                                edge for edge in manifest.relations if edge != relation_to_remove
+                            ]
+                        }
+                    )
+                }
+            )
     if manifest.qualifications and "required_qualifications" in predicate_types:
-        yield valid.model_copy(
-            update={
-                "answer_manifest": manifest.model_copy(
-                    update={"qualifications": manifest.qualifications[:-1]}
-                )
-            }
+        required_qualifications = set(task.hidden_targets.required_qualifications)
+        qualification_to_remove = next(
+            (value for value in manifest.qualifications if value in required_qualifications), None
         )
+        if qualification_to_remove is not None:
+            yield valid.model_copy(
+                update={
+                    "answer_manifest": manifest.model_copy(
+                        update={
+                            "qualifications": [
+                                value
+                                for value in manifest.qualifications
+                                if value != qualification_to_remove
+                            ]
+                        }
+                    )
+                }
+            )
     if "configuration_constraints" in predicate_types:
         constraints = task.hidden_targets.configuration_constraints
         mutated_configuration = dict(manifest.configuration)

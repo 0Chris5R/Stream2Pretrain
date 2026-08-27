@@ -21,6 +21,7 @@ dependencies = [
     "cryptography>=42.0",
     "prometheus-client>=0.20",
     "sympy==1.13.3",
+    "lark>=1.1,<2",
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp>=1.27",

@@ -306,6 +306,7 @@ PredicateType = Literal[
     "symbolic_equivalence",
     "numeric_tolerance",
     "method_partial_order",
+    "derivation_partial_order",
     "fault_identification",
     "required_relations",
     "required_qualifications",

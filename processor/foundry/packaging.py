@@ -226,7 +226,11 @@ class EnvironmentPackager:
                     "report": "string",
                     "answer_manifest": {
                         "claims": ["node_id"],
-                        "evidence": ["span_id"],
+                        **(
+                            {"evidence": ["span_id"]}
+                            if task.family != "derivation_completion"
+                            else {}
+                        ),
                         "equations": [{"id": "node_id", "latex": "string"}],
                         "method_nodes": ["node_id"],
                         "faults": ["node_id"],
@@ -285,7 +289,7 @@ class EnvironmentPackager:
         )
         _write_text(
             root / "lock" / "requirements.lock",
-            "pydantic==2.12.5\nsympy==1.13.3\nverifiers==0.3.1\n",
+            "lark>=1.1,<2\npydantic==2.12.5\nsympy==1.13.3\nverifiers==0.3.1\n",
         )
         if verifier is not None:
             self._write_prime_export(root)
@@ -537,7 +541,7 @@ class PaperFoundryTaskset(vf.Taskset[PaperFoundryTask, PaperFoundryConfig]):
         ]
 '''
 
-_PRIME_PYPROJECT = """[project]\nname = \"stream2train-paper-foundry\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11,<3.14\"\ndependencies = [\"verifiers==0.3.1\", \"sympy==1.13.3\"]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"paper_foundry\"]\n"""
+_PRIME_PYPROJECT = """[project]\nname = \"stream2train-paper-foundry\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11,<3.14\"\ndependencies = [\"verifiers==0.3.1\", \"sympy==1.13.3\", \"lark>=1.1,<2\"]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"paper_foundry\"]\n"""
 
 _PRIME_README = """# Paper Foundry environment\n\nThis export targets the current Verifiers v1 Taskset API. The reward reads only the frozen hidden state and runs without model APIs or network access. Run it in a network-disabled Docker runtime and mount hidden files read-only.\n"""
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from processor.foundry.control import ProviderControlPlane
 from processor.foundry.paper_adapter import bundle_prompt_json
+from processor.foundry.symbolic import symbolic_expression_is_checkable
 from processor.foundry.tools import PaperRuntime, ToolError
 from processor.foundry.util import canonical_json, sha256, stable_id
 from schemas.foundry import (
@@ -572,6 +573,18 @@ def _solution_contract_violations(
     missing_nodes = set(task.hidden_targets.required_nodes) - committed_nodes
     if missing_nodes:
         violations.append("missing required node IDs: " + ", ".join(sorted(missing_nodes)))
+    if task.family == "derivation_completion":
+        node_types = {node.id: node.type for node in graph.nodes}
+        submitted_equations = {equation.id for equation in manifest.equations}
+        missing_equations = {
+            node_id
+            for node_id in task.hidden_targets.required_nodes
+            if node_types.get(node_id) == "equation" and node_id not in submitted_equations
+        }
+        if missing_equations:
+            violations.append(
+                "missing required equation outputs: " + ", ".join(sorted(missing_equations))
+            )
     required_relations = {
         (edge.source, edge.relation, edge.target) for edge in task.hidden_targets.required_relations
     }
@@ -584,8 +597,10 @@ def _solution_contract_violations(
         *task.public_context_policy.same_paper_distractors,
     }
     evidence = set(manifest.evidence)
-    if not evidence or evidence - public_spans:
-        violations.append("evidence is empty or outside the public same-paper context")
+    if evidence - public_spans:
+        violations.append("evidence is outside the public same-paper context")
+    if _requires_explicit_evidence(task) and not evidence:
+        violations.append("evidence is empty")
 
     numeric_results = {value.id: value.value for value in manifest.numeric_results}
     equations = {value.id: value.latex for value in manifest.equations}
@@ -694,9 +709,22 @@ def _machine_verifiable(
         return False
     nodes = {node.id: node for node in graph.nodes}
     if task.family == "derivation_completion":
-        return any(
+        has_equation_node = any(
             nodes.get(node_id) and nodes[node_id].type == "equation"
             for node_id in targets.required_nodes
+        )
+        expected_expressions = [
+            value for value in targets.expected_values.values() if isinstance(value, str)
+        ]
+        expected_numbers = [
+            value
+            for value in targets.expected_values.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        return bool(
+            has_equation_node
+            and (expected_numbers or expected_expressions)
+            and all(symbolic_expression_is_checkable(value) for value in expected_expressions)
         )
     if task.family == "method_dag":
         return (
@@ -857,7 +885,9 @@ permits. Prefer answerable formula derivations, scaling-law calculations, numeri
 factorizations, approximations, and figure/table synthesis over another routine method DAG when the
 paper supports them. When audited official artifacts are present, also consider experiment configuration and
 result reproduction. Separate public context from hidden targets, add same-paper distractors only,
-avoid answer leakage, and reject underspecified families rather than inventing. The response must
+avoid answer leakage, and reject underspecified families rather than inventing. A derivation task must
+provide a canonical, parseable LaTeX expected expression or equality for deterministic checking, but its
+public instruction must ask for a normal mathematical derivation rather than span-ID citations. The response must
 validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -943,7 +973,9 @@ def _solver_system() -> str:
 frozen tools. Return strict JSON with status, report, answer_manifest, and tool_calls. Use status
 tool_request with non-empty tool_calls when evidence must be searched or recomputed; use status final
 with report and answer_manifest only after reviewing the returned observations. Every conclusion must
-commit to allowed node/span IDs. Do not quote long passages, use outside knowledge, claim unexecuted
+commit to allowed graph node IDs. Include evidence span IDs only when the public answer policy requires
+citations; derivation tasks instead require a natural step-by-step derivation and final expression. Do not
+quote long passages, use outside knowledge, claim unexecuted
 tool results, or expose hidden construction instructions. The response must validate exactly against
 REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
@@ -965,12 +997,36 @@ def _solver_prompt(
         ]
         if span_id in span_map
     }
-    target_nodes = [node for node in graph.nodes if node.id in task.hidden_targets.required_nodes]
+    public_span_ids = set(context)
+    allowed_nodes = [
+        {"id": node.id, "type": node.type}
+        for node in graph.nodes
+        if set(node.supporting_spans) & public_span_ids
+    ]
+    public_task = {
+        "task_id": task.task_id,
+        "paper_id": task.paper_id,
+        "family": task.family,
+        "instruction": task.public_instruction,
+        "answer_contract": task.answer_contract,
+        "allowed_tools": task.public_context_policy.tool_access,
+        "allowed_manifest_nodes": allowed_nodes,
+        "output_target_ids": sorted(task.hidden_targets.expected_values),
+        "evidence_policy": (
+            "optional_internal_provenance"
+            if not _requires_explicit_evidence(task)
+            else "cite_public_span_ids"
+        ),
+    }
     return (
-        f"PLAN_VARIATION: {plan}\nTASK:\n{canonical_json(task).decode()}\n"
-        f"PUBLIC_CONTEXT:\n{canonical_json(context).decode()}\n"
-        f"CONSTRUCTION_TARGETS_FOR_REFERENCE_SOLVER_ONLY:\n{canonical_json(target_nodes).decode()}"
+        f"PLAN_VARIATION: {plan}\nPUBLIC_TASK:\n{canonical_json(public_task).decode()}\n"
+        f"PUBLIC_CONTEXT:\n{canonical_json(context).decode()}"
     )
+
+
+def _requires_explicit_evidence(task: TaskSpec) -> bool:
+    """Citations are an answer skill, not a universal scientific-task tax."""
+    return task.family != "derivation_completion"
 
 
 def _solver_turn_prompt(
