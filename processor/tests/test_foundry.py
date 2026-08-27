@@ -1710,8 +1710,10 @@ def test_daily_run_keeps_only_ranked_limit_and_clears_frozen_queue(tmp_path: Pat
 
 def test_changed_daily_boundary_replaces_same_day_snapshot(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
-    midnight = datetime(2026, 8, 27, 0, tzinfo=UTC)
-    assert store.start_daily_run(midnight.date(), boundary_at=midnight)["candidate_count"] == 0
+    moved_boundary = datetime.now(UTC) + timedelta(minutes=5)
+    original_boundary = moved_boundary - timedelta(minutes=10)
+    run_day = moved_boundary.date()
+    assert store.start_daily_run(run_day, boundary_at=original_boundary)["candidate_count"] == 0
     store.enqueue_candidate(
         doc_id="afternoon-paper",
         payload=b"paper",
@@ -1721,13 +1723,13 @@ def test_changed_daily_boundary_replaces_same_day_snapshot(tmp_path: Path) -> No
     )
 
     moved = store.start_daily_run(
-        midnight.date(),
-        boundary_at=midnight.replace(hour=14),
+        run_day,
+        boundary_at=moved_boundary,
         candidate_limit=20,
     )
 
     assert moved["candidate_count"] == 1
-    assert moved["cutoff_at"] == midnight.replace(hour=14).isoformat()
+    assert moved["cutoff_at"] == moved_boundary.isoformat()
 
 
 def test_foundry_config_parses_daily_not_before_utc(monkeypatch: pytest.MonkeyPatch) -> None:
