@@ -50,7 +50,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 2
+          # A queued push can contain several commits. The planner must retain
+          # github.event.before or it can silently miss changed components.
+          fetch-depth: 0
 
       - name: Resolve changed scopes
         id: scope
