@@ -233,6 +233,9 @@ ingest:
 processor:
   fetcher:
     image: stream2pretrain/processor-fetcher-model
+    # Expensive extraction must publish and checkpoint continuously instead of
+    # inheriting Bytewax's 1,000-record-per-partition connector default.
+    sourceBatchSize: 1
     # Production workers use the immutable fetcher model profile. It contains
     # only Docling and figure-classification artifacts and fails startup when
     # a real extraction dependency is missing.
@@ -278,6 +281,7 @@ processor:
     # immutable classifiers are isolated behind modelService so the local RWO
     # checkpoint never pins multi-GB model memory or image layers to one node.
     image: stream2pretrain/processor
+    sourceBatchSize: 1
     replicas: 1
     requireRealModels: true
     doclingEnabled: false
@@ -337,6 +341,7 @@ processor:
       targetCPUUtilizationPercentage: 75
   iceberg:
     image: stream2pretrain/processor-iceberg-writer
+    sourceBatchSize: 1
     replicas: 1
     resources:
       requests: {cpu: 200m, memory: 512Mi}

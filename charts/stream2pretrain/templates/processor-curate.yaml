@@ -151,6 +151,8 @@ spec:
               value: {{ .Values.processor.curate.checkpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
               value: {{ .Values.processor.curate.checkpoint.snapshotSeconds | quote }}
+            - name: S2P_BYTEWAX_SOURCE_BATCH_SIZE
+              value: {{ .Values.processor.curate.sourceBatchSize | int | quote }}
             - name: S2P_MODELS_DIR
               value: {{ ternary "/models" "/opt/models" $externalModels | quote }}
             {{- if and .Values.processor.modelService.enabled (not $externalModels) }}

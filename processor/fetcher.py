@@ -653,6 +653,7 @@ def build_dataflow(
         topics=input_topics,
         starting_offset=common.kafka_starting_offset(),
         add_config=common.kafka_consumer_config(cfg.consumer_group),
+        batch_size=common.kafka_source_batch_size(),
     )
     inp = op.input("raw_fetched", flow, source)
     payload_max_bytes = common.kafka_payload_max_bytes()

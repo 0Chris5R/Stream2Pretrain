@@ -48,6 +48,13 @@ failure escapes the operator so Bytewax cannot checkpoint past the record.
 The curator recovery boundary also covers its near-duplicate index and
 deterministic decision cache.
 
+`processor.fetcher.sourceBatchSize` and `processor.curate.sourceBatchSize`
+default to one record per Kafka partition. This is intentional: extraction,
+OCR, and classification are expensive, so inheriting Bytewax's 1,000-record
+connector default can leave hours of computed results unpublished and
+uncheckpointed. Do not increase either value without measuring end-to-end
+durable append latency and restart replay on the cluster.
+
 Ordinary Kafka-lag KEDA must not independently scale either core execution:
 broker commits are not the authoritative Bytewax progress boundary. A core
 rescale is a coordinated stop, worker-count change, and restart using the

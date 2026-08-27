@@ -76,6 +76,8 @@ spec:
               value: {{ $checkpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
               value: {{ $checkpoint.snapshotSeconds | quote }}
+            - name: S2P_BYTEWAX_SOURCE_BATCH_SIZE
+              value: {{ .Values.processor.iceberg.sourceBatchSize | int | quote }}
             - name: S2P_FLUSH_INTERVAL_SECONDS
               value: {{ .Values.processor.iceberg.flushIntervalSeconds | quote }}
             - name: S2P_FLUSH_RECORDS

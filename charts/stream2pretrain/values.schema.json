@@ -237,9 +237,10 @@
       "properties": {
         "fetcher": {
           "type": "object",
-          "required": ["replicas", "pdfProcessingEnabled", "checkpoint", "canary"],
+          "required": ["replicas", "sourceBatchSize", "pdfProcessingEnabled", "checkpoint", "canary"],
           "properties": {
             "replicas": {"type": "integer", "const": 1},
+            "sourceBatchSize": {"type": "integer", "minimum": 1},
             "pdfProcessingEnabled": {"type": "boolean"},
             "checkpoint": {
               "type": "object",
@@ -275,9 +276,10 @@
         },
         "curate": {
           "type": "object",
-          "required": ["replicas", "checkpoint"],
+          "required": ["replicas", "sourceBatchSize", "checkpoint"],
           "properties": {
             "replicas": {"type": "integer", "const": 1},
+            "sourceBatchSize": {"type": "integer", "minimum": 1},
             "checkpoint": {
               "type": "object",
               "required": ["storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
@@ -292,9 +294,10 @@
         },
         "iceberg": {
           "type": "object",
-          "required": ["replicas", "checkpoint"],
+          "required": ["replicas", "sourceBatchSize", "checkpoint"],
           "properties": {
             "replicas": {"type": "integer", "const": 1},
+            "sourceBatchSize": {"type": "integer", "minimum": 1},
             "checkpoint": {
               "type": "object",
               "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],

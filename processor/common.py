@@ -388,6 +388,20 @@ def kafka_payload_max_bytes() -> int:
     return configured
 
 
+def kafka_source_batch_size() -> int:
+    """Return the bounded per-partition Bytewax input batch size.
+
+    Processor work can include PDF parsing, OCR, classifier calls, and durable
+    deduplication. Bytewax's 1,000-record connector default allows hours of
+    computed work to accumulate before sinks and recovery advance, so these
+    flows default to one record per partition and require a positive override.
+    """
+    batch_size = _env_int("S2P_BYTEWAX_SOURCE_BATCH_SIZE", 1)
+    if batch_size <= 0:
+        raise RuntimeError("S2P_BYTEWAX_SOURCE_BATCH_SIZE must be positive")
+    return batch_size
+
+
 def tracked_kafka_source(
     *,
     runtime_status: BytewaxRuntimeStatus | None,
@@ -396,9 +410,13 @@ def tracked_kafka_source(
     topics: list[str],
     starting_offset: int,
     add_config: dict[str, str],
+    batch_size: int,
 ) -> object:
     """Build a KafkaSource that reports real partition assignment readiness."""
     from bytewax.connectors.kafka import KafkaSource
+
+    if batch_size <= 0:
+        raise RuntimeError("Kafka source batch_size must be positive")
 
     if runtime_status is None:
         return KafkaSource(
@@ -406,6 +424,7 @@ def tracked_kafka_source(
             topics=topics,
             starting_offset=starting_offset,
             add_config=add_config,
+            batch_size=batch_size,
         )
     runtime_status.register_source(source_name)
 
@@ -420,6 +439,7 @@ def tracked_kafka_source(
         topics=topics,
         starting_offset=starting_offset,
         add_config=add_config,
+        batch_size=batch_size,
     )
 
 

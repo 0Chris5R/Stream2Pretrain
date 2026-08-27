@@ -1179,6 +1179,7 @@ def build_dataflow(
         topics=[cfg.decisions_topic],
         starting_offset=start_offset,
         add_config=common.kafka_consumer_config(cfg.consumer_group),
+        batch_size=common.kafka_source_batch_size(),
     )
     inp = op.input("docs_curated", flow, source)
 
@@ -1239,6 +1240,7 @@ def build_dataflow(
         topics=[cfg.license_admissions_topic],
         starting_offset=start_offset,
         add_config=common.kafka_consumer_config(f"{cfg.consumer_group}-licenses"),
+        batch_size=common.kafka_source_batch_size(),
     )
     admission_inp = op.input("license_admissions", flow, admission_source)
 

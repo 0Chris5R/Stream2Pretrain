@@ -21,12 +21,14 @@ from processor.common import (
     kafka_consumer_config,
     kafka_payload_max_bytes,
     kafka_producer_config,
+    kafka_source_batch_size,
     kafka_starting_offset,
     load_config,
     new_trace_id,
     run_bytewax_flow,
     silver_dumps,
     silver_loads,
+    tracked_kafka_source,
 )
 from schemas.bronze import BronzeRecord
 from schemas.decon import DeconAttestation
@@ -120,6 +122,49 @@ def test_kafka_payload_limit_requires_framing_headroom(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="must be positive and smaller"):
         kafka_payload_max_bytes()
+
+
+def test_kafka_source_batch_size_defaults_to_one_and_requires_positive(monkeypatch) -> None:
+    monkeypatch.delenv("S2P_BYTEWAX_SOURCE_BATCH_SIZE", raising=False)
+    assert kafka_source_batch_size() == 1
+
+    monkeypatch.setenv("S2P_BYTEWAX_SOURCE_BATCH_SIZE", "4")
+    assert kafka_source_batch_size() == 4
+
+    monkeypatch.setenv("S2P_BYTEWAX_SOURCE_BATCH_SIZE", "0")
+    with pytest.raises(RuntimeError, match="must be positive"):
+        kafka_source_batch_size()
+
+
+def test_tracked_kafka_source_forwards_explicit_batch_bound(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeKafkaSource:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    bytewax_package = ModuleType("bytewax")
+    bytewax_package.__path__ = []  # type: ignore[attr-defined]
+    connectors_package = ModuleType("bytewax.connectors")
+    connectors_package.__path__ = []  # type: ignore[attr-defined]
+    kafka_module = ModuleType("bytewax.connectors.kafka")
+    kafka_module.KafkaSource = FakeKafkaSource  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "bytewax", bytewax_package)
+    monkeypatch.setitem(sys.modules, "bytewax.connectors", connectors_package)
+    monkeypatch.setitem(sys.modules, "bytewax.connectors.kafka", kafka_module)
+
+    tracked_kafka_source(
+        runtime_status=None,
+        source_name="raw_fetched",
+        brokers=["redpanda:9092"],
+        topics=["raw.fetched"],
+        starting_offset=-1000,
+        add_config={"group.id": "fetcher"},
+        batch_size=1,
+    )
+
+    assert captured["batch_size"] == 1
+    assert captured["topics"] == ["raw.fetched"]
 
 
 def test_run_bytewax_flow_initializes_and_reuses_recovery(monkeypatch, tmp_path) -> None:

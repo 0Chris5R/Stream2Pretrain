@@ -82,6 +82,8 @@ spec:
               value: {{ $checkpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
               value: {{ $checkpoint.snapshotSeconds | quote }}
+            - name: S2P_BYTEWAX_SOURCE_BATCH_SIZE
+              value: {{ .Values.processor.fetcher.sourceBatchSize | int | quote }}
             - name: S2P_MAX_RAW_OBJECT_BYTES
               value: "67108864"
             - name: S2P_MAX_EXPANDED_OBJECT_BYTES
@@ -216,6 +218,8 @@ spec:
               value: {{ $canaryCheckpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
               value: {{ $canaryCheckpoint.snapshotSeconds | quote }}
+            - name: S2P_BYTEWAX_SOURCE_BATCH_SIZE
+              value: {{ .Values.processor.fetcher.sourceBatchSize | int | quote }}
             - name: S2P_MAX_RAW_OBJECT_BYTES
               value: "67108864"
             - name: S2P_MAX_EXPANDED_OBJECT_BYTES

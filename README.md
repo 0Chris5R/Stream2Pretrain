@@ -149,6 +149,9 @@ PVCs. Output is keyed by `doc_id`, so a crash between sink delivery and the
 next recovery snapshot can replay a record without creating a second logical
 decision. The Iceberg writer also uses the scoring, classifier, and policy
 revisions to suppress deterministic replay duplicates.
+The processor input batch is explicitly bounded to one record per Kafka
+partition so expensive extraction and classification publish and checkpoint
+continuously instead of inheriting Bytewax's 1,000-record default.
 
 ### Experimental post-training extension
 
