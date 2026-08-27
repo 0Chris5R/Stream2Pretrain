@@ -338,6 +338,13 @@ turns are explicitly loss-masked for SFT. The final answer separates readable
 report text from an exact machine-checkable manifest of claims, evidence,
 equations, numeric results, qualifications, and tool use.
 
+The solver receives only the public instruction, public paper context, allowed
+node types, and output identifiers. Hidden targets and canonical answers never
+enter an SFT prompt. Derivation tasks ask for an ordinary step-by-step
+mathematical argument and final expression; they do not require the learner to
+return evidence-span citations. The hidden evidence links remain provenance for
+construction and audit.
+
 ## 9. Frozen tools and verifier construction
 
 Packaged tools have no network access and operate only on bundled public data:
@@ -362,6 +369,13 @@ budget. Qwen3.8 criticizes the rubric, can perform one bounded repair, and then
 rechecks it under the critic prompt. The standalone verifier is copied into every package
 and imports neither network clients nor model SDKs.
 
+A derivation enters the RL route only when its target is a bounded numeric value
+or a canonical LaTeX expression that the packaged symbolic runtime can parse.
+The verifier checks the submitted target-specific intermediate and final
+equations for symbolic equivalence and checks required derivation order. A
+valuable derivation without such a deterministic oracle remains eligible for
+SFT but cannot be mislabeled as a machine-verifiable RL environment.
+
 ## 10. Acceptance suite
 
 No SFT or RL artifact is accepted from model consensus alone. The suite runs:
@@ -378,6 +392,13 @@ The package includes the actual test-case and mutation JSONL, not a summary
 placeholder. Validation reports retain false-positive and false-negative
 counts, every hard gate, mutation totals, and details. A failed gate rejects the
 artifact rather than weakening the verifier.
+
+The 2026-08-27 content audit established a clean regeneration boundary. Older
+SFT trajectories exposed construction targets in their solver prompt, and the
+older accepted derivation environment checked identifiers rather than the
+mathematics. Those artifacts are audit evidence only and must not enter a
+training export; post-audit SFT and RL artifacts are regenerated under the
+public-prompt and executable-derivation contracts above.
 
 ## 11. Official-artifact oracles
 
