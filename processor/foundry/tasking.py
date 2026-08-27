@@ -393,9 +393,7 @@ class TaskFactory:
                     {"tool": observation.tool, "arguments": observation.arguments}
                 )
                 if signature in failed_tool_requests:
-                    raise TaskOutputError(
-                        "solver repeated the same invalid frozen-tool request"
-                    )
+                    raise TaskOutputError("solver repeated the same invalid frozen-tool request")
                 failed_tool_requests.add(signature)
             executed.extend(observations)
             tool_payload = [value.model_dump(mode="json") for value in observations]
@@ -407,9 +405,7 @@ class TaskFactory:
             )
             turn_index += 1
             if turn_index >= _MAX_SOLVER_TOOL_TURNS:
-                raise TaskOutputError(
-                    "solver exceeded the bounded frozen-tool interaction budget"
-                )
+                raise TaskOutputError("solver exceeded the bounded frozen-tool interaction budget")
             turns.append(TrajectoryTurn(index=len(turns), role="tool", content=tool_payload))
 
 

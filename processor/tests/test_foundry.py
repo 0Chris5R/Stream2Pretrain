@@ -1405,9 +1405,7 @@ def test_daily_run_keeps_only_ranked_limit_and_clears_frozen_queue(tmp_path: Pat
             valid_from=FIXED_TIME,
         )
 
-    run = store.start_daily_run(
-        boundary.date(), boundary_at=boundary, candidate_limit=20
-    )
+    run = store.start_daily_run(boundary.date(), boundary_at=boundary, candidate_limit=20)
 
     assert run["candidate_count"] == 20
     retained = {
