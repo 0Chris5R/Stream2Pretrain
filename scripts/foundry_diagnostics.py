@@ -62,6 +62,28 @@ def main() -> None:
             "SELECT state,COUNT(*) AS count FROM candidate_queue GROUP BY state"
         ).fetchall()
     }
+    daily_runs = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM daily_runs ORDER BY run_date DESC LIMIT 5"
+        ).fetchall()
+    ]
+    latest_run_candidates = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT run_date,rank,doc_id FROM daily_run_candidates
+            WHERE run_date=(SELECT MAX(run_date) FROM daily_run_candidates)
+            ORDER BY rank
+            """
+        ).fetchall()
+    ]
+    manual_runs = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM manual_runs ORDER BY requested_at DESC LIMIT 5"
+        ).fetchall()
+    ]
     verifier_attempts = []
     for row in connection.execute(
         """
@@ -105,6 +127,12 @@ def main() -> None:
         "job_counts": dict(Counter(str(job["state"]) for job in jobs)),
         "artifact_counts": dict(sorted(artifact_counts.items())),
         "candidate_queue": queue,
+        "daily_candidate_limit": int(os.environ.get("S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT", "20")),
+        "daily_not_before_utc": os.environ.get("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC"),
+        "daily_run_hour_utc": int(os.environ.get("S2P_FOUNDRY_DAILY_RUN_HOUR_UTC", "0")),
+        "daily_runs": daily_runs,
+        "latest_daily_run_candidates": latest_run_candidates,
+        "manual_runs": manual_runs,
         "stream_checkpoints": stream_checkpoints,
         "verifier_attempts": verifier_attempts,
         "jobs": jobs,
