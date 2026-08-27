@@ -1445,6 +1445,12 @@ def test_changed_daily_boundary_replaces_same_day_snapshot(tmp_path: Path) -> No
     assert moved["cutoff_at"] == midnight.replace(hour=14).isoformat()
 
 
+def test_foundry_config_parses_daily_not_before_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC", "2026-08-27T14:00:00Z")
+    config = FoundryConfig.from_env()
+    assert config.daily_not_before_utc == datetime(2026, 8, 27, 14, tzinfo=UTC)
+
+
 def test_manual_run_snapshots_queue_and_coalesces_clicks(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     empty, created = store.request_manual_run()

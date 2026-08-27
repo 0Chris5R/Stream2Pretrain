@@ -444,9 +444,18 @@ class WorkerRuntime:
 
         log = structlog.get_logger(component="foundry-queue")
         while not self._drain_stop.wait(self.config.queue_poll_seconds):
-            run_day, boundary_at = _daily_cohort_boundary(
-                datetime.now(UTC), self.config.daily_run_hour_utc
-            )
+            now = datetime.now(UTC)
+            if (
+                self.config.daily_not_before_utc is not None
+                and now < self.config.daily_not_before_utc
+            ):
+                # A schedule migration must not back-run the preceding day's
+                # cohort before its explicitly chosen first boundary.
+                self.store.expire_active_manual_runs(
+                    reason="superseded by scheduled 24-hour cohort"
+                )
+                continue
+            run_day, boundary_at = _daily_cohort_boundary(now, self.config.daily_run_hour_utc)
             existing = self.store.daily_run(run_day)
             boundary_changed = (
                 existing is None or str(existing["cutoff_at"]) != boundary_at.isoformat()

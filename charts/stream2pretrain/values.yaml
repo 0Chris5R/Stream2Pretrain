@@ -416,6 +416,7 @@ processor:
     apiPort: 8092
     dailyRunHourUtc: 14 # 16:00 Europe/Berlin while CEST is active
     dailyCandidateLimit: 20
+    dailyNotBeforeUtc: "2026-08-27T14:00:00Z"
     tasksPerPaper: 6
     acceptedTasksPerPaper: 3
     queuePollSeconds: 10

@@ -124,7 +124,9 @@ a bootstrap policy and will be superseded by a trained artifact-yield ranker
 once reviewed accepted and rejected artifacts provide enough labels.
 
 The production schedule is 14:00 UTC, corresponding to 16:00 Europe/Berlin
-while daylight-saving time is active. The worker processes the frozen rank order serially. A provider-capacity stop
+while daylight-saving time is active. The initial deployment is anchored by
+`S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC=2026-08-27T14:00:00Z`, so changing the run
+hour cannot accidentally back-run the preceding day's cohort. The worker processes the frozen rank order serially. A provider-capacity stop
 does not admit older papers at the next boundary: any unfinished cohort members
 are removed, and only the newly completed 24-hour arrival window may compete.
 New arrivals after the cutoff wait for the next cohort. `Run now` remains a

@@ -43,6 +43,9 @@ def build_app(
         payload["daily_candidate_limit"] = int(
             os.environ.get("S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT", "20")
         )
+        payload["daily_not_before_utc"] = (
+            os.environ.get("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC", "").strip() or None
+        )
         return web.json_response(payload)
 
     async def activity(request: web.Request) -> web.Response:
