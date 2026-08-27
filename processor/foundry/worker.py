@@ -444,15 +444,32 @@ class WorkerRuntime:
 
         log = structlog.get_logger(component="foundry-queue")
         while not self._drain_stop.wait(self.config.queue_poll_seconds):
-            if self._run_pending_manual(log):
-                continue
             run_day, boundary_at = _daily_cohort_boundary(
                 datetime.now(UTC), self.config.daily_run_hour_utc
             )
-            run = self.store.start_daily_run(run_day, boundary_at=boundary_at)
-            if run["state"] in {"completed", "quota_exhausted"}:
+            existing = self.store.daily_run(run_day)
+            boundary_changed = (
+                existing is None or str(existing["cutoff_at"]) != boundary_at.isoformat()
+            )
+            if boundary_changed:
+                expired = self.store.expire_active_manual_runs(
+                    reason="superseded by scheduled 24-hour cohort"
+                )
+                if expired:
+                    log.info(
+                        "foundry_manual_runs_superseded",
+                        count=expired,
+                        run_date=run_day.isoformat(),
+                    )
+            run = self.store.start_daily_run(
+                run_day,
+                boundary_at=boundary_at,
+                candidate_limit=self.config.daily_candidate_limit,
+            )
+            if run["state"] not in {"completed", "quota_exhausted"}:
+                self._run_daily_snapshot(run_day, run, log)
                 continue
-            self._run_daily_snapshot(run_day, run, log)
+            self._run_pending_manual(log)
 
     def _run_pending_manual(self, log: Any) -> bool:
         """Run an active control-plane snapshot at the next safe paper boundary."""

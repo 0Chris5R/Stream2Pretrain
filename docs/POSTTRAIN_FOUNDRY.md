@@ -32,10 +32,10 @@ adaptations:
 4. The former `reasoning_candidate` route is now `posttrain_candidate`.
    Historical snapshots remain readable only through an explicit legacy flag.
    The foundry consumes the new route by default.
-5. Post-training has no fixed paper cap. At the configured UTC boundary it
-   removes unprocessed queue entries older than 24 hours, freezes every
-   candidate received during the preceding 24 hours, and processes that cohort
-   in descending quality rank. New arrivals wait for the next boundary. Work
+5. Post-training uses a configurable daily paper cap, currently 20. At the
+   configured UTC boundary it ranks every candidate received during the
+   preceding 24 hours, freezes the top-scoring cohort, and clears all lower-ranked
+   and older queued candidates. New arrivals wait for the next boundary. Work
    stops only when the cohort is exhausted, provider capacity is unavailable,
    or the next boundary replaces it. Old work never accumulates into a backlog
    that can starve fresh research.
@@ -112,7 +112,9 @@ licence hash, licence ledger, or second legal decision.
 At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC`, a one-replica scheduler commits exactly one
 cohort, including an empty cohort. It first drops unprocessed entries at or
 before the prior 24-hour boundary, then freezes all queued candidates received
-after that boundary and no later than the current boundary. Papers are ranked
+after that boundary and no later than the current boundary, retains the first
+`S2P_FOUNDRY_DAILY_CANDIDATE_LIMIT` papers, and removes the remaining frozen
+queue entries rather than carrying them into tomorrow. Papers are ranked
 by an equal-weight combination of normalized composite quality, education
 quality, scientific structure, extraction completeness, reasoning suitability,
 and the presence of equation, table, and figure evidence. Context length and
@@ -121,7 +123,8 @@ quality, recency, and document ID. The current auditable formula is explicitly
 a bootstrap policy and will be superseded by a trained artifact-yield ranker
 once reviewed accepted and rejected artifacts provide enough labels.
 
-The worker processes the frozen rank order serially. A provider-capacity stop
+The production schedule is 14:00 UTC, corresponding to 16:00 Europe/Berlin
+while daylight-saving time is active. The worker processes the frozen rank order serially. A provider-capacity stop
 does not admit older papers at the next boundary: any unfinished cohort members
 are removed, and only the newly completed 24-hour arrival window may compete.
 New arrivals after the cutoff wait for the next cohort. `Run now` remains a
@@ -345,7 +348,9 @@ Packaged tools have no network access and operate only on bundled public data:
 
 Tool count, result size, and expression structure are bounded. Imports, file
 access, attribute traversal, arbitrary Python execution, and shell execution
-are rejected.
+are rejected. Malformed tool arguments are returned as tool errors, and a
+repeated identical invalid request or eight tool-request turns rejects that
+solver trajectory rather than pinning the paper or daily queue.
 
 A model-authored rubric is compiled into an allowlisted `VerifierSpec`, not
 executed as generated Python. Predicate types cover required nodes, evidence

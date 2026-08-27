@@ -41,6 +41,8 @@ from processor.foundry.tasking import (
     GroundingCritique,
     SolvedTask,
     SolverTurn,
+    TaskFactory,
+    TaskOutputError,
     _normalize_solver_turn_data,
     _solution_contract_violations,
     _validate_or_repair,
@@ -1390,6 +1392,61 @@ def test_daily_run_freezes_even_an_empty_24_hour_cohort(tmp_path: Path) -> None:
     )
 
 
+def test_daily_run_keeps_only_ranked_limit_and_clears_frozen_queue(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    boundary = datetime.now(UTC) + timedelta(seconds=1)
+    for index in range(25):
+        store.enqueue_candidate(
+            doc_id=f"paper-{index:02d}",
+            payload=f"paper-{index:02d}".encode(),
+            reasoning_score=index / 25,
+            quality_score=5.0,
+            ranking_score=index / 25,
+            valid_from=FIXED_TIME,
+        )
+
+    run = store.start_daily_run(
+        boundary.date(), boundary_at=boundary, candidate_limit=20
+    )
+
+    assert run["candidate_count"] == 20
+    retained = {
+        str(row["doc_id"])
+        for row in store._conn.execute(
+            "SELECT doc_id FROM candidate_queue ORDER BY doc_id"
+        ).fetchall()
+    }
+    assert retained == {f"paper-{index:02d}" for index in range(5, 25)}
+    first = store.claim_candidate(
+        cutoff_at=boundary,
+        cutoff_ordinal=int(run["cutoff_ordinal"]),
+        daily_run_date=boundary.date(),
+    )
+    assert first == ("paper-24", b"paper-24")
+
+
+def test_changed_daily_boundary_replaces_same_day_snapshot(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    midnight = datetime(2026, 8, 27, 0, tzinfo=UTC)
+    assert store.start_daily_run(midnight.date(), boundary_at=midnight)["candidate_count"] == 0
+    store.enqueue_candidate(
+        doc_id="afternoon-paper",
+        payload=b"paper",
+        reasoning_score=1.0,
+        quality_score=5.0,
+        valid_from=FIXED_TIME,
+    )
+
+    moved = store.start_daily_run(
+        midnight.date(),
+        boundary_at=midnight.replace(hour=14),
+        candidate_limit=20,
+    )
+
+    assert moved["candidate_count"] == 1
+    assert moved["cutoff_at"] == midnight.replace(hour=14).isoformat()
+
+
 def test_manual_run_snapshots_queue_and_coalesces_clicks(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     empty, created = store.request_manual_run()
@@ -2000,6 +2057,48 @@ def test_frozen_tools_reject_code_execution_without_an_arbitrary_call_cap() -> N
         runtime.symbolic("simplify", "__import__('os').system('id')")
     assert runtime.search("evidence")
     assert runtime.search("evidence")
+
+
+def test_invalid_calculator_syntax_is_a_tool_error() -> None:
+    runtime = PaperRuntime(spans={"s1": "bounded paper evidence"})
+    with pytest.raises(ToolError, match="invalid calculator expression"):
+        runtime.calculator("\\frac{1}{2}")
+
+
+def test_solver_rejects_repeated_invalid_tool_request() -> None:
+    class RepeatingToolControl:
+        def call(self, **_: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            return (
+                {
+                    "status": "tool_request",
+                    "report": None,
+                    "answer_manifest": None,
+                    "tool_calls": [
+                        {
+                            "tool": "calculator",
+                            "arguments": {"expression": "\\frac{1}{2}"},
+                        }
+                    ],
+                },
+                _trace("trace:repeating-tool"),
+            )
+
+    task = _task().model_copy(
+        update={
+            "public_context_policy": _task().public_context_policy.model_copy(
+                update={"tool_access": ["calculator"]}
+            )
+        }
+    )
+    with pytest.raises(TaskOutputError, match="repeated the same invalid"):
+        TaskFactory(RepeatingToolControl())._solve_one(  # type: ignore[arg-type]
+            job_id="job",
+            bundle=_bundle(),
+            graph=_graph(),
+            task=task,
+            role="solver_a",
+            plan="test",
+        )
 
 
 def test_extended_environment_predicates_are_deterministic() -> None:

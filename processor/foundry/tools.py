@@ -113,7 +113,13 @@ class PaperRuntime:
 
     def calculator(self, expression: str) -> float:
         self._consume()
-        tree = ast.parse(expression, mode="eval")
+        try:
+            tree = ast.parse(expression, mode="eval")
+        except SyntaxError as exc:
+            # Provider-authored tool requests are untrusted input. A malformed
+            # calculator expression is a normal tool observation, not a worker
+            # failure that may pin the same paper at the head of the queue.
+            raise ToolError("invalid calculator expression") from exc
         value = _calculate(tree.body)
         if not math.isfinite(value):
             raise ToolError("calculator result is not finite")

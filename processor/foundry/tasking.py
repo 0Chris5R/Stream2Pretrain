@@ -89,6 +89,9 @@ class TaskOutputError(ValueError):
     """A model-authored task artifact remained invalid after one bounded repair."""
 
 
+_MAX_SOLVER_TOOL_TURNS = 8
+
+
 @dataclass(frozen=True, slots=True)
 class SolvedTask:
     task: TaskSpec
@@ -316,6 +319,7 @@ class TaskFactory:
         ]
         traces: list[ProviderTrace] = []
         executed: list[ToolCall] = []
+        failed_tool_requests: set[bytes] = set()
         turn_index = 0
         while True:
             data, trace = self.control.call(
@@ -382,6 +386,17 @@ class TaskFactory:
                     executed,
                 )
             observations = [_execute_tool(runtime, task, call) for call in turn.tool_calls]
+            for observation in observations:
+                if observation.error is None:
+                    continue
+                signature = canonical_json(
+                    {"tool": observation.tool, "arguments": observation.arguments}
+                )
+                if signature in failed_tool_requests:
+                    raise TaskOutputError(
+                        "solver repeated the same invalid frozen-tool request"
+                    )
+                failed_tool_requests.add(signature)
             executed.extend(observations)
             tool_payload = [value.model_dump(mode="json") for value in observations]
             transcript.append(
@@ -391,6 +406,10 @@ class TaskFactory:
                 }
             )
             turn_index += 1
+            if turn_index >= _MAX_SOLVER_TOOL_TURNS:
+                raise TaskOutputError(
+                    "solver exceeded the bounded frozen-tool interaction budget"
+                )
             turns.append(TrajectoryTurn(index=len(turns), role="tool", content=tool_payload))
 
 

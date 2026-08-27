@@ -832,8 +832,11 @@ class FoundryStore:
         day: date,
         *,
         boundary_at: datetime | None = None,
+        candidate_limit: int = 20,
     ) -> dict[str, Any]:
         """Freeze the ranked cohort from the 24 hours ending at ``boundary_at``."""
+        if candidate_limit < 1:
+            raise ValueError("daily candidate limit must be positive")
         now = datetime.now(UTC)
         cutoff_at = boundary_at or now
         if cutoff_at.tzinfo is None:
@@ -856,9 +859,19 @@ class FoundryStore:
                 existing = self._conn.execute(
                     "SELECT * FROM daily_runs WHERE run_date=?", (day_text,)
                 ).fetchone()
-                if existing is not None:
+                if existing is not None and str(existing["cutoff_at"]) == cutoff_at.isoformat():
                     self._conn.commit()
                     return dict(existing)
+                # A changed configured boundary on the same UTC date replaces
+                # the old snapshot once. This is needed when moving the
+                # production schedule without waiting an extra day. The run's
+                # stable date key is retained, while its candidate membership
+                # is rebuilt against the new immutable cutoff.
+                if existing is not None:
+                    self._conn.execute(
+                        "DELETE FROM daily_run_candidates WHERE run_date=?", (day_text,)
+                    )
+                    self._conn.execute("DELETE FROM daily_runs WHERE run_date=?", (day_text,))
                 cutoff_ordinal = int(
                     self._conn.execute(
                         "SELECT value FROM control_sequences WHERE name='candidate_enqueue'"
@@ -880,8 +893,14 @@ class FoundryStore:
                       AND enqueued_at>? AND enqueued_at<=?
                     ORDER BY ranking_score DESC,reasoning_score DESC,quality_score DESC,
                              valid_from DESC,doc_id ASC
+                    LIMIT ?
                     """,
-                    (cutoff_ordinal, window_start.isoformat(), cutoff_at.isoformat()),
+                    (
+                        cutoff_ordinal,
+                        window_start.isoformat(),
+                        cutoff_at.isoformat(),
+                        candidate_limit,
+                    ),
                 ).fetchall()
                 selected_ids = [str(row["doc_id"]) for row in ranked_rows]
                 candidate_count = len(selected_ids)
@@ -913,6 +932,21 @@ class FoundryStore:
                     """,
                     [(day_text, rank, doc_id) for rank, doc_id in enumerate(selected_ids, start=1)],
                 )
+                # The boundary is also the queue reset: candidates that were
+                # eligible for this snapshot but ranked below the configured
+                # cohort do not accumulate into an all-time backlog. Arrivals
+                # after the frozen ordinal remain queued for tomorrow.
+                self._conn.execute(
+                    """
+                    DELETE FROM candidate_queue
+                    WHERE state='queued' AND enqueue_ordinal<=?
+                      AND enqueued_at<=?
+                      AND doc_id NOT IN (
+                        SELECT doc_id FROM daily_run_candidates WHERE run_date=?
+                      )
+                    """,
+                    (cutoff_ordinal, cutoff_at.isoformat(), day_text),
+                )
                 row = self._conn.execute(
                     "SELECT * FROM daily_runs WHERE run_date=?", (day_text,)
                 ).fetchone()
@@ -922,6 +956,19 @@ class FoundryStore:
                 raise
         assert row is not None
         return dict(row)
+
+    def expire_active_manual_runs(self, *, reason: str) -> int:
+        """Stop diagnostic snapshots when a scheduled daily boundary takes ownership."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE manual_runs
+                SET state='failed',completed_at=?,stop_reason=?
+                WHERE state IN ('pending','running')
+                """,
+                (datetime.now(UTC).isoformat(), reason),
+            )
+        return int(cursor.rowcount)
 
     def daily_run(self, day: date) -> dict[str, Any] | None:
         row = self._conn.execute(
