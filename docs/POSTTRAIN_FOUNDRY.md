@@ -32,10 +32,9 @@ adaptations:
 4. The former `reasoning_candidate` route is now `posttrain_candidate`.
    Historical snapshots remain readable only through an explicit legacy flag.
    The foundry consumes the new route by default.
-5. Post-training uses a configurable daily paper cap, currently 20. At the
-   configured UTC boundary it ranks every candidate received during the
-   preceding 24 hours, freezes the top-scoring cohort, and clears all lower-ranked
-   and older queued candidates. New arrivals wait for the next boundary. Work
+5. At the configured UTC boundary, post-training ranks and freezes every candidate
+   received during the preceding 24 hours. There is no daily paper cap. New arrivals
+   wait for the next boundary. Work
    stops only when the cohort is exhausted, provider capacity is unavailable,
    or the next boundary replaces it. Old work never accumulates into a backlog
    that can starve fresh research.
@@ -109,7 +108,8 @@ These conditions rely on the upstream guarantee that only licence-admitted
 Gold records reach `docs.curated`. There is no post-training licence stage,
 licence hash, licence ledger, or second legal decision.
 
-At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC`, a one-replica scheduler commits exactly one
+At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC` and
+`S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC`, a one-replica scheduler commits exactly one
 cohort, including an empty cohort. It first drops unprocessed entries at or
 before the prior 24-hour boundary, then freezes all queued candidates received
 after that boundary and no later than the current boundary. Papers are ranked
@@ -121,9 +121,9 @@ quality, recency, and document ID. The current auditable formula is explicitly
 a bootstrap policy and will be superseded by a trained artifact-yield ranker
 once reviewed accepted and rejected artifacts provide enough labels.
 
-The production schedule is 14:00 UTC, corresponding to 16:00 Europe/Berlin
-while daylight-saving time is active. The initial deployment is anchored by
-`S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC=2026-08-27T14:00:00Z`, so changing the run
+The production schedule is 08:30 UTC, corresponding to 10:30 Europe/Berlin
+while daylight-saving time is active. The deployment is anchored by
+`S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC=2026-08-28T08:30:00Z`, so changing the run
 hour cannot accidentally back-run the preceding day's cohort. The worker processes the entire frozen rank order serially until the next boundary. A provider-capacity stop
 does not admit older papers at the next boundary: any unfinished cohort members
 are removed, and only the newly completed 24-hour arrival window may compete.

@@ -414,8 +414,9 @@ processor:
     image: stream2pretrain/processor-foundry
     replicas: 1
     apiPort: 8092
-    dailyRunHourUtc: 14 # 16:00 Europe/Berlin while CEST is active
-    dailyNotBeforeUtc: "2026-08-27T14:00:00Z"
+    dailyRunHourUtc: 8
+    dailyRunMinuteUtc: 30 # 10:30 Europe/Berlin while CEST is active
+    dailyNotBeforeUtc: "2026-08-28T08:30:00Z"
     tasksPerPaper: 6
     acceptedTasksPerPaper: 3
     queuePollSeconds: 10

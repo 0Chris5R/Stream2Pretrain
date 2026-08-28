@@ -59,7 +59,7 @@ from processor.foundry.verifier import (
     evaluate,
     normalize_spec,
 )
-from processor.foundry.worker import WorkerRuntime
+from processor.foundry.worker import WorkerRuntime, _daily_cohort_boundary
 from processor.sign import AttestationSigner, verify_signature
 from schemas.foundry import (
     AnswerManifest,
@@ -1757,8 +1757,24 @@ def test_changed_daily_boundary_replaces_same_day_snapshot(tmp_path: Path) -> No
 
 def test_foundry_config_parses_daily_not_before_utc(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC", "2026-08-27T14:00:00Z")
+    monkeypatch.setenv("S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC", "30")
     config = FoundryConfig.from_env()
     assert config.daily_not_before_utc == datetime(2026, 8, 27, 14, tzinfo=UTC)
+    assert config.daily_run_minute_utc == 30
+
+
+def test_daily_cohort_boundary_honors_minute() -> None:
+    before = datetime(2026, 8, 28, 8, 29, 59, tzinfo=UTC)
+    after = datetime(2026, 8, 28, 8, 30, 1, tzinfo=UTC)
+
+    assert _daily_cohort_boundary(before, 8, 30) == (
+        date(2026, 8, 27),
+        datetime(2026, 8, 27, 8, 30, tzinfo=UTC),
+    )
+    assert _daily_cohort_boundary(after, 8, 30) == (
+        date(2026, 8, 28),
+        datetime(2026, 8, 28, 8, 30, tzinfo=UTC),
+    )
 
 
 def test_manual_run_snapshots_queue_and_coalesces_clicks(tmp_path: Path) -> None:

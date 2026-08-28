@@ -455,7 +455,11 @@ class WorkerRuntime:
                     reason="superseded by scheduled 24-hour cohort"
                 )
                 continue
-            run_day, boundary_at = _daily_cohort_boundary(now, self.config.daily_run_hour_utc)
+            run_day, boundary_at = _daily_cohort_boundary(
+                now,
+                self.config.daily_run_hour_utc,
+                self.config.daily_run_minute_utc,
+            )
             existing = self.store.daily_run(run_day)
             boundary_changed = (
                 existing is None or str(existing["cutoff_at"]) != boundary_at.isoformat()
@@ -492,7 +496,9 @@ class WorkerRuntime:
         cutoff_ordinal = int(run["cutoff_ordinal"])
         while not self._drain_stop.is_set():
             current_day, _ = _daily_cohort_boundary(
-                datetime.now(UTC), getattr(self.config, "daily_run_hour_utc", 0)
+                datetime.now(UTC),
+                getattr(self.config, "daily_run_hour_utc", 0),
+                getattr(self.config, "daily_run_minute_utc", 0),
             )
             if current_day > run_day:
                 self.store.finish_daily_run(
@@ -721,12 +727,14 @@ def _candidate_ranking_score(record: GoldRecord) -> float:
     return sum(signals) / len(signals)
 
 
-def _daily_cohort_boundary(now: datetime, hour_utc: int) -> tuple[date, datetime]:
+def _daily_cohort_boundary(
+    now: datetime, hour_utc: int, minute_utc: int = 0
+) -> tuple[date, datetime]:
     """Return the most recent configured UTC cohort boundary."""
     if now.tzinfo is None:
         raise ValueError("daily cohort clock must be timezone-aware")
     utc_now = now.astimezone(UTC)
-    boundary = utc_now.replace(hour=hour_utc, minute=0, second=0, microsecond=0)
+    boundary = utc_now.replace(hour=hour_utc, minute=minute_utc, second=0, microsecond=0)
     if utc_now < boundary:
         boundary -= timedelta(days=1)
     return boundary.date(), boundary

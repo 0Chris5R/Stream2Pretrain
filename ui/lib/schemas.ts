@@ -806,6 +806,7 @@ export const FoundryDashboardSchema = z.object({
   models: z.array(FoundryModelSchema),
   human_audits: z.record(z.string(), z.number().int().nonnegative()),
   daily_run_hour_utc: z.number().int().min(0).max(23),
+  daily_run_minute_utc: z.number().int().min(0).max(59),
   queued_candidates: z.number().int().nonnegative(),
   daily_runs: z.array(
     z.object({
