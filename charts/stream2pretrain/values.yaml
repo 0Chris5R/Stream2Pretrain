@@ -59,7 +59,6 @@ redpanda:
     curationDecisionsSmoke: curation.decisions.smoke
     licenseAdmissions: license.admissions
     licenseAdmissionsSmoke: license.admissions.smoke
-    deconAttest: decon.attest
     foundryJobs: foundry.jobs
     foundryEvents: foundry.events
     foundryArtifacts: foundry.artifacts
@@ -74,7 +73,6 @@ minio:
     bronze: s2p-bronze
     silver: s2p-silver
     gold: s2p-gold
-    decon: s2p-decon
     posttrain: s2p-posttrain
     state: s2p-state
   credentialsSecret: stream2pretrain-minio
@@ -281,11 +279,16 @@ processor:
     # immutable classifiers are isolated behind modelService so the local RWO
     # checkpoint never pins multi-GB model memory or image layers to one node.
     image: stream2pretrain/processor
+    scoringVersion: pretrain-content-v2
     sourceBatchSize: 1
     replicas: 1
     requireRealModels: true
     doclingEnabled: false
     usePresidio: true
+    # Two segments per RPC keeps request overhead bounded while the six-way
+    # curator pool can distribute independent batches across all ready model
+    # replicas. Increase only after the documented memory/latency benchmark.
+    classifierBatchSize: 2
     resources:
       # The retained deduplication/recovery state was measured at about 1.8 GiB
       # before Python and request buffers. A 2 GiB ceiling OOM-killed the live
@@ -315,25 +318,42 @@ processor:
     enabled: true
     replicas: 1
     port: 8094
+    maxBatchItems: 2
     # Each real-model family has an independent image and runtime boundary.
     # This avoids a monolithic multi-GB image/process and lets Kubernetes
     # schedule or scale the resources each backend actually consumes.
     profiles:
-      quality:
+      # The immutable image contains both pinned quality artifacts, but each
+      # runtime loads exactly one. This avoids a shared process lock and lets
+      # FinePDFs and FineWeb scale independently without duplicating image
+      # layers on a node.
+      finepdfs:
+        runtimeProfile: finepdfs
         image: stream2pretrain/processor-quality-model
+        autoscaling:
+          minReplicas: 2
+          maxReplicas: 3
         resources:
-          requests: {cpu: 1, memory: 2Gi}
+          requests: {cpu: 1, memory: 1Gi}
+          limits: {cpu: 2, memory: 3Gi}
+      fineweb:
+        runtimeProfile: fineweb
+        image: stream2pretrain/processor-quality-model
+        autoscaling:
+          minReplicas: 2
+          maxReplicas: 3
+        resources:
+          requests: {cpu: 1, memory: 1Gi}
           limits: {cpu: 2, memory: 3Gi}
       kenlm:
+        runtimeProfile: kenlm
         image: stream2pretrain/processor-kenlm-model
+        autoscaling:
+          minReplicas: 1
+          maxReplicas: 3
         resources:
           requests: {cpu: 500m, memory: 1Gi}
           limits: {cpu: 2, memory: 3Gi}
-      embedding:
-        image: stream2pretrain/processor-embedding-model
-        resources:
-          requests: {cpu: 250m, memory: 512Mi}
-          limits: {cpu: 1, memory: 1Gi}
     autoscaling:
       enabled: true
       minReplicas: 1
@@ -372,6 +392,7 @@ processor:
     replicas: 1
     apiPort: 8090
     goldRelation: gold
+    activeScoringVersion: pretrain-content-v2
     # Bound catalog staleness while avoiding one Polaris metadata reload for
     # every aggregate in a single dashboard request.
     catalogRefreshSeconds: 30
@@ -384,31 +405,6 @@ processor:
     resources:
       requests: {cpu: 100m, memory: 512Mi}
       limits: {cpu: 1, memory: 1Gi}
-  deconGate:
-    image: stream2pretrain/decon-gate
-    replicas: 1
-    apiPort: 8081
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
-    benchmarks:
-      - mmlu
-      - gsm8k
-      - humaneval
-      - math
-      - gpqa
-    bloomBits: 33
-    bloomHashes: 7
-    signingKeySecret: stream2pretrain-decon-signing
-    signingKeyKey: ed25519.key
-    signingCertKey: ed25519.crt
-    benchmarkSetVersion: v2026-06-01
-    benchmarkCorpus:
-      configMap: stream2pretrain-decon-benchmarks
-      secret: ""
-      kind: restricted_reserve
-      fileName: corpus.json
-      mountPath: /etc/stream2pretrain/decon
   foundry:
     enabled: true
     image: stream2pretrain/processor-foundry
@@ -425,7 +421,7 @@ processor:
     providerSecret: stream2pretrain-foundry-providers
     controlTokenKey: controlToken
     hetznerKey: HETZNER_INFERENCE_API_KEY
-    signingKeySecret: stream2pretrain-decon-signing
+    signingKeySecret: stream2pretrain-foundry-signing
     signingKeyKey: ed25519.key
     signingCertKey: ed25519.crt
     hetznerModels:

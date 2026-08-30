@@ -9,12 +9,56 @@ test substitute, not a production topology.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pyiceberg.catalog import Catalog
 
     from processor.common import ProcessorConfig
+
+
+DEFAULT_METADATA_VERSIONS = 20
+DEFAULT_SNAPSHOT_RETENTION_HOURS = 168
+DEFAULT_MIN_SNAPSHOTS_TO_KEEP = 10
+
+
+def iceberg_maintenance_properties() -> dict[str, str]:
+    """Return the shared table policy with scheduled cleanup as sole owner."""
+    metadata_versions = _positive_int_env(
+        "S2P_ICEBERG_METADATA_VERSIONS", DEFAULT_METADATA_VERSIONS
+    )
+    retention_hours = _positive_int_env(
+        "S2P_ICEBERG_SNAPSHOT_RETENTION_HOURS",
+        DEFAULT_SNAPSHOT_RETENTION_HOURS,
+    )
+    minimum_snapshots = _positive_int_env(
+        "S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP",
+        DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
+    )
+    return {
+        # Immediate PyIceberg cleanup used to race the hourly maintenance job
+        # and made transient MinIO DNS failures part of every hot append.
+        # Retention remains identical; the maintenance CronJob is now the only
+        # component that physically removes obsolete metadata JSON files.
+        "write.metadata.delete-after-commit.enabled": "false",
+        "write.metadata.previous-versions-max": str(metadata_versions),
+        "history.expire.max-snapshot-age-ms": str(retention_hours * 60 * 60 * 1000),
+        "history.expire.min-snapshots-to-keep": str(minimum_snapshots),
+    }
+
+
+def ensure_iceberg_maintenance_properties(table: Any) -> None:
+    """Reconcile one existing table to the shared retention policy."""
+    current = getattr(table, "properties", {})
+    changed = {
+        key: value
+        for key, value in iceberg_maintenance_properties().items()
+        if current.get(key) != value
+    }
+    if not changed:
+        return
+    with table.transaction() as txn:
+        txn.set_properties(**changed)
 
 
 def load_runtime_catalog(cfg: ProcessorConfig | None = None) -> Catalog:
@@ -67,6 +111,8 @@ def _polaris_properties(cfg: ProcessorConfig | None) -> dict[str, str]:
         "s3.access-key-id": _cfg_or_env(cfg, "minio_access_key", "MINIO_ACCESS_KEY"),
         "s3.secret-access-key": _cfg_or_env(cfg, "minio_secret_key", "MINIO_SECRET_KEY"),
         "s3.region": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        "s3.connect-timeout": os.environ.get("S2P_S3_CONNECT_TIMEOUT_SECONDS", "10"),
+        "s3.request-timeout": os.environ.get("S2P_S3_REQUEST_TIMEOUT_SECONDS", "60"),
         "py-io-impl": "pyiceberg.io.pyarrow.PyArrowFileIO",
     }
     token = cfg.polaris_token if cfg is not None else os.environ.get("POLARIS_TOKEN")
@@ -100,4 +146,18 @@ def _required_env(name: str) -> str:
     return value
 
 
-__all__ = ["load_runtime_catalog"]
+def _positive_int_env(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return value
+
+
+__all__ = [
+    "DEFAULT_METADATA_VERSIONS",
+    "DEFAULT_MIN_SNAPSHOTS_TO_KEEP",
+    "DEFAULT_SNAPSHOT_RETENTION_HOURS",
+    "ensure_iceberg_maintenance_properties",
+    "iceberg_maintenance_properties",
+    "load_runtime_catalog",
+]

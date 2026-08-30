@@ -47,7 +47,7 @@
         "authSecret": {"type": "string"},
         "topics": {
           "type": "object",
-          "required": ["rawFetched", "smokeRaw", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "docsCuratedSmoke", "curationDecisions", "curationDecisionsSmoke", "licenseAdmissions", "licenseAdmissionsSmoke", "deconAttest", "foundryJobs", "foundryEvents", "foundryArtifacts"],
+          "required": ["rawFetched", "smokeRaw", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "docsCuratedSmoke", "curationDecisions", "curationDecisionsSmoke", "licenseAdmissions", "licenseAdmissionsSmoke", "foundryJobs", "foundryEvents", "foundryArtifacts"],
           "properties": {
             "rawFetched": {"type": "string"},
             "smokeRaw": {"type": "string"},
@@ -59,7 +59,6 @@
             "curationDecisionsSmoke": {"type": "string"},
             "licenseAdmissions": {"type": "string"},
             "licenseAdmissionsSmoke": {"type": "string"},
-            "deconAttest": {"type": "string"},
             "foundryJobs": {"type": "string"},
             "foundryEvents": {"type": "string"},
             "foundryArtifacts": {"type": "string"}
@@ -75,12 +74,11 @@
         "region": {"type": "string"},
         "buckets": {
           "type": "object",
-          "required": ["bronze", "silver", "gold", "decon", "posttrain", "state"],
+          "required": ["bronze", "silver", "gold", "posttrain", "state"],
           "properties": {
             "bronze": {"type": "string"},
             "silver": {"type": "string"},
             "gold": {"type": "string"},
-            "decon": {"type": "string"},
             "posttrain": {"type": "string"},
             "state": {"type": "string"}
           }
@@ -233,7 +231,7 @@
     },
     "processor": {
       "type": "object",
-      "required": ["fetcher", "curate", "iceberg"],
+      "required": ["fetcher", "curate", "iceberg", "duckdbApi"],
       "properties": {
         "fetcher": {
           "type": "object",
@@ -276,10 +274,11 @@
         },
         "curate": {
           "type": "object",
-          "required": ["replicas", "sourceBatchSize", "checkpoint"],
+          "required": ["replicas", "sourceBatchSize", "scoringVersion", "checkpoint"],
           "properties": {
             "replicas": {"type": "integer", "const": 1},
             "sourceBatchSize": {"type": "integer", "minimum": 1},
+            "scoringVersion": {"type": "string", "minLength": 1},
             "checkpoint": {
               "type": "object",
               "required": ["storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
@@ -309,6 +308,13 @@
                 "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
               }
             }
+          }
+        },
+        "duckdbApi": {
+          "type": "object",
+          "required": ["activeScoringVersion"],
+          "properties": {
+            "activeScoringVersion": {"type": "string", "minLength": 1}
           }
         }
       }

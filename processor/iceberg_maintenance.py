@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import time
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -21,14 +22,17 @@ from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from processor import common
-from processor.iceberg_catalog import load_runtime_catalog
+from processor.iceberg_catalog import (
+    DEFAULT_SNAPSHOT_RETENTION_HOURS,
+    ensure_iceberg_maintenance_properties,
+    iceberg_maintenance_properties,
+    load_runtime_catalog,
+)
 
 _METADATA_FILE_RE = re.compile(r"(?:^|/)(\d+)-[^/]+\.metadata\.json$")
-DEFAULT_SNAPSHOT_RETENTION_HOURS = 168
-DEFAULT_METADATA_VERSIONS = 20
-DEFAULT_MIN_SNAPSHOTS_TO_KEEP = 10
 _DEFAULT_TABLES = (
     "curated",
     "curation_decisions",
@@ -48,37 +52,11 @@ class ObjectInfo:
 
 
 def _maintenance_properties() -> dict[str, str]:
-    retention_hours = int(
-        os.environ.get(
-            "S2P_ICEBERG_SNAPSHOT_RETENTION_HOURS",
-            DEFAULT_SNAPSHOT_RETENTION_HOURS,
-        )
-    )
-    metadata_versions = int(
-        os.environ.get("S2P_ICEBERG_METADATA_VERSIONS", DEFAULT_METADATA_VERSIONS)
-    )
-    minimum_snapshots = int(
-        os.environ.get("S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP", DEFAULT_MIN_SNAPSHOTS_TO_KEEP)
-    )
-    if min(retention_hours, metadata_versions, minimum_snapshots) < 1:
-        raise ValueError("Iceberg maintenance limits must be at least 1")
-    return {
-        "write.metadata.delete-after-commit.enabled": "true",
-        "write.metadata.previous-versions-max": str(metadata_versions),
-        "history.expire.max-snapshot-age-ms": str(retention_hours * 60 * 60 * 1000),
-        "history.expire.min-snapshots-to-keep": str(minimum_snapshots),
-    }
+    return iceberg_maintenance_properties()
 
 
 def _ensure_maintenance_properties(table: Any) -> None:
-    current = getattr(table, "properties", {})
-    changed = {
-        key: value for key, value in _maintenance_properties().items() if current.get(key) != value
-    }
-    if not changed:
-        return
-    with table.transaction() as txn:
-        txn.set_properties(**changed)
+    ensure_iceberg_maintenance_properties(table)
 
 
 def _s3_location(value: str) -> tuple[str, str]:
@@ -129,15 +107,44 @@ def _cleanup_candidates(
 
 
 def _delete_objects(s3: Any, *, bucket: str, objects: list[ObjectInfo]) -> None:
+    benign_codes = {"NoSuchKey", "NoSuchObject", "NotFound"}
+    retryable_codes = {"InternalError", "RequestTimeout", "ServiceUnavailable", "SlowDown"}
+    max_attempts = 5
     for offset in range(0, len(objects), 1000):
-        batch = objects[offset : offset + 1000]
-        response = s3.delete_objects(
-            Bucket=bucket,
-            Delete={"Objects": [{"Key": item.key} for item in batch], "Quiet": True},
-        )
-        errors = response.get("Errors", [])
-        if errors:
-            raise RuntimeError(f"MinIO rejected metadata deletions: {errors[:3]}")
+        pending = {item.key for item in objects[offset : offset + 1000]}
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = s3.delete_objects(
+                    Bucket=bucket,
+                    Delete={
+                        "Objects": [{"Key": key} for key in sorted(pending)],
+                        "Quiet": True,
+                    },
+                )
+            except ClientError as exc:
+                code = str(exc.response.get("Error", {}).get("Code", ""))
+                if code in benign_codes:
+                    break
+                if code not in retryable_codes or attempt == max_attempts:
+                    raise
+            else:
+                errors = response.get("Errors", [])
+                fatal = [error for error in errors if str(error.get("Code")) not in retryable_codes]
+                fatal = [error for error in fatal if str(error.get("Code")) not in benign_codes]
+                if fatal:
+                    raise RuntimeError(f"MinIO rejected metadata deletions: {fatal[:3]}")
+                pending = {
+                    str(error.get("Key"))
+                    for error in errors
+                    if str(error.get("Code")) in retryable_codes and error.get("Key")
+                }
+                if not pending:
+                    break
+                if attempt == max_attempts:
+                    raise RuntimeError(
+                        f"MinIO metadata deletions remained retryable after {max_attempts} attempts"
+                    )
+            time.sleep(min(2 ** (attempt - 1), 8))
 
 
 def _latest_metadata_location(
@@ -256,6 +263,21 @@ def _maintain_table(
         older_than=metadata_cutoff,
     )
     if apply:
+        # A writer can commit between the first catalog load and object list.
+        # Reload immediately before deletion and protect the newest catalog
+        # view as well. The 24-hour age floor remains a second safety barrier.
+        table = catalog.load_table((namespace, table_name))
+        fresh_bucket, fresh_protected = _protected_metadata(table)
+        if fresh_bucket != bucket:
+            raise RuntimeError(
+                f"{namespace}.{table_name} moved to bucket {fresh_bucket} during maintenance"
+            )
+        protected.update(fresh_protected)
+        candidates = _cleanup_candidates(
+            candidates,
+            protected_keys=protected,
+            older_than=metadata_cutoff,
+        )
         _delete_objects(s3, bucket=bucket, objects=candidates)
 
     return {
@@ -267,6 +289,9 @@ def _maintain_table(
         "protected_metadata_files": len(protected),
         "unreferenced_metadata_files": len(candidates),
         "unreferenced_metadata_bytes": sum(item.size for item in candidates),
+        "oldest_unreferenced_metadata_at": (
+            min(item.last_modified for item in candidates).isoformat() if candidates else None
+        ),
     }
 
 
@@ -319,7 +344,12 @@ def main() -> None:
         aws_access_key_id=cfg.minio_access_key,
         aws_secret_access_key=cfg.minio_secret_key,
         region_name="us-east-1",
-        config=Config(s3={"addressing_style": "path"}),
+        config=Config(
+            retries={"max_attempts": 5, "mode": "standard"},
+            connect_timeout=10,
+            read_timeout=60,
+            s3={"addressing_style": "path"},
+        ),
     )
     namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
         "ICEBERG_NAMESPACE", "gold"

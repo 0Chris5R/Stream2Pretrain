@@ -37,10 +37,7 @@ export default function DatasetsPage() {
   const [dateTo, setDateTo] = useState(day(0));
   const [routes, setRoutes] = useState(['pretrain', 'posttrain_candidate']);
   const [source, setSource] = useState('');
-  const [sourceFormat, setSourceFormat] = useState('');
-  const [tags, setTags] = useState<string[]>([]);
-  const [minEdu, setMinEdu] = useState('');
-  const [minQuality, setMinQuality] = useState('');
+  const [contentTag, setContentTag] = useState('');
   const [includeStructured, setIncludeStructured] = useState(true);
   const [format, setFormat] = useState<'jsonl' | 'parquet'>('jsonl');
   const query = useMemo(() => {
@@ -50,13 +47,10 @@ export default function DatasetsPage() {
       include_structured: String(includeStructured),
     });
     routes.forEach((route) => value.append('route', route));
-    tags.forEach((tag) => value.append('tag', tag));
+    if (contentTag) value.set('tag', contentTag);
     if (source) value.set('source', source);
-    if (sourceFormat) value.set('source_format', sourceFormat);
-    if (minEdu) value.set('min_edu', minEdu);
-    if (minQuality) value.set('min_quality', minQuality);
     return value.toString();
-  }, [dateFrom, dateTo, routes, source, sourceFormat, tags, minEdu, minQuality, includeStructured]);
+  }, [dateFrom, dateTo, routes, source, contentTag, includeStructured]);
   const summary = useQuery({
     queryKey: queryKeys.dataset(query),
     queryFn: () => fetchSummary(query),
@@ -67,11 +61,6 @@ export default function DatasetsPage() {
   function toggleRoute(route: string) {
     setRoutes((current) =>
       current.includes(route) ? current.filter((item) => item !== route) : [...current, route],
-    );
-  }
-  function toggleTag(tag: string) {
-    setTags((current) =>
-      current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag],
     );
   }
   function downloadManifest() {
@@ -129,52 +118,28 @@ export default function DatasetsPage() {
                 {facets.data?.sources.map((item) => <option key={item}>{item}</option>)}
               </select>
             </Field>
-            <Field label="Format">
+            <Field label="Content tag">
               <select
                 className="h-10 w-full rounded-md border bg-background px-3 text-sm"
-                value={sourceFormat}
-                onChange={(event) => setSourceFormat(event.target.value)}
+                value={contentTag}
+                onChange={(event) => setContentTag(event.target.value)}
               >
-                <option value="">All formats</option>
-                {facets.data?.source_formats.map((item) => <option key={item}>{item}</option>)}
+                <option value="">All content</option>
+                {facets.data?.content_tags.map((item) => (
+                  <option key={item} value={item}>
+                    {item.replaceAll('_', ' ')}
+                  </option>
+                ))}
               </select>
             </Field>
           </div>
-          <div className="grid gap-3 lg:grid-cols-[2fr_2fr_1fr_1fr]">
+          <div>
             <ChipField
               label="Routes"
               values={['pretrain', 'posttrain_candidate']}
               selected={routes}
               toggle={toggleRoute}
             />
-            <ChipField
-              label="Content"
-              values={facets.data?.content_tags ?? []}
-              selected={tags}
-              toggle={toggleTag}
-            />
-            <Field label="Min source quality">
-              <Input
-                type="number"
-                min="0"
-                max="5"
-                step="0.1"
-                placeholder="0.0"
-                value={minEdu}
-                onChange={(event) => setMinEdu(event.target.value)}
-              />
-            </Field>
-            <Field label="Min composite">
-              <Input
-                type="number"
-                min="0"
-                max="5"
-                step="0.1"
-                placeholder="0.0"
-                value={minQuality}
-                onChange={(event) => setMinQuality(event.target.value)}
-              />
-            </Field>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
             <div className="flex flex-wrap gap-4">
@@ -234,7 +199,6 @@ export default function DatasetsPage() {
           <CardContent className="space-y-3 text-sm">
             <SelectionRow label="Window" value={`${dateFrom} to ${dateTo}`} />
             <SelectionRow label="Routes" value={routes.join(', ') || 'none'} />
-            <SelectionRow label="Safety" value="Risk tier 1, no rejections" />
             <SelectionRow label="Licences" value="Strict allowlist" />
           </CardContent>
         </Card>

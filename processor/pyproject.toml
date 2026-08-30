@@ -112,11 +112,6 @@ quality-service = [
     "torch>=2.3,<3",
     "safetensors>=0.4",
 ]
-embedding-service = [
-    "onnxruntime>=1.18",
-    "transformers>=4.40",
-    "tokenizers>=0.19",
-]
 kenlm-service = [
     "huggingface-hub>=0.24",
     "sentencepiece>=0.2",
@@ -176,7 +171,6 @@ s2p-curate = "processor.curate:main"
 s2p-curator-model-service = "processor.model_service:main"
 s2p-iceberg-writer = "processor.iceberg_writer:main"
 s2p-iceberg-maintenance = "processor.iceberg_maintenance:main"
-s2p-decon-api = "processor.decon_api:main"
 s2p-duckdb-api = "processor.duckdb_api:main"
 s2p-local-sources-api = "processor.local_sources_api:main"
 s2p-mixture-controller = "processor.mixture_controller.controller:main"

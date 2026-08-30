@@ -74,52 +74,12 @@
       "id": 4,
       "type": "histogram",
       "title": "Quality score distribution (FineWeb-Edu)",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
           "expr": "sum by (le) (rate(s2p_quality_score_bucket{namespace=\"$namespace\"}[5m]))",
           "format": "heatmap",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 5,
-      "type": "stat",
-      "title": "Decon flag rate (last 5m)",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [
-        {
-          "expr": "sum(rate(s2p_decon_flagged_total{namespace=\"$namespace\"}[5m])) / clamp_min(sum(rate(s2p_decon_checked_total{namespace=\"$namespace\"}[5m])), 1)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 0.01},
-              {"color": "red", "value": 0.05}
-            ]
-          }
-        }
-      }
-    },
-    {
-      "id": 6,
-      "type": "timeseries",
-      "title": "Decon flags by benchmark",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [
-        {
-          "expr": "sum by (benchmark) (rate(s2p_decon_flagged_total{namespace=\"$namespace\"}[5m]))",
-          "legendFormat": "{{benchmark}}",
           "refId": "A"
         }
       ]

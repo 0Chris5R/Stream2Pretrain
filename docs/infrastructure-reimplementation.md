@@ -25,8 +25,8 @@ Measurements were taken from the existing DHBW k3s cluster on 2026-08-15.
 - Persistent claims: MinIO 10 GiB, Prometheus 10 GiB, Redpanda 50 GiB, curator
   checkpoint 20 GiB.
 - Redpanda: one broker, one partition and one replica per application topic.
-- Topic high-watermarks: `raw.fetched=113216`, `docs.normalized=113216`,
-  `docs.curated=0`, `decon.attest=0`.
+- Topic high-watermarks: `raw.fetched=113216`, `docs.normalized=113216`, and
+  `docs.curated=0`.
 - Application images exist only in the control-plane node's containerd store.
 - Polaris 1.7.0 is running with in-memory persistence. Catalog recovery after a
   pod replacement is therefore not guaranteed.
@@ -94,7 +94,7 @@ Only reversible, targeted changes were applied to the existing cluster:
   replay. At final read-only verification, both high-watermarks had continued
   to 113756.
 
-The fetcher path is working. `docs.curated` and `decon.attest` remain at zero.
+The fetcher path is working. `docs.curated` remains at zero.
 A local evaluation of five captured Silver records measured two rejection
 reasons on every record: `c4_nopunc_filter` and `license_excluded`. All five had
 missing SPDX metadata. This is a data and curation-policy mismatch, not a cloud
@@ -118,8 +118,8 @@ format.
 
 1. Add reproducible AMD64 image publication or distribute identical image
    digests to every worker.
-2. Supply externally managed MinIO, Polaris, Grafana, source-token, signing, and
-   benchmark-corpus credentials.
+2. Supply externally managed MinIO, Polaris, Grafana, source-token, and signing
+   credentials.
 3. Recreate the four stateless workloads with legacy immutable selectors during
    an approved maintenance window.
 4. Plan the curator StatefulSet and checkpoint PVC migration separately.

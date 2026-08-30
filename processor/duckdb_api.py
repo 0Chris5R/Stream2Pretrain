@@ -18,12 +18,15 @@ from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
 from ingest.common.license_admission import LICENSE_POLICY_REVISION, PERMISSIVE_TRAINING_LICENSES
+from processor.content_policy import CONTENT_POLICY_GENERATION
 
 _RELATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 _TRAINING_LICENSE_SQL = ", ".join(
     f"'{value.replace(chr(39), chr(39) * 2)}'" for value in sorted(PERMISSIVE_TRAINING_LICENSES)
 )
 _LICENSE_POLICY_SQL = LICENSE_POLICY_REVISION.replace("'", "''")
+_ACTIVE_CONTENT_GENERATION = os.environ.get("S2P_ACTIVE_SCORING_VERSION", CONTENT_POLICY_GENERATION)
+_ACTIVE_CONTENT_GENERATION_SQL = _ACTIVE_CONTENT_GENERATION.replace("'", "''")
 _REMOVED_CORPUS_SOURCES = (
     "github-events",
     "github-releases",
@@ -78,6 +81,7 @@ def _current_decision_predicate(
     )
     return (
         f"{_visible_source_predicate(source_column, include_fixtures=include_fixtures)} "
+        f"AND scoring_version = '{_ACTIVE_CONTENT_GENERATION_SQL}' "
         f"AND NOT ({historical})"
     )
 
@@ -157,7 +161,7 @@ class DuckDBQueryService:
         FROM {self._gold}
         WHERE valid_from <= CAST(? AS TIMESTAMP)
           AND (valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP))
-          AND {_visible_source_predicate()}
+          AND {_current_decision_predicate()}
         GROUP BY source_feed
         ORDER BY tokens DESC, source_feed ASC
         """
@@ -566,11 +570,12 @@ class DuckDBQueryService:
           SELECT
             doc_id, text, source_feed, source_format, lang, valid_from,
             quality_score, edu_score, structural_quality_score, reasoning_score,
-            benchmark_score, perplexity, risk_tier, route,
+            perplexity, risk_tier, route,
             COALESCE(training_usage, 'pretrain_and_posttrain') AS training_usage,
             content_tags, reject_reasons, source_word_count, training_word_count,
             included_section_count, excluded_section_count, figure_count,
             table_count, equation_count, citation_count,
+            scoring_version,
             scientific_artifact_s3_uri,
             FALSE AS admission_only
           FROM {self._decisions}
@@ -587,7 +592,6 @@ class DuckDBQueryService:
             0.0 AS edu_score,
             0.0 AS structural_quality_score,
             0.0 AS reasoning_score,
-            0.0 AS benchmark_score,
             0.0 AS perplexity,
             3 AS risk_tier,
             'quarantine' AS route,
@@ -605,6 +609,7 @@ class DuckDBQueryService:
             0 AS table_count,
             0 AS equation_count,
             0 AS citation_count,
+            '{_ACTIVE_CONTENT_GENERATION_SQL}' AS scoring_version,
             CAST(NULL AS VARCHAR) AS scientific_artifact_s3_uri,
             TRUE AS admission_only
           FROM {self._license_admissions} AS admission
@@ -628,7 +633,6 @@ class DuckDBQueryService:
           edu_score,
           structural_quality_score,
           reasoning_score,
-          benchmark_score,
           perplexity,
           risk_tier,
           route,
@@ -782,7 +786,7 @@ class DuckDBQueryService:
         SELECT
           doc_id, text, source_feed, source_format, CAST(valid_from AS VARCHAR) AS valid_from,
           route, content_tags, quality_score, edu_score, structural_quality_score,
-          reasoning_score, benchmark_score, tokens, policy_revision, scoring_version,
+          reasoning_score, tokens, policy_revision, scoring_version,
           classifier_revision, projection_version, scientific_artifact_s3_uri
           , spdx_license, spdx_license_source
         FROM {self._decisions}
@@ -845,8 +849,7 @@ class DuckDBQueryService:
             f"""
             SELECT DISTINCT
               policy_revision, scoring_version, classifier_revision, classifier_backend,
-              projection_version, extraction_pipeline, benchmark_set_version,
-              decon_embedding_revision, pii_scanner_revision, lang_detector_revision,
+              projection_version, extraction_pipeline, pii_scanner_revision, lang_detector_revision,
               tokenizer_revision, perplexity_scorer, minhash_backend, lsh_backend
             FROM {self._decisions}
             {where}
@@ -865,8 +868,6 @@ class DuckDBQueryService:
             "classifier_backend",
             "projection_version",
             "extraction_pipeline",
-            "benchmark_set_version",
-            "decon_embedding_revision",
             "pii_scanner_revision",
             "lang_detector_revision",
             "tokenizer_revision",
@@ -976,7 +977,7 @@ class DuckDBQueryService:
           doc_id, TRIM(LEADING '# ' FROM SPLIT_PART(text, '\n', 1)) AS title,
           text, source_feed, source_format, lang, CAST(valid_from AS VARCHAR) AS valid_from,
           quality_score, edu_score, risk_tier, reject_reasons, pii_flags,
-          contaminated_with, extraction_pipeline, classifier_revision, classifier_backend,
+          extraction_pipeline, classifier_revision, classifier_backend,
           scoring_version, policy_revision, license, license_source,
           spdx_license, spdx_license_source,
           COALESCE(training_usage, 'pretrain_and_posttrain') AS training_usage,
@@ -987,7 +988,7 @@ class DuckDBQueryService:
           perplexity_scorer, near_duplicate, near_dup_cluster_id,
           minhash_backend, minhash_num_perms, lsh_backend,
           structural_quality_score, extraction_completeness, reasoning_score,
-          benchmark_score, route, eligible_routes, route_reasons, content_tags,
+          route, eligible_routes, route_reasons, content_tags,
           segment_scores_json, projection_version, source_word_count,
           training_word_count, included_section_count, excluded_section_count,
           excluded_sections, metadata_pii_flags, removed_body_pii_flags,
@@ -995,9 +996,7 @@ class DuckDBQueryService:
           tokenizer_revision, gopher_word_count, gopher_mean_word_len,
           gopher_stopword_ratio, gopher_bullet_line_ratio,
           gopher_ellipsis_line_ratio, gopher_symbol_word_ratio,
-          gopher_alpha_word_ratio, decon_exact_matches,
-          decon_semantic_matches, decon_max_similarity, decon_ngram_size,
-          decon_embedding_revision, benchmark_set_version
+          gopher_alpha_word_ratio
         FROM {self._decisions}
         WHERE doc_id = ? AND {_current_decision_predicate()}
         ORDER BY valid_from DESC
@@ -1381,7 +1380,6 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           CAST(NULL AS VARCHAR) AS license_source,
           CAST(NULL AS INTEGER) AS risk_tier,
           CAST([] AS VARCHAR[]) AS pii_flags,
-          CAST([] AS VARCHAR[]) AS contaminated_with,
           CAST(NULL AS TIMESTAMP) AS valid_from,
           CAST(NULL AS TIMESTAMP) AS valid_to,
           CAST([] AS VARCHAR[]) AS reject_reasons,
@@ -1418,7 +1416,6 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           , CAST(0 AS DOUBLE) AS structural_quality_score
           , CAST(0 AS DOUBLE) AS extraction_completeness
           , CAST(0 AS DOUBLE) AS reasoning_score
-          , CAST(0 AS DOUBLE) AS benchmark_score
           , CAST('quarantine' AS VARCHAR) AS route
           , CAST([] AS VARCHAR[]) AS eligible_routes
           , CAST([] AS VARCHAR[]) AS route_reasons
@@ -1443,12 +1440,6 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           , CAST(0 AS DOUBLE) AS gopher_ellipsis_line_ratio
           , CAST(0 AS DOUBLE) AS gopher_symbol_word_ratio
           , CAST(0 AS DOUBLE) AS gopher_alpha_word_ratio
-          , CAST([] AS VARCHAR[]) AS decon_exact_matches
-          , CAST([] AS VARCHAR[]) AS decon_semantic_matches
-          , CAST(0 AS DOUBLE) AS decon_max_similarity
-          , CAST(13 AS INTEGER) AS decon_ngram_size
-          , CAST('unknown' AS VARCHAR) AS decon_embedding_revision
-          , CAST('unknown' AS VARCHAR) AS benchmark_set_version
           , CAST('unknown' AS VARCHAR) AS classifier_backend
           , CAST('pretrain_and_posttrain' AS VARCHAR) AS training_usage
         WHERE FALSE

@@ -6,15 +6,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from processor import common
-from processor.decon_gate import DeconGate
 from processor.iceberg_writer import (
-    AttestationSink,
     IcebergWriter,
     LicenseAdmissionWriter,
+    _drop_obsolete_columns,
     gold_identifier,
 )
-from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
 from schemas.license_admission import LicenseAdmissionDecision
 
@@ -45,10 +42,6 @@ def _gold() -> GoldRecord:
 def test_to_arrow_includes_v2_provenance_columns() -> None:
     writer = IcebergWriter(
         catalog=object(),
-        decon=DeconGate(benchmark_set_version="v-test"),
-        scoring_version="v-test",
-        classifier_revision="classifier-test",
-        policy_revision="git:test",
     )
 
     table = writer._to_arrow([_gold()])
@@ -57,61 +50,35 @@ def test_to_arrow_includes_v2_provenance_columns() -> None:
     assert table.column("extraction_pipeline").to_pylist() == ["hf-model-card-markdown-v1"]
     assert table.column("spdx_license").to_pylist() == ["Apache-2.0"]
     assert table.column("spdx_license_source").to_pylist() == ["source_terms"]
+    assert "benchmark_score" not in table.column_names
 
 
-class _FakeS3:
-    def __init__(self) -> None:
-        self.objects: dict[tuple[str, str], bytes] = {}
+def test_obsolete_pretraining_score_is_removed_from_existing_table() -> None:
+    deleted: list[str] = []
 
-    def put_object(self, **kwargs: object) -> None:
-        assert kwargs["ContentType"] == "application/json"
-        body = kwargs["Body"]
-        assert isinstance(body, bytes)
-        self.objects[(str(kwargs["Bucket"]), str(kwargs["Key"]))] = body
+    class _Schema:
+        def find_field(self, name: str) -> object:
+            if name != "benchmark_score":
+                raise ValueError(name)
+            return object()
 
+    class _Update:
+        def delete_column(self, name: str) -> None:
+            deleted.append(name)
 
-class _FakeProducer:
-    def __init__(self) -> None:
-        self.messages: list[tuple[str, bytes, bytes]] = []
-        self.flushed = False
+        def commit(self) -> None:
+            deleted.append("committed")
 
-    def produce(self, topic: str, *, key: bytes, value: bytes) -> None:
-        self.messages.append((topic, key, value))
+    class _Table:
+        def schema(self) -> _Schema:
+            return _Schema()
 
-    def flush(self) -> None:
-        self.flushed = True
+        def update_schema(self) -> _Update:
+            return _Update()
 
+    _drop_obsolete_columns(_Table(), ("benchmark_score",))  # type: ignore[arg-type]
 
-def test_attestation_sink_writes_decon_bucket_and_topic() -> None:
-    s3 = _FakeS3()
-    producer = _FakeProducer()
-    sink = AttestationSink(
-        s3_client=s3,
-        bucket="s2p-decon",
-        kafka_producer=producer,
-        topic="decon.attest",
-    )
-    attestation = DeconAttestation(
-        snapshot_id=7,
-        committed_at=datetime(2026, 6, 15, tzinfo=UTC),
-        benchmark_set_version="v-test",
-        benchmarks=["MMLU", "GSM8K", "HumanEval", "MATH", "GPQA"],
-        tokens_scanned=12,
-        tokens_flagged=1,
-        rejected_doc_hashes=["sha256:" + "b" * 64],
-        per_benchmark_hits={"MMLU": 1, "GSM8K": 0, "HumanEval": 0, "MATH": 0, "GPQA": 0},
-        signature="sig",
-        signer_cert="cert",
-    )
-
-    uri = sink.write(attestation)
-
-    key = "decon/v-test/00000000000000000007.json"
-    payload = s3.objects[("s2p-decon", key)]
-    assert uri == f"s3://s2p-decon/{key}"
-    assert common.decon_loads(payload).snapshot_id == 7
-    assert producer.messages == [("decon.attest", b"7", payload)]
-    assert producer.flushed
+    assert deleted == ["benchmark_score", "committed"]
 
 
 class _Snapshot:
@@ -175,9 +142,6 @@ class _MemoryWriter(IcebergWriter):
     def _ensure_table(self) -> _MemoryTable:
         return self.gold
 
-    def _set_snapshot_props(self, *_args: object) -> None:
-        return None
-
 
 class _AdmissionCatalog:
     def __init__(self) -> None:
@@ -224,10 +188,6 @@ def test_license_admission_writer_batches_and_deduplicates_decisions() -> None:
 def test_writer_persists_rejected_decision_without_adding_it_to_gold() -> None:
     writer = _MemoryWriter(
         catalog=object(),
-        decon=DeconGate(benchmark_set_version="v-test"),
-        scoring_version="v-test",
-        classifier_revision="classifier-test",
-        policy_revision="git:test",
     )
     rejected = _gold().model_copy(update={"risk_tier": 2, "reject_reasons": ["license_excluded"]})
 
@@ -239,41 +199,9 @@ def test_writer_persists_rejected_decision_without_adding_it_to_gold() -> None:
     assert writer.gold.rows == 0
 
 
-def test_writer_does_not_materialize_legacy_benchmark_candidate() -> None:
-    writer = _MemoryWriter(
-        catalog=object(),
-        decon=DeconGate(benchmark_set_version="v-test"),
-        scoring_version="v-test",
-        classifier_revision="classifier-test",
-        policy_revision="git:test",
-    )
-    candidate = _gold().model_copy(
-        update={
-            "route": "benchmark_candidate",
-            "eligible_routes": [
-                "broad_pretraining",
-                "reasoning_candidate",
-                "benchmark_candidate",
-            ],
-        }
-    )
-
-    assert writer.add(candidate) is None
-    stats = writer.flush()
-
-    assert stats.rows_committed == 0
-    assert stats.benchmark_candidates_committed == 0
-    assert writer.decisions.rows == 1
-    assert writer.gold.rows == 0
-
-
 def test_writer_ignores_replayed_decision_recipe() -> None:
     writer = _MemoryWriter(
         catalog=object(),
-        decon=DeconGate(benchmark_set_version="v-test"),
-        scoring_version="v-test",
-        classifier_revision="classifier-test",
-        policy_revision="git:test",
     )
     record = _gold().model_copy(update={"route": "broad_pretraining"})
 
@@ -292,10 +220,6 @@ def test_writer_ignores_replayed_decision_recipe() -> None:
 def test_writer_ignores_replay_after_restart_by_scanning_iceberg_keys() -> None:
     first_writer = _MemoryWriter(
         catalog=object(),
-        decon=DeconGate(benchmark_set_version="v-test"),
-        scoring_version="v-test",
-        classifier_revision="classifier-test",
-        policy_revision="git:test",
     )
     record = _gold().model_copy(update={"route": "broad_pretraining"})
     first_writer.add(record)
@@ -303,10 +227,6 @@ def test_writer_ignores_replay_after_restart_by_scanning_iceberg_keys() -> None:
 
     restarted_writer = _MemoryWriter(
         catalog=object(),
-        decon=DeconGate(benchmark_set_version="v-test"),
-        scoring_version="v-test",
-        classifier_revision="classifier-test",
-        policy_revision="git:test",
     )
     restarted_writer.decisions = first_writer.decisions
     restarted_writer.gold = first_writer.gold

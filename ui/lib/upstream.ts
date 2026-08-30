@@ -8,25 +8,19 @@
  * Defaults match the Helm chart's Service names; see
  * `charts/stream2pretrain/templates/` for the canonical names.
  *
- * Note (v0.2.0): the v0.1 manual URL submit endpoint is gone. The
- * `sourcesApi` key keeps the cockpit's `/api/sources` route pointing at
- * an in-cluster SourceFeed CRUD upstream (currently the mixture
- * controller's REST surface); override via the `SOURCES_API_URL` env.
+ * The source upstream is read-only and serves monitoring data.
  */
 
 export const UPSTREAM = {
-  /** SourceFeed CRUD upstream (mixture-controller REST surface). */
+  /** Source monitoring upstream (mixture-controller REST surface). */
   sourcesApi:
     process.env.SOURCES_API_URL ??
     'http://stream2pretrain-mixture-controller.stream2pretrain.svc:8080',
-  /** Decon-Gate REST: per-snapshot attestation lookup, decon stats. */
-  deconGate:
-    process.env.DECON_GATE_URL ?? 'http://stream2pretrain-decon-gate.stream2pretrain.svc:8081',
   /** Mixture controller REST: shadow-mode A/B comparison. */
   mixture:
     process.env.MIXTURE_API_URL ??
     'http://stream2pretrain-mixture-controller.stream2pretrain.svc:8080',
-  /** DuckDB-server: lakehouse temporal queries (as_of, mixture). */
+  /** DuckDB-server: lakehouse temporal queries and exports. */
   duckdb: process.env.DUCKDB_URL ?? 'http://stream2pretrain-duckdb.stream2pretrain.svc:8090',
   /** Prometheus: metrics queries used by the dashboard. */
   prometheus:

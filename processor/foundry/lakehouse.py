@@ -7,8 +7,19 @@ from contextlib import suppress
 from typing import Any
 
 from processor.foundry.util import canonical_json
-from processor.iceberg_catalog import load_runtime_catalog
+from processor.iceberg_catalog import (
+    ensure_iceberg_maintenance_properties,
+    iceberg_maintenance_properties,
+    load_runtime_catalog,
+)
 from schemas.foundry import FoundryArtifactRecord, FoundryEvent
+
+
+def _is_missing_catalog_table(exc: Exception) -> bool:
+    """Distinguish an absent table from a transient catalog/storage failure."""
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    return "nosuchtable" in name or "not found" in message or "does not exist" in message
 
 
 class FoundryLakehouseSink:
@@ -96,15 +107,24 @@ class FoundryLakehouseSink:
         )
         identifier = (namespace, table_name)
         try:
-            return self._catalog.load_table(identifier)
-        except Exception:
-            with suppress(Exception):
-                self._catalog.create_namespace((namespace,))
-            return self._catalog.create_table(
-                identifier=identifier,
-                schema=schema,
-                properties={"format-version": "2", "write.format.default": "parquet"},
-            )
+            table = self._catalog.load_table(identifier)
+        except Exception as exc:
+            if not _is_missing_catalog_table(exc):
+                raise
+        else:
+            ensure_iceberg_maintenance_properties(table)
+            return table
+        with suppress(Exception):
+            self._catalog.create_namespace((namespace,))
+        return self._catalog.create_table(
+            identifier=identifier,
+            schema=schema,
+            properties={
+                "format-version": "2",
+                "write.format.default": "parquet",
+                **iceberg_maintenance_properties(),
+            },
+        )
 
 
 def _schema_column_names(schema: Any) -> set[str]:

@@ -174,7 +174,6 @@ def paper_bundle_from_gold(
             "extraction_completeness": gold.extraction_completeness,
             "risk_tier": gold.risk_tier,
             "pii_action": gold.pii_action,
-            "benchmark_set_version": gold.benchmark_set_version,
         },
         official_artifacts=official_artifacts or [],
         source_gold_hash=gold_hash,

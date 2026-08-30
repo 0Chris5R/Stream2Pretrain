@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,6 +64,34 @@ class VerifierCompiler:
         graph: PaperEvidenceGraph,
         task: TaskSpec,
     ) -> tuple[VerifierSpec, list[ProviderTrace]]:
+        if task.content_policy_revision == "scientific-reasoning-v2":
+            # The executable contract is derived solely from reviewed TaskSpec
+            # targets. The model critic may identify risks for audit, but it
+            # cannot add qualifications, targets, or predicate schemas.
+            spec = deterministic_verifier(task, bundle, graph)
+            critique_data, critic_trace = self.control.call(
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                role="verifier_critic",
+                system=_critic_system(),
+                user=_critic_prompt(bundle, graph, task, spec),
+                max_output_tokens=6_000,
+                call_key=f"verifier_critic:{task.task_id}:deterministic-v2",
+            )
+            critique = VerifierCritique.model_validate(critique_data)
+            return (
+                spec.model_copy(
+                    update={
+                        "critic_audit": [
+                            {
+                                **_critic_audit("deterministic-v2", critique),
+                                "action": "audit_only_no_contract_mutation",
+                            }
+                        ]
+                    }
+                ),
+                [critic_trace],
+            )
         data, compiler_trace = self.control.call(
             job_id=job_id,
             paper_id=bundle.paper_id,
@@ -566,9 +595,16 @@ def normalize_spec(
         predicates[selected_index] = predicates[selected_index].model_copy(update={"weight": 1.0})
     return spec.model_copy(
         update={
-            "verifier_id": stable_id("verifier", task.task_id, "v1"),
+            "verifier_id": stable_id(
+                "verifier",
+                task.task_id,
+                task.content_policy_revision,
+            ),
             "task_id": task.task_id,
-            "version": max(1, spec.version),
+            "version": max(
+                2 if task.content_policy_revision == "scientific-reasoning-v2" else 1,
+                spec.version,
+            ),
             "predicates": predicates,
             "runtime_dependencies": sorted(set([*spec.runtime_dependencies, "sympy==1.13.3"])),
             "network_required": False,
@@ -806,9 +842,13 @@ def _evaluate_predicate(
             predicate.config.get("constraints", task.hidden_targets.configuration_constraints),
         )
     elif predicate.type == "report_manifest_consistency":
-        passed = bool(answer.report.strip()) and bool(committed | set(manifest.evidence))
+        present = bool(answer.report.strip()) and bool(committed | set(manifest.evidence))
+        if present and task.content_policy_revision == "scientific-reasoning-v2":
+            passed, details = _scientific_report_consistency(answer, task, committed)
+        else:
+            passed = present
+            details = "report and structured manifest are both present"
         score = float(passed)
-        details = "report and structured manifest are both present"
     else:
         details = f"unsupported predicate {predicate.type}"
     return PredicateResult(
@@ -818,6 +858,105 @@ def _evaluate_predicate(
         required=predicate.required,
         details=details,
     )
+
+
+_REPORT_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_])([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)(\s*%)?"
+)
+_MATH_SEGMENT = re.compile(r"(?:\$+|\\\(|\\\[)?([^\n;]+=[^\n;]+?)(?:\$+|\\\)|\\\])?(?:$|[.;])")
+_INTERNAL_ID_TOKEN = re.compile(
+    r"^(?:eq|equation|node|span|claim|method|fault|table|figure|fig|result)[-_:.]?\d+$",
+    re.IGNORECASE,
+)
+
+
+def _scientific_report_consistency(
+    answer: FoundryAnswer,
+    task: TaskSpec,
+    committed: set[str],
+) -> tuple[bool, str]:
+    """Require answer-facing scientific results, not hidden-manifest gaming."""
+    report = answer.report.strip()
+    failures: list[str] = []
+    if _report_is_internal_id_listing(report, committed):
+        failures.append("report only lists internal manifest identifiers")
+
+    for target, expected in task.hidden_targets.expected_values.items():
+        if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+            tolerance = _report_numeric_tolerance(float(expected))
+            if not _numeric_value_appears(report, float(expected), tolerance):
+                failures.append(f"numeric target {target} is absent from the report")
+        elif (
+            isinstance(expected, str)
+            and task.family == "derivation_completion"
+            and symbolic_expression_is_checkable(expected)
+            and not _symbolic_value_appears(report, expected)
+        ):
+            failures.append(f"symbolic target {target} is absent from the report")
+
+    required_values = task.hidden_targets.configuration_constraints.get("required_values", {})
+    if isinstance(required_values, dict):
+        for target, expected in required_values.items():
+            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                if not _numeric_value_appears(
+                    report,
+                    float(expected),
+                    _report_numeric_tolerance(float(expected)),
+                ):
+                    failures.append(f"configuration value {target} is absent from the report")
+            elif isinstance(expected, str) and expected.casefold() not in report.casefold():
+                failures.append(f"configuration value {target} is absent from the report")
+
+    if failures:
+        return False, "; ".join(failures)
+    return True, "report exposes the checked scientific result and agrees with the manifest"
+
+
+def _numeric_value_appears(report: str, expected: float, tolerance: float) -> bool:
+    for raw, percent in _REPORT_NUMBER.findall(report.replace(",", "")):
+        try:
+            value = float(raw)
+            candidates = (value, value / 100.0) if percent else (value,)
+            if any(abs(candidate - expected) <= tolerance for candidate in candidates):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _report_numeric_tolerance(expected: float) -> float:
+    """Permit ordinary displayed rounding while the manifest stays exact."""
+    return max(_numeric_tolerance(expected), abs(expected) * 1e-4, 1e-8)
+
+
+def _symbolic_value_appears(report: str, expected: str) -> bool:
+    compact_expected = re.sub(r"\s+", "", expected).strip("$\\()[]")
+    compact_report = re.sub(r"\s+", "", report)
+    if compact_expected and compact_expected in compact_report:
+        return True
+    for candidate in _MATH_SEGMENT.findall(report):
+        cleaned = candidate.strip().strip("$\\()[] .")
+        try:
+            if symbolically_equivalent(cleaned, expected):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _report_is_internal_id_listing(report: str, committed: set[str]) -> bool:
+    tokens = [token for token in re.split(r"[\s,;|]+", report.strip()) if token]
+    if not tokens:
+        return True
+    normalized_committed = {value.casefold().strip(".,:;()[]{}") for value in committed}
+    substantive = [
+        token
+        for token in tokens
+        if token.casefold().strip(".,:;()[]{}") not in normalized_committed
+        and not _INTERNAL_ID_TOKEN.fullmatch(token.strip(".,:;()[]{}"))
+        and any(character.isalpha() for character in token)
+    ]
+    return not substantive
 
 
 def _configuration_constraints(

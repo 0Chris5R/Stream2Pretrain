@@ -66,15 +66,15 @@ spec:
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
             - name: S2P_MODEL_SERVICE_PROFILE
-              value: {{ $profile | quote }}
+              value: {{ default $profile $service.runtimeProfile | quote }}
             - name: S2P_MODEL_SERVICE_PORT
               value: {{ $root.Values.processor.modelService.port | quote }}
+            - name: S2P_MODEL_SERVICE_MAX_BATCH_ITEMS
+              value: {{ $root.Values.processor.modelService.maxBatchItems | int | quote }}
             - name: S2P_FINEPDFS_EDU_REVISION
               value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
             - name: S2P_FINEWEB_EDU_REVISION
               value: "fineweb-edu@284663cbb2dabf9bda30d8f8cc49601251ee1631"
-            - name: E5_SMALL_REVISION
-              value: "intfloat/e5-small-v2@ffb93f3bd4047442299a41ebb6fa998a38507c52"
           startupProbe:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 10
@@ -126,8 +126,8 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: {{ $name }}
-  minReplicas: {{ $root.Values.processor.modelService.autoscaling.minReplicas }}
-  maxReplicas: {{ $root.Values.processor.modelService.autoscaling.maxReplicas }}
+  minReplicas: {{ default $root.Values.processor.modelService.autoscaling.minReplicas $service.autoscaling.minReplicas }}
+  maxReplicas: {{ default $root.Values.processor.modelService.autoscaling.maxReplicas $service.autoscaling.maxReplicas }}
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 300

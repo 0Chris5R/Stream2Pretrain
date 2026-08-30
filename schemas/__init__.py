@@ -1,6 +1,6 @@
 """Stream2Pretrain shared schemas.
 
-Every component (ingest, processor, UI BFF, decon-gate sidecar) imports its
+Every component imports its
 record types from this package. Schemas are Pydantic v2 models so they double
 as runtime validators and as JSON-Schema sources for cross-language consumers
 (the Next.js UI reads `schemas/json_schema/*.json` to type its TanStack Query
@@ -11,7 +11,6 @@ Public API
 - :class:`schemas.bronze.BronzeRecord`
 - :class:`schemas.silver.SilverRecord`
 - :class:`schemas.gold.GoldRecord`
-- :class:`schemas.decon.DeconAttestation`
 - :class:`schemas.sourcefeed.SourceFeedSpec`
 - :mod:`schemas.topics` - topic name + partition / replication constants.
 """
@@ -23,7 +22,6 @@ from schemas.bronze import (
     SourceFormat,
     SpdxLicenseSource,
 )
-from schemas.decon import BenchmarkHit, DeconAttestation
 from schemas.foundry import (
     AnswerManifest,
     ArtifactAuditRecord,
@@ -63,7 +61,6 @@ from schemas.sourcefeed import (
 )
 from schemas.topics import (
     CURATION_DECISIONS,
-    DECON_ATTEST,
     DOCS_CURATED,
     DOCS_NORMALIZED,
     FOUNDRY_ARTIFACTS,
@@ -79,7 +76,6 @@ from schemas.topics import (
 
 __all__ = [
     "CURATION_DECISIONS",
-    "DECON_ATTEST",
     "DOCS_CURATED",
     "DOCS_NORMALIZED",
     "FOUNDRY_ARTIFACTS",
@@ -90,10 +86,8 @@ __all__ = [
     "RAW_SMOKE",
     "AnswerManifest",
     "ArtifactAuditRecord",
-    "BenchmarkHit",
     "BronzeRecord",
     "CorpusRoute",
-    "DeconAttestation",
     "EnvironmentManifest",
     "FoundryAnswer",
     "FoundryArtifactRecord",

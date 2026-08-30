@@ -49,6 +49,40 @@
       register: stream2pretrain_node_table
       changed_when: false
 
+    - name: Apply the CoreDNS disruption budget
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        cmd: /usr/local/bin/kubectl apply -f /dev/stdin
+        stdin: "{{ lookup('file', '../kubernetes/coredns-pdb.yaml') }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_root }}"
+      register: stream2pretrain_coredns_pdb
+      changed_when: >-
+        'configured' in stream2pretrain_coredns_pdb.stdout or
+        'created' in stream2pretrain_coredns_pdb.stdout
+
+    - name: Keep two CoreDNS replicas on separate nodes
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        cmd: >-
+          /usr/local/bin/kubectl -n kube-system patch deployment/coredns
+          --type=strategic --patch-file=/dev/stdin
+        stdin: "{{ lookup('file', '../kubernetes/coredns-ha-patch.yaml') }}"
+      environment:
+        KUBECONFIG: "{{ kubeconfig_root }}"
+      register: stream2pretrain_coredns_patch
+      changed_when: "'no change' not in stream2pretrain_coredns_patch.stdout"
+
+    - name: Wait for both CoreDNS replicas
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        cmd: >-
+          /usr/local/bin/kubectl -n kube-system rollout status
+          deployment/coredns --timeout=180s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_root }}"
+      changed_when: false
+
     - name: Print cluster node table
       when: k3s_role == 'server'
       ansible.builtin.debug:

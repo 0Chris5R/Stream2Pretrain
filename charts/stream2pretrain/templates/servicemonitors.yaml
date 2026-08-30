@@ -1,6 +1,6 @@
 {{- if .Values.observability.serviceMonitor.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
-{{- range $component := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "decon-gate" "mixture-controller" "foundry" }}
+{{- range $component := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "mixture-controller" "foundry" }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -24,5 +24,33 @@ spec:
       interval: {{ $.Values.observability.serviceMonitor.interval }}
       scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout }}
       path: /metrics
+{{- end }}
+{{- $root := . }}
+{{- if .Values.processor.modelService.enabled }}
+{{- range $profile, $_service := .Values.processor.modelService.profiles }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullName }}-processor-model-service-{{ $profile }}
+  namespace: {{ $root.Values.observability.serviceMonitor.namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" $root "component" (printf "processor-model-service-%s" $profile)) | nindent 4 }}
+    {{- with $root.Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ $root.Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" (printf "processor-model-service-%s" $profile)) | nindent 6 }}
+  endpoints:
+    - port: http
+      interval: {{ $root.Values.observability.serviceMonitor.interval }}
+      scrapeTimeout: {{ $root.Values.observability.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+{{- end }}
 {{- end }}
 {{- end }}

@@ -27,13 +27,7 @@ export const SourceFeedRateLimitSchema = z.object({
  * (`oai_pmh`, `rest_json`) are NOT accepted by the Gatekeeper admission
  * policy. Keep in sync.
  */
-export const SourceFeedProtocols = [
-  'rss',
-  'atom',
-  'oai-pmh',
-  'rest-json',
-  'manual',
-] as const;
+export const SourceFeedProtocols = ['rss', 'atom', 'oai-pmh', 'rest-json', 'manual'] as const;
 
 export const SourceFeedSpecSchema = z.object({
   name: z.string().min(1).max(63),
@@ -96,36 +90,6 @@ export const RuntimeProfileSchema = z.object({
 });
 
 export type RuntimeProfile = z.infer<typeof RuntimeProfileSchema>;
-
-export const DeconAttestationSchema = z.object({
-  snapshot_id: z.string().regex(/^\d+$/),
-  committed_at: z.string(),
-  benchmark_set_version: z.string(),
-  benchmarks: z.array(z.enum(['MMLU', 'GSM8K', 'HumanEval', 'MATH', 'GPQA'])),
-  per_benchmark_hits: z.record(z.string(), z.number().int().nonnegative()),
-  rejected_doc_hashes: z.array(z.string()),
-  tokens_scanned: z.number().int().nonnegative(),
-  tokens_flagged: z.number().int().nonnegative(),
-  signature: z.string(),
-  signer_cert: z.string(),
-});
-
-export type DeconAttestation = z.infer<typeof DeconAttestationSchema>;
-
-export const BenchmarkCoverageSchema = z.object({
-  benchmark_set_version: z.string(),
-  manifest_sha256: z.string(),
-  corpus_kind: z.enum(['demo_canaries', 'synthetic_canary', 'restricted_reserve']),
-  item_count: z.number().int().nonnegative(),
-  per_benchmark_items: z.record(z.string(), z.number().int().nonnegative()),
-  non_empty_benchmarks: z.array(z.string()),
-  latest_snapshot_id: z.string().nullable(),
-  last_successful_scan: z.string().nullable(),
-  tokens_scanned: z.number().int().nonnegative(),
-  tokens_flagged: z.number().int().nonnegative(),
-});
-
-export type BenchmarkCoverage = z.infer<typeof BenchmarkCoverageSchema>;
 
 export const MixtureSourceWeightSchema = z.object({
   // Field name mirrors Pydantic `MixtureSourceWeight.source_feed`. The
@@ -285,7 +249,6 @@ export const CorpusRouteSchema = z.enum([
   'broad_pretraining',
   'posttrain_candidate',
   'reasoning_candidate',
-  'benchmark_candidate',
   'quarantine',
   'retry',
 ]);
@@ -417,7 +380,6 @@ export const DocumentSummarySchema = z.object({
   edu_score: z.number(),
   structural_quality_score: z.number(),
   reasoning_score: z.number(),
-  benchmark_score: z.number(),
   perplexity: z.number(),
   risk_tier: z.number().int(),
   route: CorpusRouteSchema,
@@ -475,7 +437,6 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
   removed_body_pii_flags: z.array(z.string()),
   pii_action: z.string(),
   pii_scanner_revision: z.string(),
-  contaminated_with: z.array(z.string()),
   extraction_pipeline: z.string(),
   classifier_revision: z.string(),
   classifier_backend: z.string(),
@@ -515,12 +476,6 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
   segment_scores: z.array(SegmentScoreSchema),
   projection_version: z.string(),
   excluded_sections: z.array(z.string()),
-  decon_exact_matches: z.array(z.string()),
-  decon_semantic_matches: z.array(z.string()),
-  decon_max_similarity: z.number(),
-  decon_ngram_size: z.number().int().positive(),
-  decon_embedding_revision: z.string(),
-  benchmark_set_version: z.string(),
   scientific_artifact: ScientificDocumentSchema.nullable(),
 });
 

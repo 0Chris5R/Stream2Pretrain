@@ -3,7 +3,7 @@
 Status: implementation contract
 Policy implementation: `processor/scientific_policy.py` and `processor/curate.py`
 Current policy id: `S2P_POLICY_REVISION`
-Current scoring id: `S2P_SCORING_VERSION`
+Current scoring id: `S2P_SCORING_VERSION`, default `pretrain-content-v2`
 
 This document defines every score shown in the Stream2Pretrain UI. A model
 score, a deterministic evidence score, and a composite policy score are
@@ -26,7 +26,7 @@ Scientific sources are not scored as one flattened paper.
 6. Source-authored captions, alt text, structured tables, and display
    equations may be appended. Raw OCR is audit-only unless an OCR policy
    explicitly sets `ocr_training_eligible=true`.
-7. Deduplication, final PII scanning, and benchmark decontamination run on the
+7. Deduplication and final PII scanning run on the
    exact final projection that could be exported.
 
 ## 2. Section coverage
@@ -58,6 +58,11 @@ code before FineWeb-Edu scoring. The score remains an audit signal because the
 ordinary-web threshold was not calibrated for structured Markdown. Discovery
 metadata has no educational classifier and cannot reach Gold.
 
+FinePDFs Edu v2 remains a labelled comparison on Hugging Face cards, not their
+primary signal or gate. Its official training domain is PDFs. Using its often
+higher card score as admission evidence would be an out-of-domain substitution,
+not a quality improvement.
+
 The document educational score is the word-weighted mean of measured, retained
 sections. Each section weight is `max(1, min(word_count, 512))`.
 
@@ -87,22 +92,20 @@ discovery metadata do not receive a KenLM value. Their persisted scorer is
 `not-applicable`, and typicality is removed from the composite instead of
 substituting an artificial value. Gopher and C4 are hard gates only for
 ordinary web prose. Every trainable profile
-retains privacy, licence, exact/near-duplicate, validity, and benchmark checks.
+retains privacy, licence, exact/near-duplicate, and validity checks.
 
-### 3.3 Language, privacy, deduplication, and decontamination
+### 3.3 Language, privacy, and deduplication
 
 - FastLangID must select English with confidence at least 0.5.
 - Presidio plus the regex/Luhn pack removes high-confidence affected sections,
   then scans the rebuilt projection again. A remaining blocking match
   quarantines the record.
-- MinHash uses 112 permutations. The LSH/Bloom backend observes the final
-  projection and blocks near duplicates.
-- Decon-Gate checks exact 13-token shingles and E5-small-v2 semantic similarity
-  at 0.92 against the versioned restricted benchmark reserve. A hit quarantines
-  the record and is included in the signed snapshot attestation.
-
+- MinHash uses 112 permutations. The LSH/Bloom backend treats any matching LSH
+  band as a candidate, then confirms at least 0.80 estimated MinHash similarity
+  against the durable anchor signature. State is retained across worker
+  restarts and namespaced by scoring generation.
 Strict laptop and Kubernetes profiles set `S2P_REQUIRE_REAL_MODELS=1` and fail
-startup if FinePDFs, FineWeb-Edu, KenLM/SentencePiece, E5, Presidio, Rensa,
+startup if FinePDFs, FineWeb-Edu, KenLM/SentencePiece, Presidio, Rensa,
 Plyvel, or the required tokenizer artifacts cannot load.
 
 ## 4. Deterministic evidence scores
@@ -138,13 +141,12 @@ Binary terms are 1 when present and 0 otherwise. This score indicates visible
 reasoning-supporting anatomy. It does not claim that a model has judged the
 reasoning correct.
 
-### 4.4 Post-training benchmark allocation
+### 4.4 Post-training dataset allocation
 
-Pretraining does not score or reserve papers for a benchmark. The persisted
-`benchmark_score` field is zero and retained only so historical snapshots remain
-readable. After a paper has produced accepted SFT or RL artifacts, the foundry
-assigns its paper family within that output pool: four families to `train`, then
-one to `benchmark`. This is the only active generated-data benchmark split.
+Pretraining does not score or reserve papers for an evaluation split. After a
+paper has produced accepted SFT or RL artifacts, the foundry assigns its paper
+family within that output pool: four families to `train`, then one to the
+post-training evaluation split.
 
 ### 4.5 Non-scientific structure
 
@@ -179,9 +181,7 @@ Blocking reasons are applied before corpus-use routes:
    makes it the primary inspection route; the record remains pretraining-eligible.
 5. All other clean records keep `pretrain` as their primary route.
 
-`broad_pretraining`, `reasoning_candidate`, and `benchmark_candidate` are
-read-only compatibility labels for historical snapshots. Current curation
-never creates them.
+Current curation emits only the route values listed above.
 
 The low-quality blocker uses the official FineWeb-Edu score 3 boundary only for
 ordinary web prose. Scientific papers and cards use their

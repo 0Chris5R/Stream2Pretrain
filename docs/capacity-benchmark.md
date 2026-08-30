@@ -23,6 +23,66 @@ for the course cluster until the probe below records allocatable resources.
 FinePDFs v2 plus FineWeb-Edu comparison inference also makes the curator
 materially larger than the older FineWeb-only configuration.
 
+## 2026-08-30 live baseline and remediation gates
+
+The cluster diagnosis that triggered this remediation observed, over the same
+one-hour interval, 218 fetched records, 210 normalized records, 91 curation
+decisions, and 57 durable exports. That made curation the limiting stage at
+43 percent of the observed normalized arrival rate, or 2.31 times below
+break-even. The first rollout target is therefore 315 decisions per hour:
+1.5 times the measured 210 normalized records per hour. This is a calculated
+gate from that observation, not a claim about long-term source traffic.
+
+At diagnosis time the single stateful curator used about 1,580 MiB and 1.5 CPU
+cores. One combined quality-model Pod used about 2 CPU cores while the other
+ready replicas were nearly idle. The remediation leaves Bytewax, its recovery
+partition count, every content classifier, OCR, PII scan, deduplication step,
+and quality gate intact. It instead separates FinePDFs and FineWeb runtimes,
+uses fresh service connections plus bounded two-segment requests, and retains
+the exact one-by-one classifier implementation and pinned revision in each
+batch result.
+
+The classifier rollout gate runs inside the curator Pod against each quality
+Service. It requires at least two ready backends, observes 60 fresh inference
+requests at a bounded concurrency of 12, requires every ready backend to answer
+and no backend to receive less than ten percent of requests, and then proves
+that a two-item batch has byte-for-byte equal JSON results, order, and revisions
+to two singleton requests. Prometheus
+also records request, batch-size, queue-time, inference-time, active-request,
+model-family, and profile labels for each backend ServiceMonitor.
+
+Do not call the curator fixed after the distribution gate alone. Sustain at
+least 315 durable decisions per hour for six hours with no growing
+`docs.normalized` lag, no Bytewax recovery-frontier rollback, no skipped model
+signal, and no new processing-failure object. After enough weekday evidence
+exists, replace the provisional target with at least 1.25 times the measured
+weekday p95 normalized arrival rate. If the gate misses while model queue time
+or CPU is saturated, increase stateless model replicas or worker CPU/RAM. Do
+not remove processing stages.
+
+The same diagnosis found one CoreDNS Pod and an actual 3.1-second DNS timeout
+during a MinIO multipart operation. The infrastructure gate therefore requires
+two ready CoreDNS replicas protected by a `minAvailable: 1` disruption budget,
+100 consecutive in-cluster DNS resolutions for MinIO and Polaris, and ten
+successful MinIO put, head, and delete cycles. An ordinary application-only
+release performs only an idempotent CoreDNS replica/PDB presence check; the
+full probe runs when the DNS infrastructure contract changes.
+
+This does not turn the existing single-Pod, single-volume MinIO deployment
+into highly available storage. Client retries and redundant DNS remove the
+observed name-resolution failure mode, but a production HA claim still needs
+an administrator-provisioned replicated object store or multi-node MinIO
+tenant and a measured failure-domain migration. Its additional CPU, RAM, and
+storage are `needs-measurement`; do not infer them from the DNS fix.
+
+Iceberg cleanup remains the single scheduled maintenance owner's job. Hot
+writer and Foundry commits never delete prior metadata. The existing guarantees
+remain unchanged: 20 previous metadata versions, a 168-hour maximum snapshot
+age, at least ten snapshots retained, and a 24-hour orphan-object floor. Close
+this gate only after 24 hours with no metadata-delete warning, 100 successful
+append/read cycles including a CoreDNS restart, and a verified seven-day
+`as_of(timestamp)` query.
+
 ## Preconditions
 
 - `kubectl` points at the target k3s cluster.
@@ -55,8 +115,8 @@ The report covers:
 - Node allocatable CPU and memory from `kubectl get nodes -o json`.
 - Stream2Pretrain pod requests and limits from rendered live Pods.
 - PVC requests/capacity, including processor recovery and model caches.
-- Redpanda topic metadata for `raw.fetched`, `docs.normalized`,
-  `docs.curated`, and `decon.attest` when `rpk` is reachable inside a broker
+- Redpanda topic metadata for `raw.fetched`, `docs.normalized`, and
+  `docs.curated` when `rpk` is reachable inside a broker
   Pod.
 - MinIO pod discovery. Throughput remains `needs-measurement` until a MinIO
   benchmark such as `warp` is run against the target tenant.

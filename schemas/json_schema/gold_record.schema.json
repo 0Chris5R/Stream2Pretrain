@@ -185,18 +185,6 @@
       "description": "Reserved row-lineage id; null in the current Iceberg V2 writer.",
       "title": "Row Id"
     },
-    "benchmark_score": {
-      "default": 0.0,
-      "maximum": 1.0,
-      "minimum": 0.0,
-      "title": "Benchmark Score",
-      "type": "number"
-    },
-    "benchmark_set_version": {
-      "default": "unknown",
-      "title": "Benchmark Set Version",
-      "type": "string"
-    },
     "c4_curly_brace_pass": {
       "default": true,
       "title": "C4 Curly Brace Pass",
@@ -234,51 +222,11 @@
       "title": "Classifier Revision",
       "type": "string"
     },
-    "contaminated_with": {
-      "description": "Benchmark identifiers this doc overlapped with, e.g. ['MMLU'].",
-      "items": {
-        "type": "string"
-      },
-      "title": "Contaminated With",
-      "type": "array"
-    },
     "content_tags": {
       "items": {
         "type": "string"
       },
       "title": "Content Tags",
-      "type": "array"
-    },
-    "decon_embedding_revision": {
-      "default": "unknown",
-      "title": "Decon Embedding Revision",
-      "type": "string"
-    },
-    "decon_exact_matches": {
-      "items": {
-        "type": "string"
-      },
-      "title": "Decon Exact Matches",
-      "type": "array"
-    },
-    "decon_max_similarity": {
-      "default": 0.0,
-      "maximum": 1.0,
-      "minimum": -1.0,
-      "title": "Decon Max Similarity",
-      "type": "number"
-    },
-    "decon_ngram_size": {
-      "default": 13,
-      "minimum": 1,
-      "title": "Decon Ngram Size",
-      "type": "integer"
-    },
-    "decon_semantic_matches": {
-      "items": {
-        "type": "string"
-      },
-      "title": "Decon Semantic Matches",
       "type": "array"
     },
     "doc_id": {
@@ -301,7 +249,6 @@
           "broad_pretraining",
           "posttrain_candidate",
           "reasoning_candidate",
-          "benchmark_candidate",
           "quarantine",
           "retry"
         ],
@@ -593,12 +540,12 @@
           "high_perplexity",
           "pii_detected",
           "license_excluded",
-          "decontamination_hit",
           "validity_interval_invalid",
           "minhash_backend_mismatch",
           "insufficient_body",
           "insufficient_scientific_body",
           "incomplete_scientific_extraction",
+          "document_template",
           "hf_card_quality_filter"
         ],
         "type": "string"
@@ -640,7 +587,6 @@
         "broad_pretraining",
         "posttrain_candidate",
         "reasoning_candidate",
-        "benchmark_candidate",
         "quarantine",
         "retry"
       ],

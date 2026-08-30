@@ -293,7 +293,6 @@ def main() -> None:
             in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
             and not decision.get("reject_reasons")
             and not decision.get("pii_flags")
-            and not decision.get("contaminated_with")
         )
         if not trainable:
             curated_consumer.close()

@@ -177,7 +177,6 @@ disable_error_code = ["arg-type", "assignment", "attr-defined", "call-overload",
 module = [
     "processor.operators.*",
     "processor.tokenize",
-    "processor.decon_gate",
 ]
 disable_error_code = ["attr-defined", "no-any-return", "operator"]
 

@@ -1,23 +1,21 @@
 'use client';
 
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  Check,
-  CircleDot,
-  Clock3,
-  ExternalLink,
-  Eye,
-  FlaskConical,
-  Play,
-  X,
-} from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { Check, CircleDot, Clock3, ExternalLink, Eye, FlaskConical, X } from 'lucide-react';
 
 import { ArtifactInspector } from '@/components/artifact-inspector';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { FoundryActivityPanel } from '@/components/foundry-activity-panel';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   Table,
   TableBody,
@@ -31,7 +29,6 @@ import { queryKeys } from '@/lib/query-keys';
 import {
   FoundryDashboardSchema,
   FoundryArtifactListSchema,
-  FoundryManualRunResponseSchema,
   FoundryJobDetailSchema,
   type FoundryDashboard,
   type FoundryArtifact,
@@ -51,12 +48,7 @@ async function fetchArtifacts(): Promise<FoundryArtifact[]> {
   return (await apiFetch('/api/foundry/artifacts?limit=100', FoundryArtifactListSchema)).items;
 }
 
-async function startManualRun(): Promise<void> {
-  await apiFetch('/api/foundry/runs/manual', FoundryManualRunResponseSchema, { method: 'POST' });
-}
-
 export default function PostTrainingPage() {
-  const queryClient = useQueryClient();
   const [selected, setSelected] = useState('');
   const [inspectionTarget, setInspectionTarget] = useState<FoundryArtifact | null>(null);
   const dashboard = useQuery({
@@ -64,7 +56,7 @@ export default function PostTrainingPage() {
     queryFn: fetchDashboard,
     refetchInterval: 10_000,
   });
-  const selectedId = selected || dashboard.data?.recent_jobs[0]?.job_id || '';
+  const selectedId = selected;
   const job = useQuery({
     queryKey: queryKeys.foundryJob(selectedId),
     queryFn: () => fetchJob(selectedId),
@@ -76,13 +68,6 @@ export default function PostTrainingPage() {
     queryFn: fetchArtifacts,
     refetchInterval: 10_000,
   });
-  const manualRun = useMutation({
-    mutationFn: startManualRun,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.foundry });
-    },
-  });
-
   const data = dashboard.data;
   const acceptedSft = data?.artifacts['sft_trajectory:accepted'] ?? 0;
   const acceptedRl = data?.artifacts['rl_environment:accepted'] ?? 0;
@@ -99,23 +84,10 @@ export default function PostTrainingPage() {
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Post-training</h1>
-        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-          <Badge variant="outline">
-            Daily cohort · {String(data?.daily_run_hour_utc ?? 0).padStart(2, '0')}:
-            {String(data?.daily_run_minute_utc ?? 0).padStart(2, '0')} UTC
-          </Badge>
-          <Button
-            size="sm"
-            onClick={() => manualRun.mutate()}
-            disabled={
-              Boolean(dashboard.error) ||
-              manualRun.isPending ||
-              data?.manual_runs.some((run) => ['pending', 'running'].includes(run.state))
-            }
-          >
-            <Play className="mr-2 h-4 w-4" /> Run now
-          </Button>
-        </div>
+        <Badge variant="outline">
+          Daily cohort · {String(data?.daily_run_hour_utc ?? 0).padStart(2, '0')}:
+          {String(data?.daily_run_minute_utc ?? 0).padStart(2, '0')} UTC
+        </Badge>
       </div>
 
       {dashboard.error ? <ErrorBox error={dashboard.error} /> : null}
@@ -139,17 +111,23 @@ export default function PostTrainingPage() {
         <SplitAllocation data={data} />
       </div>
 
-      <div className="grid min-w-0 items-start gap-5 2xl:grid-cols-[minmax(38rem,1fr)_minmax(30rem,0.8fr)]">
-        <JobsTable jobs={data?.recent_jobs ?? []} selected={selectedId} onSelect={setSelected} />
-        <div className="2xl:sticky 2xl:top-20">
-          {job.data ? (
-            <JobPanel job={job.data} onInspect={setInspectionTarget} />
-          ) : (
-            <EmptyPanel loading={job.isLoading} />
-          )}
-          {job.error ? <ErrorBox error={job.error} /> : null}
-        </div>
-      </div>
+      <JobsTable jobs={data?.recent_jobs ?? []} selected={selectedId} onSelect={setSelected} />
+
+      <Dialog open={Boolean(selectedId)} onOpenChange={(open) => !open && setSelected('')}>
+        <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto p-0">
+          <DialogHeader className="border-b px-6 py-4">
+            <DialogTitle>Post-training job</DialogTitle>
+            <DialogDescription>
+              Tasks, model calls, validation, and generated artifacts.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="p-5">
+            {job.data ? <JobPanel job={job.data} onInspect={setInspectionTarget} /> : null}
+            {job.isLoading ? <EmptyPanel loading /> : null}
+            {job.error ? <ErrorBox error={job.error} /> : null}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <ArtifactTable
         artifacts={artifacts.data ?? []}
@@ -164,8 +142,6 @@ export default function PostTrainingPage() {
           if (!open) setInspectionTarget(null);
         }}
       />
-
-      {manualRun.error ? <ErrorBox error={manualRun.error} /> : null}
     </div>
   );
 }

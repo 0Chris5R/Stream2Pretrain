@@ -9,7 +9,9 @@ from processor import iceberg_maintenance
 from processor.iceberg_maintenance import (
     ObjectInfo,
     _cleanup_candidates,
+    _delete_objects,
     _maintain_table,
+    _maintenance_properties,
     _s3_location,
 )
 
@@ -37,6 +39,50 @@ def test_s3_location_rejects_non_object_storage_paths() -> None:
         "gold",
         "warehouse/gold/curated",
     )
+
+
+def test_hot_commits_never_own_metadata_deletion() -> None:
+    properties = _maintenance_properties()
+
+    assert properties["write.metadata.delete-after-commit.enabled"] == "false"
+    assert properties["write.metadata.previous-versions-max"] == "20"
+    assert properties["history.expire.max-snapshot-age-ms"] == str(168 * 60 * 60 * 1000)
+    assert properties["history.expire.min-snapshots-to-keep"] == "10"
+
+
+def test_metadata_delete_retries_only_retryable_keys(monkeypatch) -> None:
+    class _RetryingS3:
+        def __init__(self) -> None:
+            self.requests: list[list[str]] = []
+
+        def delete_objects(self, **kwargs: object) -> dict[str, object]:
+            delete = kwargs["Delete"]
+            assert isinstance(delete, dict)
+            keys = [str(item["Key"]) for item in delete["Objects"]]  # type: ignore[index]
+            self.requests.append(keys)
+            if len(self.requests) == 1:
+                return {
+                    "Errors": [
+                        {"Key": "old-a", "Code": "SlowDown"},
+                        {"Key": "already-gone", "Code": "NoSuchKey"},
+                    ]
+                }
+            return {}
+
+    s3 = _RetryingS3()
+    monkeypatch.setattr(iceberg_maintenance.time, "sleep", lambda _seconds: None)
+    now = datetime(2026, 8, 22, tzinfo=UTC)
+
+    _delete_objects(
+        s3,
+        bucket="gold",
+        objects=[
+            ObjectInfo("old-a", 1, now),
+            ObjectInfo("already-gone", 1, now),
+        ],
+    )
+
+    assert s3.requests == [["already-gone", "old-a"], ["old-a"]]
 
 
 def test_register_only_never_runs_snapshot_or_metadata_cleanup(monkeypatch) -> None:

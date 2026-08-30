@@ -2,9 +2,9 @@
 
 The single Helm chart that deploys every Stream2Pretrain component on a
 Kubernetes cluster: ingest CronJobs/Deployments, the stateful Kafka curator,
-the iceberg-writer Deployment, the DuckDB query API, the Decon-Gate attestation
-API, the post-training foundry StatefulSet/API, the Next.js UI, the
-kopf mixture-controller plus its SourceFeed REST API,
+the iceberg-writer Deployment, the DuckDB query API, the post-training foundry
+StatefulSet/API, the Next.js UI, the kopf mixture-controller plus its read-only
+SourceFeed monitoring API,
 the SourceFeed and MixtureRecipe CRDs, KEDA
 ScaledObjects, NetworkPolicies, ServiceMonitors, the Stream2Pretrain Grafana
 dashboard, and OPA Gatekeeper constraints.
@@ -30,7 +30,6 @@ to `.Chart.AppVersion`. Producing those images is a CI job. Expected refs:
 - `<registry>/stream2pretrain/processor-curate:<tag>`
 - `<registry>/stream2pretrain/processor-iceberg-writer:<tag>`
 - `<registry>/stream2pretrain/processor-duckdb-api:<tag>`
-- `<registry>/stream2pretrain/decon-gate:<tag>`
 - `<registry>/stream2pretrain/mixture-controller:<tag>`
 - `<registry>/stream2pretrain/processor-foundry:<tag>`
 - `<registry>/stream2pretrain/ui:<tag>`
@@ -63,8 +62,7 @@ via `sealed-secrets` or External Secrets Operator before `helm install`:
 |-----------------------------------------------------|-----------------------------------|-------------------------------|
 | `stream2pretrain-minio` (`.Values.minio.credentialsSecret`)      | `accessKey`, `secretKey`          | every component               |
 | `stream2pretrain-hf` (`.Values.sources.huggingface.models.tokenSecret`) | `token` (HF user token)           | ingest-hf                     |
-| `stream2pretrain-decon-signing` (`.Values.processor.deconGate.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), `ed25519.crt` when Foundry is enabled | Decon-Gate and Foundry signer |
-| `stream2pretrain-decon-benchmarks` (`.Values.processor.deconGate.benchmarkCorpus.configMap`) | `corpus.json` | Decon-Gate benchmark corpus |
+| `stream2pretrain-foundry-signing` (`.Values.processor.foundry.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), `ed25519.crt` | Foundry artifact signer |
 | `stream2pretrain-keda-redpanda` (`.Values.keda.triggerAuthSecret`) | `sasl`, `tls`, `username`, `password` | KEDA Kafka trigger            |
 | `stream2pretrain-foundry-providers` (`.Values.processor.foundry.providerSecret`, when enabled) | `HETZNER_INFERENCE_API_KEY`, `controlToken` | foundry worker, API, and UI manual trigger |
 
@@ -98,7 +96,6 @@ Constraint that:
 - Throughput per stage (`s2p_documents_emitted_total`)
 - Topic lag and KEDA replica counts
 - FineWeb-Edu quality-score histogram
-- Decon flag rate (overall and per benchmark)
 - Iceberg flush latency p95
 - SourceFeed poll outcomes
 - Foundry SFT/RL acceptance, provider usage and latency, validation gates,

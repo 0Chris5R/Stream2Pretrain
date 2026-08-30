@@ -176,8 +176,7 @@ required_secrets() {
     stream2pretrain/stream2pretrain-minio/secretKey \
     stream2pretrain/stream2pretrain-polaris/credential \
     stream2pretrain/stream2pretrain-polaris/scope \
-    stream2pretrain/stream2pretrain-hf/token \
-    stream2pretrain/stream2pretrain-decon-signing/ed25519.key; do
+    stream2pretrain/stream2pretrain-hf/token; do
     namespace="${item%%/*}"
     remainder="${item#*/}"
     secret="${remainder%%/*}"
@@ -198,7 +197,8 @@ required_secrets() {
     for item in \
       stream2pretrain/stream2pretrain-foundry-providers/HETZNER_INFERENCE_API_KEY \
       stream2pretrain/stream2pretrain-foundry-providers/controlToken \
-      stream2pretrain/stream2pretrain-decon-signing/ed25519.crt; do
+      stream2pretrain/stream2pretrain-foundry-signing/ed25519.key \
+      stream2pretrain/stream2pretrain-foundry-signing/ed25519.crt; do
       namespace="${item%%/*}"
       remainder="${item#*/}"
       secret="${remainder%%/*}"
@@ -210,10 +210,6 @@ required_secrets() {
         missing=1
       fi
     done
-  fi
-  if ! kubectl get configmap -n stream2pretrain stream2pretrain-decon-benchmarks >/dev/null 2>&1; then
-    printf 'Missing required ConfigMap: stream2pretrain/stream2pretrain-decon-benchmarks\n' >&2
-    missing=1
   fi
   return "$missing"
 }
@@ -263,7 +259,7 @@ ensure_topics() {
     docs.curated docs.curated.smoke \
     curation.decisions curation.decisions.smoke \
     license.admissions license.admissions.smoke \
-    decon.attest foundry.jobs foundry.events foundry.artifacts; do
+    foundry.jobs foundry.events foundry.artifacts; do
     if ! topic_exists "$topic"; then
       local retention_ms=604800000
       [[ "$topic" == *.smoke ]] && retention_ms=86400000
@@ -288,7 +284,7 @@ required_topics() {
     docs.curated docs.curated.smoke \
     curation.decisions curation.decisions.smoke \
     license.admissions license.admissions.smoke \
-    decon.attest foundry.jobs foundry.events foundry.artifacts; do
+    foundry.jobs foundry.events foundry.artifacts; do
     if ! topic_exists "$topic"; then
       printf 'Missing required Redpanda topic: %s\n' "$topic" >&2
       missing=1

@@ -10,7 +10,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from processor.foundry.store import FoundryStore
-from processor.foundry.tasking import _deterministic_corruption_task, _normalize_task
+from processor.foundry.tasking import _normalize_task
+from processor.foundry.util import sha256, stable_id
 from schemas.foundry import PaperBundle, PaperEvidenceGraph, ProviderTrace, TaskSpec
 
 _ROOT = "paper_environment/"
@@ -147,6 +148,17 @@ def _rejected_view(
     graph: PaperEvidenceGraph | None,
     task: TaskSpec | None,
 ) -> dict[str, Any]:
+    validation = artifact.get("validation") or {}
+    validation_details = validation.get("details") or {}
+    trajectory = validation_details.get("trajectory")
+    reference_trajectories = validation_details.get("reference_trajectories")
+    trajectories = (
+        [trajectory]
+        if isinstance(trajectory, dict)
+        else [value for value in reference_trajectories if isinstance(value, dict)]
+        if isinstance(reference_trajectories, list)
+        else []
+    )
     included = set(task.public_context_policy.included_spans if task else [])
     included.update(task.public_context_policy.same_paper_distractors if task else [])
     spans = [
@@ -177,10 +189,10 @@ def _rejected_view(
             else [],
         },
         "evidence_graph": graph.model_dump(mode="json") if graph else None,
-        "trajectories": [],
+        "trajectories": trajectories,
         "verifier": None,
         "validation": {
-            "report": artifact["validation"],
+            "report": validation,
             "valid": [],
             "equivalent": [],
             "adversarial": [],
@@ -219,17 +231,37 @@ def _recover_task(
     if fallback_trace is None:
         return None
     for candidate in candidates:
-        normalized = _normalize_task(candidate, bundle, graph, fallback_trace, set())
+        if _uses_v2_content_policy(fallback_trace.prompt_version):
+            normalized = _normalize_task(candidate, bundle, graph, fallback_trace, set())
+        else:
+            normalized = candidate.model_copy(
+                update={
+                    "task_id": stable_id(
+                        "paper-task",
+                        bundle.paper_id,
+                        candidate.family,
+                        sha256(candidate.public_instruction),
+                    ),
+                    "paper_id": bundle.paper_id,
+                    "construction_provenance": [
+                        *candidate.construction_provenance,
+                        fallback_trace.trace_id,
+                    ],
+                }
+            )
         if normalized.task_id == artifact["task_id"]:
             return normalized.model_copy(update={"route": artifact["pool"]})
-    corruption = _deterministic_corruption_task(
-        bundle=bundle,
-        graph=graph,
-        designer_trace=fallback_trace,
-    )
-    if corruption is not None and corruption.task_id == artifact["task_id"]:
-        return corruption.model_copy(update={"route": artifact["pool"]})
     return None
+
+
+def _uses_v2_content_policy(prompt_version: str) -> bool:
+    prefix = "paper-foundry-prompts-v"
+    if not prompt_version.startswith(prefix):
+        return False
+    try:
+        return int(prompt_version.removeprefix(prefix).split(".", 1)[0]) >= 4
+    except ValueError:
+        return False
 
 
 def _task_payloads(value: Any) -> list[dict[str, Any]]:

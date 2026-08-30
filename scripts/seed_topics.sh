@@ -61,7 +61,6 @@ create_topic "curation.decisions" 4 1
 create_topic "curation.decisions.smoke" 4 1 "$RETENTION_MS_SMOKE"
 create_topic "license.admissions" 1 1
 create_topic "license.admissions.smoke" 4 1 "$RETENTION_MS_SMOKE"
-create_topic "decon.attest"     1 1
 create_topic "foundry.jobs"     1 1
 create_topic "foundry.events"   1 1
 create_topic "foundry.artifacts" 1 1

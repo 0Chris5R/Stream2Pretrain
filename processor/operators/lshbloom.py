@@ -1,9 +1,10 @@
 """Band-partitioned Bloom filter for streaming MinHash near-deduplication.
 
 Implements the LSHBloom design from arXiv 2411.04257: each LSH band gets
-its own Bloom filter, indexed in a key-value store. Inserting a new
-signature is "for each band, hash the band-key into the corresponding
-Bloom; if all bands report seen, declare a duplicate cluster".
+its own Bloom filter, indexed in a key-value store. Band collisions produce
+candidates; the stored anchor MinHash then confirms similarity. Requiring all
+bands to collide only detects virtually identical text and previously allowed
+large numbers of lightly edited repository cards through.
 
 State backend
 -------------
@@ -18,7 +19,7 @@ operator's ``backend`` field for forensic replay.
 
 This operator is the stateful core of Stream2Pretrain's near-dup pass. It
 is deterministic: given the same insertion order it produces the same
-cluster assignment, which is what makes the contamination-bisect feature
+cluster assignment, which keeps replayed deduplication deterministic
 work across pipeline restarts.
 """
 
@@ -101,10 +102,14 @@ class LSHBloomIndex:
         num_hashes: int = 3,
         state_dir: str | Path | None = None,
         backend: str | None = None,
+        similarity_threshold: float = 0.80,
     ) -> None:
         self._num_bands = num_bands
         self._bits_per_band = bits_per_band
         self._num_hashes = num_hashes
+        if not 0.0 < similarity_threshold <= 1.0:
+            raise ValueError("similarity_threshold must be in (0, 1]")
+        self._similarity_threshold = similarity_threshold
         self._state_path = Path(state_dir) if state_dir else None
         self._cluster_counter = 0
         self._memory_bands: list[_BitArray] = [_BitArray(bits_per_band) for _ in range(num_bands)]
@@ -113,6 +118,7 @@ class LSHBloomIndex:
         # another unbounded JSON value.
         self._cluster_map: dict[str, str] = {}
         self._cluster_anchors: dict[str, str] = {}
+        self._memory_signatures: dict[str, bytes] = {}
         self._dirty_bands: set[int] = set()
         self._observations_since_bloom_checkpoint = 0
         self._bloom_checkpoint_interval = max(
@@ -240,6 +246,11 @@ class LSHBloomIndex:
         value = self._db_get(self._db, self._anchor_state_key(cluster_id))
         return value.decode("utf-8") if value is not None else None
 
+    def _lookup_anchor_signature(self, cluster_id: str) -> bytes | None:
+        if self._db is None:
+            return getattr(self, "_memory_signatures", {}).get(cluster_id)
+        return self._db_get(self._db, self._signature_state_key(cluster_id))
+
     def _checkpoint_dirty_bands(self, *, force: bool = False) -> None:
         """Amortize large Bloom bitmap writes across many observations.
 
@@ -271,29 +282,32 @@ class LSHBloomIndex:
         """
         bands = sig.band_keys(self._num_bands)
         cluster_keys = [self._cluster_key(i, b) for i, b in enumerate(bands)]
-        # Determine if every band already has a hit -> near duplicate.
-        all_seen = True
-        existing_cluster: str | None = None
+        candidate_clusters: list[str] = []
         for ck in cluster_keys:
             cid = self._lookup_cluster(ck)
-            if cid is None:
-                all_seen = False
-                break
-            existing_cluster = existing_cluster or cid
-        if all_seen and existing_cluster is not None:
-            # At-least-once Kafka delivery can replay the same document after
-            # its expensive curation completed but before the source offset
-            # checkpoint committed. A document is never a near-duplicate of
-            # itself; only a different doc_id colliding with the anchor is.
-            if self._lookup_anchor(existing_cluster) == doc_id:
-                return NearDupResult(is_near_duplicate=False, cluster_id=existing_cluster)
-            return NearDupResult(is_near_duplicate=True, cluster_id=existing_cluster)
-        # Otherwise: register doc as the anchor of a new cluster (if no
-        # band claimed one) and update the band Blooms.
-        cluster_id = existing_cluster or self._mint_cluster_id(doc_id)
+            if cid is not None and cid not in candidate_clusters:
+                candidate_clusters.append(cid)
+        for cluster_id in candidate_clusters:
+            anchor_doc_id = self._lookup_anchor(cluster_id)
+            anchor_signature = self._lookup_anchor_signature(cluster_id)
+            # At-least-once delivery replays the same document after its
+            # curation completed but before the source offset committed.
+            if anchor_doc_id == doc_id:
+                return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
+            if (
+                anchor_signature is not None
+                and _signature_similarity(sig.digest, anchor_signature)
+                >= self._similarity_threshold
+            ):
+                return NearDupResult(is_near_duplicate=True, cluster_id=cluster_id)
+
+        # No candidate passed verification. Register a new anchor and fill
+        # every still-empty band bucket. Existing buckets remain attached to
+        # their first anchor; the other bands make the new cluster discoverable.
+        cluster_id = self._mint_cluster_id(doc_id)
         writes: list[tuple[bytes, bytes]] = []
-        if self._lookup_anchor(cluster_id) is None:
-            writes.append((self._anchor_state_key(cluster_id), doc_id.encode("utf-8")))
+        writes.append((self._anchor_state_key(cluster_id), doc_id.encode("utf-8")))
+        writes.append((self._signature_state_key(cluster_id), sig.digest))
         for i, ck in enumerate(cluster_keys):
             for h in self._hashes(ck.encode("utf-8")):
                 self._memory_bands[i].set(h)
@@ -305,6 +319,7 @@ class LSHBloomIndex:
         # An in-memory test backend still needs current-process lookup state.
         if self._db is None:
             self._cluster_anchors.setdefault(cluster_id, doc_id)
+            self._memory_signatures.setdefault(cluster_id, sig.digest)
             for ck in cluster_keys:
                 self._cluster_map.setdefault(ck, cluster_id)
         self._observations_since_bloom_checkpoint += 1
@@ -325,6 +340,10 @@ class LSHBloomIndex:
     def _cluster_key(band_idx: int, band_bytes: bytes) -> str:
         h = hashlib.blake2b(band_bytes, digest_size=8, person=b"s2pck").hexdigest()
         return f"{band_idx:04d}:{h}"
+
+    @staticmethod
+    def _signature_state_key(cluster_id: str) -> bytes:
+        return f"signature:{cluster_id}".encode("ascii")
 
     def close(self) -> None:
         """Flush durable state and release file handles."""
@@ -347,6 +366,17 @@ class LSHBloomIndex:
 def memory_index() -> LSHBloomIndex:
     """Convenience: in-memory index for unit tests."""
     return LSHBloomIndex(state_dir=None)
+
+
+def _signature_similarity(left: bytes, right: bytes) -> float:
+    """Estimate Jaccard similarity from equal MinHash permutation values."""
+    if len(left) != len(right) or not left or len(left) % 4:
+        return 0.0
+    permutations = len(left) // 4
+    equal = sum(
+        left[offset : offset + 4] == right[offset : offset + 4] for offset in range(0, len(left), 4)
+    )
+    return equal / permutations
 
 
 def from_env() -> LSHBloomIndex:

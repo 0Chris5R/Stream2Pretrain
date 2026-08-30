@@ -1,253 +1,80 @@
-# Stream2Pretrain - Architecture
+# Architecture
 
-This document is the narrative version of the architecture sketch in
-`RESEARCH.md` section 4. It walks through the data plane in execution order,
-documents the cross-cutting concerns, and pins each component to its host on
-the k3s cluster.
-
-For the diagrammatic view, see [`architecture.mmd`](./architecture.mmd) (the
-Mermaid source rendered by GitHub) or the ASCII block in
-[`../RESEARCH.md`](../RESEARCH.md) section 4.
-
-## Architectural style
-
-Stream2Pretrain is a **Kappa** pipeline: there is a single streaming code path
-that handles both live ingestion and reprocessing. There is no parallel batch
-job. Reprocessing is implemented by replaying Redpanda from an earlier offset,
-which is the substrate for the contamination-bisect feature.
-
-The dataflow is:
-
-```
-SourceFeed pollers --> Redpanda --> extract --> curate --> decision audit
-                                                   |           |
-                                                   |           +--> attestation
-                                                   +--> accepted-only Gold
-```
-
-Documents use a stable `doc_id` derived from the canonical URL, but the current
-append path is at-least-once. Replay and cross-table failure behavior must be
-measured before claiming idempotent writes.
-
-## Component walkthrough
-
-### Edge: source-feed pollers
-
-Each Phase-1 source has a dedicated workload (CronJob or long-running
-Deployment depending on cadence):
-
-| SourceFeed | Workload | Cadence | Output topic |
-|---|---|---|---|
-| `rss-arxiv-cs-*` (4 feeds) | per-SourceFeed `ingest-rss` CronJob | 2h conditional GET | `raw.fetched` |
-| `oai-arxiv-cs` | `ingest-oaipmh` CronJob | 2h with resumption tokens | `raw.fetched` |
-| `hf-models`, `hf-datasets` | `ingest-hf-cards` Deployment | 10-15 min | exact-revision README prose to `raw.fetched` |
-
-Every content poller writes the **raw bytes** to MinIO under
-`s3://bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.html.gz` and
-emits a `BronzeRecord` pointer (defined in `schemas/bronze.py`) onto
-`raw.fetched`. A doc that fetches twice in the same minute deduplicates by
-`doc_id`; the bronze object is overwritten with the latest bytes plus a fresh
-`fetched_at`.
-
-Discovery is not training content. OAI and arXiv RSS schedule an exact paper;
-Hub list responses schedule an exact README revision. Metadata-only envelopes are excluded before
-body extraction, never create corpus decisions, and cannot reach Gold directly.
-
-### Bus: Redpanda
-
-A single-binary Kafka API broker. Topics:
-
-| Topic | Producer(s) | Consumer(s) | Partitions (dev / prod) |
-|---|---|---|---|
-| `raw.fetched` | all content pollers | Bytewax fetcher | 4 / 12 |
-| `docs.normalized` | Bytewax fetcher | Bytewax curator | 4 / 12 |
-| `curation.decisions` | Bytewax curator | Iceberg writer | 4 / 12 |
-| `docs.curated` | Bytewax curator, accepted subset only | training/export consumers | 4 / 12 |
-| `decon.attest` | Decon-Gate | UI + verifier scripts | 1 / 3 |
-
-Partition counts and retention windows live in `schemas/topics.py`. The
-prod profile is `needs-measurement` until the Week 5 throughput benchmark.
-Deployment probes use parallel 24-hour `raw.smoke`, `docs.normalized.smoke`,
-`curation.decisions.smoke`, and `docs.curated.smoke` lanes. They never write
-the exact canary document into a production topic. Licence evidence uses the
-matching `license.admissions.smoke` lane, and the temporary Bronze object is
-deleted after the probe.
-
-### Engine: Bytewax curator
-
-A Python streaming dataflow with the Rust core. The pipeline is wired in
-`processor/curate.py` and uses operators from `processor/operators/`:
-
-1. `fetcher` - reads retained Bronze bytes and dispatches by content type.
-2. `scientific` - native HTML structure through Resiliparse/DOM extraction, or
-   a bounded Docling CPU fallback for PDFs; retains sections, equations,
-   tables, citations, figure assets, Tesseract OCR, and figure-type routing.
-3. `langid` - fastText lid.176; drops anything below the lang threshold.
-4. `gopher_c4_taggers` - heuristic filters via the Dolma Rust taggers.
-5. `minhash` - 112-perm signature using Rensa.
-6. `lshbloom` - band-partitioned Bloom near-dup index (RocksDB-checkpointed).
-7. `quality_classifier` - source-aware CPU inference: pinned FinePDFs Edu v2
-   for scientific HTML/PDF, pinned FineWeb-Edu for ordinary web prose and as
-   an audit-only signal for card prose. Structured discovery metadata has no
-   educational score.
-8. `kenlm_perplexity` - mmap'd binary KenLM model gated only on ordinary web
-   prose. Scientific text, metadata, and cards bypass this web-domain signal.
-9. `pii_regex` - email / phone / SSN / credit-card / IP scan.
-10. `decon_gate` - 13-gram Bloom + E5 embedding sketch plus signed attestation API.
-11. `validity_interval_enricher` - populates `[valid_from, valid_to)` from
-    `http_last_modified`, `schema.org datePublished`,
-    license effective date, retraction date. Precedence rule documented in
-    [`data-model.md`](./data-model.md).
-12. `decision publisher` - emits every scored row, with the complete signal
-    vector and rejection reasons, to `curation.decisions`; accepted rows also
-    go to `docs.curated`.
-13. `iceberg_writer` - commits all outcomes to the decision table, accepted
-    rows to Gold, and emits an attestation for the complete committed batch.
-
-Malformed or tombstone records are never silently checkpointed. Deterministic
-record-local failures are written idempotently to the Gold bucket under
-`processing-failures/`; transient storage, model, and unknown failures stop the
-execution so retained Bytewax recovery replays the input.
-
-Operators are pure functions over `(key, value)` tuples; the Bytewax runtime
-handles partitioning, state, and recovery.
-
-### Storage: MinIO + Iceberg + Polaris
-
-- **MinIO**: S3 API, single chart, single dev node.
-  Application buckets: `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`,
-  and `s2p-posttrain`.
-- **Iceberg V2**: append-only decision and accepted-only Gold tables, plus
-  signed attestation metadata. The `_row_id` field is reserved and remains
-  null until real V3 row lineage is implemented. Partitioning is detailed in
-  `data-model.md`.
-- **Polaris** (lite mode): Iceberg REST catalog, RBAC, single-replica in dev.
-
-The current normalized Silver record is transported by Redpanda; its
-structured scientific JSON and figure assets live in `s2p-silver`. There is no
-separate Silver Iceberg table in the deployed pipeline. Storage ownership and
-the production scaling boundary are detailed in
-[`storage-scaling.md`](./storage-scaling.md).
-
-### Serving: DuckDB + Next.js UI
-
-DuckDB runs as a single `s2p-duckdb-api` Pod with the `iceberg` extension loaded,
-serving paginated document search, facets, dataset summaries/exports, quality
-histograms, and safe read-only query routes. The Next.js App Router app exposes:
-
-- `/dashboard` - live throughput, KEDA replica counts, per-source rates.
-- `/sources` - SourceFeed CRUD, enable/disable, run-once, and schedule status.
-- `/decon` - latest signed attestations, drill-down to rejected docs.
-- `/documents` - structured scientific-document inspector with figure/OCR,
-  table, equation, citation, warning, and provenance views.
-- `/datasets` - date-range, route, source, format, tag, score, and structured-
-  evidence selection with JSONL/Parquet export plus a reproducibility manifest.
-- `/mixture` - shadow A/B comparison view; N3 remains explicit future work in
-  the local profile.
-
-### Cross-cutting
-
-- **Autoscaling**: KEDA scales independently committing ingest workers, while
-  CPU HPA scales stateless model services. Core Bytewax flows use durable
-  recovery and coordinated stop-and-start rescaling; ordinary broker-lag KEDA
-  is not safe for their source progress.
-- **Observability**: kube-prometheus-stack scrapes every `/metrics`, Loki
-  picks up structured logs, Tempo records OTel traces. The pollers, fulltext
-  fetchers, curator, and Iceberg writer all emit a `trace_id` that is stored
-  on the gold record so a UI click can pivot from a row to the full trace.
-- **Ingress + TLS**: Traefik IngressRoute with cert-manager.
-- **Policy**: OPA Gatekeeper validates SourceFeed admission. Constraint
-  templates live in `charts/stream2pretrain/templates/gatekeeper-constraints.yaml`.
-- **Network**: the base chart has default-deny `NetworkPolicy` plus broad
-  per-component external HTTP(S) egress. `SourceFeed.egressAllow` records the
-  expected hostnames for audit and FQDN-policy generation; exact hostname
-  enforcement requires an FQDN-aware CNI. The measured DHBW profile currently
-  leaves NetworkPolicy disabled, as stated in the README limits.
-
-## Mermaid view
+## Kappa data flow
 
 ```mermaid
 flowchart LR
-  subgraph edge[Edge - SourceFeed Pollers]
-    rss[arXiv RSS discovery]
-    oai[arXiv OAI-PMH discovery]
-    arxiv[arXiv full-text fetcher]
-    hfModels[HF model cards]
-    hfDatasets[HF dataset cards]
-  end
-
-  subgraph bus[Redpanda]
-    raw[(raw.fetched)]
-    norm[(docs.normalized)]
-    decisions[(curation.decisions)]
-    cur[(docs.curated)]
-    att[(decon.attest)]
-  end
-
-  subgraph engine[Bytewax Curator]
-    fetch[fetcher]
-    extract[resiliparse / Docling + scientific structure + langid]
-    tags[gopher / c4 / minhash / lshbloom]
-    score[quality + perplexity + pii]
-    decon[Decon-Gate]
-    valid[validity-interval enricher]
-    iceberg[iceberg writer]
-  end
-
-  subgraph store[Storage]
-    minio[(MinIO)]
-    silver[(Iceberg silver)]
-    gold[(Iceberg gold)]
-    polaris[Polaris REST catalog]
-  end
-
-  subgraph serve[Serving]
-    duckdb[DuckDB]
-    ui[Next.js UI]
-  end
-
-  rss --> arxiv
-  oai --> arxiv
-  arxiv --> raw
-  hfModels --> raw
-  hfDatasets --> raw
-  raw --> fetch --> extract --> tags --> score --> decon --> valid
-  valid --> decisions --> iceberg
-  valid --> cur
-  decon --> att
-  iceberg --> silver
-  iceberg --> gold
-  iceberg -.-> minio
-  silver --- polaris
-  gold --- polaris
-  polaris --> duckdb --> ui
-  att --> ui
+  arxiv["arXiv feeds"] --> arxivFetch["arXiv full-text worker"]
+  hf["Hugging Face API"] --> hfFetch["Exact-revision card fetch"]
+  arxivFetch --> raw[(raw.fetched)]
+  hfFetch --> raw
+  raw --> fetcher["Bytewax fetcher and source projection"]
+  fetcher --> normalized[(docs.normalized)]
+  normalized --> curator["Bytewax source-aware curator"]
+  curator --> decisions[(curation.decisions)]
+  curator --> curated[(docs.curated)]
+  decisions --> writer["Iceberg writer"]
+  curated --> writer
+  writer --> minio["MinIO and Iceberg"]
+  minio --> polaris["Polaris catalog"]
+  polaris --> duckdb["DuckDB API"]
+  duckdb --> ui["Read-only Next.js cockpit"]
+  curated --> foundry["Scientific-paper Foundry"]
+  foundry --> packages["Signed SFT and RL artifacts"]
+  packages --> ui
 ```
 
-## Pod placement on the dev cluster (1 control + 2 workers)
+The system is streaming-only. Live input and explicitly approved replay use the
+same Redpanda and Bytewax path. Discovery envelopes only schedule content
+retrieval and never enter document, route, or acceptance totals.
 
-| Pod | Node preference | Resource budget (dev) |
+## Topics
+
+| Topic | Producer | Consumer |
 |---|---|---|
-| Redpanda | worker-1 (dedicated) | 2 vCPU, 2 GiB RAM, 20 GiB disk |
-| MinIO | worker-2 | 1 vCPU, 1 GiB RAM, 50 GiB disk |
-| Bytewax fetcher and curator | both workers | `needs-measurement` |
-| Polaris | control or worker-2 | 0.5 vCPU, 512 MiB |
-| DuckDB | control | 1 vCPU, 1 GiB |
-| UI | control | 0.25 vCPU, 256 MiB |
-| Pollers | both workers | 0.1 vCPU, 128 MiB each |
-| kube-prometheus-stack + Loki | dedicated namespace | shared 1 vCPU, 1 GiB |
+| `raw.fetched` | content ingest workers | Bytewax fetcher |
+| `docs.normalized` | Bytewax fetcher | Bytewax curator |
+| `curation.decisions` | Bytewax curator | Iceberg writer and monitoring |
+| `docs.curated` | Bytewax curator | Iceberg writer and Foundry intake |
+| smoke variants | isolated deployment smoke | isolated smoke consumers |
 
-Resource numbers are dev-tier estimates and `needs-measurement` for prod.
+## Processing components
 
-## Failure modes covered by design
+- arXiv full-text worker: licence resolution, native HTML, ar5iv fallback,
+  bounded CPU PDF fallback, immutable Bronze publication.
+- Hugging Face workers: exact revision and repository terms, README-only body
+  fetch, immutable Bronze publication.
+- Fetcher: source dispatch, structured paper extraction, Markdown card
+  projection, language metadata, scientific artifact persistence, Silver emit.
+- Curator: source-specific quality scoring, PII, exact and near duplicate state,
+  composite and reasoning signals, route decision.
+- Iceberg writer: durable decision table and accepted corpus table with
+  idempotent identity handling.
+- Foundry: ranked 24-hour scientific-paper cohort, task and evidence graph
+  generation, two solver trajectories, verifier compilation, deterministic
+  validation, signed packaging, and per-artifact human audit.
 
-- **Redpanda crash-loop**: pollers buffer in MinIO bronze, drain on recovery.
-- **Curator crash**: Bytewax restores operator state and Redpanda allows replay;
-  the current append path is documented as at-least-once until restart tests
-  quantify duplicate behavior.
-- **MinIO unavailable**: writers retry with exponential backoff; the
-  bronze-record pointer carries a tombstone field (`bytes_size = None`).
-- **Polaris unavailable**: writes fail and are replayable from Redpanda. A
-  staged-commit recovery mechanism is not claimed by the current code.
-- **Decon-Gate signing key compromise**: rotate via `operations.md` runbook,
-  re-attest the latest snapshot.
+## Storage
+
+- `s2p-bronze`: short-retention source bodies.
+- `s2p-silver`: structured scientific JSON and assets with bounded retention.
+- `s2p-gold`: Iceberg data and metadata for route decisions and accepted text.
+- `s2p-posttrain`: generated tasks, trajectories, environments, packages, and
+  audit evidence.
+- retained PVCs: Bytewax recovery, dedup state, and Foundry control state.
+
+## UI
+
+Dashboard, Sources, Documents, Datasets, and Mixture are monitoring/export
+views backed by declaratively configured workloads. Document and job detail
+opens in a dialog. Only named approval or rejection of a generated SFT/RL
+artifact mutates product state.
+
+## Scaling
+
+Independently committing ingest workers and stateless model services can scale
+horizontally. The core Bytewax flows currently run as one coordinated execution
+per stage because recovery and global near-duplicate state must not be forked by
+ordinary replica scaling. CPU, memory, lag, and object growth are measured in
+Prometheus; any production throughput claim remains `needs-measurement` until a
+target-cluster run records it.

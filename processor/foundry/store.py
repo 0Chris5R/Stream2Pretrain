@@ -141,7 +141,6 @@ class FoundryStore:
               state TEXT NOT NULL,
               reasoning_score REAL NOT NULL DEFAULT 0,
               quality_score REAL NOT NULL DEFAULT 0,
-              benchmark_score REAL NOT NULL DEFAULT 0,
               ranking_score REAL NOT NULL DEFAULT 0,
               domain_key TEXT NOT NULL DEFAULT 'general_scientific',
               valid_from TEXT NOT NULL DEFAULT '',
@@ -214,7 +213,6 @@ class FoundryStore:
         additions = {
             "reasoning_score": "REAL NOT NULL DEFAULT 0",
             "quality_score": "REAL NOT NULL DEFAULT 0",
-            "benchmark_score": "REAL NOT NULL DEFAULT 0",
             "ranking_score": "REAL NOT NULL DEFAULT 0",
             "domain_key": "TEXT NOT NULL DEFAULT 'general_scientific'",
             "valid_from": "TEXT NOT NULL DEFAULT ''",
@@ -224,6 +222,8 @@ class FoundryStore:
         for name, declaration in additions.items():
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE candidate_queue ADD COLUMN {name} {declaration}")
+        if "benchmark_score" in existing:
+            self._conn.execute("ALTER TABLE candidate_queue DROP COLUMN benchmark_score")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS candidate_queue_snapshot_idx "
             "ON candidate_queue(state,enqueue_ordinal)"
@@ -662,10 +662,10 @@ class FoundryStore:
                 self._conn.execute(
                     """
                     INSERT INTO candidate_queue
-                    (doc_id,payload,state,reasoning_score,quality_score,benchmark_score,
+                    (doc_id,payload,state,reasoning_score,quality_score,
                      ranking_score,domain_key,valid_from,enqueue_ordinal,enqueued_at,updated_at,
                      scientific_payload)
-                    VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(doc_id) DO UPDATE SET
                       payload=excluded.payload,
                       reasoning_score=excluded.reasoning_score,

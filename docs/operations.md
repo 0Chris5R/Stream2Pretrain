@@ -15,7 +15,7 @@ OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh plan
 # 1.2 Provision the reviewed VM plan and install k3s.
 OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh cluster
 
-# 1.3 Provision MinIO, required buckets, Secrets, and benchmark ConfigMap.
+# 1.3 Provision MinIO, required buckets, and Secrets.
 # See infra/README.md. No demo credentials are created by the script.
 
 # 1.4 Apply the measured ownership tiers.
@@ -58,8 +58,13 @@ durable append latency and restart replay on the cluster.
 Ordinary Kafka-lag KEDA must not independently scale either core execution:
 broker commits are not the authoritative Bytewax progress boundary. A core
 rescale is a coordinated stop, worker-count change, and restart using the
-pre-created recovery partitions. Quality, KenLM, and E5 remain stateless
-`processor-model-service-*` deployments with CPU HPA and cross-node spreading.
+pre-created recovery partitions. FinePDFs, FineWeb, and KenLM remain
+stateless `processor-model-service-*` deployments with CPU HPA and cross-node
+spreading. FinePDFs and FineWeb use independent Services and runtimes so their
+CPU work scales independently. The curator sends bounded batches over fresh
+in-cluster connections so Kubernetes distributes them across ready backends;
+the batch endpoint invokes the same pinned classifier once per input and
+preserves exact one-by-one order, score, and revision.
 Their deployment strategy is `Recreate`: the DHBW nodes cannot hold two
 generations of the multi-GiB model images at once. The release workflow removes
 an HPA and scales its service to one Pod only when that service's immutable
@@ -160,7 +165,7 @@ The deployment writes and validates the identity-bound
 retained state volume. Legacy state without either a matching marker or a
 readable recovery source fails closed, and an identity mismatch is never
 overwritten. After the first Bytewax snapshot, the PVC is authoritative. The
-only manual case is a **deliberate replay** such as a contamination bisect.
+only manual case is an explicitly approved recovery or audit replay.
 
 ```bash
 # 4.1 Stop the curator.
@@ -178,34 +183,32 @@ kubectl -n stream2pretrain delete pvc \
 kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=1
 ```
 
-## 5. Rotate the Decon-Gate signing key
+## 5. Rotate the Foundry artifact-signing key
 
-The prototype uses a single in-cluster Ed25519 key in a Kubernetes Secret.
-A real deployment should use Sigstore Rekor; this runbook covers the
-prototype path.
+The Foundry uses a single in-cluster Ed25519 key in a Kubernetes Secret to sign
+generated packages.
 
 ```bash
 # 5.1 Generate a fresh key pair.
 openssl genpkey -algorithm Ed25519 -out new.key
 openssl pkey -in new.key -pubout -out new.pub
 
-# 5.2 Wrap the public key in a self-signed cert (used as `signer_cert`).
+# 5.2 Wrap the public key in a self-signed certificate.
 openssl req -new -x509 -key new.key -out new.crt -days 365 \
-    -subj "/CN=stream2pretrain-decon-gate/O=Stream2Pretrain"
+    -subj "/CN=stream2pretrain-foundry/O=Stream2Pretrain"
 
 # 5.3 Update the Secret in-place.
-kubectl -n stream2pretrain create secret generic stream2pretrain-decon-signing \
+kubectl -n stream2pretrain create secret generic stream2pretrain-foundry-signing \
     --from-file=ed25519.key=new.key \
     --from-file=ed25519.crt=new.crt \
     --dry-run=client -o yaml | kubectl apply -f -
 
-# 5.4 Restart signing workloads to pick up the new key.
-kubectl -n stream2pretrain rollout restart statefulset/stream2pretrain-processor-curate
-kubectl -n stream2pretrain rollout restart deploy/stream2pretrain-processor-iceberg-writer
+# 5.4 Restart the Foundry workload to pick up the new key.
+kubectl -n stream2pretrain rollout restart statefulset/stream2pretrain-processor-foundry
 ```
 
-After rotation, old attestations remain verifiable using their embedded
-`signer_cert` field; only new attestations carry the new cert.
+Existing packages retain the certificate stored with their signature; newly
+generated packages use the new key.
 
 ## 6. Promote a shadow MixtureRecipe
 
@@ -239,11 +242,15 @@ kubectl -n stream2pretrain patch mixturerecipe production \
 
 ## 8. Backups
 
-- Mirror `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`, and
-  `s2p-posttrain` to a second failure domain on the reviewed schedule.
+- Mirror `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-posttrain` to a
+  second failure domain on the reviewed schedule.
 - Iceberg data and metadata live in `s2p-gold`; snapshot expiry and orphan
   removal must run through the guarded Iceberg maintenance command, not a
   bucket-wide age deletion.
+- Hot writer and Foundry commits have metadata deletion disabled. The scheduled
+  `processor-iceberg-maintenance` CronJob is the single cleanup owner and keeps
+  the documented snapshot, metadata-version, orphan-age, and as-of retention
+  floors. Inspect its most recent log before any manual maintenance run.
 - Back up Redpanda if the configured replay horizon is operationally required,
   plus the curator and foundry state PVCs for in-flight recovery.
 - Production Polaris requires its relational database backup and a tested

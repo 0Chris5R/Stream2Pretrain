@@ -10,6 +10,13 @@ Only the `dev` environment is deployable. The former production overlays were
 removed because their replica counts, retention periods, and volume sizes were
 not based on target-cluster measurements.
 
+CoreDNS availability is bootstrap-owned by `infra/ansible/deploy.yaml`. It
+applies `infra/kubernetes/coredns-ha-patch.yaml` and
+`infra/kubernetes/coredns-pdb.yaml`, yielding two topology-spread DNS replicas
+with a one-Pod minimum availability budget. The application release only
+reapplies and fully probes this contract when those manifests change; ordinary
+application releases perform a cheap replica/PDB presence check.
+
 ## Safety boundary
 
 - Terraform protects every VM with `prevent_destroy`.
@@ -51,9 +58,8 @@ The release graph and exact chart versions are in `../helmfile.yaml` and
 - The existing, non-committed DHBW DNS inventory. By default the script reads
   `../cloud/dns-credentials.yaml`; set `DNS_CREDENTIALS_INVENTORY` when it is
   stored elsewhere.
-- A reachable MinIO service named `minio` in namespace `minio`, the five
-  application buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`, and
-  `s2p-posttrain`,
+- A reachable MinIO service named `minio` in namespace `minio`, the application
+  buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-posttrain`,
   and externally managed credentials.
 - Application images with identical digests available on every eligible node.
   The current cluster has them only on the control-plane node, so the DHBW
@@ -70,9 +76,8 @@ Required externally managed objects for enabled components:
 | `stream2pretrain` | Secret `stream2pretrain-polaris` | `credential`, `scope` |
 | `stream2pretrain` | Secret `stream2pretrain-github` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-hf` | `token` |
-| `stream2pretrain` | Secret `stream2pretrain-decon-signing` | `ed25519.key`, `ed25519.crt` |
+| `stream2pretrain` | Secret `stream2pretrain-foundry-signing` | `ed25519.key`, `ed25519.crt` |
 | `stream2pretrain` | Secret `stream2pretrain-foundry-providers` (foundry only) | `HETZNER_INFERENCE_API_KEY`, `controlToken` |
-| `stream2pretrain` | ConfigMap `stream2pretrain-decon-benchmarks` | `corpus.json` |
 
 Use Sealed Secrets, External Secrets, or another team-approved mechanism. The
 repository intentionally contains no example credential values.

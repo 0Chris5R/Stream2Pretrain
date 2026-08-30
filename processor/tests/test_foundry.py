@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import io
 import json
+import sqlite3
 import sys
 import tarfile
 import threading
@@ -18,16 +19,17 @@ from typing import Any
 import httpx
 import pytest
 
+from processor.foundry import lakehouse
 from processor.foundry.config import FoundryConfig, ProviderConfig
 from processor.foundry.control import ProviderControlPlane
 from processor.foundry.graph import BoundedGraphPatch, EvidenceGraphCompiler
-from processor.foundry.inspection import ArtifactInspector, inspect_package
-from processor.foundry.lakehouse import _schema_column_names
+from processor.foundry.inspection import ArtifactInspector, _uses_v2_content_policy, inspect_package
+from processor.foundry.lakehouse import FoundryLakehouseSink, _schema_column_names
 from processor.foundry.oracle_build import tree_hash
 from processor.foundry.oracles import kubernetes_job_manifest
-from processor.foundry.packaging import EnvironmentPackager
+from processor.foundry.packaging import EnvironmentPackager, MinioPackageSink
 from processor.foundry.paper_adapter import bundle_json, bundle_prompt_json
-from processor.foundry.pipeline import PipelineResult, _validate_sft
+from processor.foundry.pipeline import FoundryPipeline, PipelineResult, _validate_sft
 from processor.foundry.providers import (
     OpenAICompatibleProvider,
     ProviderBudgetExhaustedError,
@@ -36,6 +38,7 @@ from processor.foundry.providers import (
 )
 from processor.foundry.quota import QuotaExceededError, QuotaLedger
 from processor.foundry.routing import ROLE_PROVIDER
+from processor.foundry.standalone_verifier import score_response
 from processor.foundry.store import FoundryStore
 from processor.foundry.symbolic import symbolically_equivalent
 from processor.foundry.tasking import (
@@ -44,11 +47,19 @@ from processor.foundry.tasking import (
     SolverTurn,
     TaskFactory,
     TaskOutputError,
+    TrajectoryGroundingDecision,
+    _answerability_system,
+    _designer_system,
+    _grounding_system,
     _machine_verifiable,
     _normalize_solver_turn_data,
+    _select_diverse_tasks,
     _solution_contract_violations,
     _solver_prompt,
+    _solver_system,
     _validate_or_repair,
+    grounding_decision_blocks,
+    validate_task,
 )
 from processor.foundry.tools import PaperRuntime, ToolError
 from processor.foundry.util import sha256
@@ -92,6 +103,51 @@ from schemas.gold import GoldRecord
 from schemas.scientific import ScientificDocument, ScientificParagraph, ScientificSection
 
 FIXED_TIME = datetime(2026, 8, 19, tzinfo=UTC)
+
+
+def test_foundry_reconciles_loaded_tables_to_scheduled_cleanup_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = object()
+    sink = object.__new__(FoundryLakehouseSink)
+    sink._catalog = SimpleNamespace(load_table=lambda _identifier: table)  # type: ignore[attr-defined]
+    reconciled: list[object] = []
+    monkeypatch.setattr(
+        lakehouse,
+        "ensure_iceberg_maintenance_properties",
+        reconciled.append,
+    )
+
+    assert sink._ensure("foundry_events", object()) is table
+    assert reconciled == [table]
+
+
+def test_foundry_does_not_treat_property_commit_failure_as_a_missing_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = object()
+
+    class _Catalog:
+        def load_table(self, _identifier: object) -> object:
+            return table
+
+        def create_table(self, **_kwargs: object) -> object:
+            raise AssertionError("must not create an already loaded table")
+
+    sink = object.__new__(FoundryLakehouseSink)
+    sink._catalog = _Catalog()  # type: ignore[attr-defined]
+
+    def fail_reconciliation(_table: object) -> None:
+        raise RuntimeError("transient catalog failure")
+
+    monkeypatch.setattr(
+        lakehouse,
+        "ensure_iceberg_maintenance_properties",
+        fail_reconciliation,
+    )
+
+    with pytest.raises(RuntimeError, match="transient catalog failure"):
+        sink._ensure("foundry_events", object())
 
 
 def _provider_config() -> ProviderConfig:
@@ -229,6 +285,58 @@ def _graph() -> PaperEvidenceGraph:
         ],
         edges=[],
     )
+
+
+def _deep_derivation() -> tuple[TaskSpec, PaperEvidenceGraph]:
+    edge = EvidenceEdge(source="equation:start", relation="derives", target="equation:result")
+    graph = PaperEvidenceGraph(
+        graph_id="graph:deep-derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:start",
+                type="equation",
+                canonical_text="The initial equality is y minus one equals x.",
+                latex="y-1=x",
+                canonical_symbolic_form="y-1=x",
+                supporting_spans=["section-1.span1"],
+            ),
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="Rearrangement gives y equals x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[edge],
+    )
+    task = TaskSpec(
+        schema_version="task-spec-v2",
+        content_policy_revision="scientific-reasoning-v2",
+        task_id="task:deep-derivation",
+        paper_id=_bundle().paper_id,
+        family="derivation_completion",
+        public_instruction=(
+            "Starting from the stated relation, derive the transformed expression and explain "
+            "which algebraic operation preserves equality."
+        ),
+        public_context_policy=PublicContextPolicy(
+            included_spans=["section-1.span1"],
+            tool_access=["open", "symbolic"],
+        ),
+        hidden_targets=HiddenTargets(
+            required_nodes=["equation:start", "equation:result"],
+            required_relations=[edge],
+            expected_values={"equation:result": "y=x+1"},
+        ),
+        verifier_class="symbolic_derivation_v2",
+        difficulty=Difficulty(estimated=4),
+        reasoning_operations=["substitution", "symbolic_rearrangement"],
+        route="rl",
+    )
+    return task, graph
 
 
 def _answer() -> FoundryAnswer:
@@ -569,7 +677,14 @@ def test_sft_validation_accepts_grounded_ids_alongside_readable_claim_text() -> 
         task=_task().model_copy(update={"route": "sft"}),
         trajectories=[trajectory],
         traces=[],
-        critic=GroundingCritique(accepted=True),
+        critic=GroundingCritique(
+            decisions=[
+                TrajectoryGroundingDecision(
+                    trajectory_id=trajectory.trajectory_id,
+                    scientifically_grounded=True,
+                )
+            ]
+        ),
     )
     report, validated, cases = _validate_sft(solved, _bundle(), _graph())
     assert report.positive_pass
@@ -582,6 +697,155 @@ def test_sft_validation_accepts_grounded_ids_alongside_readable_claim_text() -> 
     assert report.security_pass
     assert cases["adversarial"]
     assert validated[0].accepted
+
+
+def test_sft_persists_good_trajectory_when_paired_solution_fails(tmp_path: Path) -> None:
+    task = _task().model_copy(update={"route": "sft"})
+    good = Trajectory(
+        trajectory_id="trajectory:good",
+        task_id=task.task_id,
+        provider_trace_id="trace:good",
+        answer=_answer(),
+        accepted=False,
+        reward=0,
+        validation={"solver": "good"},
+    )
+    good_independent = good.model_copy(
+        update={
+            "trajectory_id": "trajectory:good-independent",
+            "provider_trace_id": "trace:good-independent",
+            "provider_trace_ids": ["trace:good-independent"],
+            "validation": {"solver": "good-independent"},
+        }
+    )
+    bad = Trajectory(
+        trajectory_id="trajectory:bad",
+        task_id=task.task_id,
+        provider_trace_id="trace:bad",
+        answer=FoundryAnswer(
+            report="This answer has no supported commitment.",
+            answer_manifest=AnswerManifest(),
+        ),
+        accepted=False,
+        reward=0,
+        validation={"solver": "bad"},
+    )
+    solved = SolvedTask(
+        task=task,
+        trajectories=[good, good_independent, bad],
+        traces=[],
+        critic=GroundingCritique(
+            decisions=[
+                TrajectoryGroundingDecision(
+                    trajectory_id=value.trajectory_id,
+                    scientifically_grounded=True,
+                )
+                for value in (good, good_independent, bad)
+            ]
+        ),
+    )
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _created = store.start_job(
+        paper_id=_bundle().paper_id,
+        paper_hash=_bundle().paper_hash,
+        doc_id="doc:trajectory-isolation",
+        policy_version="posttrain-policy-v4",
+    )
+
+    class CapturingSink:
+        def __init__(self) -> None:
+            self.packages: list[Any] = []
+
+        def write(self, package: Any, **_: Any) -> str:
+            self.packages.append(package)
+            return "s3://posttrain/sft-package.tar.gz"
+
+    sink = CapturingSink()
+    pipeline = FoundryPipeline(
+        config=FoundryConfig(),
+        store=store,
+        control=object(),  # type: ignore[arg-type]
+        package_sink=sink,
+    )
+    artifacts = pipeline._validate_and_package(
+        job_id=job_id,
+        bundle=_bundle(),
+        graph=_graph(),
+        solved=[solved],
+        common_traces=[],
+        oracle_results=[],
+    )
+
+    accepted = [value for value in artifacts if value.status == "accepted"]
+    rejected = [value for value in artifacts if value.status == "rejected"]
+    assert [value.artifact_id for value in accepted] == [
+        "trajectory:good",
+        "trajectory:good-independent",
+    ]
+    assert len(rejected) == 1
+    assert rejected[0].validation.details["trajectory_id"] == "trajectory:bad"
+    assert accepted[0].package_uri == "s3://posttrain/sft-package.tar.gz"
+    assert rejected[0].package_uri is None
+    assert accepted[0].validation.details["trajectory_id"] == "trajectory:good"
+    persisted_rejection = store.artifact(rejected[0].artifact_id)
+    assert persisted_rejection is not None
+    assert persisted_rejection["validation"]["details"]["trajectory"]["answer"]["report"] == (
+        bad.answer.report
+    )
+    assert len(sink.packages) == 2
+    packaged_trajectory_ids = []
+    for package in sink.packages:
+        inspection = inspect_package(package.content)
+        assert len(inspection["trajectories"]) == 1
+        packaged_trajectory_ids.append(inspection["trajectories"][0]["trajectory_id"])
+        assert inspection["trajectories"][0]["validation"]["grounding_decision"][
+            "scientifically_grounded"
+        ]
+    assert packaged_trajectory_ids == ["trajectory:good", "trajectory:good-independent"]
+
+
+def test_grounding_gate_ignores_only_proven_format_false_negative() -> None:
+    format_only = TrajectoryGroundingDecision(
+        trajectory_id="trajectory:format-only",
+        scientifically_grounded=False,
+        findings=["The scientific answer is correct but the manifest omits node IDs."],
+    )
+    substantive = TrajectoryGroundingDecision(
+        trajectory_id="trajectory:wrong",
+        scientifically_grounded=False,
+        findings=["The derived exponent has the wrong sign."],
+    )
+    explicit = substantive.model_copy(
+        update={"unsupported_claims": ["The claimed negative exponent contradicts the paper."]}
+    )
+
+    assert not grounding_decision_blocks(format_only)
+    assert grounding_decision_blocks(substantive)
+    assert grounding_decision_blocks(explicit)
+
+
+def test_inspection_keeps_legacy_and_v2_prompt_revisions_separate() -> None:
+    assert not _uses_v2_content_policy("paper-foundry-prompts-v3")
+    assert _uses_v2_content_policy("paper-foundry-prompts-v4")
+    assert _uses_v2_content_policy("paper-foundry-prompts-v5")
+    assert not _uses_v2_content_policy("test-v1")
+
+
+def test_v2_prompts_encode_deep_task_and_per_trajectory_contracts() -> None:
+    designer = _designer_system()
+    answerability = _answerability_system()
+    solver = _solver_system()
+    grounding = _grounding_system()
+
+    assert "multi-step derivations" in designer
+    assert "single subtraction or percentage calculation" in designer
+    assert "internal-ID listing" in answerability
+    assert "difficulty 4-5" in answerability
+    assert "The readable report is the" in solver
+    assert "manifest is machine-readable provenance" in solver
+    assert "one decisions entry for every supplied trajectory_id" in grounding
+    assert "one bad solution must" in grounding
+    assert '"decisions"' in grounding
 
 
 def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> None:
@@ -739,6 +1003,159 @@ def test_derivation_requires_checkable_expected_outcome_for_rl() -> None:
         graph,
         _bundle(),
     )
+
+
+def test_v2_derivation_requires_deep_answer_facing_reasoning() -> None:
+    task, graph = _deep_derivation()
+    validate_task(task, _bundle(), graph)
+    assert _machine_verifiable(task, graph, _bundle())
+
+    shallow_graph = PaperEvidenceGraph(
+        graph_id="graph:shallow-numeric",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="metric:one",
+                type="metric",
+                canonical_text="The reported value is 80.",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    shallow = task.model_copy(
+        update={
+            "task_id": "task:shallow",
+            "family": "figure_table_reasoning",
+            "public_instruction": "Read the value and subtract ten.",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["metric:one"],
+                expected_values={"difference": 70.0},
+            ),
+            "difficulty": Difficulty(estimated=2),
+            "reasoning_operations": ["subtraction"],
+        }
+    )
+    with pytest.raises(ValueError, match="low value"):
+        validate_task(shallow, _bundle(), shallow_graph)
+
+
+def test_v2_report_must_expose_symbolic_result_not_hide_it_in_manifest(tmp_path: Path) -> None:
+    task, graph = _deep_derivation()
+    spec = deterministic_verifier(task, _bundle(), graph)
+    answer = FoundryAnswer(
+        report="Starting from y - 1 = x, add one to both sides to obtain y = x + 1.",
+        answer_manifest=AnswerManifest(
+            equations=[
+                SubmittedEquation(id="equation:start", latex="y-1=x"),
+                SubmittedEquation(id="equation:result", latex="y=x+1"),
+            ],
+            relations=task.hidden_targets.required_relations,
+        ),
+    )
+    hidden_result = answer.model_copy(
+        update={"report": "The checked result is recorded in the structured manifest."}
+    )
+
+    assert evaluate(spec, answer, task=task, graph=graph, bundle=_bundle()).passed
+    assert not evaluate(spec, hidden_result, task=task, graph=graph, bundle=_bundle()).passed
+    report, validated, cases = run_acceptance_suite(
+        task=task,
+        spec=spec,
+        bundle=_bundle(),
+        graph=graph,
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:deep",
+                task_id=task.task_id,
+                provider_trace_id="trace:deep",
+                answer=answer,
+                accepted=False,
+                reward=0,
+            )
+        ],
+    )
+    assert suite_passes(report)
+    assert any(value.report == hidden_result.report for value in cases["mutations"])
+    package = EnvironmentPackager(signer=AttestationSigner()).build(
+        bundle=_bundle(),
+        graph=graph,
+        task=task,
+        trajectories=validated,
+        validation=report,
+        traces=[],
+        verifier=spec,
+        pool="rl",
+        dataset_split="train",
+        validation_cases=cases,
+    )
+    with tarfile.open(fileobj=io.BytesIO(package.content), mode="r:gz") as archive:
+        archive.extractall(tmp_path, filter="data")
+    environment_root = tmp_path / "paper_environment"
+    assert score_response(answer.model_dump_json(), environment_root) == 1.0
+    assert score_response(hidden_result.model_dump_json(), environment_root) == 0.0
+
+
+def test_v2_verifier_contract_cannot_be_authored_by_provider() -> None:
+    task, graph = _deep_derivation()
+
+    class AuditOnlyControl:
+        def __init__(self) -> None:
+            self.roles: list[str] = []
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.roles.append(kwargs["role"])
+            return (
+                {
+                    "accepted": True,
+                    "findings": [],
+                    "false_positive_risks": [],
+                    "false_negative_risks": [],
+                    "repair_instructions": [],
+                },
+                _trace("trace:verifier-audit"),
+            )
+
+    control = AuditOnlyControl()
+    verifier, traces = VerifierCompiler(control).compile(  # type: ignore[arg-type]
+        job_id="job:v2",
+        bundle=_bundle(),
+        graph=graph,
+        task=task,
+    )
+
+    assert control.roles == ["verifier_critic"]
+    assert len(traces) == 1
+    assert verifier.version == 2
+    assert verifier.critic_audit[0]["action"] == "audit_only_no_contract_mutation"
+    assert {predicate.target for predicate in verifier.predicates if predicate.target} <= set(
+        [*task.hidden_targets.required_nodes, *task.hidden_targets.expected_values]
+    )
+
+
+def test_task_selection_prioritizes_deep_families_and_caps_repetition() -> None:
+    task, _graph_value = _deep_derivation()
+    derivations = [
+        task.model_copy(update={"task_id": f"task:derivation:{index}"}) for index in range(3)
+    ]
+    assumption = task.model_copy(
+        update={"task_id": "task:assumption", "family": "assumption_consequence"}
+    )
+    corruption = task.model_copy(
+        update={"task_id": "task:corruption", "family": "corruption_diagnosis"}
+    )
+
+    selected = _select_diverse_tasks(
+        [corruption, *derivations, assumption],
+        limit=4,
+    )
+
+    assert [value.family for value in selected] == [
+        "derivation_completion",
+        "derivation_completion",
+        "assumption_consequence",
+        "corruption_diagnosis",
+    ]
 
 
 def test_derivation_manifest_does_not_require_public_span_ids() -> None:
@@ -1361,6 +1778,26 @@ def test_candidate_queue_ranks_snapshot_by_composite_score(tmp_path: Path) -> No
         "high-reasoning",
         "low-reasoning",
     ]
+
+
+def test_candidate_queue_removes_retired_pretraining_score(tmp_path: Path) -> None:
+    path = tmp_path / "control.sqlite3"
+    store = FoundryStore(str(path))
+    store.close()
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "ALTER TABLE candidate_queue ADD COLUMN benchmark_score REAL NOT NULL DEFAULT 0"
+    )
+    connection.close()
+
+    migrated = FoundryStore(str(path))
+    columns = {
+        str(row[1])
+        for row in migrated._conn.execute("PRAGMA table_info(candidate_queue)").fetchall()
+    }
+    migrated.close()
+
+    assert "benchmark_score" not in columns
 
 
 def test_candidate_queue_updates_changed_payload_and_removes_only_waiting_rows(
@@ -2138,6 +2575,57 @@ def test_acceptance_suite_and_signed_package_are_reproducible(tmp_path: Path) ->
                         ("paper_foundry.", "public_tools", "hidden")
                     ):
                         sys.modules.pop(module_name, None)
+
+
+def test_minio_package_paths_separate_content_policy_revisions() -> None:
+    task = _task().model_copy(
+        update={"content_policy_revision": "scientific-reasoning-v2", "route": "sft"}
+    )
+    report, validated, cases = run_acceptance_suite(
+        task=task,
+        spec=deterministic_verifier(task, _bundle(), _graph()),
+        bundle=_bundle(),
+        graph=_graph(),
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:revision",
+                task_id=task.task_id,
+                provider_trace_id="trace:revision",
+                answer=_answer(),
+                accepted=False,
+                reward=0,
+            )
+        ],
+    )
+    package = EnvironmentPackager(signer=AttestationSigner()).build(
+        bundle=_bundle(),
+        graph=_graph(),
+        task=task,
+        trajectories=validated,
+        validation=report,
+        traces=[],
+        verifier=None,
+        pool="sft",
+        dataset_split="train",
+        validation_cases=cases,
+    )
+
+    class S3:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        def put_object(self, **kwargs: Any) -> None:
+            self.keys.append(kwargs["Key"])
+
+    s3 = S3()
+    uri = MinioPackageSink(s3_client=s3, bucket="posttrain").write(
+        package,
+        paper_id=_bundle().paper_id,
+        task_id=task.task_id,
+    )
+
+    assert "/revisions/scientific-reasoning-v2/" in uri
+    assert len(s3.keys) == 2
 
 
 def test_relation_only_required_nodes_produce_effective_mutations() -> None:

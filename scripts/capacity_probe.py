@@ -20,7 +20,6 @@ TOPICS = (
     "docs.normalized",
     "docs.curated",
     "curation.decisions",
-    "decon.attest",
 )
 
 

@@ -1,7 +1,5 @@
 {{- $component := "processor-curate" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
-{{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
-{{- $signingMount := "/var/run/secrets/stream2pretrain/decon-signing" }}
 {{- $externalModels := or .Values.processor.curate.modelBundle.bootstrap (ne .Values.processor.curate.modelBundle.url "") }}
 {{- if ne (int .Values.processor.curate.replicas) 1 }}
 {{- fail "processor.curate.replicas must be exactly 1 until coordinated Bytewax multi-worker recovery is implemented" }}
@@ -49,9 +47,9 @@ spec:
               import urllib.request
 
               urls = [
-                  "http://{{ printf "%s-processor-model-service-quality" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
+                  "http://{{ printf "%s-processor-model-service-finepdfs" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
+                  "http://{{ printf "%s-processor-model-service-fineweb" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
                   "http://{{ printf "%s-processor-model-service-kenlm" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
-                  "http://{{ printf "%s-processor-model-service-embedding" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
               ]
               deadline = time.monotonic() + 900
               for url in urls:
@@ -84,8 +82,6 @@ spec:
               value: "90ddef285f67230389057c14b2f6bbfeb70d40ea"
             - name: FINEWEB_EDU_REVISION
               value: "284663cbb2dabf9bda30d8f8cc49601251ee1631"
-            - name: E5_SMALL_REVISION
-              value: "ffb93f3bd4047442299a41ebb6fa998a38507c52"
             - name: KENLM_REVISION
               value: "3fbe35c83b1a39f420a345b7c96a186c8030d834"
             - name: FIGURE_CLASSIFIER_REVISION
@@ -156,15 +152,17 @@ spec:
             - name: S2P_MODELS_DIR
               value: {{ ternary "/models" "/opt/models" $externalModels | quote }}
             {{- if and .Values.processor.modelService.enabled (not $externalModels) }}
-            - name: S2P_QUALITY_MODEL_SERVICE_URL
-              value: {{ printf "http://%s-processor-model-service-quality:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_FINEPDFS_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-finepdfs:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_FINEWEB_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-fineweb:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             - name: S2P_KENLM_MODEL_SERVICE_URL
               value: {{ printf "http://%s-processor-model-service-kenlm:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
-            - name: S2P_EMBEDDING_MODEL_SERVICE_URL
-              value: {{ printf "http://%s-processor-model-service-embedding:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             {{- end }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.curate.requireRealModels | quote }}
+            - name: S2P_SCORING_VERSION
+              value: {{ .Values.processor.curate.scoringVersion | quote }}
             - name: S2P_FINEPDFS_EDU_REVISION
               value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
             - name: S2P_FINEWEB_EDU_REVISION
@@ -185,18 +183,8 @@ spec:
               value: "2"
             - name: S2P_CURATOR_CLASSIFIER_CONCURRENCY
               value: "6"
-            - name: S2P_DECON_SIGNING_KEY
-              value: {{ printf "%s/%s" $signingMount .Values.processor.deconGate.signingKeyKey | quote }}
-            - name: S2P_DECON_SIGNING_CERT
-              value: {{ printf "%s/%s" $signingMount .Values.processor.deconGate.signingCertKey | quote }}
-            - name: S2P_BENCH_CORPUS_PATH
-              value: {{ printf "%s/%s" $bench.mountPath $bench.fileName | quote }}
-            - name: S2P_BENCH_SET_VERSION
-              value: {{ .Values.processor.deconGate.benchmarkSetVersion | quote }}
-            - name: S2P_DECON_BLOOM_BITS
-              value: {{ .Values.processor.deconGate.bloomBits | quote }}
-            - name: S2P_DECON_BLOOM_HASHES
-              value: {{ .Values.processor.deconGate.bloomHashes | quote }}
+            - name: S2P_CURATOR_CLASSIFIER_BATCH_SIZE
+              value: {{ .Values.processor.curate.classifierBatchSize | int | quote }}
           startupProbe:
             httpGet: {path: /healthz, port: metrics}
             periodSeconds: 10
@@ -222,12 +210,6 @@ spec:
               mountPath: /models
               readOnly: true
             {{- end }}
-            - name: decon-signing
-              mountPath: {{ $signingMount | quote }}
-              readOnly: true
-            - name: decon-benchmarks
-              mountPath: {{ $bench.mountPath | quote }}
-              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
@@ -236,17 +218,6 @@ spec:
           emptyDir:
             sizeLimit: {{ printf "%dMi" (int .Values.processor.curate.modelBundle.sizeMi) | quote }}
         {{- end }}
-        - name: decon-signing
-          secret:
-            secretName: {{ .Values.processor.deconGate.signingKeySecret | quote }}
-        - name: decon-benchmarks
-          {{- if $bench.secret }}
-          secret:
-            secretName: {{ $bench.secret | quote }}
-          {{- else }}
-          configMap:
-            name: {{ $bench.configMap | quote }}
-          {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: checkpoint

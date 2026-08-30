@@ -193,7 +193,6 @@ def test_bronze_to_durable_decision_within_30s(dev_stack: StackEndpoints) -> Non
     assert decision["route"] in {
         "broad_pretraining",
         "posttrain_candidate",
-        "benchmark_candidate",
         "quarantine",
         "retry",
     }
@@ -204,7 +203,6 @@ def test_bronze_to_durable_decision_within_30s(dev_stack: StackEndpoints) -> Non
         and decision["route"] in {"broad_pretraining", "posttrain_candidate"}
         and not decision["reject_reasons"]
         and not decision["pii_flags"]
-        and not decision["contaminated_with"]
     )
     if trainable:
         assert _topic_exists(dev_stack.redpanda_brokers, DOCS_CURATED)
@@ -219,7 +217,6 @@ def test_bronze_to_durable_decision_within_30s(dev_stack: StackEndpoints) -> Non
         )
     else:
         assert decision["reject_reasons"] or decision["route"] in {
-            "benchmark_candidate",
             "retry",
             "quarantine",
         }

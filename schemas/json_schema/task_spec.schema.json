@@ -206,6 +206,11 @@
       "title": "Construction Provenance",
       "type": "array"
     },
+    "content_policy_revision": {
+      "default": "scientific-reasoning-v1",
+      "title": "Content Policy Revision",
+      "type": "string"
+    },
     "difficulty": {
       "$ref": "#/$defs/Difficulty"
     },

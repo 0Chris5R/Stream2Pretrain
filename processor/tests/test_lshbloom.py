@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from processor.operators.lshbloom import LSHBloomIndex
-from processor.operators.minhash import MinHasher
+from processor.operators.minhash import MinHasher, MinHashSignature
 
 
 def test_first_observation_is_not_dup() -> None:
@@ -31,6 +31,54 @@ def test_identical_text_is_near_dup() -> None:
     assert first.is_near_duplicate is False
     assert second.is_near_duplicate is True
     assert second.cluster_id == first.cluster_id
+
+
+def test_lightly_edited_repository_card_is_near_duplicate() -> None:
+    h = MinHasher(num_perms=64)
+    common = (
+        "This technical model card documents architecture training data evaluation results "
+        "runtime usage limitations checkpoints and reproducible benchmark measurements "
+    )
+    first_text = (common * 20) + "repository owner alpha"
+    edited_text = (common * 20) + "repository owner beta"
+    idx = LSHBloomIndex(
+        num_bands=16,
+        bits_per_band=1 << 14,
+        similarity_threshold=0.80,
+    )
+
+    first = idx.observe("sha256:" + "a" * 64, h.signature(first_text))
+    edited = idx.observe("sha256:" + "b" * 64, h.signature(edited_text))
+
+    assert first.is_near_duplicate is False
+    assert edited.is_near_duplicate is True
+    assert edited.cluster_id == first.cluster_id
+
+
+def test_single_band_collision_is_confirmed_before_rejection() -> None:
+    first_values = list(range(64))
+    collision_values = first_values[:4] + list(range(100, 160))
+    first_sig = MinHashSignature(
+        digest=b"".join(value.to_bytes(4, "little") for value in first_values),
+        num_perms=64,
+        backend="test",
+    )
+    collision_sig = MinHashSignature(
+        digest=b"".join(value.to_bytes(4, "little") for value in collision_values),
+        num_perms=64,
+        backend="test",
+    )
+    idx = LSHBloomIndex(num_bands=16, bits_per_band=1 << 14)
+
+    first = idx.observe("sha256:" + "a" * 64, first_sig)
+    collision = idx.observe("sha256:" + "b" * 64, collision_sig)
+    repeated_collision = idx.observe("sha256:" + "c" * 64, collision_sig)
+
+    assert first.is_near_duplicate is False
+    assert collision.is_near_duplicate is False
+    assert collision.cluster_id != first.cluster_id
+    assert repeated_collision.is_near_duplicate is True
+    assert repeated_collision.cluster_id == collision.cluster_id
 
 
 def test_replaying_anchor_document_is_idempotent() -> None:
@@ -124,12 +172,16 @@ def test_durable_backend_writes_incremental_cluster_keys(
     assert b"__cluster_anchors__" not in stored
     assert sum(key.startswith(b"cluster:") for key in stored) == 16
     assert sum(key.startswith(b"anchor:") for key in stored) == 1
+    assert sum(key.startswith(b"signature:") for key in stored) == 1
 
     replay_index = LSHBloomIndex(num_bands=16, bits_per_band=1 << 14, state_dir="unused")
     replay = replay_index.observe(doc_id, sig)
+    duplicate_after_restart = replay_index.observe("sha256:" + "e" * 64, sig)
     replay_index.close()
     assert replay.is_near_duplicate is False
     assert replay.cluster_id == first.cluster_id
+    assert duplicate_after_restart.is_near_duplicate is True
+    assert duplicate_after_restart.cluster_id == first.cluster_id
 
 
 def test_different_text_not_near_dup() -> None:

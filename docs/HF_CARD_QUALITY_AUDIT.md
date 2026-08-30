@@ -1,7 +1,8 @@
 # Hugging Face card quality audit
 
-Status: implemented policy. A bounded live content sample has been inspected;
-the same-sample learned-model comparison still remains `needs-measurement`.
+Status: implemented policy. Two bounded live content samples have been
+inspected; a labelled learned-model calibration still remains
+`needs-measurement`.
 
 ## What the card source contributes
 
@@ -21,6 +22,10 @@ classifier:
 - `substantive_technical_card`: useful documentation with a narrower scope.
 - `template_boilerplate`: unfilled generated card templates.
 - `stub_checkpoint_upload`: upload notices and checkpoint-only READMEs.
+- `synthetic_script_card`: generated `inference.py`, `pipeline.py`, or trainer
+  inventories whose apparent technical fields do not document a real model.
+- `minimal_artifact_listing`: short checkpoint or file inventories without
+  measured, source, revision, or evaluation evidence.
 - `marketing`: promotional prose without technical grounding.
 - `generic_marketing_benchmark`: polished claims built from unidentified
   models, benchmarks, or results that provide no checkable provenance.
@@ -47,7 +52,9 @@ The deterministic gate follows the official Hugging Face card structure:
 - A dataset card must provide an overview plus substantive material about data
   composition, fields, collection, use, or limitations.
 - Older non-template cards without current headings may pass when their prose
-  independently establishes multiple technical dimensions.
+  independently establishes technical detail plus concrete measurements,
+  named sources, immutable revisions, metrics, repository references, or
+  executable examples.
 - Placeholder templates, upload stubs, wrong-type cards, and ungrounded
   marketing are rejected.
 - Unfilled template sections are removed independently. A card with measured
@@ -58,9 +65,14 @@ The deterministic gate follows the official Hugging Face card structure:
 
 This gate is independent of the learned educational-quality scores. Every
 retained section receives both FineWeb-Edu and FinePDFs Edu v2. FineWeb-Edu is
-currently the primary reported card score and FinePDFs is the comparison score.
-Neither score alone admits or rejects a card until a same-sample evaluation has
-been measured on the labels above.
+the primary reported card signal because its official training set is web
+content, which is closer to a Markdown repository README. Its model card still
+describes a school-focused web rubric and warns about specialized higher
+education, so it is audit-only for cards. FinePDFs Edu v2 was trained on PDF
+samples and explicitly documents out-of-domain limitations, so it is retained
+only as a labelled comparison for cards. Neither classifier gates card
+admission and a higher-looking out-of-domain FinePDFs score must not replace the
+FineWeb score.
 
 ## Bounded live sample, 2026-08-27
 
@@ -76,6 +88,34 @@ a substantive trainer report being rejected because other sections still held
 placeholders. The sample is operational evidence, not an estimate of classifier
 precision or recall.
 
+## Bounded deployed-corpus sample, 2026-08-30
+
+The audit inspected 100 durable accepted model-card projections, 100 durable
+accepted dataset-card projections, 100 model-card rejections, 100 dataset-card
+rejections, and 20 accepted arXiv projections. It found generated script cards,
+trainer shells, minimal checkpoint inventories, placeholder paper-title cards,
+and repeated lightly edited repository cards among the historical acceptances.
+It also found useful compact and legacy cards rejected because they did not use
+the expected heading vocabulary. The revised deterministic policy retained 94
+of the 100 previously accepted model cards and 92 of the 100 previously accepted
+dataset cards. The removed sample rows were the observed generated scripts,
+trainer/quantization shells, minimal inventories, access-only or generic cards,
+and placeholder-title cards.
+The revised policy also accepts the audited compact measured card and the four
+useful no-template-heading rejection examples. These are bounded observed
+sample counts, not population precision or recall estimates.
+
+The arXiv sample contained 19 substantive scientific papers and one published
+IEEEtran starter file. A narrow literal template detector removes that starter
+without imposing a minimum paper length or requiring conventional headings.
+Equations, tables, figures, and captions remain in the scientific projection.
+
+The `pretrain-content-v2` scoring generation is the clean-output boundary.
+Normal documents, aggregates, as-of views, and dataset exports expose only that
+generation. Historical rows remain durable audit history but do not masquerade
+as current clean output. Deployment must replay eligible live input through the
+new generation before expecting current exports to repopulate.
+
 ## Classifier follow-up
 
 The next classifier step is a small card-specific model trained on manually
@@ -90,4 +130,5 @@ Primary references:
 - <https://huggingface.co/docs/hub/model-cards>
 - <https://huggingface.co/docs/hub/model-card-annotated>
 - <https://huggingface.co/docs/hub/datasets-cards>
+- <https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier>
 - <https://huggingface.co/HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn>

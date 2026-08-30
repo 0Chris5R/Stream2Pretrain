@@ -104,6 +104,7 @@ class EnvironmentPackager:
             manifest = EnvironmentManifest(
                 environment_id=stable_id("paper-environment", task.task_id, environment_hash),
                 task_id=task.task_id,
+                content_policy_revision=task.content_policy_revision,
                 paper_id=bundle.paper_id,
                 family=task.family,
                 pool=pool,
@@ -357,6 +358,7 @@ class MinioPackageSink:
     ) -> str:
         key = (
             f"{package.manifest.pool}/{package.manifest.dataset_split}/"
+            f"revisions/{normalize_identifier(package.manifest.content_policy_revision)}/"
             f"environments/{normalize_identifier(paper_id)}/"
             f"{normalize_identifier(task_id)}/{package.package_hash.removeprefix('sha256:')}.tar.gz"
         )

@@ -86,8 +86,6 @@ class _DatasetConnection(_FakeConnection):
                 "classifier_backend",
                 "projection_version",
                 "extraction_pipeline",
-                "benchmark_set_version",
-                "decon_embedding_revision",
                 "pii_scanner_revision",
                 "lang_detector_revision",
                 "tokenizer_revision",
@@ -112,6 +110,7 @@ def test_as_of_uses_half_open_validity_predicate() -> None:
     sql, params = conn.calls[-1]
     assert "valid_from <= CAST(? AS TIMESTAMP)" in sql
     assert "valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP)" in sql
+    assert "scoring_version = 'pretrain-content-v2'" in sql
     assert params == ["2026-06-17T10:00:00Z", "2026-06-17T10:00:00Z"]
 
 
@@ -445,10 +444,10 @@ def test_document_filters_are_parameterized_and_hide_fixtures() -> None:
     )
 
     assert "source_feed NOT LIKE 'local-%'" in where
+    assert "scoring_version = 'pretrain-content-v2'" in where
     assert "LIST_CONTAINS(content_tags, ?)" in where
     assert "route = ?" in where
     assert "eligible_routes" not in where
-    assert "benchmark_candidate" not in where
     assert "figure_count > 0" in where
     assert "edu_score >= ?" in where
     assert "method" not in where

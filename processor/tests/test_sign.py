@@ -10,8 +10,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from processor.sign import (
     AttestationSigner,
-    sign_attestation,
-    verify_attestation,
     verify_signature,
 )
 
@@ -70,12 +68,3 @@ def test_loads_base64_32_byte_secret_key(tmp_path: Path) -> None:
     res = signer.sign(payload)
 
     assert verify_signature(payload, res.signature_b64, res.cert_pem)
-
-
-def test_mapping_sign_and_verify_public_surface() -> None:
-    signed = sign_attestation({"snapshot_id": 45, "tokens_scanned": 20})
-
-    assert verify_attestation(signed)
-    assert verify_attestation({**signed, "snapshot_id": "45"})
-    assert not verify_attestation({**signed, "tokens_scanned": 21})
-    assert not verify_attestation({**signed, "snapshot_id": "46"})

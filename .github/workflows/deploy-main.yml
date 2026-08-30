@@ -46,6 +46,8 @@ jobs:
       monitoring: ${{ steps.scope.outputs.monitoring }}
       redpanda: ${{ steps.scope.outputs.redpanda }}
       foundry_package: ${{ steps.scope.outputs.foundry_package }}
+      dns_infra: ${{ steps.scope.outputs.dns_infra }}
+      model_runtime: ${{ steps.scope.outputs.model_runtime }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -68,6 +70,8 @@ jobs:
             echo "monitoring=false" >> "$GITHUB_OUTPUT"
             echo "redpanda=false" >> "$GITHUB_OUTPUT"
             echo "foundry_package=false" >> "$GITHUB_OUTPUT"
+            echo "dns_infra=false" >> "$GITHUB_OUTPUT"
+            echo "model_runtime=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           before="${{ github.event.before }}"
@@ -85,18 +89,20 @@ jobs:
           monitoring=false
           redpanda=false
           foundry_package=false
+          dns_infra=false
+          model_runtime=false
           if grep -Eq \
             '^(schemas/|ingest/|processor/|tests/|scripts/.*\.py$|pyproject\.toml$|uv\.lock$|[^/]+/pyproject\.toml$)' \
             "$changed"; then
             python=true
           fi
           if grep -Eq \
-            '^(\.github/workflows/deploy-main\.yml$|charts/|infra/helmfile-values/|helmfile\.yaml$|scripts/)' \
+            '^(\.github/workflows/deploy-main\.yml$|charts/|infra/helmfile-values/|infra/kubernetes/|helmfile\.yaml$|scripts/)' \
             "$changed"; then
             helm=true
           fi
           if grep -Eq \
-            '^(\.github/workflows/deploy-main\.yml$|schemas/|ingest/|processor/|ui/|charts/|infra/helmfile-values/|scripts/|pyproject\.toml$|uv\.lock$|\.dockerignore$|helmfile\.yaml$)' \
+            '^(\.github/workflows/deploy-main\.yml$|schemas/|ingest/|processor/|ui/|charts/|infra/helmfile-values/|infra/kubernetes/|scripts/|pyproject\.toml$|uv\.lock$|\.dockerignore$|helmfile\.yaml$)' \
             "$changed"; then
             deploy=true
           fi
@@ -129,6 +135,16 @@ jobs:
             "$changed"; then
             foundry_package=true
           fi
+          if grep -Eq \
+            '^(infra/kubernetes/coredns-(ha-patch|pdb)\.yaml|scripts/validate_storage_dns\.py)$' \
+            "$changed"; then
+            dns_infra=true
+          fi
+          if grep -Eq \
+            '^(processor/(curate|model_client|model_service)\.py|processor/operators/quality\.py|charts/stream2pretrain/templates/(processor-curate|processor-model-service|servicemonitors)\.yaml|charts/stream2pretrain/values\.yaml|scripts/benchmark_model_service\.py)$' \
+            "$changed"; then
+            model_runtime=true
+          fi
           echo "Changed files:"
           sed 's/^/  /' "$changed"
           echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
@@ -139,6 +155,8 @@ jobs:
           echo "monitoring=$monitoring" >> "$GITHUB_OUTPUT"
           echo "redpanda=$redpanda" >> "$GITHUB_OUTPUT"
           echo "foundry_package=$foundry_package" >> "$GITHUB_OUTPUT"
+          echo "dns_infra=$dns_infra" >> "$GITHUB_OUTPUT"
+          echo "model_runtime=$model_runtime" >> "$GITHUB_OUTPUT"
 
   validate:
     name: Validate repository
@@ -249,6 +267,27 @@ jobs:
               resource = by_name.get((kind, name))
               if resource is None or resource.get("spec", {}).get("replicas") != 1:
                   raise SystemExit(f"core workload must render exactly one replica: {name}")
+
+          for profile in ("finepdfs", "fineweb"):
+              name = f"stream2pretrain-processor-model-service-{profile}"
+              deployment = by_name.get(("Deployment", name))
+              service = by_name.get(("Service", name))
+              hpa = by_name.get(("HorizontalPodAutoscaler", name))
+              monitor = by_name.get(("ServiceMonitor", name))
+              if any(value is None for value in (deployment, service, hpa, monitor)):
+                  raise SystemExit(f"classifier runtime contract is incomplete: {name}")
+              if hpa.get("spec", {}).get("minReplicas") != 2:
+                  raise SystemExit(f"classifier must retain two baseline replicas: {name}")
+              runtime_profile = next(
+                  item.get("value")
+                  for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+                  if item.get("name") == "S2P_MODEL_SERVICE_PROFILE"
+              )
+              if runtime_profile != profile:
+                  raise SystemExit(f"classifier runtime profile drifted: {name}")
+              endpoint = monitor.get("spec", {}).get("endpoints", [{}])[0]
+              if endpoint.get("port") != "http" or endpoint.get("path") != "/metrics":
+                  raise SystemExit(f"classifier metrics endpoint drifted: {name}")
 
           def container_env(kind, workload_name, container_name):
               resource = by_name[(kind, workload_name)]
@@ -414,9 +453,6 @@ jobs:
           - profile: quality
             repository: processor-base-quality
             extra: quality-service
-          - profile: embedding
-            repository: processor-base-embedding
-            extra: embedding-service
           - profile: kenlm
             repository: processor-base-kenlm
             extra: kenlm-service
@@ -524,7 +560,6 @@ jobs:
     outputs:
       image: ${{ steps.pin.outputs.image }}
       quality_image: ${{ steps.pin.outputs.quality_image }}
-      embedding_image: ${{ steps.pin.outputs.embedding_image }}
       kenlm_image: ${{ steps.pin.outputs.kenlm_image }}
       fetcher_image: ${{ steps.pin.outputs.fetcher_image }}
     steps:
@@ -597,7 +632,6 @@ jobs:
           }
           pin_image image "$(resolve_image none processor-base runtime)"
           pin_image quality_image "$(resolve_image quality processor-base-quality quality-service)"
-          pin_image embedding_image "$(resolve_image embedding processor-base-embedding embedding-service)"
           pin_image kenlm_image "$(resolve_image kenlm processor-base-kenlm kenlm-service)"
           pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher fetcher-service)"
 
@@ -643,17 +677,12 @@ jobs:
             model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
-          - image: processor-embedding-model
-            model_profile: embedding
-            context: .
-            dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-kenlm-model
             model_profile: kenlm
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.fetcher.app
@@ -685,7 +714,6 @@ jobs:
           IMAGE_INPUTS: ${{ matrix.inputs }}
           PROCESSOR_BASE_IMAGE: ${{ needs.processor-base-pin.outputs.image }}
           PROCESSOR_QUALITY_IMAGE: ${{ needs.processor-base-pin.outputs.quality_image }}
-          PROCESSOR_EMBEDDING_IMAGE: ${{ needs.processor-base-pin.outputs.embedding_image }}
           PROCESSOR_KENLM_IMAGE: ${{ needs.processor-base-pin.outputs.kenlm_image }}
           PROCESSOR_FETCHER_IMAGE: ${{ needs.processor-base-pin.outputs.fetcher_image }}
         run: |
@@ -695,7 +723,6 @@ jobs:
           selected_processor_base="$PROCESSOR_BASE_IMAGE"
           case "${{ matrix.image }}" in
             processor-quality-model) selected_processor_base="$PROCESSOR_QUALITY_IMAGE" ;;
-            processor-embedding-model) selected_processor_base="$PROCESSOR_EMBEDDING_IMAGE" ;;
             processor-kenlm-model) selected_processor_base="$PROCESSOR_KENLM_IMAGE" ;;
             processor-fetcher-model) selected_processor_base="$PROCESSOR_FETCHER_IMAGE" ;;
           esac
@@ -823,7 +850,6 @@ jobs:
       processor: ${{ steps.pin.outputs.processor }}
       processor_foundry: ${{ steps.pin.outputs.processor_foundry }}
       processor_quality_model: ${{ steps.pin.outputs.processor_quality_model }}
-      processor_embedding_model: ${{ steps.pin.outputs.processor_embedding_model }}
       processor_kenlm_model: ${{ steps.pin.outputs.processor_kenlm_model }}
       processor_fetcher_model: ${{ steps.pin.outputs.processor_fetcher_model }}
       ui: ${{ steps.pin.outputs.ui }}
@@ -867,7 +893,6 @@ jobs:
           pin_component processor processor
           pin_component processor_foundry processor-foundry
           pin_component processor_quality_model processor-quality-model
-          pin_component processor_embedding_model processor-embedding-model
           pin_component processor_kenlm_model processor-kenlm-model
           pin_component processor_fetcher_model processor-fetcher-model
           pin_component ui ui
@@ -904,6 +929,8 @@ jobs:
       SOURCES_CHANGED: ${{ needs.changes.outputs.sources }}
       MONITORING_CHANGED: ${{ needs.changes.outputs.monitoring }}
       REDPANDA_CHANGED: ${{ needs.changes.outputs.redpanda }}
+      DNS_INFRA_CHANGED: ${{ needs.changes.outputs.dns_infra }}
+      MODEL_RUNTIME_CHANGED: ${{ needs.changes.outputs.model_runtime }}
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
       IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
@@ -911,7 +938,6 @@ jobs:
       IMAGE_DIGEST_PROCESSOR: ${{ needs.image-pin.outputs.processor }}
       IMAGE_DIGEST_PROCESSOR_FOUNDRY: ${{ needs.image-pin.outputs.processor_foundry }}
       IMAGE_DIGEST_PROCESSOR_QUALITY: ${{ needs.image-pin.outputs.processor_quality_model }}
-      IMAGE_DIGEST_PROCESSOR_EMBEDDING: ${{ needs.image-pin.outputs.processor_embedding_model }}
       IMAGE_DIGEST_PROCESSOR_KENLM: ${{ needs.image-pin.outputs.processor_kenlm_model }}
       IMAGE_DIGEST_PROCESSOR_FETCHER: ${{ needs.image-pin.outputs.processor_fetcher_model }}
       IMAGE_DIGEST_UI: ${{ needs.image-pin.outputs.ui }}
@@ -1124,6 +1150,25 @@ jobs:
 
           kubectl --request-timeout=20s get nodes
           finish_phase "VPN and cluster connection"
+
+          if [[ "$DNS_INFRA_CHANGED" == "true" ]]; then
+            kubectl -n kube-system patch deployment/coredns \
+              --type=strategic \
+              --patch-file=infra/kubernetes/coredns-ha-patch.yaml
+            kubectl apply -f infra/kubernetes/coredns-pdb.yaml
+            kubectl -n kube-system rollout status deployment/coredns --timeout=180s
+          else
+            coredns_replicas="$(
+              kubectl -n kube-system get deployment/coredns \
+                -o jsonpath='{.spec.replicas}'
+            )"
+            if [[ "$coredns_replicas" -lt 2 ]] \
+               || ! kubectl -n kube-system get poddisruptionbudget/coredns >/dev/null; then
+              echo "CoreDNS HA drifted; apply infra/kubernetes/coredns-* before deploying." >&2
+              exit 1
+            fi
+          fi
+          finish_phase "CoreDNS availability preflight"
 
           # One explicitly approved reset discards only the historical Kafka
           # backlog. Existing Iceberg data and dedup state remain intact. Core
@@ -2733,7 +2778,6 @@ jobs:
           : "${IMAGE_DIGEST_PROCESSOR:?Missing pinned processor digest}"
           : "${IMAGE_DIGEST_PROCESSOR_FOUNDRY:?Missing pinned Foundry digest}"
           : "${IMAGE_DIGEST_PROCESSOR_QUALITY:?Missing pinned quality digest}"
-          : "${IMAGE_DIGEST_PROCESSOR_EMBEDDING:?Missing pinned embedding digest}"
           : "${IMAGE_DIGEST_PROCESSOR_KENLM:?Missing pinned KenLM digest}"
           : "${IMAGE_DIGEST_PROCESSOR_FETCHER:?Missing pinned fetcher digest}"
           : "${IMAGE_DIGEST_UI:?Missing pinned UI digest}"
@@ -2748,12 +2792,11 @@ jobs:
             --set "ingest.arxivHtmlFetcher.image=stream2pretrain/ingest-arxiv-html@${IMAGE_DIGEST_INGEST_ARXIV_HTML}"
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
             --set "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
-            --set "processor.modelService.profiles.embedding.image=stream2pretrain/processor-embedding-model@${IMAGE_DIGEST_PROCESSOR_EMBEDDING}"
+            --set "processor.modelService.profiles.finepdfs.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
+            --set "processor.modelService.profiles.fineweb.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
             --set "processor.modelService.profiles.kenlm.image=stream2pretrain/processor-kenlm-model@${IMAGE_DIGEST_PROCESSOR_KENLM}"
             --set "processor.iceberg.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.duckdbApi.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "processor.deconGate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.foundry.image=stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
             --set "mixtureController.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}"
@@ -2778,14 +2821,17 @@ jobs:
           # digest actually changes. Unchanged services keep their Pods, model
           # memory, HPA state, and readiness throughout the release.
           model_image_changed=false
-          for profile in quality embedding kenlm; do
+          for profile in finepdfs fineweb kenlm; do
             model="stream2pretrain-processor-model-service-${profile}"
             case "$profile" in
-              quality) digest="$IMAGE_DIGEST_PROCESSOR_QUALITY" ;;
-              embedding) digest="$IMAGE_DIGEST_PROCESSOR_EMBEDDING" ;;
+              finepdfs|fineweb) digest="$IMAGE_DIGEST_PROCESSOR_QUALITY" ;;
               kenlm) digest="$IMAGE_DIGEST_PROCESSOR_KENLM" ;;
             esac
-            target_image="${registry}/stream2pretrain/processor-${profile}-model@${digest}"
+            case "$profile" in
+              finepdfs|fineweb) repository="processor-quality-model" ;;
+              *) repository="processor-${profile}-model" ;;
+            esac
+            target_image="${registry}/stream2pretrain/${repository}@${digest}"
             current_image="$(
               kubectl -n stream2pretrain get "deployment/$model" -o json 2>/dev/null \
                 | jq -r '
@@ -2969,6 +3015,42 @@ jobs:
             exit 1
           fi
           finish_phase "Changed workload readiness"
+
+          if [[ "$MODEL_RUNTIME_CHANGED" == "true" ]]; then
+            for profile_and_family in \
+              "finepdfs finepdfs-edu-v2" \
+              "fineweb fineweb-edu"; do
+              read -r profile family <<< "$profile_and_family"
+              model="stream2pretrain-processor-model-service-${profile}"
+              expected_backends="$(
+                kubectl -n stream2pretrain get "deployment/$model" \
+                  -o jsonpath='{.status.readyReplicas}'
+              )"
+              if [[ -z "$expected_backends" || "$expected_backends" -lt 2 ]]; then
+                echo "$model did not expose both baseline classifier replicas." >&2
+                exit 1
+              fi
+              kubectl -n stream2pretrain exec -i \
+                statefulset/stream2pretrain-processor-curate -c curate -- \
+                python - \
+                  --base-url "http://${model}:8094" \
+                  --model-family "$family" \
+                  --expected-backends "$expected_backends" \
+                  < scripts/benchmark_model_service.py
+            done
+          else
+            echo "Skipping model distribution benchmark: classifier runtime is unchanged."
+          fi
+          finish_phase "Classifier distribution gate"
+
+          if [[ "$DNS_INFRA_CHANGED" == "true" ]]; then
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- \
+              python - < scripts/validate_storage_dns.py
+          else
+            echo "Skipping repeated DNS/MinIO probe: CoreDNS infrastructure is unchanged."
+          fi
+          finish_phase "DNS and MinIO rollout gate"
 
           # The running stable live workloads must persist a marker whose identity is
           # derived from their effective environment. This closes the clean

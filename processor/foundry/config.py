@@ -78,8 +78,8 @@ class FoundryConfig:
     max_retries: int = 2
     timeout_seconds: float = 180.0
     provider_context_window_tokens: int = 262_144
-    policy_version: str = "posttrain-policy-v3"
-    prompt_version: str = "paper-foundry-prompts-v3"
+    policy_version: str = "posttrain-policy-v4"
+    prompt_version: str = "paper-foundry-prompts-v4"
 
     @classmethod
     def from_env(cls) -> FoundryConfig:

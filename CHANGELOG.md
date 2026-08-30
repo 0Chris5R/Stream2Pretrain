@@ -41,8 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed provider qualification benchmarks, score thresholds, availability
   heartbeats, maximum-gap rules, and provider approval state.
 - Removed copy-ratio, shared-word, and minimum-answer-length gates and metrics.
-- Replaced active `broad_pretraining`, `reasoning_candidate`, and
-  `benchmark_candidate` routing with `pretrain` plus optional
+- Replaced legacy routing values with `pretrain` plus optional
   `posttrain_candidate`; the 80/20 benchmark split now occurs only after SFT/RL
   artifact validation.
 - Disabled optional official-artifact oracles by default and retained them as
@@ -136,7 +135,7 @@ Initial public preview. This is the v0.1 reference cut described in
 ### Added
 - **Foundation**: monorepo layout, `pyproject.toml` with `uv` workspace,
   shared Pydantic schemas (`schemas/bronze.py`, `silver.py`, `gold.py`,
-  `decon.py`, `sourcefeed.py`, `topics.py`).
+  `sourcefeed.py`, `topics.py`).
 - **Infra**: Terraform for DHBWCloud OpenStack (3 VMs), `infra/k3s-install.sh`,
   helmfile of the dependency stack (kube-prometheus-stack, Loki, Alloy,
   Tempo, Traefik, cert-manager, KEDA, OPA Gatekeeper, MinIO, Redpanda,
@@ -150,30 +149,27 @@ Initial public preview. This is the v0.1 reference cut described in
   share `ingest/common/` for HTTP client, hashing, MinIO writer, kafka
   producer, OTel, structured logging, rate limiting, and feed loading.
 - **Processor**: Bytewax dataflows `processor/fetcher.py`,
-  `processor/curate.py`, `processor/iceberg_writer.py`,
-  `processor/decon_gate.py`. Operators in `processor/operators/` cover
+  `processor/curate.py`, and `processor/iceberg_writer.py`. Operators in
+  `processor/operators/` cover
   Resiliparse extraction, fastText langid, Gopher / C4 taggers, MinHash
   (Rensa), LSHBloom near-dup, FineWeb-Edu ONNX classifier, KenLM
   perplexity, PII regex, validity-interval enricher.
-- **Storage**: MinIO buckets bronze / silver / gold / decon-attestations /
-  checkpoints; Iceberg V3 tables with row lineage; Polaris-lite catalog.
+- **Storage**: MinIO buckets for bronze / silver / gold / checkpoints; Iceberg
+  V3 tables with row lineage; Polaris-lite catalog.
 - **UI**: Next.js 14 App Router app with shadcn/ui + TanStack Query,
-  routes `/dashboard`, `/sources`, `/decon`, `/as-of`, `/mixtures`.
+  routes `/dashboard`, `/documents`, `/sources`, `/datasets`, `/post-training`,
+  `/as-of`, and `/mixture`.
 - **Mixture controller**: shadow A/B comparison primitive driven by two
   `MixtureRecipe` CRDs, perplexity-delta promotion gate.
-- **Decon-Gate**: streaming 13-gram Bloom + E5-small ONNX sketch with
-  Ed25519-signed per-snapshot attestations on the `decon.attest` topic;
-  `scripts/decon_bisect.py` reproduces any past attestation by snapshot
-  id.
 - **Validity intervals**: `[valid_from, valid_to)` propagated all the way
   into the gold table; DuckDB `gold_as_of(ts)` view; `/as-of` UI.
-- **Tests**: `tests/integration/test_end_to_end_dev.py`,
-  `test_decon_attestation_signing.py`, `test_iceberg_as_of.py`. Component
+- **Tests**: `tests/integration/test_end_to_end_dev.py` and
+  `test_iceberg_as_of.py`. Component
   unit tests live alongside their packages.
 - **Load**: `tests/load/k6_submit.js` ramps the submit API to 100 RPS for
   60 s with thresholds.
-- **Scripts**: `scripts/seed_topics.sh`, `scripts/load_seed_feeds.sh`,
-  `scripts/decon_bisect.py`, `scripts/dev_smoke.sh`.
+- **Scripts**: `scripts/seed_topics.sh`, `scripts/load_seed_feeds.sh`, and
+  `scripts/dev_smoke.sh`.
 - **Docs**: `docs/architecture.md` + `architecture.mmd`, `docs/data-model.md`,
   `docs/operations.md`, `docs/novelty.md`, `docs/threat-model.md`.
 

@@ -62,7 +62,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 ### 2026-08-15 - Curation product execution contract locked
 
 - `docs/CURATION_PRODUCT_EXECUTION_PLAN.md` is the binding source of truth for
-  the post-pilot scoring, OCR, benchmark-safety, source-aware classifier, UI,
+  the post-pilot scoring, OCR, source-aware classifier, UI,
   export, validation, and Kubernetes-capacity work.
 - Do not silently reduce, omit, proxy, or relabel its requirements because an
   implementation is expensive. Scope changes require an explicit team decision
@@ -77,10 +77,9 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 ### 2026-06-15 - Project framing locked
 - Use case: streaming-first LLM pretraining data curator on Kubernetes.
 - Architecture: Kappa (streaming-only), per the lecture default.
-- Three locked novelty differentiators (survived adversarial verification):
-  1. Streaming Decon-Gate with signed per-snapshot contamination attestations.
-  2. Per-document validity intervals + Iceberg `as_of(timestamp)` query view.
-  3. Shadow-mode A/B mixture comparison via two `MixtureRecipe` CRDs.
+- Two locked novelty differentiators (survived adversarial verification):
+  1. Per-document validity intervals + Iceberg `as_of(timestamp)` query view.
+  2. Shadow-mode A/B mixture comparison via two `MixtureRecipe` CRDs.
 
 ### 2026-06-15 - Tech stack frozen
 - Streaming bus: **Redpanda** (single-binary Kafka API; begründete Abweichung).
@@ -175,17 +174,18 @@ provide" section. Tracked here for the AI pair.
 The repo now contains the v0.1.0 implementation footprint described in
 RESEARCH.md sections 4-8. Key paths:
 
-- `schemas/` - shared Pydantic models for bronze, silver, gold, decon
-  attestations, SourceFeed and MixtureRecipe CRDs, plus Redpanda topic
+- `schemas/` - shared Pydantic models for bronze, silver, gold,
+  SourceFeed and MixtureRecipe CRDs, plus Redpanda topic
   catalogue.
 - `ingest/` - pollers (rss, sitemap, oai-pmh, github events / releases,
   HF Hub) + FastAPI submit API. `ingest/common/` hosts the shared HTTP,
   S3, Kafka, OTel, rate-limit, robots, and feeds-loader libs.
-- `processor/` - Bytewax dataflows (fetcher, curate, iceberg_writer,
-  decon_gate, sign) plus operators in `processor/operators/`. Mixture
+- `processor/` - Bytewax dataflows (fetcher, curate, iceberg_writer) plus
+  operators in `processor/operators/`. Mixture
   controller lives in `processor/mixture_controller/`.
 - `ui/` - Next.js 14 App Router UI with shadcn/ui + TanStack Query.
-  Routes: `/dashboard`, `/sources`, `/decon`, `/as-of`, `/mixtures`.
+  Routes: `/dashboard`, `/documents`, `/sources`, `/datasets`, `/post-training`,
+  `/as-of`, and `/mixture`.
   DuckDB-backed via `ui/lib/duckdb-client.ts`.
 - `charts/stream2pretrain/` - single Helm chart for every component plus
   CRDs (`SourceFeed`, `MixtureRecipe`), KEDA `ScaledObject`s,
@@ -198,8 +198,7 @@ RESEARCH.md sections 4-8. Key paths:
 - `tests/` - cross-component integration tests (`tests/integration/`)
   and a k6 submit-API load profile (`tests/load/`). Component unit tests
   live alongside their packages.
-- `scripts/` - `seed_topics.sh`, `load_seed_feeds.sh`, `decon_bisect.py`,
-  `dev_smoke.sh`.
+- `scripts/` - `seed_topics.sh`, `load_seed_feeds.sh`, and `dev_smoke.sh`.
 - `docs/` - `architecture.md` + `architecture.mmd`, `data-model.md`,
   `operations.md`, `novelty.md`, `threat-model.md`.
 - Top-level: `CHANGELOG.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`,

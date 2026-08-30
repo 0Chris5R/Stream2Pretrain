@@ -17,7 +17,6 @@ Public API
 - :func:`bronze_loads`           - decode wire bytes into a dict
 - :func:`silver_dumps` / :func:`silver_loads` - SilverRecord serde
 - :func:`gold_dumps`   / :func:`gold_loads`   - GoldRecord serde
-- :func:`decon_dumps`  / :func:`decon_loads`  - DeconAttestation serde
 - :func:`new_trace_id` - W3C 32-char hex when there is no upstream trace
 """
 
@@ -43,7 +42,6 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from structlog.types import EventDict, WrappedLogger
 
 from schemas.bronze import BronzeRecord
-from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
 from schemas.silver import SilverRecord
 
@@ -99,7 +97,6 @@ class ProcessorConfig:
     normalized_topic: str
     curated_topic: str
     decisions_topic: str
-    decon_attest_topic: str
 
     minio_endpoint: str
     minio_access_key: str
@@ -107,7 +104,6 @@ class ProcessorConfig:
     bronze_bucket: str
     silver_bucket: str
     gold_bucket: str
-    decon_bucket: str
 
     polaris_uri: str
     polaris_warehouse: str
@@ -122,10 +118,6 @@ class ProcessorConfig:
 
     state_dir: str
     models_dir: str
-
-    # Decon-Gate
-    benchmark_set_version: str
-    benchmark_corpus_path: str | None
 
     # Mixture Controller
     proxy_lm_window_minutes: int
@@ -306,14 +298,12 @@ def load_config() -> ProcessorConfig:
         normalized_topic=_env("S2P_NORMALIZED_TOPIC", "docs.normalized"),
         curated_topic=_env("S2P_CURATED_TOPIC", "docs.curated"),
         decisions_topic=_env("S2P_DECISIONS_TOPIC", "curation.decisions"),
-        decon_attest_topic=_env("S2P_DECON_TOPIC", "decon.attest"),
         minio_endpoint=_env("MINIO_ENDPOINT", "http://localhost:9000"),
         minio_access_key=_env("MINIO_ACCESS_KEY", "minioadmin"),
         minio_secret_key=_env("MINIO_SECRET_KEY", "minioadmin"),
         bronze_bucket=_env("MINIO_BRONZE_BUCKET", "bronze"),
         silver_bucket=_env("MINIO_SILVER_BUCKET", "silver"),
         gold_bucket=_env("MINIO_GOLD_BUCKET", "gold"),
-        decon_bucket=_env("MINIO_DECON_BUCKET", "decon"),
         polaris_uri=_env("POLARIS_URI", "http://polaris:8181/api/catalog"),
         polaris_warehouse=_env("POLARIS_WAREHOUSE", "stream2pretrain"),
         polaris_token=_env_optional("POLARIS_TOKEN"),
@@ -327,8 +317,6 @@ def load_config() -> ProcessorConfig:
         http_max_retries=_env_int("S2P_HTTP_MAX_RETRIES", 4),
         state_dir=_env("S2P_STATE_DIR", "/var/lib/s2p"),
         models_dir=_env("S2P_MODELS_DIR", "/opt/models"),
-        benchmark_set_version=_env("S2P_BENCH_SET_VERSION", "v2026-06-01"),
-        benchmark_corpus_path=_env_optional("S2P_BENCH_CORPUS_PATH"),
         proxy_lm_window_minutes=_env_int("S2P_PROXY_LM_WINDOW_MIN", 10),
         promotion_threshold=_env_float("S2P_PROMOTION_THRESHOLD", 0.05),
         promotion_required_windows=_env_int("S2P_PROMOTION_REQUIRED_WINDOWS", 3),
@@ -635,17 +623,6 @@ def gold_loads(payload: bytes) -> GoldRecord:
     return GoldRecord.model_validate_json(payload)
 
 
-def decon_dumps(record: DeconAttestation) -> bytes:
-    """Serialize a DeconAttestation to canonical JSON bytes (sorted keys)."""
-    obj = record.model_dump(mode="json")
-    return orjson.dumps(obj, option=orjson.OPT_SORT_KEYS)
-
-
-def decon_loads(payload: bytes) -> DeconAttestation:
-    """Parse a DeconAttestation from JSON bytes."""
-    return DeconAttestation.model_validate_json(payload)
-
-
 __all__ = [
     "BytewaxRuntimeStatus",
     "DeterministicProcessingError",
@@ -655,8 +632,6 @@ __all__ = [
     "bronze_loads_dict",
     "configure_logging",
     "current_trace_id_hex",
-    "decon_dumps",
-    "decon_loads",
     "get_logger",
     "gold_dumps",
     "gold_loads",

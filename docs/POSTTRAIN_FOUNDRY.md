@@ -27,7 +27,7 @@ adaptations:
 3. The architecture's paper loader is an adapter over the existing
    `GoldRecord` plus `ScientificDocument`. It does not add a second extractor or
    duplicate curation. Existing stable sections, equations, tables, figures,
-   OCR decisions, quality signals, PII decisions, decontamination state, and
+   OCR decisions, quality signals, PII decisions, and
    source provenance become an immutable `PaperBundle`.
 4. The former `reasoning_candidate` route is now `posttrain_candidate`.
    Historical snapshots remain readable only through an explicit legacy flag.
@@ -127,8 +127,9 @@ while daylight-saving time is active. The deployment is anchored by
 hour cannot accidentally back-run the preceding day's cohort. The worker processes the entire frozen rank order serially until the next boundary. A provider-capacity stop
 does not admit older papers at the next boundary: any unfinished cohort members
 are removed, and only the newly completed 24-hour arrival window may compete.
-New arrivals after the cutoff wait for the next cohort. `Run now` remains a
-manual diagnostic snapshot and does not alter the daily cohort boundary.
+New arrivals after the cutoff wait for the next cohort. An authenticated
+control API remains available for operator diagnostics, but the monitoring UI
+does not expose pipeline-control actions.
 
 The control store resets interrupted `processing` rows to `queued` after
 restart and resumes the same daily cutoff. A serialized background drain loop
@@ -324,10 +325,24 @@ The implemented task families are:
 - official-artifact experiment configuration;
 - official-artifact result reproduction.
 
-Task proposal uses graph evidence and stable IDs. An independent answerability
-audit rejects missing targets, unresolved public context, oracle-only answers,
-and tasks that cannot be checked from the packaged environment. Selection is
-deterministic and balances accepted families within each paper.
+Task proposal uses graph evidence and stable IDs. Content policy
+`scientific-reasoning-v2` prioritizes, in order, multi-step derivations,
+scaling-law or regime inference, multi-result numerical synthesis, assumption
+consequences, and algorithm analysis. Derivation and assumption families are
+capped at two tasks each; every other family is capped at one. Within a family,
+difficulty, distinct reasoning operations, answer-facing values, relations,
+and graph nodes determine priority. Corruption diagnosis is last. The selector
+does not backfill unused slots with shallow tasks.
+
+An independent answerability audit rejects missing targets, unresolved public
+context, oracle-only answers, external knowledge, answer leakage, ambiguous
+outcomes, and tasks that cannot be checked from the packaged environment. Both
+proposal and answerability prompts explicitly reject one-value lookup, one
+arithmetic operation, internal-ID listing, simple edge reversal, and
+manifest-format compliance. RL requires difficulty 4 or 5, at least two linked
+reasoning operations, and an answer-facing numeric, symbolic, or discrete
+outcome. Valuable open-ended synthesis remains SFT. A public task never becomes
+hard merely by demanding more schema fields.
 
 Each selected task receives bounded multi-turn solutions from separate Qwen3.8
 solver calls and prompts. The agents can request only frozen paper-local tools. Tool requests
@@ -338,10 +353,32 @@ equations, numeric results, qualifications, and tool use.
 
 The solver receives only the public instruction, public paper context, allowed
 node types, and output identifiers. Hidden targets and canonical answers never
-enter an SFT prompt. Derivation tasks ask for an ordinary step-by-step
-mathematical argument and final expression; they do not require the learner to
-return evidence-span citations. The hidden evidence links remain provenance for
-construction and audit.
+enter an SFT prompt. Its prompt says that the readable report is the scientific
+answer and must show intermediate reasoning, calculations, assumptions, and
+the final requested values or expressions. It says that the manifest is
+machine-readable provenance, not a substitute for reasoning. Derivation tasks
+ask for an ordinary step-by-step mathematical argument and final expression;
+they do not require the learner to return evidence-span citations or internal
+IDs. The hidden evidence links remain provenance for construction and audit.
+
+The grounding critic returns exactly one decision per trajectory. It may reject
+only a concrete unsupported claim, contradiction, wrong calculation, or
+materially incomplete scientific conclusion. Manifest shape, node IDs,
+relation labels, ordering, and configuration keys are owned by executable
+checks. A proven format-only negative vote does not discard a scientifically
+sound trajectory; an empty or scientifically substantive negative vote still
+fails closed. Every trajectory then runs the complete deterministic suite
+independently. A good SFT trajectory is retained even if its paired solution
+fails, and accepted packages contain only accepted trajectories. Rejected
+siblings remain separate inspectable artifact records with their trajectory ID,
+critic decision, validation report, and provider-trace links.
+
+The exact versioned prompt text is generated by `_designer_system`,
+`_answerability_system`, `_solver_system`, and `_grounding_system` in
+`processor/foundry/tasking.py`; each function appends the live strict JSON
+Schema to the literal policy above. Prompt version
+`paper-foundry-prompts-v4` invalidates the prior provider-call cache, so no v3
+response can be reused under this contract.
 
 ## 9. Frozen tools and verifier construction
 
@@ -359,24 +396,36 @@ are rejected. Malformed tool arguments are returned as tool errors, and a
 repeated identical invalid request or eight tool-request turns rejects that
 solver trajectory rather than pinning the paper or daily queue.
 
-A model-authored rubric is compiled into an allowlisted `VerifierSpec`, not
-executed as generated Python. Predicate types cover required nodes, evidence
+For `scientific-reasoning-v2`, the authoritative `VerifierSpec` is compiled
+locally from the reviewed `TaskSpec` hidden targets. Qwen3.8 performs an
+audit-only critique and cannot add qualifications, targets, predicate types, or
+schema fields. This removes the observed failure mode in which a generated
+verifier invented requirements that the task never specified. Legacy v1 tasks
+retain their original bounded model-rubric path solely for deterministic
+inspection and regression. Predicate types cover required nodes, evidence
 membership and coverage, exact equations, numeric tolerances, required
 qualifications, contradiction flags, report-manifest consistency, and tool
-budget. Qwen3.8 criticizes the rubric, can perform one bounded repair, and then
-rechecks it under the critic prompt. The standalone verifier is copied into every package
-and imports neither network clients nor model SDKs.
+budget. The standalone verifier is copied into every package and imports
+neither network clients nor model SDKs.
 
 A derivation enters the RL route only when its target is a bounded numeric value
 or a canonical LaTeX expression that the packaged symbolic runtime can parse.
-The verifier checks the submitted target-specific intermediate and final
-equations for symbolic equivalence and checks required derivation order. A
+Under v2 it must also bind at least two equation nodes through a real equation
+dependency. The verifier checks submitted target-specific intermediate and
+final equations for symbolic equivalence, checks required derivation order,
+and requires the readable report itself to expose the checked final expression.
+Numeric and required configuration outcomes must likewise appear in the
+readable report, not only in the hidden manifest. A report that merely lists
+internal IDs or says the answer is in the manifest fails. The packaged
+standalone reward implements the same checks as the construction-time suite and
+is regression-tested against the signed archive. A
 valuable derivation without such a deterministic oracle remains eligible for
 SFT but cannot be mislabeled as a machine-verifiable RL environment.
 
 ## 10. Acceptance suite
 
-No SFT or RL artifact is accepted from model consensus alone. The suite runs:
+No SFT or RL artifact is accepted from model consensus alone. The suite runs
+separately for each generated trajectory:
 
 - positive tests against independent trajectories;
 - equivalent-answer tests;
@@ -387,16 +436,23 @@ No SFT or RL artifact is accepted from model consensus alone. The suite runs:
 - security tests for tool budget and code-execution attempts.
 
 The package includes the actual test-case and mutation JSONL, not a summary
-placeholder. Validation reports retain false-positive and false-negative
-counts, every hard gate, mutation totals, and details. A failed gate rejects the
-artifact rather than weakening the verifier.
+placeholder. V2 mutations also remove answer-facing scientific results from
+the readable report while leaving the manifest intact. Validation reports
+retain false-positive and false-negative counts, every hard gate, mutation
+totals, per-trajectory critic decisions, and details. A failed gate rejects
+that trajectory rather than weakening the verifier or discarding a sound
+sibling. An RL environment is accepted when at least one independently
+grounded reference trajectory passes every gate; only those passing references
+enter its package.
 
-The 2026-08-27 content audit established a clean regeneration boundary. Older
+The 2026-08-30 content audit establishes policy `posttrain-policy-v4`, prompt
+`paper-foundry-prompts-v4`, TaskSpec schema `task-spec-v2`, and content policy
+`scientific-reasoning-v2` as a clean regeneration boundary. Older
 SFT trajectories exposed construction targets in their solver prompt, and the
 older accepted derivation environment checked identifiers rather than the
 mathematics. Those artifacts are audit evidence only and must not enter a
-training export; post-audit SFT and RL artifacts are regenerated under the
-public-prompt and executable-derivation contracts above.
+training export. V2 package keys and manifests carry the content-policy
+revision so legacy and regenerated output cannot be silently merged.
 
 ## 11. Official-artifact oracles
 
@@ -434,7 +490,9 @@ and does not force a proxy oracle.
 Accepted artifacts are deterministic gzip/tar archives in MinIO. Timestamps,
 member order, permissions, and gzip metadata are normalized before hashing.
 Each archive is stored under
-`s3://posttrain/<sft|rl>/<train|benchmark>/environments/...`. Each archive
+`s3://posttrain/<sft|rl>/<train|benchmark>/revisions/<content-policy>/environments/...`.
+The revision segment is mandatory, and the signed manifest repeats the same
+revision. Each archive
 contains:
 
 ```text
@@ -539,7 +597,7 @@ Required externally managed Secrets are:
 
 - `stream2pretrain-foundry-providers` with
   `HETZNER_INFERENCE_API_KEY` and a random `controlToken`;
-- `stream2pretrain-decon-signing` with `ed25519.key` and `ed25519.crt`;
+- `stream2pretrain-foundry-signing` with `ed25519.key` and `ed25519.crt`;
 - the existing MinIO and Polaris Secrets.
 
 The worker starts after `Qwen3.8-27B` is visible through authenticated model
@@ -567,12 +625,10 @@ export HETZNER_INFERENCE_API_KEY='...'
 ./scripts/foundry_local.sh logs
 ```
 
-Open `http://localhost:3100/post-training`. `Run now` freezes the same ranked
-candidate queue as the daily scheduler and the worker processes it serially
-until that snapshot is empty or the provider budget gate closes it. It does not
-bypass licence, quota, or validation gates. Generated artifacts can then be
-approved or rejected in the UI by entering the current reviewer name and an
-optional reason. Every action is retained. The script does not delete images,
+Open `http://localhost:3100/post-training` to monitor the scheduled queue and
+inspect artifacts. Generated artifacts can be approved or rejected in the UI
+by entering the current reviewer name and an optional reason. Every action is
+retained. The script does not delete images,
 volumes, lakehouse data, provider traces, or credentials. `down` stops only the
 foundry worker and API while preserving state.
 

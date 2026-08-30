@@ -20,7 +20,6 @@ class ScientificScores:
     extraction_completeness: float
     structural_quality_score: float
     reasoning_score: float
-    benchmark_score: float
     content_tags: list[str]
 
 
@@ -161,9 +160,6 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
         extraction_completeness=completeness,
         structural_quality_score=structural,
         reasoning_score=reasoning,
-        # Benchmark allocation is a post-training artifact decision. The
-        # pretraining curator deliberately does not estimate it.
-        benchmark_score=0.0,
         content_tags=tags,
     )
 
@@ -191,7 +187,6 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
             completeness,
             structural,
             0.0,
-            0.0,
             ["discovery_metadata"],
         )
     reasoning = min(0.45, 0.10 + 0.15 * (quality_score / 5.0) + 0.20 * completeness)
@@ -203,7 +198,6 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         completeness,
         structural,
         reasoning,
-        0.0,
         [content_tag],
     )
 
@@ -260,7 +254,7 @@ def route_document(
             reasons=["scientific extraction is incomplete; retry the full artifact"],
         )
     eligible: list[CorpusRoute] = ["pretrain"]
-    reasons = ["clean body projection passed privacy, quality, dedup, and decontamination gates"]
+    reasons = ["clean body projection passed privacy, quality, and deduplication gates"]
     posttrain_ready = posttrain_candidate_eligible(silver)
     if reasoning_score >= 0.55 and posttrain_ready:
         eligible.append("posttrain_candidate")

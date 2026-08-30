@@ -14,8 +14,6 @@ from processor.common import (
     BytewaxRuntimeStatus,
     DurableProcessingFailureWriter,
     bronze_loads,
-    decon_dumps,
-    decon_loads,
     gold_dumps,
     gold_loads,
     kafka_consumer_config,
@@ -31,7 +29,6 @@ from processor.common import (
     tracked_kafka_source,
 )
 from schemas.bronze import BronzeRecord
-from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
 from schemas.silver import SilverRecord
 
@@ -50,14 +47,12 @@ def test_load_config_reads_kubernetes_env_contract(monkeypatch) -> None:
     monkeypatch.setenv("S2P_RAW_TOPIC", "raw.prod")
     monkeypatch.setenv("S2P_NORMALIZED_TOPIC", "normalized.prod")
     monkeypatch.setenv("S2P_CURATED_TOPIC", "curated.prod")
-    monkeypatch.setenv("S2P_DECON_TOPIC", "decon.prod")
     monkeypatch.setenv("MINIO_ENDPOINT", "http://minio:9000")
     monkeypatch.setenv("MINIO_ACCESS_KEY", "access")
     monkeypatch.setenv("MINIO_SECRET_KEY", "secret")
     monkeypatch.setenv("MINIO_BRONZE_BUCKET", "bronze-prod")
     monkeypatch.setenv("MINIO_SILVER_BUCKET", "silver-prod")
     monkeypatch.setenv("MINIO_GOLD_BUCKET", "gold-prod")
-    monkeypatch.setenv("MINIO_DECON_BUCKET", "decon-prod")
     monkeypatch.setenv("POLARIS_URI", "http://polaris:8181/api/catalog")
     monkeypatch.setenv("POLARIS_WAREHOUSE", "s3://gold/warehouse")
 
@@ -70,14 +65,12 @@ def test_load_config_reads_kubernetes_env_contract(monkeypatch) -> None:
     assert cfg.raw_topic == "raw.prod"
     assert cfg.normalized_topic == "normalized.prod"
     assert cfg.curated_topic == "curated.prod"
-    assert cfg.decon_attest_topic == "decon.prod"
     assert cfg.minio_endpoint == "http://minio:9000"
     assert cfg.minio_access_key == "access"
     assert cfg.minio_secret_key == "secret"
     assert cfg.bronze_bucket == "bronze-prod"
     assert cfg.silver_bucket == "silver-prod"
     assert cfg.gold_bucket == "gold-prod"
-    assert cfg.decon_bucket == "decon-prod"
     assert cfg.polaris_uri == "http://polaris:8181/api/catalog"
     assert cfg.polaris_warehouse == "s3://gold/warehouse"
 
@@ -352,23 +345,3 @@ def test_gold_roundtrip() -> None:
     payload = gold_dumps(rec)
     parsed = gold_loads(payload)
     assert parsed.doc_id == rec.doc_id
-
-
-def test_decon_roundtrip_canonical_bytes() -> None:
-    rec = DeconAttestation(
-        snapshot_id=1,
-        committed_at=datetime(2026, 6, 15, tzinfo=UTC),
-        benchmark_set_version="v-test",
-        benchmarks=["MMLU", "GSM8K", "HumanEval", "MATH", "GPQA"],
-        tokens_scanned=10,
-        tokens_flagged=0,
-        rejected_doc_hashes=[],
-        per_benchmark_hits={"MMLU": 0, "GSM8K": 0, "HumanEval": 0, "MATH": 0, "GPQA": 0},
-        signature="sig",
-        signer_cert="cert",
-    )
-    payload = decon_dumps(rec)
-    # Canonical (sorted-keys) bytes are deterministic across calls.
-    assert payload == decon_dumps(rec)
-    parsed = decon_loads(payload)
-    assert parsed.snapshot_id == rec.snapshot_id

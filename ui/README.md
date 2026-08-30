@@ -5,9 +5,7 @@ The Next.js curation UI contains six workspaces:
 - `/dashboard`: live corpus, route, source, acceptance, and score state;
 - `/documents`: paginated curation browser with filters, section decisions,
   projection, figures, tables, OCR audit, and advanced provenance;
-- `/sources`: source topology and real add/edit/enable/run/delete actions;
-- `/decon`: Benchmark Safety reserve coverage and automatically verified signed
-  attestations;
+- `/sources`: read-only source topology, health, throughput, and licence outcomes;
 - `/datasets`: point/range selection with JSONL or Parquet export and manifest;
 - `/mixture`: the explicitly future N3 two-branch experiment.
 
@@ -41,8 +39,7 @@ The Podman profile builds and serves this UI on `http://localhost:3100`.
 | Variable | Purpose |
 |---|---|
 | `DUCKDB_URL` | documents, dashboard, facets, and dataset exports |
-| `SOURCES_API_URL` | Kubernetes CRD controller or persisted local SourceFeed API |
-| `DECON_GATE_URL` | benchmark reserve coverage, attestations, verification |
+| `SOURCES_API_URL` | Kubernetes controller or persisted local source monitor |
 | `PROMETHEUS_URL` | live activity stream |
 | `S2P_LOCAL_MODE` | reports the active local runtime profile |
 
@@ -50,21 +47,20 @@ Every browser payload is validated with Zod in `ui/lib/schemas.ts`. Browser
 code never talks directly to Kubernetes, object storage, or the Iceberg
 catalog. Next.js routes under `ui/app/api` form the typed backend-for-frontend.
 
-## Source controls
+## Source monitoring
 
-In Kubernetes, writes target real `SourceFeed` CRDs and `Run once` creates a
-bounded Job from the appropriate poller template. In Podman, the compatible
-local source service persists specs in its named volume and runs RSS/Atom,
-OAI-PMH ingestion against the same local Redpanda and MinIO. The
-default arXiv RSS source resolves current entry ids and fetches full native HTML
-or the bounded PDF fallback.
+The Sources page is monitoring-only. In Kubernetes, source configuration is
+managed as deployment configuration and observed through the controller. In
+Podman, `processor/local_sources_api.py` reports the file-configured sources and
+their scheduled ingestion status.
 
 ## Dataset exports
 
 The export API enforces risk tier 1, no rejection reasons, fixture exclusion,
-and training-route selection. The UI supports source, source format, tags,
-score floors, date range, structured-surrogate inclusion, JSONL, and Parquet.
-The separately routed benchmark reserve is never part of a training export.
+and training-route selection. The UI exposes date range, route, source, one
+content tag, structured-surrogate inclusion, JSONL, and Parquet. Post-training
+benchmark splits are allocated only after generated artifacts pass validation
+and are never part of a pretraining export.
 
 ## Container image
 

@@ -25,7 +25,6 @@ minio:
     bronze: s2p-bronze
     silver: s2p-silver
     gold: s2p-gold
-    decon: s2p-decon
     posttrain: s2p-posttrain
 
 iceberg:
@@ -98,10 +97,6 @@ processor:
     resources:
       requests: {cpu: 100m, memory: 768Mi}
       limits: {cpu: 1, memory: 2Gi}
-  deconGate:
-    replicas: 1
-    benchmarkCorpus:
-      kind: synthetic_canary
   # Single-writer foundry on the measured control-plane image cache.
   foundry:
     enabled: true

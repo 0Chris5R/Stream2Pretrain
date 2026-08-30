@@ -1,8 +1,7 @@
 """Emit deterministic local-only Bronze fixtures into the real pipeline.
 
-This module is used by ``compose.local.yml`` to prove the accept, PII-reject,
-and benchmark-decontamination branches without depending on the content of a
-particular live arXiv paper.  It is never referenced by the Helm deployment.
+This module is used by ``compose.local.yml`` to prove accepted, duplicate,
+heuristic-reject, and PII-reject branches without depending on a live paper.
 """
 
 from __future__ import annotations
@@ -44,36 +43,6 @@ _CLEAN_BODY = (
     "valuable because its claims can be checked rather than merely trusted."
 )
 
-_CANARY = (
-    "the violet observatory stores thirteen silver lanterns beside a quiet river while "
-    "careful astronomers record every changing shadow"
-)
-
-_CONTAMINATED_BODY = (
-    "Benchmark isolation must be tested with a controlled canary rather than accidental overlap. "
-    "The following synthetic sentence is registered only in the local benchmark reserve: "
-    f"{_CANARY}. The rest of this document explains why protected evaluation material must never "
-    "enter a training mixture. Exact matching provides a cheap first barrier, while semantic "
-    "review can be reserved for the smaller and more valuable benchmark set. Every rejection "
-    "should retain the document hash, matching benchmark, pipeline revision, and timestamp in an "
-    "auditable quarantine. This paragraph contains enough conventional prose to pass the earlier "
-    "structural filters before the intended decontamination decision occurs. No real benchmark "
-    "question or answer is included in this fixture."
-)
-
-_BENCHMARK_CANDIDATE_BODY = (
-    "A fresh benchmark reserve needs evidence-rich papers with a clear method and verifiable "
-    "result. This controlled paper describes how a stream processor selects a new scientific "
-    "artifact, preserves its source version, and records every transformation before any question "
-    "is written. The method separates the candidate store from all training exports immediately. "
-    "A reviewer can later connect a generated question to a specific paragraph, table cell, "
-    "equation, or figure region. The expected answer must be supported by that retained evidence, "
-    "and an independent verification step must reject unsupported or ambiguous items. After a "
-    "versioned benchmark release, its exact content enters the decontamination set so subsequent "
-    "training data cannot overlap it. This fixture proves routing and physical isolation only; it "
-    "does not claim that an automatically generated question is already a high-quality benchmark."
-)
-
 _PII_BODY = (
     "Privacy filtering is another independently testable stage in a responsible corpus pipeline. "
     "This controlled fixture includes the synthetic contact address pipeline-test@example.invalid "
@@ -93,7 +62,7 @@ _HEURISTIC_BODY = (
     "signal before a final route is selected. The placeholder block lorem ipsum dolor sit amet, "
     "consectetur adipiscing elit; lorem ipsum dolor sit amet is intentional and should trigger "
     "the boilerplate rule without confusing valid braces in scientific math. "
-    "No private information, benchmark canary, or accidental duplicate is included. The resulting "
+    "No private information or accidental duplicate is included. The resulting "
     "decision must remain visible in the audit table with its classifier versions and exact "
     "rejection reason. This provides a stable heuristic-rejection branch for the local "
     "demonstration without relying on changing content from an external source."
@@ -103,13 +72,6 @@ FIXTURES = (
     LocalFixture("clean", "Clean scientific pipeline fixture.", _CLEAN_BODY),
     LocalFixture("duplicate-clean", "Clean scientific pipeline fixture.", _CLEAN_BODY),
     LocalFixture("heuristic-canary", "Heuristic quarantine fixture.", _HEURISTIC_BODY),
-    LocalFixture("benchmark-canary", "Benchmark quarantine fixture.", _CONTAMINATED_BODY),
-    LocalFixture(
-        "benchmark-reserve",
-        "Fresh benchmark reserve routing fixture.",
-        _BENCHMARK_CANDIDATE_BODY,
-        "local-benchmark-reserve-canary",
-    ),
     LocalFixture("pii-canary", "Privacy quarantine fixture.", _PII_BODY),
 )
 
@@ -138,7 +100,7 @@ def _html(fixture: LocalFixture) -> bytes:
     scientific_body = f"<h2 id='methods'>Methods.</h2><p>{fixture.body}</p>"
     metadata = ""
     evidence = ""
-    if fixture.name in {"clean", "duplicate-clean", "benchmark-reserve"}:
+    if fixture.name in {"clean", "duplicate-clean"}:
         figure_data_uri = _controlled_figure_data_uri()
         metadata = (
             "<div class='ltx_creator ltx_role_author'>Ada Student Email: "

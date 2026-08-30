@@ -280,6 +280,7 @@ class Difficulty(FrozenModel):
 
 class TaskSpec(FrozenModel):
     schema_version: str = "task-spec-v1"
+    content_policy_revision: str = "scientific-reasoning-v1"
     task_id: str
     paper_id: str
     family: TaskFamily
@@ -512,6 +513,7 @@ class EnvironmentManifest(FrozenModel):
     schema_version: str = "paper-environment-v2"
     environment_id: str
     task_id: str
+    content_policy_revision: str = "scientific-reasoning-v1"
     paper_id: str
     family: TaskFamily
     pool: PosttrainPool

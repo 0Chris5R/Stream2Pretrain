@@ -48,6 +48,7 @@ def run_acceptance_suite(
                 "accepted": result.passed,
                 "reward": result.reward,
                 "validation": {
+                    **trajectory.validation,
                     "predicates": [asdict(value) for value in result.predicates],
                 },
             }
@@ -235,6 +236,13 @@ def _mutation_candidates(
     spec: VerifierSpec,
 ) -> Iterable[FoundryAnswer]:
     manifest = valid.answer_manifest
+    if task.content_policy_revision == "scientific-reasoning-v2" and (
+        task.hidden_targets.expected_values
+        or task.hidden_targets.configuration_constraints.get("required_values")
+    ):
+        yield valid.model_copy(
+            update={"report": "The checked result is recorded in the structured manifest."}
+        )
     required = sorted(set(task.hidden_targets.required_nodes))
     for node_id in required:
         yield valid.model_copy(

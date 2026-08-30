@@ -1,86 +1,17 @@
-%% Stream2Pretrain - architecture diagram (Mermaid source).
-%%
-%% Render with `mmdc -i architecture.mmd -o architecture.png` or paste into a
-%% Mermaid-aware viewer. The same graph is embedded in architecture.md for
-%% one-click rendering on GitHub.
-
 flowchart LR
-  classDef edge fill:#e3f2fd,stroke:#1976d2;
-  classDef bus fill:#fff8e1,stroke:#f57c00;
-  classDef engine fill:#f1f8e9,stroke:#558b2f;
-  classDef store fill:#fce4ec,stroke:#c2185b;
-  classDef serve fill:#ede7f6,stroke:#5e35b1;
-
-  subgraph EDGE [Edge - SourceFeed Pollers]
-    direction TB
-    rss[arXiv RSS discovery]
-    oai[arXiv OAI-PMH discovery]
-    arxiv[arXiv full-text fetcher]
-    hfModels[HF model cards]
-    hfDatasets[HF dataset cards]
-  end
-
-  subgraph BUS [Redpanda]
-    direction TB
-    raw[(raw.fetched)]
-    norm[(docs.normalized)]
-    cur[(docs.curated)]
-    att[(decon.attest)]
-  end
-
-  subgraph ENG [Bytewax Curator]
-    direction TB
-    fetch[fetcher]
-    extract[resiliparse + fastText langid]
-    tags[Gopher / C4 / MinHash + LSHBloom]
-    score[FineWeb-Edu ONNX + KenLM + PII]
-    decon[Decon-Gate API]
-    valid[validity-interval enricher]
-    iceberg[Iceberg writer]
-  end
-
-  subgraph STORE [Storage]
-    direction TB
-    minio[(MinIO bronze + checkpoints)]
-    silver[(Iceberg silver)]
-    gold[(Iceberg gold)]
-    polaris[Polaris REST catalog]
-  end
-
-  subgraph SERVE [Serving]
-    direction TB
-    duckdb[DuckDB + iceberg ext]
-    ui[Next.js 14 UI]
-  end
-
-  rss --> arxiv
-  oai --> arxiv
-  arxiv --> raw
-  hfModels --> raw
-  hfDatasets --> raw
-
-  raw --> fetch
-  fetch --> extract
-  extract --> norm
-  norm --> tags
-  tags --> score
-  score --> decon
-  decon --> valid
-  valid --> iceberg
-  decon --> att
-  iceberg --> cur
-  iceberg --> silver
-  iceberg --> gold
-  iceberg -.-> minio
-
-  silver --- polaris
-  gold --- polaris
-  polaris --> duckdb
-  duckdb --> ui
-  att --> ui
-
-  class rss,oai,arxiv,hfModels,hfDatasets edge
-  class raw,norm,cur,att bus
-  class fetch,extract,tags,score,decon,valid,iceberg engine
-  class minio,silver,gold,polaris store
-  class duckdb,ui serve
+  arxiv["arXiv feeds"] --> arxivFetch["arXiv full text"]
+  hf["Hugging Face API"] --> hfFetch["Exact-revision cards"]
+  arxivFetch --> raw[(raw.fetched)]
+  hfFetch --> raw
+  raw --> fetcher["Bytewax fetcher"]
+  fetcher --> normalized[(docs.normalized)]
+  normalized --> curator["Bytewax curator"]
+  curator --> decisions[(curation.decisions)]
+  curator --> curated[(docs.curated)]
+  decisions --> writer["Iceberg writer"]
+  curated --> writer
+  writer --> lakehouse["MinIO + Iceberg + Polaris"]
+  lakehouse --> duckdb["DuckDB API"]
+  duckdb --> ui["Read-only cockpit"]
+  curated --> foundry["SFT/RL Foundry"]
+  foundry --> ui

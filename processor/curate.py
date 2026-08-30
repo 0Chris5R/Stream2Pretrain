@@ -12,11 +12,10 @@ End-to-end source-aware curation. The worker:
 6. Dispatches by source family: FinePDFs Edu v2 for papers, FineWeb-Edu for
    Hugging Face cards and web prose, and a discovery-only metadata policy.
 7. Runs the PII regex pack plus Presidio.
-8. Runs the Decon-Gate (n-gram Bloom + E5-small-v2 embedding sketch).
-9. Emits a trainable :class:`GoldRecord` on ``docs.curated``.
+8. Emits a trainable :class:`GoldRecord` on ``docs.curated``.
 
 Every scored outcome is published to ``curation.decisions`` for durable
-audit and attestation. Only trainable rows are also published to
+audit. Only trainable rows are also published to
 ``docs.curated`` and materialized in the clean Gold table.
 """
 
@@ -29,23 +28,18 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
     is_training_permitted,
 )
 from processor import common
+from processor.content_policy import CONTENT_POLICY_GENERATION
 from processor.decision_cache import DecisionCache
-from processor.decon_gate import (  # type: ignore[attr-defined]
-    DeconGate,
-    EmbeddingSketch,
-    _EmbeddingSketch,
-)
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.model_client import (
     CuratorModelClient,
-    RemoteEmbeddingSketch,
     RemoteKenLMScorer,
     RemoteQualityClassifier,
 )
@@ -57,6 +51,7 @@ from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiScanner
 from processor.operators.quality import QualityClassifier, QualityScore
+from processor.operators.scientific_document_quality import is_publication_template
 from processor.operators.source_quality import (
     MetadataDiscoveryPolicy,
 )
@@ -72,7 +67,6 @@ from processor.scientific_policy import (
 from processor.source_policy import resolve_source_policy
 from processor.tokenize import Tokenizer
 from schemas.bronze import BronzeRecord
-from schemas.decon import BenchmarkName
 from schemas.gold import GoldRecord, PiiFlag, RejectReason, RiskTier, SegmentScore
 from schemas.silver import SilverRecord, SilverSegment
 
@@ -116,7 +110,6 @@ class CurateState:
     fineweb_quality: QualityScorer
     metadata_discovery: MetadataDiscoveryPolicy
     pii: PiiScanner
-    decon: DeconGate
     tokenizer: Tokenizer
     policy_revision: str
     scoring_version: str
@@ -143,42 +136,56 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     require_real_models = os.environ.get("S2P_REQUIRE_REAL_MODELS") == "1"
     model_service_url = os.environ.get("S2P_MODEL_SERVICE_URL", "").strip()
     quality_service_url = os.environ.get("S2P_QUALITY_MODEL_SERVICE_URL", "").strip()
+    finepdfs_service_url = os.environ.get("S2P_FINEPDFS_MODEL_SERVICE_URL", "").strip()
+    fineweb_service_url = os.environ.get("S2P_FINEWEB_MODEL_SERVICE_URL", "").strip()
     kenlm_service_url = os.environ.get("S2P_KENLM_MODEL_SERVICE_URL", "").strip()
-    embedding_service_url = os.environ.get("S2P_EMBEDDING_MODEL_SERVICE_URL", "").strip()
     kenlm_path = os.path.join(models, "kenlm", "en.arpa.bin")
     kenlm_sentencepiece_path = os.path.join(models, "kenlm", "en.sp.model")
     finepdfs_quality_dir = os.path.join(models, "finepdfs-edu-v2")
     fineweb_quality_dir = os.path.join(models, "fineweb-edu")
-    e5_dir = os.path.join(models, "e5-small")
     model_clients: tuple[CuratorModelClient, ...] = ()
-    embedding: EmbeddingSketch
     kenlm: PerplexityScorer
     finepdfs_quality: QualityScorer
     fineweb_quality: QualityScorer
     if model_service_url:
         model_client = CuratorModelClient(model_service_url)
-        embedding = RemoteEmbeddingSketch(model_client)
         kenlm = RemoteKenLMScorer(model_client)
         finepdfs_quality = RemoteQualityClassifier(model_client, "finepdfs-edu-v2")
         fineweb_quality = RemoteQualityClassifier(model_client, "fineweb-edu")
         model_clients = (model_client,)
-    elif any((quality_service_url, kenlm_service_url, embedding_service_url)):
-        if not all((quality_service_url, kenlm_service_url, embedding_service_url)):
-            raise RuntimeError("all split curator model service URLs are required")
-        quality_client = CuratorModelClient(quality_service_url)
-        kenlm_client = CuratorModelClient(kenlm_service_url)
-        embedding_client = CuratorModelClient(embedding_service_url)
-        embedding = RemoteEmbeddingSketch(embedding_client)
-        kenlm = RemoteKenLMScorer(kenlm_client)
-        finepdfs_quality = RemoteQualityClassifier(quality_client, "finepdfs-edu-v2")
-        fineweb_quality = RemoteQualityClassifier(quality_client, "fineweb-edu")
-        model_clients = (quality_client, kenlm_client, embedding_client)
-    else:
-        embedding = _EmbeddingSketch(
-            e5_dir if os.path.isdir(e5_dir) else None,
-            revision=os.environ.get("E5_SMALL_REVISION"),
-            allow_fallback=not require_real_models,
+    elif any(
+        (
+            quality_service_url,
+            finepdfs_service_url,
+            fineweb_service_url,
+            kenlm_service_url,
         )
+    ):
+        # A legacy combined quality URL remains a read-compatible local
+        # option. Production supplies independent FinePDFs and FineWeb URLs so
+        # their CPU workloads and HPAs cannot block one another.
+        resolved_finepdfs_url = finepdfs_service_url or quality_service_url
+        resolved_fineweb_url = fineweb_service_url or quality_service_url
+        if not all(
+            (
+                resolved_finepdfs_url,
+                resolved_fineweb_url,
+                kenlm_service_url,
+            )
+        ):
+            raise RuntimeError("all split curator model service URLs are required")
+        finepdfs_client = CuratorModelClient(resolved_finepdfs_url)
+        fineweb_client = (
+            finepdfs_client
+            if resolved_fineweb_url == resolved_finepdfs_url
+            else CuratorModelClient(resolved_fineweb_url)
+        )
+        kenlm_client = CuratorModelClient(kenlm_service_url)
+        kenlm = RemoteKenLMScorer(kenlm_client)
+        finepdfs_quality = RemoteQualityClassifier(finepdfs_client, "finepdfs-edu-v2")
+        fineweb_quality = RemoteQualityClassifier(fineweb_client, "fineweb-edu")
+        model_clients = tuple(dict.fromkeys((finepdfs_client, fineweb_client, kenlm_client)))
+    else:
         kenlm = KenLMScorer(
             kenlm_path if os.path.isfile(kenlm_path) else None,
             kenlm_sentencepiece_path if os.path.isfile(kenlm_sentencepiece_path) else None,
@@ -197,17 +204,17 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             allow_fallback=not require_real_models,
         )
     pii = PiiScanner(allow_fallback=not require_real_models)
+    scoring_version = os.environ.get(SCORING_VERSION_ENV, CONTENT_POLICY_GENERATION)
     minhasher = MinHasher()
     if require_real_models and minhasher.backend == "fallback-pyhash":
         raise RuntimeError("datasketch or rensa MinHash is required")
-    lsh = LSHBloomIndex(state_dir=os.path.join(cfg.state_dir, "lshbloom"))
+    # Each generation owns its dedup anchors so superseded projections cannot
+    # reject the first clean record produced by a new policy.
+    lsh = LSHBloomIndex(
+        state_dir=os.path.join(cfg.state_dir, "lshbloom", scoring_version),
+    )
     if require_real_models and lsh.backend == "memory":
         raise RuntimeError("a durable LSHBloom backend is required")
-    decon = DeconGate(
-        benchmark_set_version=cfg.benchmark_set_version,
-        benchmark_corpus=_load_benchmark_corpus(cfg.benchmark_corpus_path),
-        embedding=embedding,
-    )
     return CurateState(
         gopher=GopherFilter(),
         c4=C4Filter(),
@@ -218,10 +225,9 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         fineweb_quality=fineweb_quality,
         metadata_discovery=MetadataDiscoveryPolicy(),
         pii=pii,
-        decon=decon,
         tokenizer=Tokenizer(allow_fallback=not require_real_models),
         policy_revision=os.environ.get(POLICY_REVISION_ENV, "git:dev"),
-        scoring_version=os.environ.get(SCORING_VERSION_ENV, "v0.1.0"),
+        scoring_version=scoring_version,
         decision_cache=DecisionCache(os.path.join(cfg.state_dir, "decision-cache.sqlite3")),
         model_clients=model_clients,
     )
@@ -238,24 +244,9 @@ def _decision_cache_key(state: CurateState, payload: bytes) -> str:
             state.metadata_discovery.revision,
             state.kenlm.scorer,
             state.pii.revision,
-            state.decon.benchmark_set_version,
         )
     ).encode("utf-8")
     return hashlib.sha256(recipe + b"\0" + payload).hexdigest()
-
-
-def _load_benchmark_corpus(path: str | None) -> dict[BenchmarkName, list[str]] | None:
-    """Read benchmark prompts from a JSON file, or return ``None``."""
-    if not path or not os.path.isfile(path):
-        return None
-    import orjson
-
-    with open(path, "rb") as fh:
-        data = orjson.loads(fh.read())
-    if not isinstance(data, dict):
-        return None
-    valid = {"MMLU", "GSM8K", "HumanEval", "MATH", "GPQA"}
-    return {cast(BenchmarkName, k): list(v) for k, v in data.items() if k in valid}
 
 
 def _score_segment_models(
@@ -266,35 +257,79 @@ def _score_segment_models(
     kenlm: PerplexityScorer,
     use_kenlm: bool,
 ) -> dict[str, _SegmentModelSignals]:
-    """Run independent stateless model calls across the available replicas."""
+    """Run bounded model batches concurrently across stateless replicas."""
     concurrency = max(1, int(os.environ.get("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "1")))
+    batch_size = int(os.environ.get("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2"))
+    if batch_size < 1:
+        raise RuntimeError("S2P_CURATOR_CLASSIFIER_BATCH_SIZE must be positive")
+    quality_results: dict[str, QualityScore] = {}
+    comparison_results: dict[str, QualityScore] = {}
+    perplexity_results: dict[str, PerplexityResult] = {}
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        pending: dict[
-            str,
+        quality_batches: list[
             tuple[
-                Future[QualityScore],
-                Future[QualityScore] | None,
-                Future[PerplexityResult] | None,
-            ],
-        ] = {}
-        for segment in segments:
-            pending[segment.segment_id] = (
-                executor.submit(primary_quality.score, segment.text),
-                (
-                    executor.submit(comparison_quality.score, segment.text)
-                    if comparison_quality is not None
-                    else None
-                ),
-                executor.submit(kenlm.score, segment.text) if use_kenlm else None,
-            )
-        return {
-            segment_id: _SegmentModelSignals(
-                quality=quality.result(),
-                comparison=comparison.result() if comparison is not None else None,
-                perplexity=perplexity.result() if perplexity is not None else None,
-            )
-            for segment_id, (quality, comparison, perplexity) in pending.items()
+                list[SilverSegment],
+                Future[list[QualityScore]],
+                dict[str, QualityScore],
+            ]
+        ] = []
+        for scorer, destination in (
+            (primary_quality, quality_results),
+            (comparison_quality, comparison_results),
+        ):
+            if scorer is None:
+                continue
+            for offset in range(0, len(segments), batch_size):
+                batch = list(segments[offset : offset + batch_size])
+                quality_batches.append(
+                    (
+                        batch,
+                        executor.submit(
+                            _score_quality_batch,
+                            scorer,
+                            [segment.text for segment in batch],
+                        ),
+                        destination,
+                    )
+                )
+        perplexity_pending = {
+            segment.segment_id: executor.submit(kenlm.score, segment.text)
+            for segment in segments
+            if use_kenlm
         }
+        for batch, future, destination in quality_batches:
+            results = future.result()
+            if len(results) != len(batch):
+                raise RuntimeError(
+                    "quality classifier returned a different number of batch results"
+                )
+            destination.update(
+                (segment.segment_id, result) for segment, result in zip(batch, results, strict=True)
+            )
+        perplexity_results.update(
+            (segment_id, future.result()) for segment_id, future in perplexity_pending.items()
+        )
+    return {
+        segment.segment_id: _SegmentModelSignals(
+            quality=quality_results[segment.segment_id],
+            comparison=comparison_results.get(segment.segment_id),
+            perplexity=perplexity_results.get(segment.segment_id),
+        )
+        for segment in segments
+    }
+
+
+def _score_quality_batch(
+    scorer: QualityScorer,
+    texts: Sequence[str],
+) -> list[QualityScore]:
+    """Use a remote batch facade when present and preserve local compatibility."""
+    score_many = getattr(scorer, "score_many", None)
+    if callable(score_many):
+        values = list(score_many(texts))
+    else:
+        values = [scorer.score(text) for text in texts]
+    return values
 
 
 def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
@@ -548,6 +583,12 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         for warning in silver.extraction_warnings
     ):
         reject.append("incomplete_scientific_extraction")
+    if is_scientific and is_publication_template(
+        title=silver.title,
+        text=text,
+        segments=kept_segments,
+    ):
+        reject.append("document_template")
 
     # The projection has already been sanitized. Only high-risk findings remain
     # blocking; ordinary contact details are represented by typed placeholders.
@@ -639,7 +680,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         structural_quality_score=structure.structural_quality_score,
         extraction_completeness=structure.extraction_completeness,
         reasoning_score=structure.reasoning_score,
-        benchmark_score=structure.benchmark_score,
         route=route.route,
         eligible_routes=route.eligible_routes,
         route_reasons=[*route.reasons, *runtime_excluded, *pii_review_notes],
@@ -691,7 +731,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         removed_body_pii_flags=sorted(set(removed_body_pii)),
         pii_action=pii_action,  # type: ignore[arg-type]
         pii_scanner_revision=state.pii.revision,
-        contaminated_with=[],
         valid_from=silver.valid_from,
         valid_to=silver.valid_to,
         reject_reasons=reject,
@@ -714,30 +753,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         citation_count=silver.citation_count,
         extraction_warnings=list(silver.extraction_warnings),
     )
-    post_record, hits = state.decon.scan(pre_record)
-    if hits:
-        new_reasons = list(post_record.reject_reasons)
-        if "decontamination_hit" not in new_reasons:
-            new_reasons.append("decontamination_hit")
-        final_route = route_document(
-            silver=silver,
-            reject_reasons=list(new_reasons),
-            reasoning_score=structure.reasoning_score,
-        )
-        return post_record.model_copy(
-            update={
-                "reject_reasons": new_reasons,
-                "risk_tier": 3,
-                "route": final_route.route,
-                "eligible_routes": final_route.eligible_routes,
-                "route_reasons": [
-                    *final_route.reasons,
-                    *runtime_excluded,
-                    *pii_review_notes,
-                ],
-            }
-        )
-    return post_record
+    return pre_record
 
 
 def _training_projection(
@@ -800,7 +816,7 @@ def _filter_structured_projection(
 
 def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFlag]) -> RiskTier:
     """Map current reject signals onto the 1/2/3 risk-tier ladder."""
-    if "decontamination_hit" in reject or "pii_detected" in reject or pii_flags:
+    if "pii_detected" in reject or pii_flags:
         return 3
     if reject:
         return 2
@@ -840,7 +856,6 @@ def is_trainable_gold(record: GoldRecord) -> bool:
         in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
         and not record.reject_reasons
         and not record.pii_flags
-        and not record.contaminated_with
     )
 
 
@@ -854,7 +869,6 @@ def process_silver_payload(
     silver = common.silver_loads(payload)
     gold = curate_one(state, silver)
     if metrics is not None:
-        metrics.record_decon_scan(benchmarks=gold.contaminated_with)
         metrics.record_route(route=gold.route)
     if not is_trainable_gold(gold):
         if metrics is not None and gold.reject_reasons:
@@ -887,7 +901,6 @@ def process_silver_decision_payload(
     silver = common.silver_loads(payload)
     gold = curate_one(state, silver)
     if metrics is not None:
-        metrics.record_decon_scan(benchmarks=gold.contaminated_with)
         metrics.record_route(route=gold.route)
         if is_trainable_gold(gold):
             metrics.record_curated(

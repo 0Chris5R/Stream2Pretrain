@@ -41,8 +41,6 @@ spec:
               value: {{ .Values.ui.port | quote }}
             - name: HOSTNAME
               value: "::"
-            - name: DECON_GATE_URL
-              value: {{ printf "http://%s-decon-gate.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.processor.deconGate.apiPort | quote }}
             - name: MIXTURE_API_URL
               value: {{ printf "http://%s-mixture-controller.%s.svc:%v" (include "stream2pretrain.fullname" .) .Release.Namespace .Values.mixtureController.apiPort | quote }}
             - name: SOURCES_API_URL

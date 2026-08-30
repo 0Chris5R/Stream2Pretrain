@@ -25,14 +25,12 @@ def cfg(tmp_path: Path) -> ProcessorConfig:
         normalized_topic="docs.normalized",
         curated_topic="docs.curated",
         decisions_topic="curation.decisions",
-        decon_attest_topic="decon.attest",
         minio_endpoint="http://localhost:9000",
         minio_access_key="minioadmin",
         minio_secret_key="minioadmin",
         bronze_bucket="bronze",
         silver_bucket="silver",
         gold_bucket="gold",
-        decon_bucket="decon",
         polaris_uri="http://polaris:8181/api/catalog",
         polaris_warehouse="stream2pretrain",
         polaris_token=None,
@@ -43,8 +41,6 @@ def cfg(tmp_path: Path) -> ProcessorConfig:
         http_max_retries=0,
         state_dir=str(tmp_path / "state"),
         models_dir=str(tmp_path / "models"),
-        benchmark_set_version="v2026-test-01",
-        benchmark_corpus_path=None,
         proxy_lm_window_minutes=10,
         promotion_threshold=0.05,
         promotion_required_windows=2,
@@ -82,8 +78,8 @@ def bronze_record(fixed_now: datetime) -> BronzeRecord:
 def silver_record(fixed_now: datetime) -> SilverRecord:
     text = (
         "The streaming language modelling pipeline curates documents. "
-        "It writes deterministic shards to an Iceberg lakehouse and signs "
-        "a contamination attestation for every snapshot. The pipeline "
+        "It writes deterministic shards to an Iceberg lakehouse and records "
+        "the processing provenance for every row. The pipeline "
         "supports per-document validity intervals so train-time replays are "
         "fully reproducible. "
     ) * 8
@@ -117,8 +113,8 @@ def long_english_text() -> str:
         "The Stream2Pretrain pipeline curates documents into training shards. "
         "It uses Bytewax for streaming, Resiliparse for extraction, and KenLM "
         "for perplexity scoring. The architecture is deliberately modular so "
-        "operators can be replaced without touching the dataflow. The decon "
-        "gate emits a signed attestation per snapshot so contamination can be "
+        "operators can be replaced without touching the dataflow. Durable "
+        "decision rows preserve revisions so processing can be "
         "audited later by replay. "
     )
     return paragraph * 6

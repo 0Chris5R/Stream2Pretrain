@@ -24,7 +24,6 @@ def _bucket_names() -> list[str]:
         _required("MINIO_BRONZE_BUCKET"),
         _required("MINIO_SILVER_BUCKET"),
         _required("MINIO_GOLD_BUCKET"),
-        _required("MINIO_DECON_BUCKET"),
         _required("MINIO_POSTTRAIN_BUCKET"),
     ]
     state = os.environ.get("S2P_STATE_BUCKET")

@@ -85,18 +85,6 @@ class ProcessorMetrics:
             buckets=QUALITY_BUCKETS,
             registry=self.registry,
         )
-        self._decon_checked = Counter(
-            "s2p_decon_checked_total",
-            "Documents checked by Decon-Gate.",
-            ["namespace"],
-            registry=self.registry,
-        )
-        self._decon_flagged = Counter(
-            "s2p_decon_flagged_total",
-            "Decon-Gate benchmark hits.",
-            ["namespace", "benchmark"],
-            registry=self.registry,
-        )
         self._iceberg_flush_seconds = Histogram(
             "s2p_iceberg_flush_seconds",
             "Iceberg micro-batch flush duration.",
@@ -148,28 +136,17 @@ class ProcessorMetrics:
         with self._lock:
             self._processor_failures.labels(self._namespace, stage, reason).inc()
 
-    def record_decon_scan(self, *, benchmarks: Iterable[str]) -> None:
-        hits = list(benchmarks)
-        with self._lock:
-            self._decon_checked.labels(self._namespace).inc()
-            for benchmark in hits:
-                self._decon_flagged.labels(self._namespace, benchmark).inc()
-
     def record_iceberg_flush(
         self,
         *,
         rows: int,
         seconds: float,
         decisions: int | None = None,
-        benchmark_candidates: int = 0,
     ) -> None:
         with self._lock:
             self._documents_emitted.labels(self._namespace, "iceberg").inc(max(0, rows))
             self._documents_emitted.labels(self._namespace, "decision").inc(
                 max(0, rows if decisions is None else decisions)
-            )
-            self._documents_emitted.labels(self._namespace, "benchmark_reserve").inc(
-                max(0, benchmark_candidates)
             )
             self._iceberg_flush_seconds.labels(self._namespace).observe(max(0.0, seconds))
 

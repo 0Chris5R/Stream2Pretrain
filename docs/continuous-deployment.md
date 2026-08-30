@@ -9,7 +9,7 @@ still uses a traceable commit-SHA tag. The complete application Helm release is
 then applied after a push to `main`.
 
 Processor dependencies are built once into a lockfile-keyed lite base.
-Content-addressed bases separately package fetcher, quality, KenLM, and E5
+Content-addressed bases separately package fetcher, quality, and KenLM
 artifacts. Ordinary source changes reuse those bases, so they do not reinstall
 Python or redownload multi-GB models. Each strict inference family has its own
 image, Pod resources, Service, and HPA instead of one oversized curator image.

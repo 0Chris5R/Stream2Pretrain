@@ -3,8 +3,8 @@
 The current data plane retains raw Bronze objects and structured scientific
 artifacts in MinIO, transports typed records over Redpanda, and appends every
 curation outcome to an Iceberg decision table. Only accepted outcomes are also
-appended to Gold. Signed decontamination attestations describe each writer
-batch. The wire shape is enforced by the Pydantic models in `schemas/`.
+appended to Gold. The wire shape is enforced by the Pydantic models in
+`schemas/`.
 
 ## Tier overview
 
@@ -15,7 +15,6 @@ batch. The wire shape is enforced by the Pydantic models in `schemas/`.
 | Scientific artifact | Structured sections, tables, equations, figures, citations, OCR and extractor provenance | JSON and figure assets in MinIO | aligned with source | `schemas/scientific.py` |
 | Decisions | Every accepted or rejected scored outcome plus its full signal vector | Parquet in Iceberg | indefinite | `schemas/gold.py` |
 | Gold | Curated, mixture-ready training shard | Parquet in Iceberg | indefinite | `schemas/gold.py` |
-| Decon attestations | Signed snapshot certificates | Parquet in Iceberg | indefinite | `schemas/decon.py` |
 
 ## Bronze tier
 
@@ -101,10 +100,9 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `license_source` | enum | yes | `html_meta`, `robots_txt`, `sitemap`, `license_file`, `manual`, `unknown` |
 | `risk_tier` | 1 / 2 / 3 | yes | MixtureVitae convention |
 | `pii_flags` | list[enum] | no | `email`, `phone`, `ssn`, `credit_card`, `ipv4`, `ipv6`, `passport` |
-| `contaminated_with` | list[string] | no | benchmark ids matched by Decon-Gate |
 | `valid_from` | UTC datetime | yes | inherited |
 | `valid_to` | UTC datetime \| null | no | |
-| `reject_reasons` | list[enum] | no | Includes language, web heuristics, duplicate, source quality, PII/secret, licence, decontamination, validity, incomplete extraction, and `metadata_only` blockers |
+| `reject_reasons` | list[enum] | no | Includes language, web heuristics, duplicate, source quality, PII/secret, licence, validity, incomplete extraction, and `metadata_only` blockers |
 | `scoring_version` | string | yes | recipe version |
 | `classifier_revision` | string | yes | e.g. `fineweb-edu-onnx-int8-2026-05-31` |
 | `policy_revision` | `git:<sha>` | yes | git commit of the policy bundle |
@@ -122,14 +120,14 @@ Gold partitioning: `PARTITION BY lang, risk_tier, month(valid_from)`. The
 
 | Tier | Meaning | Example trigger |
 |---|---|---|
-| 1 | trainable under current policy | allowlisted content licence, no PII flag or contamination hit |
+| 1 | trainable under current policy | allowlisted content licence and no PII flag |
 | 2 | caution | heuristic uncertainty or a rejected code licence |
 | 3 | drop | hard fail: explicit dirty signal, dropped before mixture |
 
 Every row is published to `curation.decisions` and committed to
 `gold.curation_decisions`, including the full signal vector, risk tier, PII
-flags, contamination matches, and rejection reasons. Only tier 1 rows with
-empty `reject_reasons`, empty `pii_flags`, and no `contaminated_with` marks are
+flags, and rejection reasons. Only tier 1 rows with empty `reject_reasons` and
+empty `pii_flags` are
 also published to `docs.curated` and committed to `gold.curated`. The two
 Iceberg appends are not a distributed transaction; current delivery is
 at-least-once and replay behavior remains a runtime measurement.
@@ -141,35 +139,10 @@ body retrieval; the query layer folds those records into the same corpus route
 ledger using `license_not_permitted`. The internal pre-fetch table is not a
 second product ledger. Discovery metadata produces no licence or document row.
 
-## Decon attestations
-
-One signed row per writer batch. Its counts are calculated from the complete
-decision batch and it records the accepted Gold snapshot id when one exists.
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `snapshot_id` | int >=0 | yes | matches Iceberg gold snapshot |
-| `committed_at` | UTC datetime | yes | snapshot commit time |
-| `benchmark_set_version` | string | yes | e.g. `v2026-06-01` |
-| `benchmarks` | list[enum] | yes | subset of `MMLU`, `GSM8K`, `HumanEval`, `MATH`, `GPQA` |
-| `tokens_scanned` | int >=0 | yes | total tokens in the snapshot delta |
-| `tokens_flagged` | int >=0 | yes | tokens dropped by the gate |
-| `rejected_doc_hashes` | list[string] | no | sha256 doc_ids that hit |
-| `per_benchmark_hits` | map[bench, int] | yes | hit counts (zero entries included) |
-| `signature` | base64 | yes | Ed25519 over canonical JSON of the body |
-| `signer_cert` | PEM | yes | x509 cert binding the signing key |
-
-Canonicalisation rule (verifier-side): drop `signature` and `signer_cert`,
-JSON-encode with `sort_keys=True` and `separators=(",", ":")`, UTF-8 bytes.
-
-Attestation table partitioning: `PARTITION BY month(committed_at)`.
-
 ## Iceberg branch and tag conventions
 
 - `main`: production curated stream.
 - `shadow-<recipe>`: shadow A/B comparison branch per `MixtureRecipe` CRD.
-- Tags: `attest-<snapshot_id>` is created automatically when a Decon-Gate
-  attestation is committed, so a verifier can pin the table state by tag.
 
 ## Read-side conveniences
 
@@ -178,6 +151,4 @@ DuckDB views:
 - `gold_as_of(ts)` -> rows where `valid_from <= ts AND (valid_to IS NULL OR valid_to > ts)`.
 - `gold_clean` -> defensive alias for the Gold table contract:
   `WHERE risk_tier = 1 AND cardinality(pii_flags) = 0 AND cardinality(reject_reasons) = 0`.
-- `gold_uncontaminated` -> defensive alias for `WHERE cardinality(contaminated_with) = 0`.
-
 The exact SQL lives in `ui/lib/duckdb-client.ts`.

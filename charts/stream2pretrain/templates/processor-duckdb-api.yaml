@@ -40,6 +40,8 @@ spec:
               value: {{ .Values.processor.duckdbApi.apiPort | quote }}
             - name: S2P_DUCKDB_GOLD_RELATION
               value: {{ .Values.processor.duckdbApi.goldRelation | quote }}
+            - name: S2P_ACTIVE_SCORING_VERSION
+              value: {{ .Values.processor.duckdbApi.activeScoringVersion | quote }}
             - name: S2P_DUCKDB_CATALOG_REFRESH_SECONDS
               value: {{ .Values.processor.duckdbApi.catalogRefreshSeconds | quote }}
             - name: S2P_DUCKDB_MEMORY_LIMIT

@@ -8,7 +8,6 @@ import pytest
 from processor.model_client import (
     CuratorModelClient,
     ModelServiceError,
-    RemoteEmbeddingSketch,
     RemoteKenLMScorer,
     RemoteQualityClassifier,
 )
@@ -31,10 +30,6 @@ def _metadata() -> dict[str, object]:
             "backend": "kenlm-sentencepiece",
             "scorer": "kenlm-sentencepiece:en.arpa.bin",
         },
-        "embedding": {
-            "backend": "onnxruntime-cpu",
-            "revision": "e5@pinned",
-        },
     }
 
 
@@ -42,10 +37,18 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/metadata":
             return httpx.Response(200, json=_metadata())
-        if request.url.path == "/v1/quality":
-            family = request.read().decode()
-            revision = "finepdfs@pinned" if "finepdfs" in family else "fineweb@pinned"
-            return httpx.Response(200, json={"edu_score": 4.25, "revision": revision})
+        if request.url.path == "/v1/quality:batch":
+            body = request.read().decode()
+            revision = "finepdfs@pinned" if "finepdfs" in body else "fineweb@pinned"
+            item_count = body.count('"paper"') + body.count('"page"')
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"edu_score": 4.25, "revision": revision} for _ in range(item_count)
+                    ]
+                },
+            )
         if request.url.path == "/v1/perplexity":
             return httpx.Response(
                 200,
@@ -55,8 +58,6 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
                     "scorer": "kenlm-sentencepiece:en.arpa.bin",
                 },
             )
-        if request.url.path == "/v1/embed":
-            return httpx.Response(200, json={"embedding": [1.0, 0.0]})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -65,14 +66,15 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
     finepdfs = RemoteQualityClassifier(client, "finepdfs-edu-v2")
     fineweb = RemoteQualityClassifier(client, "fineweb-edu")
     kenlm = RemoteKenLMScorer(client)
-    embeddings = RemoteEmbeddingSketch(client)
 
     assert finepdfs.score("paper").edu_score == 4.25
+    assert [result.revision for result in finepdfs.score_many(["paper", "paper"])] == [
+        "finepdfs@pinned",
+        "finepdfs@pinned",
+    ]
     assert finepdfs.revision == "finepdfs@pinned"
     assert fineweb.score("page").revision == "fineweb@pinned"
     assert kenlm.score("text").perplexity == 42.0
-    embeddings.add("MMLU", "prompt")
-    assert list(embeddings.query("candidate")) == [("MMLU", 1.0)]
     client.close()
 
 
@@ -88,4 +90,49 @@ def test_model_service_5xx_is_transient() -> None:
     )
     with pytest.raises(ModelServiceError, match="returned 503"):
         client.perplexity("retry me")
+    client.close()
+
+
+def test_quality_batch_requires_one_result_per_input() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/metadata":
+            return httpx.Response(200, json=_metadata())
+        return httpx.Response(
+            200,
+            json={"results": [{"edu_score": 4.0, "revision": "finepdfs@pinned"}]},
+        )
+
+    client = CuratorModelClient(
+        "http://models",
+        client=httpx.Client(base_url="http://models", transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ModelServiceError, match="invalid quality batch"):
+        client.quality_many("finepdfs-edu-v2", ["one", "two"])
+    client.close()
+
+
+def test_oversize_combined_batch_preserves_the_singleton_path(monkeypatch) -> None:
+    requests: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/metadata":
+            return httpx.Response(200, json=_metadata())
+        payload = request.read().decode()
+        texts = ["left"] if "left" in payload else ["right"]
+        requests.append(texts)
+        return httpx.Response(
+            200,
+            json={"results": [{"edu_score": 4.0, "revision": "finepdfs@pinned"} for _ in texts]},
+        )
+
+    monkeypatch.setattr("processor.model_client.MODEL_SERVICE_MAX_REQUEST_BYTES", 1)
+    client = CuratorModelClient(
+        "http://models",
+        client=httpx.Client(base_url="http://models", transport=httpx.MockTransport(handler)),
+    )
+
+    results = client.quality_many("finepdfs-edu-v2", ["left", "right"])
+
+    assert len(results) == 2
+    assert requests == [["left"], ["right"]]
     client.close()

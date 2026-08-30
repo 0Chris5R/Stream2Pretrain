@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import math
-from collections.abc import Iterable
+import json
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
 from processor.operators.kenlm_score import PerplexityResult
 from processor.operators.quality import QualityScore
-from schemas.decon import BenchmarkName
+
+MODEL_SERVICE_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
 class ModelServiceError(RuntimeError):
@@ -30,6 +31,13 @@ class CuratorModelClient:
         self._client = client or httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(timeout_seconds, connect=10.0),
+            # Kubernetes balances TCP connections, not individual requests on
+            # an already-open connection.  The curator deliberately opens a
+            # fresh in-cluster connection for each bounded classifier batch so
+            # all ready replicas can receive work instead of one long-lived
+            # connection pinning the stream to one Pod.
+            limits=httpx.Limits(max_keepalive_connections=0, max_connections=16),
+            headers={"Connection": "close"},
             trust_env=False,
         )
         try:
@@ -46,20 +54,46 @@ class CuratorModelClient:
         self.metadata: dict[str, Any] = payload
 
     def quality(self, model_family: str, text: str) -> QualityScore:
-        payload = self._post("/v1/quality", {"model_family": model_family, "text": text})
+        return self.quality_many(model_family, [text])[0]
+
+    def quality_many(self, model_family: str, texts: Sequence[str]) -> list[QualityScore]:
+        """Score one bounded batch while preserving input order and revisions."""
+        if not texts:
+            return []
+        request_payload = {"model_family": model_family, "texts": list(texts)}
+        # Combining otherwise valid singleton calls must never make a document
+        # fail the service's unchanged 2 MiB request limit. Fall back to the
+        # exact singleton path when only the batch envelope crosses that bound.
+        encoded_size = len(json.dumps(request_payload).encode("utf-8"))
+        if len(texts) > 1 and encoded_size > MODEL_SERVICE_MAX_REQUEST_BYTES:
+            return [self.quality_many(model_family, [text])[0] for text in texts]
+        payload = self._post(
+            "/v1/quality:batch",
+            request_payload,
+        )
+        raw_results = payload.get("results")
+        if not isinstance(raw_results, list) or len(raw_results) != len(texts):
+            raise ModelServiceError("curator model service returned invalid quality batch data")
+        scores: list[QualityScore] = []
         try:
-            score = QualityScore(
-                edu_score=float(payload["edu_score"]),
-                revision=str(payload["revision"]),
-            )
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    raise TypeError("quality batch item is not an object")
+                scores.append(
+                    QualityScore(
+                        edu_score=float(item["edu_score"]),
+                        revision=str(item["revision"]),
+                    )
+                )
         except (KeyError, TypeError, ValueError) as exc:
             raise ModelServiceError("curator model service returned invalid quality data") from exc
         expected = str(self.metadata["quality"][model_family]["revision"])
-        if score.revision != expected:
-            raise ModelServiceError(
-                f"curator model service revision drift: {score.revision} != {expected}"
-            )
-        return score
+        for score in scores:
+            if score.revision != expected:
+                raise ModelServiceError(
+                    f"curator model service revision drift: {score.revision} != {expected}"
+                )
+        return scores
 
     def perplexity(self, text: str) -> PerplexityResult:
         payload = self._post("/v1/perplexity", {"text": text})
@@ -78,17 +112,7 @@ class CuratorModelClient:
             )
         return result
 
-    def embed(self, text: str) -> list[float]:
-        payload = self._post("/v1/embed", {"text": text})
-        vector = payload.get("embedding")
-        if not isinstance(vector, list) or not vector:
-            raise ModelServiceError("curator model service returned an empty embedding")
-        try:
-            return [float(value) for value in vector]
-        except (TypeError, ValueError) as exc:
-            raise ModelServiceError("curator model service returned an invalid embedding") from exc
-
-    def _post(self, path: str, payload: dict[str, str]) -> dict[str, Any]:
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             response = self._client.post(path, json=payload)
         except httpx.HTTPError as exc:
@@ -142,6 +166,9 @@ class RemoteQualityClassifier:
     def score(self, text: str) -> QualityScore:
         return self._client.quality(self._model_family, text)
 
+    def score_many(self, texts: Sequence[str]) -> list[QualityScore]:
+        return self._client.quality_many(self._model_family, texts)
+
 
 class RemoteKenLMScorer:
     """KenLMScorer-compatible facade backed by the model service."""
@@ -165,48 +192,3 @@ class RemoteKenLMScorer:
 
     def score(self, text: str) -> PerplexityResult:
         return self._client.perplexity(text)
-
-
-class RemoteEmbeddingSketch:
-    """Decon-Gate embedding index using remote E5 inference."""
-
-    def __init__(self, client: CuratorModelClient) -> None:
-        self._client = client
-        metadata = client.metadata.get("embedding", {})
-        if metadata.get("backend") != "onnxruntime-cpu":
-            raise RuntimeError("the remote E5 embedding backend is not real")
-        self._revision = str(metadata.get("revision", ""))
-        if not self._revision:
-            raise RuntimeError("the remote E5 embedding backend has no revision")
-        self._index: dict[BenchmarkName, list[list[float]]] = {}
-
-    @property
-    def revision(self) -> str:
-        return self._revision
-
-    @property
-    def backend(self) -> str:
-        return "onnxruntime-cpu-remote"
-
-    def add(self, benchmark: BenchmarkName, text: str) -> None:
-        self._index.setdefault(benchmark, []).append(self._client.embed(text))
-
-    def query(self, text: str) -> Iterable[tuple[BenchmarkName, float]]:
-        if not self._index:
-            return []
-        query = self._client.embed(text)
-        return [
-            (benchmark, max((_cosine(query, vector) for vector in vectors), default=0.0))
-            for benchmark, vectors in self._index.items()
-        ]
-
-
-def _cosine(left: list[float], right: list[float]) -> float:
-    if not left or len(left) != len(right):
-        return 0.0
-    numerator = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = math.sqrt(sum(value * value for value in left))
-    right_norm = math.sqrt(sum(value * value for value in right))
-    if left_norm == 0 or right_norm == 0:
-        return 0.0
-    return numerator / (left_norm * right_norm)

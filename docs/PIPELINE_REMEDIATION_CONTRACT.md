@@ -52,7 +52,7 @@ must retain:
 - deterministic replay from retained Redpanda data;
 - bounded retries without silent record loss;
 - coordinated rescaling from durable recovery state;
-- isolated deployment canaries that never contaminate production tables;
+- isolated deployment canaries that never leak into production tables;
 - durable state and recovery for deduplication and source cursors.
 
 Standard Kafka-lag KEDA is deliberately not attached to the two core Bytewax
@@ -82,7 +82,7 @@ Distinct policies are required for the active content families:
 FinePDFs Edu v2 remains the scientific-quality default unless same-sample
 evidence justifies a change. FineWeb-Edu must not score code or structured
 metadata as if it were web prose. Every profile retains the shared privacy,
-deduplication, decontamination, provenance, and audit contracts where those
+deduplication, provenance, and audit contracts where those
 operations are meaningful.
 
 OAI-PMH metadata may discover and schedule an arXiv full-text item, but it must
@@ -164,8 +164,6 @@ derived from real runtime data. Specifically:
   figures, OCR, and extraction records;
 - post-training renders an explicit unavailable state instead of an empty or
   apparently healthy dashboard;
-- synthetic benchmark canaries are labelled as canaries and never presented as
-  comprehensive benchmark protection.
 
 ## 9. Validation and deployment order
 

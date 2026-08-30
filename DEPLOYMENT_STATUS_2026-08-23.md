@@ -12,9 +12,10 @@ Application hostname: `https://stream2pretrain-app.s241221-at-student-dhbw-mannh
 
 - Deployment run [32639246763](https://github.com/0Chris5R/Stream2Pretrain/actions/runs/32639246763) completed successfully from commit `0d00db4`.
 - Repository validation, Helm rendering, image resolution, cluster capacity preflight, workload rollout, source-schedule materialization, and the isolated pretraining canary passed.
-- The final browser audit rendered every route with HTTP 200: `/`, `/dashboard`, `/documents`, `/sources`, `/decon`, `/datasets`, `/post-training`, `/mixture`, and the `/as-of` redirect.
-- `/api/health`, `/api/activity`, `/api/decon`, `/api/decon/coverage`, and `/api/foundry/activity` returned valid JSON with HTTP 200 in the final audit.
-- Benchmark-safety coverage now accepts the configured `synthetic_canary` corpus kind and reports all five configured benchmark families.
+- The final browser audit rendered the monitoring, document, source, dataset,
+  post-training, mixture, and time-travel views with HTTP 200.
+- `/api/health`, `/api/activity`, and `/api/foundry/activity` returned valid JSON
+  with HTTP 200 in the final audit.
 - Local repository verification completed with 544 tests passing and 6 environment-dependent skips; Ruff check and formatting checks pass.
 - Unchanged container images are reused by digest. In the successful build, unchanged components resolved in roughly 14–29 seconds and the rebuilt processor completed in 57 seconds.
 
@@ -65,7 +66,6 @@ The canonical hostname currently publishes IPv6 (`AAAA`) ingress addresses but n
 
 - Restored deterministic deployment validation and retry-safe Redpanda topic reconciliation across transient university-VPN Kubernetes API failures.
 - Added bounded DuckDB memory, query-thread, metadata-refresh, and disk-spill configuration; raised the measured dev pod ceiling to 2 GiB after a confirmed OOM.
-- Corrected benchmark-safety UI/schema handling for the configured synthetic canary reserve.
 - Added an explicit monitoring-repair workflow with readiness checks and failure diagnostics.
 - Added Prometheus automatic Go heap limiting.
 - Kept the original `users.dhbw.site` hostname as the canonical deployment hostname.

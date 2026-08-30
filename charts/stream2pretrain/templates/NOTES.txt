@@ -3,9 +3,8 @@ Stream2Pretrain {{ .Chart.AppVersion }} installed in namespace {{ .Release.Names
 Components:
 - Ingest: arXiv (OAI-PMH + 4 RSS + native HTML fetcher) and Hugging Face
   model/dataset cards.
-- Processor: fetcher (Resiliparse), curate (Bytewax StatefulSet with in-process
-  Decon-Gate scan), iceberg-writer (PyIceberg + signed attestation writer),
-  decon-gate API (attestation lookup), post-training foundry (paper-to-SFT/RL
+- Processor: fetcher (Resiliparse), curator (Bytewax StatefulSet), Iceberg
+  writer, and post-training foundry (paper-to-SFT/RL
   StatefulSet plus control API and per-artifact human audits).
 - Control plane: mixture-controller (kopf) + SourceFeed/MixtureRecipe CRDs.
 {{- if .Values.ui.ingress.enabled }}
@@ -21,11 +20,10 @@ Required external secrets (create before installing or use sealed-secrets):
       --from-literal=accessKey=... --from-literal=secretKey=...
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.sources.huggingface.models.tokenSecret }} \
       --from-literal=token=hf_...
-  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.processor.deconGate.signingKeySecret }} \
-      --from-file=ed25519.key=./signing.key
-  kubectl -n {{ .Release.Namespace }} create configmap {{ .Values.processor.deconGate.benchmarkCorpus.configMap }} \
-      --from-file={{ .Values.processor.deconGate.benchmarkCorpus.fileName }}=./benchmark-corpus.json
 {{- if .Values.processor.foundry.enabled }}
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.processor.foundry.signingKeySecret }} \
+      --from-file={{ .Values.processor.foundry.signingKeyKey }}=./signing.key \
+      --from-file={{ .Values.processor.foundry.signingCertKey }}=./signing.crt
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.processor.foundry.providerSecret }} \
       --from-literal={{ .Values.processor.foundry.hetznerKey }}=... \
       --from-literal={{ .Values.processor.foundry.controlTokenKey }}=...

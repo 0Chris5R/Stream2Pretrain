@@ -1,9 +1,8 @@
-"""Local SourceFeed control plane with real bounded ingestion runs.
+"""Read-only local SourceFeed monitor with scheduled ingestion.
 
 The Kubernetes profile stores SourceFeed specs as CRDs. The Podman profile
-uses this small API instead: specs and run status are persisted on its named
-volume, and ``Run once`` executes the same ingest code against local Redpanda
-and MinIO. It deliberately does not impersonate Kubernetes.
+uses this small API to report configured sources and their scheduler status.
+Source configuration remains file-based and the HTTP surface is monitoring-only.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ def _now() -> str:
 
 
 class LocalSourceStore:
-    """Atomic local spec/status store used by the Podman control API."""
+    """Atomic local status store used by the Podman monitor API."""
 
     def __init__(self, path: Path = STATE_PATH, seed_path: Path = SEED_PATH) -> None:
         self.path = path
@@ -115,43 +114,6 @@ class LocalSourceStore:
             if elapsed >= spec.poll_interval_seconds:
                 due.append(name)
         return due
-
-    async def upsert(self, spec: SourceFeedSpec) -> dict[str, Any]:
-        async with self._lock:
-            previous = self.data.get(spec.name, {})
-            self.data[spec.name] = {
-                "spec": spec.model_dump(mode="json"),
-                "last_success_at": previous.get("last_success_at"),
-                "last_attempt_at": previous.get("last_attempt_at"),
-                "last_error": previous.get("last_error"),
-                "documents_24h": int(previous.get("documents_24h", 0)),
-                "error_rate_24h": float(previous.get("error_rate_24h", 0.0)),
-                "poll_state": "idle",
-                "seen_ids": list(previous.get("seen_ids", [])),
-            }
-            self._persist()
-            return self.public(spec.name, self.data[spec.name])
-
-    async def delete(self, name: str) -> bool:
-        async with self._lock:
-            if name not in self.data:
-                return False
-            del self.data[name]
-            self._persist()
-            return True
-
-    async def set_enabled(self, name: str, enabled: bool) -> dict[str, Any] | None:
-        async with self._lock:
-            item = self.data.get(name)
-            if item is None:
-                return None
-            spec = SourceFeedSpec.model_validate(item["spec"]).model_copy(
-                update={"enabled": enabled}
-            )
-            item["spec"] = spec.model_dump(mode="json")
-            item["poll_state"] = "idle"
-            self._persist()
-            return self.public(name, item)
 
     async def mark_polling(self, name: str) -> SourceFeedSpec | None:
         async with self._lock:
@@ -236,7 +198,7 @@ async def _execute(store: LocalSourceStore, name: str, spec: SourceFeedSpec) -> 
         elif spec.protocol == "oai-pmh":
             emitted = await run_oaipmh(cfg, [spec], max_records=MAX_RECORDS)
         else:
-            raise ValueError(f"Run once is not available for {spec.protocol} sources")
+            raise ValueError(f"Scheduled polling is not available for {spec.protocol} sources")
         await store.finish(name, emitted=emitted, seen_ids=newly_seen)
     except Exception as exc:
         await store.fail(name, f"{type(exc).__name__}: {exc}")
@@ -275,34 +237,6 @@ def build_app(store: LocalSourceStore | None = None) -> web.Application:
     async def list_sources(_: web.Request) -> web.Response:
         return web.json_response(source_store.list_sources())
 
-    async def upsert_source(request: web.Request) -> web.Response:
-        spec = SourceFeedSpec.model_validate(await request.json())
-        return web.json_response(await source_store.upsert(spec), status=201)
-
-    async def patch_source(request: web.Request) -> web.Response:
-        body = await request.json()
-        if not isinstance(body.get("enabled"), bool):
-            raise web.HTTPBadRequest(text="enabled must be a boolean")
-        status = await source_store.set_enabled(request.match_info["name"], body["enabled"])
-        if status is None:
-            raise web.HTTPNotFound(text="source not found")
-        return web.json_response(status)
-
-    async def delete_source(request: web.Request) -> web.Response:
-        if not await source_store.delete(request.match_info["name"]):
-            raise web.HTTPNotFound(text="source not found")
-        return web.json_response({"deleted": True})
-
-    async def run_source(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        spec = await source_store.mark_polling(name)
-        if spec is None:
-            if name not in source_store.data:
-                raise web.HTTPNotFound(text="source not found")
-            raise web.HTTPConflict(text="source is disabled or already polling")
-        start_execution(name, spec)
-        return web.json_response(LocalSourceStore.public(name, source_store.data[name]), status=202)
-
     async def probe(_: web.Request) -> web.Response:
         return web.Response(text="ok\n")
 
@@ -310,10 +244,6 @@ def build_app(store: LocalSourceStore | None = None) -> web.Application:
     app.router.add_get("/healthz", probe)
     app.router.add_get("/readyz", probe)
     app.router.add_get("/v1/sources", list_sources)
-    app.router.add_post("/v1/sources", upsert_source)
-    app.router.add_patch("/v1/sources/{name}", patch_source)
-    app.router.add_delete("/v1/sources/{name}", delete_source)
-    app.router.add_post("/v1/sources/{name}/run", run_source)
     app.on_startup.append(start_scheduler)
     app.on_cleanup.append(stop_scheduler)
     return app

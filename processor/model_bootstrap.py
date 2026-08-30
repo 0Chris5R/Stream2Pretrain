@@ -23,7 +23,6 @@ REVISIONS = {
     "fineweb_edu": os.environ.get(
         "FINEWEB_EDU_REVISION", "284663cbb2dabf9bda30d8f8cc49601251ee1631"
     ),
-    "e5_small_v2": os.environ.get("E5_SMALL_REVISION", "ffb93f3bd4047442299a41ebb6fa998a38507c52"),
     "kenlm": os.environ.get("KENLM_REVISION", "3fbe35c83b1a39f420a345b7c96a186c8030d834"),
     "figure_classifier": os.environ.get(
         "FIGURE_CLASSIFIER_REVISION", "f859dfbff5c9916cd996942d4b0db7fa25808220"
@@ -96,8 +95,6 @@ def _validate() -> None:
         "FinePDFs Edu v2 tokenizer": MODELS_DIR / "finepdfs-edu-v2" / "tokenizer.json",
         "FineWeb-Edu weights": MODELS_DIR / "fineweb-edu" / "model.safetensors",
         "FineWeb-Edu tokenizer": MODELS_DIR / "fineweb-edu" / "tokenizer.json",
-        "E5 ONNX model": MODELS_DIR / "e5-small" / "model.onnx",
-        "E5 tokenizer": MODELS_DIR / "e5-small" / "tokenizer.json",
         "figure ONNX model": MODELS_DIR / "figure-classifier" / "model.onnx",
         "KenLM binary": MODELS_DIR / "kenlm" / "en.arpa.bin",
         "KenLM tokenizer": MODELS_DIR / "kenlm" / "en.sp.model",
@@ -129,13 +126,6 @@ def main() -> None:
         revision=REVISIONS["fineweb_edu"],
         destination=MODELS_DIR / "fineweb-edu",
         patterns=["*.json", "*.txt", "*.safetensors"],
-    )
-    print("Downloading pinned E5-small-v2 ONNX model", flush=True)
-    _snapshot(
-        repo_id="intfloat/e5-small-v2",
-        revision=REVISIONS["e5_small_v2"],
-        destination=MODELS_DIR / "e5-small",
-        patterns=["model.onnx", "*.json", "*.txt"],
     )
     print("Downloading pinned document-figure ONNX classifier", flush=True)
     _snapshot(

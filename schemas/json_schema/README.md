@@ -22,7 +22,6 @@ generator.
 | `bronze_record.schema.json` | `schemas.bronze.BronzeRecord` |
 | `silver_record.schema.json` | `schemas.silver.SilverRecord` |
 | `gold_record.schema.json` | `schemas.gold.GoldRecord` |
-| `decon_attestation.schema.json` | `schemas.decon.DeconAttestation` |
 | `source_feed_spec.schema.json` | `schemas.sourcefeed.SourceFeedSpec` |
 | `mixture_recipe_spec.schema.json` | `schemas.sourcefeed.MixtureRecipeSpec` |
 | `license_admission_decision.schema.json` | `schemas.license_admission.LicenseAdmissionDecision` |

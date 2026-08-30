@@ -10,6 +10,7 @@ import pytest
 from processor import common
 from processor.common import ProcessorConfig, gold_loads, silver_dumps
 from processor.curate import (
+    _score_segment_models,
     _training_projection,
     build_state,
     curate_one,
@@ -54,7 +55,7 @@ class _SplitModelClient:
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
-        if "quality" in base_url:
+        if any(value in base_url for value in ("quality", "finepdfs", "fineweb")):
             self.metadata = {
                 "ready": True,
                 "quality": {
@@ -76,23 +77,12 @@ class _SplitModelClient:
                     "scorer": "kenlm-sentencepiece:en.arpa.bin",
                 },
             }
-        else:
-            self.metadata = {
-                "ready": True,
-                "embedding": {
-                    "backend": "onnxruntime-cpu",
-                    "revision": "e5@pinned",
-                },
-            }
 
     def quality(self, model_family: str, _text: str) -> QualityScore:
         return QualityScore(4.0, str(self.metadata["quality"][model_family]["revision"]))  # type: ignore[index]
 
     def perplexity(self, _text: str) -> PerplexityResult:
         return PerplexityResult(42.0, "head", "kenlm-sentencepiece:en.arpa.bin")
-
-    def embed(self, _text: str) -> list[float]:
-        return [1.0, 0.0]
 
     def close(self) -> None:
         self.closed.append(self.base_url)
@@ -106,13 +96,97 @@ class _LowQualityScorer:
         return QualityScore(1.0, self.revision)
 
 
+class _BatchQualityScorer:
+    revision = "batch-test"
+    backend = "test"
+
+    def __init__(self) -> None:
+        self.batches: list[list[str]] = []
+
+    def score(self, text: str) -> QualityScore:
+        return QualityScore(float(len(text)), self.revision)
+
+    def score_many(self, texts: list[str]) -> list[QualityScore]:
+        self.batches.append(list(texts))
+        return [self.score(text) for text in texts]
+
+
+class _BatchKenLM:
+    scorer = "batch-test"
+
+    def score(self, text: str) -> PerplexityResult:
+        return PerplexityResult(float(len(text)), "head", self.scorer)
+
+
+def test_segment_models_batch_without_skipping_any_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "6")
+    primary = _BatchQualityScorer()
+    comparison = _BatchQualityScorer()
+    segments = [
+        SilverSegment(
+            segment_id=f"section-{index}",
+            title=f"Section {index}",
+            text="x" * index,
+            word_count=1,
+        )
+        for index in range(1, 6)
+    ]
+
+    results = _score_segment_models(
+        segments,
+        primary_quality=primary,
+        comparison_quality=comparison,
+        kenlm=_BatchKenLM(),
+        use_kenlm=True,
+    )
+
+    assert sorted(len(batch) for batch in primary.batches) == [1, 2, 2]
+    assert sorted(len(batch) for batch in comparison.batches) == [1, 2, 2]
+    assert sorted(text for batch in primary.batches for text in batch) == sorted(
+        segment.text for segment in segments
+    )
+    assert sorted(text for batch in comparison.batches for text in batch) == sorted(
+        segment.text for segment in segments
+    )
+    assert set(results) == {segment.segment_id for segment in segments}
+    for segment in segments:
+        result = results[segment.segment_id]
+        assert result.quality.edu_score == float(len(segment.text))
+        assert result.comparison is not None
+        assert result.comparison.edu_score == float(len(segment.text))
+        assert result.perplexity is not None
+        assert result.perplexity.perplexity == float(len(segment.text))
+
+
 def test_split_model_services_are_all_required_and_closed(
     cfg: ProcessorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("S2P_MODEL_SERVICE_URL", raising=False)
     monkeypatch.setenv("S2P_QUALITY_MODEL_SERVICE_URL", "http://quality")
     monkeypatch.setenv("S2P_KENLM_MODEL_SERVICE_URL", "http://kenlm")
-    monkeypatch.setenv("S2P_EMBEDDING_MODEL_SERVICE_URL", "http://embedding")
+    monkeypatch.setattr("processor.curate.CuratorModelClient", _SplitModelClient)
+    _SplitModelClient.closed.clear()
+
+    state = build_state(cfg)
+    assert len(state.model_clients) == 2
+    state.close()
+    assert set(_SplitModelClient.closed) == {
+        "http://quality",
+        "http://kenlm",
+    }
+
+
+def test_independent_quality_model_services_are_all_required_and_closed(
+    cfg: ProcessorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("S2P_MODEL_SERVICE_URL", raising=False)
+    monkeypatch.delenv("S2P_QUALITY_MODEL_SERVICE_URL", raising=False)
+    monkeypatch.setenv("S2P_FINEPDFS_MODEL_SERVICE_URL", "http://finepdfs")
+    monkeypatch.setenv("S2P_FINEWEB_MODEL_SERVICE_URL", "http://fineweb")
+    monkeypatch.setenv("S2P_KENLM_MODEL_SERVICE_URL", "http://kenlm")
     monkeypatch.setattr("processor.curate.CuratorModelClient", _SplitModelClient)
     _SplitModelClient.closed.clear()
 
@@ -120,9 +194,9 @@ def test_split_model_services_are_all_required_and_closed(
     assert len(state.model_clients) == 3
     state.close()
     assert set(_SplitModelClient.closed) == {
-        "http://quality",
+        "http://finepdfs",
+        "http://fineweb",
         "http://kenlm",
-        "http://embedding",
     }
 
 
@@ -132,7 +206,6 @@ def test_partial_split_model_service_configuration_fails(
     monkeypatch.delenv("S2P_MODEL_SERVICE_URL", raising=False)
     monkeypatch.setenv("S2P_QUALITY_MODEL_SERVICE_URL", "http://quality")
     monkeypatch.delenv("S2P_KENLM_MODEL_SERVICE_URL", raising=False)
-    monkeypatch.delenv("S2P_EMBEDDING_MODEL_SERVICE_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="all split curator model service URLs"):
         build_state(cfg)
@@ -206,7 +279,7 @@ def test_hf_placeholder_section_is_excluded_without_rejecting_substantive_card(
                         title="Model description",
                         text=(
                             long_english_text
-                            + " The transformer architecture is evaluated for accuracy on a named benchmark."
+                            + " The transformer architecture reaches 84.2% accuracy on NamedBench."
                         ),
                         word_count=len(long_english_text.split()) + 11,
                     ),
@@ -611,6 +684,94 @@ def test_short_web_page_is_quarantined_instead_of_retried(cfg: ProcessorConfig) 
 
         assert "insufficient_body" in gold.reject_reasons
         assert gold.route == "quarantine"
+    finally:
+        state.close()
+
+
+def test_scientific_authoring_template_is_quarantined(cfg: ProcessorConfig) -> None:
+    state = build_state(cfg)
+    try:
+        template_text = (
+            "This starter file demonstrates IEEEtran.cls for conference papers. "
+            "Subsection text here. Subsubsection text here. The conclusion goes here. "
+        ) * 20
+        segments = [
+            SilverSegment(
+                segment_id="introduction",
+                title="Introduction",
+                role="introduction",
+                text=template_text,
+                word_count=len(template_text.split()),
+            )
+        ]
+        silver = _silver(template_text, doc_id="sha256:" + "8" * 64).model_copy(
+            update={
+                "title": "Bare Demo of IEEEtran.cls for Conferences",
+                "source_feed": "arxiv-html-fetcher",
+                "url": "https://arxiv.org/html/2608.88888",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "segments": segments,
+                "model_text": template_text,
+                "training_word_count": len(template_text.split()),
+                "included_section_count": 1,
+                "scientific_artifact_s3_uri": "s3://silver/scientific/8/document.json",
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "document_template" in gold.reject_reasons
+        assert gold.route == "quarantine"
+        assert not is_trainable_gold(gold)
+    finally:
+        state.close()
+
+
+def test_short_real_scientific_note_keeps_structured_math(cfg: ProcessorConfig) -> None:
+    state = build_state(cfg)
+    try:
+        body = (
+            "We derive a compact estimator for streaming gradients under bounded delay. "
+            "The proof applies convexity to each update and sums the residual terms. "
+            "On 18 controlled trials the estimator reduces median error by 12 percent. "
+            "Ablations isolate the delayed update and regularization terms. "
+            "The method remains limited to stationary observation noise and future work "
+            "must test adversarial delays and non-convex objectives."
+        )
+        silver = _silver(body, doc_id="sha256:" + "9" * 64).model_copy(
+            update={
+                "title": "A short note on delayed streaming gradients",
+                "source_feed": "arxiv-html-fetcher",
+                "url": "https://arxiv.org/html/2608.99999",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "segments": [
+                    SilverSegment(
+                        segment_id="result",
+                        title="Derivation and result",
+                        role="results",
+                        text=body,
+                        word_count=len(body.split()),
+                    )
+                ],
+                "model_text": body,
+                "structured_text": (
+                    "[EQUATION id=eq-1 latex=E_t\\leq E_0+\\sum_i r_i] "
+                    "E_t <= E_0 + sum_i r_i [/EQUATION]"
+                ),
+                "training_word_count": len(body.split()),
+                "included_section_count": 1,
+                "equation_count": 1,
+                "scientific_artifact_s3_uri": "s3://silver/scientific/9/document.json",
+            }
+        )
+
+        gold = curate_one(state, silver)
+
+        assert "document_template" not in gold.reject_reasons
+        assert "[EQUATION" in gold.text
+        assert "sum_i r_i" in gold.text
     finally:
         state.close()
 

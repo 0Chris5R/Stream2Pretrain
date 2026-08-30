@@ -24,7 +24,7 @@ from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId, Trai
 
 # Risk-tier follows the MixtureVitae / Common Pile convention:
 #   1 = trainable under current policy (explicit allowlisted content licence,
-#       low PII, and low contamination)
+#       low PII)
 #   2 = caution (heuristic uncertainty, restricted licence, partial PII)
 #   3 = drop (explicit dirty signal; should not enter training mixture)
 RiskTier = Literal[1, 2, 3]
@@ -46,8 +46,6 @@ CorpusRoute = Literal[
     "posttrain_candidate",
     # Read compatibility for snapshots written before the foundry landed.
     "reasoning_candidate",
-    # Read compatibility for the removed upstream benchmark-candidate route.
-    "benchmark_candidate",
     "quarantine",
     "retry",
 ]
@@ -61,12 +59,12 @@ RejectReason = Literal[
     "high_perplexity",
     "pii_detected",
     "license_excluded",
-    "decontamination_hit",
     "validity_interval_invalid",
     "minhash_backend_mismatch",
     "insufficient_body",
     "insufficient_scientific_body",
     "incomplete_scientific_extraction",
+    "document_template",
     "hf_card_quality_filter",
 ]
 
@@ -127,7 +125,6 @@ class GoldRecord(BaseModel):
     structural_quality_score: float = Field(default=0.0, ge=0.0, le=5.0)
     extraction_completeness: float = Field(default=0.0, ge=0.0, le=1.0)
     reasoning_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    benchmark_score: float = Field(default=0.0, ge=0.0, le=1.0)
     route: CorpusRoute = "quarantine"
     eligible_routes: list[CorpusRoute] = Field(default_factory=list)
     route_reasons: list[str] = Field(default_factory=list)
@@ -180,18 +177,6 @@ class GoldRecord(BaseModel):
         "body_quarantine",
     ] = "none"
     pii_scanner_revision: str = "regex-only"
-
-    # Decontamination.
-    contaminated_with: list[str] = Field(
-        default_factory=list,
-        description="Benchmark identifiers this doc overlapped with, e.g. ['MMLU'].",
-    )
-    decon_exact_matches: list[str] = Field(default_factory=list)
-    decon_semantic_matches: list[str] = Field(default_factory=list)
-    decon_max_similarity: float = Field(default=0.0, ge=-1.0, le=1.0)
-    decon_ngram_size: int = Field(default=13, ge=1)
-    decon_embedding_revision: str = "unknown"
-    benchmark_set_version: str = "unknown"
 
     # Temporal validity.
     valid_from: datetime

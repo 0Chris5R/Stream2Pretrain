@@ -16,7 +16,6 @@ case "$command_name" in
   s2p-curator-model-service) module="processor.model_service" ;;
   s2p-iceberg-writer) module="processor.iceberg_writer" ;;
   s2p-iceberg-maintenance) module="processor.iceberg_maintenance" ;;
-  s2p-decon-api) module="processor.decon_api" ;;
   s2p-duckdb-api) module="processor.duckdb_api" ;;
   s2p-local-sources-api) module="processor.local_sources_api" ;;
   s2p-mixture-controller) module="processor.mixture_controller.controller" ;;

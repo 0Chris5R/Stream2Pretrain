@@ -81,7 +81,7 @@ local-rebuild-processor: ## Refresh processor source without duplicating the lar
 		-t stream2pretrain-processor:local -
 
 .PHONY: local-ingest-fixtures
-local-ingest-fixtures: ## Emit six deterministic route and rejection fixtures.
+local-ingest-fixtures: ## Emit deterministic route and rejection fixtures.
 	$(LOCAL_COMPOSE) --profile manual run --rm controlled-fixtures
 
 .PHONY: local-status
@@ -90,7 +90,7 @@ local-status: ## Show read-only local pipeline, topic, API, and UI status.
 
 .PHONY: local-logs
 local-logs: ## Follow the local processor, API, and UI logs.
-	$(LOCAL_COMPOSE) logs -f processor-fetcher processor-curate processor-iceberg-writer decon-api duckdb-api ui
+	$(LOCAL_COMPOSE) logs -f processor-fetcher processor-curate processor-iceberg-writer duckdb-api ui
 
 .PHONY: local-down
 local-down: ## Stop the local end-to-end profile (volumes preserved).

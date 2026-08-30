@@ -28,7 +28,7 @@ echo "Redpanda topics"
   rpk -X brokers=redpanda:29092 topic describe \
   raw.fetched raw.smoke docs.normalized docs.normalized.smoke docs.curated \
   docs.curated.smoke curation.decisions curation.decisions.smoke \
-  license.admissions license.admissions.smoke decon.attest -p
+  license.admissions license.admissions.smoke -p
 
 check_url() {
   local label="$1"
@@ -47,7 +47,6 @@ check_url "UI" "http://localhost:3100/api/health"
 check_url "MinIO" "http://localhost:9000/minio/health/live"
 check_url "Redpanda admin" "http://localhost:9644/v1/status/ready"
 check_url "Prometheus" "http://localhost:9091/-/healthy"
-check_url "Decon API" "http://localhost:8081/healthz"
 check_url "DuckDB API" "http://localhost:8090/healthz"
 check_url "Documents API" "http://localhost:8090/documents?limit=1"
 check_url "Sources API" "http://localhost:3100/api/sources"
@@ -58,7 +57,6 @@ echo "Useful pages"
 echo "  Cockpit:          http://localhost:3100"
 echo "  Dashboard:        http://localhost:3100/dashboard"
 echo "  Sources:          http://localhost:3100/sources"
-echo "  Benchmark safety: http://localhost:3100/decon"
 echo "  Datasets/export:  http://localhost:3100/datasets"
 echo "  Documents/OCR:    http://localhost:3100/documents"
 echo "  Post-training:    http://localhost:3100/post-training"

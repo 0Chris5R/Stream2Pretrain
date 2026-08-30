@@ -711,50 +711,14 @@ def _builtin_source_status(
 
 
 async def serve_rest_api(controller: MixtureController, port: int = 8080) -> None:
-    """REST surface used by the Next.js BFF for SourceFeeds and mixtures."""
+    """Read-only monitoring surface for sources and mixture comparisons."""
     from aiohttp import web  # type: ignore[import-untyped]
     from kubernetes import client  # type: ignore[import-untyped]
-    from kubernetes.client import ApiException  # type: ignore[import-untyped]
 
     namespace = os.environ.get("S2P_NAMESPACE", "stream2pretrain")
     api = _kube_custom_objects_api()
     batch_api = client.BatchV1Api()
     apps_api = client.AppsV1Api()
-    core_api = client.CoreV1Api()
-    background_tasks: set[asyncio.Task[None]] = set()
-
-    async def _watch_source_job(name: str, job_name: str) -> None:
-        for _ in range(720):
-            await asyncio.sleep(5)
-            job = batch_api.read_namespaced_job(job_name, namespace)
-            status = job.status
-            if status.succeeded:
-                phase = "Active"
-                error = None
-            elif status.failed:
-                phase = "Failed"
-                error = "Run-once ingest job failed"
-            else:
-                continue
-            stamp = datetime.now(tz=UTC).isoformat()
-            patch: dict[str, Any] = {
-                "status": {
-                    "phase": phase,
-                    "lastPolledAt": stamp,
-                    "lastErrorMessage": error,
-                }
-            }
-            if phase == "Active":
-                patch["status"]["lastSuccessAt"] = stamp
-            api.patch_namespaced_custom_object_status(
-                group="stream2pretrain.io",
-                version="v1alpha1",
-                namespace=namespace,
-                plural="sourcefeeds",
-                name=name,
-                body=patch,
-            )
-            return
 
     async def list_sources(_: web.Request) -> web.Response:
         resp = api.list_namespaced_custom_object(
@@ -799,163 +763,6 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
         builtins = [source for source in builtins if source["spec"]["enabled"]]
         return web.json_response(sorted([*crd_sources, *builtins], key=lambda row: row["name"]))
 
-    async def create_source(request: web.Request) -> web.Response:
-        body = await request.json()
-        spec = SourceFeedSpec.model_validate(body)
-        manifest = {
-            "apiVersion": "stream2pretrain.io/v1alpha1",
-            "kind": "SourceFeed",
-            "metadata": {"name": spec.name},
-            "spec": spec.model_dump(mode="json", by_alias=True, exclude_none=True),
-        }
-        try:
-            item = api.create_namespaced_custom_object(
-                group="stream2pretrain.io",
-                version="v1alpha1",
-                namespace=namespace,
-                plural="sourcefeeds",
-                body=manifest,
-            )
-        except ApiException as exc:
-            if exc.status == 409:
-                item = api.patch_namespaced_custom_object(
-                    group="stream2pretrain.io",
-                    version="v1alpha1",
-                    namespace=namespace,
-                    plural="sourcefeeds",
-                    name=spec.name,
-                    body=manifest,
-                )
-            else:
-                raise
-        return web.json_response(_sourcefeed_status(item), status=201)
-
-    async def delete_source(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        try:
-            api.delete_namespaced_custom_object(
-                group="stream2pretrain.io",
-                version="v1alpha1",
-                namespace=namespace,
-                plural="sourcefeeds",
-                name=name,
-            )
-        except ApiException as exc:
-            if exc.status == 404:
-                return web.json_response({"detail": "source not found"}, status=404)
-            raise
-        return web.json_response({"deleted": True})
-
-    async def patch_source(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        body = await request.json()
-        enabled = body.get("enabled")
-        if not isinstance(enabled, bool):
-            return web.json_response({"detail": "enabled must be a boolean"}, status=400)
-        try:
-            item = api.patch_namespaced_custom_object(
-                group="stream2pretrain.io",
-                version="v1alpha1",
-                namespace=namespace,
-                plural="sourcefeeds",
-                name=name,
-                body={"spec": {"enabled": enabled}},
-            )
-        except ApiException as exc:
-            if exc.status == 404:
-                return web.json_response({"detail": "source not found"}, status=404)
-            raise
-        return web.json_response(_sourcefeed_status(item))
-
-    async def run_source(request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        try:
-            item = api.get_namespaced_custom_object(
-                group="stream2pretrain.io",
-                version="v1alpha1",
-                namespace=namespace,
-                plural="sourcefeeds",
-                name=name,
-            )
-        except ApiException as exc:
-            if exc.status == 404:
-                return web.json_response({"detail": "source not found"}, status=404)
-            raise
-        source = SourceFeedSpec.model_validate({**item["spec"], "name": name})
-        if not source.enabled:
-            return web.json_response({"detail": "source is disabled"}, status=409)
-        try:
-            cron = batch_api.read_namespaced_cron_job(
-                _poller_cronjob_name(source.protocol), namespace
-            )
-        except (ApiException, ValueError) as exc:
-            return web.json_response({"detail": str(exc)}, status=409)
-
-        suffix = f"{int(time.time()):x}"[-8:]
-        run_name = f"s2p-source-{name[:38]}-{suffix}".rstrip("-")
-        config_name = f"{run_name}-feed"
-        config = client.V1ConfigMap(
-            metadata=client.V1ObjectMeta(name=config_name, namespace=namespace),
-            data={
-                "source.json": json.dumps(
-                    {"feeds": [source.model_dump(mode="json", by_alias=True)]}
-                )
-            },
-        )
-        core_api.create_namespaced_config_map(namespace, config)
-
-        job_spec = cron.spec.job_template.spec
-        job_spec.ttl_seconds_after_finished = 3600
-        _bind_source_config(
-            job_spec,
-            config_name=config_name,
-            source_name=name,
-            egress_class=_source_egress_class(source),
-        )
-        job = batch_api.create_namespaced_job(
-            namespace,
-            client.V1Job(
-                metadata=client.V1ObjectMeta(name=run_name, namespace=namespace),
-                spec=job_spec,
-            ),
-        )
-        core_api.patch_namespaced_config_map(
-            config_name,
-            namespace,
-            {
-                "metadata": {
-                    "ownerReferences": [
-                        {
-                            "apiVersion": "batch/v1",
-                            "kind": "Job",
-                            "name": run_name,
-                            "uid": job.metadata.uid,
-                            "controller": True,
-                            "blockOwnerDeletion": True,
-                        }
-                    ]
-                }
-            },
-        )
-        item = api.patch_namespaced_custom_object_status(
-            group="stream2pretrain.io",
-            version="v1alpha1",
-            namespace=namespace,
-            plural="sourcefeeds",
-            name=name,
-            body={
-                "status": {
-                    "phase": "Polling",
-                    "lastPolledAt": datetime.now(tz=UTC).isoformat(),
-                    "lastErrorMessage": None,
-                }
-            },
-        )
-        task = asyncio.create_task(_watch_source_job(name, run_name))
-        background_tasks.add(task)
-        task.add_done_callback(background_tasks.discard)
-        return web.json_response(_sourcefeed_status(item), status=202)
-
     async def compare(request: web.Request) -> web.Response:
         recipe_a = request.query.get("a")
         recipe_b = request.query.get("b")
@@ -970,10 +777,6 @@ async def serve_rest_api(controller: MixtureController, port: int = 8080) -> Non
     app.router.add_get("/healthz", probe)
     app.router.add_get("/readyz", probe)
     app.router.add_get("/v1/sources", list_sources)
-    app.router.add_post("/v1/sources", create_source)
-    app.router.add_patch("/v1/sources/{name}", patch_source)
-    app.router.add_delete("/v1/sources/{name}", delete_source)
-    app.router.add_post("/v1/sources/{name}/run", run_source)
     app.router.add_get("/v1/compare", compare)
     runner = web.AppRunner(app)
     await runner.setup()

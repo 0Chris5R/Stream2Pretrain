@@ -18,6 +18,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
   Table,
   TableBody,
   TableCell,
@@ -113,10 +120,7 @@ export default function DocumentsPage() {
     queryKey: queryKeys.documentFacets(filters.includeFixtures),
     queryFn: () => fetchFacets(filters.includeFixtures),
   });
-  const selectedId = useMemo(() => {
-    const items = list.data?.items ?? [];
-    return items.some((item) => item.doc_id === selected) ? selected : (items[0]?.doc_id ?? '');
-  }, [list.data, selected]);
+  const selectedId = selected;
   const detail = useQuery({
     queryKey: queryKeys.document(selectedId),
     queryFn: () => fetchDocument(selectedId),
@@ -207,20 +211,28 @@ export default function DocumentsPage() {
 
       {list.error ? <ErrorBox error={list.error} /> : null}
 
-      <div className="grid min-w-0 items-start gap-5 2xl:grid-cols-[minmax(38rem,1fr)_minmax(32rem,0.9fr)]">
-        <DocumentTable
-          page={list.data}
-          loading={list.isLoading}
-          selected={selectedId}
-          select={setSelected}
-        />
-        <div className="2xl:sticky 2xl:top-20">
-          {detail.data ? <DocumentPanel document={detail.data} /> : null}
-          {detail.isLoading ? <PanelLoading /> : null}
-          {detail.error ? <ErrorBox error={detail.error} /> : null}
-          {!selectedId && !list.isLoading ? <EmptyPanel /> : null}
-        </div>
-      </div>
+      <DocumentTable
+        page={list.data}
+        loading={list.isLoading}
+        selected={selectedId}
+        select={setSelected}
+      />
+
+      <Dialog open={Boolean(selectedId)} onOpenChange={(open) => !open && setSelected('')}>
+        <DialogContent className="max-h-[92vh] max-w-6xl overflow-y-auto p-0">
+          <DialogHeader className="border-b px-6 py-4">
+            <DialogTitle>Document details</DialogTitle>
+            <DialogDescription>
+              Training projection, evidence, and processing audit.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="p-5">
+            {detail.data ? <DocumentPanel document={detail.data} /> : null}
+            {detail.isLoading ? <PanelLoading /> : null}
+            {detail.error ? <ErrorBox error={detail.error} /> : null}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {list.data && list.data.pages > 1 ? (
         <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
@@ -396,7 +408,11 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
   );
 }
 
-function AdmissionOnlyPanel({ document }: { document: Extract<DocumentDetail, { admission_only: true }> }) {
+function AdmissionOnlyPanel({
+  document,
+}: {
+  document: Extract<DocumentDetail, { admission_only: true }>;
+}) {
   const admission = document.license_admission;
   return (
     <Card className="overflow-hidden shadow-sm">
@@ -605,10 +621,6 @@ function AuditView({ document }: { document: CuratedDocumentDetail }) {
     [
       'Deduplication',
       `${document.near_duplicate ? 'near duplicate' : 'unique'} · ${document.minhash_backend} + ${document.lsh_backend}`,
-    ],
-    [
-      'Decontamination',
-      `${document.contaminated_with.length ? document.contaminated_with.join(', ') : 'clean'} · ${document.benchmark_set_version}`,
     ],
     [
       'Licence',
@@ -848,23 +860,18 @@ function Score({ label, value }: { label: string; value: string }) {
 
 function RouteBadge({ route }: { route: CorpusRoute }) {
   const variant =
-    route === 'quarantine'
-      ? 'destructive'
-      : route === 'retry' || route === 'benchmark_candidate'
-        ? 'warning'
-        : 'success';
+    route === 'quarantine' ? 'destructive' : route === 'retry' ? 'warning' : 'success';
   return <Badge variant={variant}>{routeLabel(route)}</Badge>;
 }
 
 function routeLabel(route: CorpusRoute): string {
   if (route === 'posttrain_candidate' || route === 'reasoning_candidate') return 'Post-training';
-  if (route === 'benchmark_candidate') return 'Legacy benchmark';
   return humanize(route);
 }
 
 function routeColor(route: CorpusRoute): string {
   if (route === 'quarantine') return 'bg-red-500';
-  if (route === 'retry' || route === 'benchmark_candidate') return 'bg-amber-500';
+  if (route === 'retry') return 'bg-amber-500';
   return 'bg-emerald-500';
 }
 

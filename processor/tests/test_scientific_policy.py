@@ -113,7 +113,6 @@ def test_upstream_curation_never_allocates_a_benchmark_split() -> None:
     )
 
     assert decision.route == "posttrain_candidate"
-    assert "benchmark_candidate" not in decision.eligible_routes
 
 
 def test_non_scientific_high_reasoning_record_is_never_a_paper_candidate() -> None:

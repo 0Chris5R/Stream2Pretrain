@@ -1,7 +1,5 @@
 {{- $component := "processor-iceberg-writer" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
-{{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
-{{- $signingMount := "/var/run/secrets/stream2pretrain/decon-signing" }}
 {{- $checkpoint := .Values.processor.iceberg.checkpoint }}
 {{- if ne (int .Values.processor.iceberg.replicas) 1 }}
 {{- fail "processor.iceberg.replicas must be exactly 1 until Iceberg commit coordination is externalized" }}
@@ -86,14 +84,6 @@ spec:
               value: {{ .Values.iceberg.branches.main | quote }}
             - name: S2P_CONSUMER_GROUP
               value: s2p-iceberg-writer
-            - name: S2P_DECON_SIGNING_KEY
-              value: {{ printf "%s/%s" $signingMount .Values.processor.deconGate.signingKeyKey | quote }}
-            - name: S2P_DECON_SIGNING_CERT
-              value: {{ printf "%s/%s" $signingMount .Values.processor.deconGate.signingCertKey | quote }}
-            - name: S2P_BENCH_CORPUS_PATH
-              value: {{ printf "%s/%s" $bench.mountPath $bench.fileName | quote }}
-            - name: S2P_BENCH_SET_VERSION
-              value: {{ .Values.processor.deconGate.benchmarkSetVersion | quote }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 60
@@ -109,29 +99,12 @@ spec:
               mountPath: /tmp
             - name: checkpoint
               mountPath: /var/lib/s2p/checkpoint
-            - name: decon-signing
-              mountPath: {{ $signingMount | quote }}
-              readOnly: true
-            - name: decon-benchmarks
-              mountPath: {{ $bench.mountPath | quote }}
-              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
         - name: checkpoint
           persistentVolumeClaim:
             claimName: {{ $checkpointClaim | quote }}
-        - name: decon-signing
-          secret:
-            secretName: {{ .Values.processor.deconGate.signingKeySecret | quote }}
-        - name: decon-benchmarks
-          {{- if $bench.secret }}
-          secret:
-            secretName: {{ $bench.secret | quote }}
-          {{- else }}
-          configMap:
-            name: {{ $bench.configMap | quote }}
-          {{- end }}
 ---
 apiVersion: v1
 kind: Service

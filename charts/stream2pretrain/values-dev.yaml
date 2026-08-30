@@ -20,9 +20,6 @@ processor:
     replicas: 1
   duckdbApi:
     replicas: 1
-  deconGate:
-    replicas: 1
-
 mixtureController:
   replicas: 1
 

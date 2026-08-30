@@ -19,7 +19,6 @@ x-processor-environment: &processor-environment
   S2P_CURATED_TOPIC: docs.curated
   S2P_DECISIONS_TOPIC: curation.decisions
   S2P_LICENSE_ADMISSIONS_TOPIC: license.admissions
-  S2P_DECON_TOPIC: decon.attest
   S2P_FOUNDRY_JOBS_TOPIC: foundry.jobs
   S2P_FOUNDRY_EVENTS_TOPIC: foundry.events
   S2P_FOUNDRY_ARTIFACTS_TOPIC: foundry.artifacts
@@ -34,11 +33,7 @@ x-processor-environment: &processor-environment
   MINIO_BRONZE_BUCKET: bronze
   MINIO_SILVER_BUCKET: silver
   MINIO_GOLD_BUCKET: gold
-  MINIO_DECON_BUCKET: decon-attestations
   MINIO_POSTTRAIN_BUCKET: posttrain
-  S2P_BENCH_SET_VERSION: local-canaries-v1
-  S2P_BENCH_CORPUS_PATH: /config/benchmark_canaries.json
-  S2P_BENCHMARK_CORPUS_KIND: demo_canaries
   S2P_ICEBERG_CATALOG_TYPE: sql
   S2P_ICEBERG_CATALOG_NAME: local
   S2P_ICEBERG_CATALOG_URI: sqlite:////var/lib/s2p-lakehouse/catalog.db
@@ -58,7 +53,6 @@ x-processor-environment: &processor-environment
   S2P_DOCLING_MAX_PAGES: "40"
   S2P_DOCLING_MAX_BYTES: "52428800"
   S2P_DOCLING_DOCUMENT_TIMEOUT: "180"
-  S2P_USE_COSIGN: "0"
 
 x-processor-service: &processor-service
   image: stream2pretrain-processor:local
@@ -67,7 +61,6 @@ x-processor-service: &processor-service
     dockerfile: processor/Dockerfile.local
   environment: *processor-environment
   volumes:
-    - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
     - models-data:/opt/models:ro
   mem_limit: 1g
   cpus: 1.0
@@ -85,7 +78,6 @@ services:
       HF_HUB_DISABLE_XET: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       FINEWEB_EDU_REVISION: 284663cbb2dabf9bda30d8f8cc49601251ee1631
-      E5_SMALL_REVISION: ffb93f3bd4047442299a41ebb6fa998a38507c52
       KENLM_REVISION: 3fbe35c83b1a39f420a345b7c96a186c8030d834
       FIGURE_CLASSIFIER_REVISION: f859dfbff5c9916cd996942d4b0db7fa25808220
     volumes:
@@ -135,7 +127,7 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        for topic in raw.fetched raw.smoke github.release.jobs docs.normalized docs.curated curation.decisions license.admissions decon.attest foundry.jobs foundry.events foundry.artifacts; do
+        for topic in raw.fetched raw.smoke github.release.jobs docs.normalized docs.curated curation.decisions license.admissions foundry.jobs foundry.events foundry.artifacts; do
           retention_ms=604800000
           [ "$${topic}" = raw.smoke ] && retention_ms=86400000
           rpk -X brokers=redpanda:29092 topic create "$${topic}" \
@@ -197,7 +189,6 @@ services:
         mc mb --ignore-existing local/bronze
         mc mb --ignore-existing local/silver
         mc mb --ignore-existing local/gold
-        mc mb --ignore-existing local/decon-attestations
         mc mb --ignore-existing local/checkpoints
         mc mb --ignore-existing local/posttrain
     restart: "no"
@@ -225,7 +216,6 @@ services:
     volumes:
       - ./ingest:/app/ingest:ro
       - ./processor:/app/processor:ro
-      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
       - models-data:/opt/models:ro
       - curator-state:/var/lib/s2p
     mem_limit: 4g
@@ -239,13 +229,12 @@ services:
       S2P_CONSUMER_GROUP: s2p-local-curate
       S2P_PROBE_PORT: "9090"
       S2P_POLICY_REVISION: git:local-uncommitted
-      S2P_SCORING_VERSION: local-mechanics-v1
+      S2P_SCORING_VERSION: pretrain-content-v2
     depends_on:
       redpanda-bootstrap:
         condition: service_completed_successfully
     volumes:
       - ./processor:/app/processor:ro
-      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
       - models-data:/opt/models:ro
       - curator-state:/var/lib/s2p
     mem_limit: 8g
@@ -267,25 +256,10 @@ services:
       lakehouse-bootstrap:
         condition: service_completed_successfully
     volumes:
-      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
       - lakehouse-data:/var/lib/s2p-lakehouse
       - curator-state:/var/lib/s2p
     mem_limit: 1536m
     cpus: 1.0
-
-  decon-api:
-    <<: *processor-service
-    entrypoint: ["s2p-decon-api"]
-    environment:
-      <<: *processor-environment
-      S2P_DECON_API_PORT: "8081"
-    depends_on:
-      minio-bootstrap:
-        condition: service_completed_successfully
-    ports:
-      - "8081:8081"
-    mem_limit: 512m
-    cpus: 0.5
 
   duckdb-api:
     <<: *processor-service
@@ -295,11 +269,11 @@ services:
       S2P_DUCKDB_API_PORT: "8090"
       S2P_BIND_HOST: 0.0.0.0
       S2P_DUCKDB_UNSAFE_VERSION_GUESSING: "1"
+      S2P_ACTIVE_SCORING_VERSION: pretrain-content-v2
     depends_on:
       lakehouse-bootstrap:
         condition: service_completed_successfully
     volumes:
-      - ./local/benchmark_canaries.json:/config/benchmark_canaries.json:ro
       - lakehouse-data:/var/lib/s2p-lakehouse
     ports:
       - "8090:8090"
@@ -400,13 +374,11 @@ services:
       context: ./ui
       dockerfile: Dockerfile
     depends_on:
-      - decon-api
       - duckdb-api
       - prometheus
       - sources-api
       - foundry-api
     environment:
-      DECON_GATE_URL: http://decon-api:8081
       DUCKDB_URL: http://duckdb-api:8090
       PROMETHEUS_URL: http://prometheus:9090
       SOURCES_API_URL: http://sources-api:8083

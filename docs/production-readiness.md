@@ -44,12 +44,11 @@ These must pass before calling the repo production ready:
 | PRD-005 | done | UI build | Commit `ui/package-lock.json` and make UI build reproducible with `npm ci`. | `npm ci --prefix ui`, `npm run build --prefix ui` |
 | PRD-007 | done | Seed loader | Recompute real MinHash in curate when seed rows carry placeholders, so day-one seed data can reach clean Gold. | Curate unit test with seed placeholder input |
 | PRD-008 | done | SPDX provenance | Propagate `source_format`, `extraction_pipeline`, `spdx_license`, and `spdx_license_source` from Silver to Gold and Iceberg. | Curate + Iceberg writer tests |
-| PRD-009 | done | Decon-Gate | Mount benchmark corpus and signing key as files, publish attestations through an implemented API/topic path, and remove references to a non-existent sidecar service. | Decon API + attestation sink unit tests, Helm default/dev/prod renders, UI build |
 | PRD-010 | done | Metrics | Ensure every metric used by Grafana and UI is emitted by code with stable names. | Processor and ingest metric unit tests; `source_feed` propagated through Silver/Gold for per-source UI queries |
 | PRD-012 | done | Security | Remove default wide-open ingress/admin CIDRs, require explicit prod secrets, and add secret-scan/lint gates. | `uv run python scripts/security_scan.py`, scanner unit tests, Terraform fmt/validate, Helm prod render |
 | PRD-013 | needs-measurement | Capacity | Measure Redpanda partitions, worker CPU/RAM, MinIO throughput, recovery storage, and model-cache sizing on the target k3s cluster. | `docs/capacity-benchmark.md`, `scripts/capacity_probe.py`, and a generated target-cluster report with commands and outputs |
-| PRD-014 | done | Documentation | Update README, chart README, and operations docs to match implemented deploy path only. Remove stale FastAPI/decon-sidecar claims. | Documentation grep for removed claims |
-| PRD-015 | done | UI backend services | Implement or remove the DuckDB server, SourceFeed CRUD API, and mixture compare REST API routes the UI proxies to. | DuckDB API + mixture controller API unit tests, UI typecheck, rendered prod Services |
+| PRD-014 | done | Documentation | Update README, chart README, and operations docs to match implemented deploy paths only. | Documentation drift check |
+| PRD-015 | done | UI backend services | Implement the DuckDB server, read-only source monitor, and mixture comparison REST routes the UI proxies to. | DuckDB API + mixture controller API unit tests, UI typecheck, rendered prod Services |
 | PRD-016 | done | Gold/training contract | Decide and enforce whether `docs.curated` / Gold contains only trainable rows or all scored rows. If all scored rows remain, every training/as-of query must filter `risk_tier = 1` and empty `reject_reasons`. | Curate dataflow tests plus defensive Iceberg writer test |
 | PRD-017 | done | Typing gate | Make `uv run mypy schemas ingest processor tests` pass or document narrow, production-scoped exceptions for optional runtime dependencies. | `uv run mypy schemas ingest processor tests`; explicit overrides for untyped runtime integrations and non-production test fakes |
 
@@ -89,4 +88,4 @@ to block production deploys.
   optional-runtime and test-fake exceptions above.
 - `terraform fmt -check infra/terraform` - passed.
 - `terraform -chdir=infra/terraform validate` - passed after `terraform init -backend=false`.
-- Documentation drift check for stale FastAPI/decon-sidecar/DuckDB-server claims - passed.
+- Documentation drift check for stale service claims - passed.

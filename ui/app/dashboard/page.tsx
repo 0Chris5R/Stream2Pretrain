@@ -217,7 +217,6 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-
       {dashboard.error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
           {(dashboard.error as Error).message}
@@ -275,18 +274,10 @@ function SummaryValue({ label, value }: { label: string; value: string }) {
 function RouteBadge({ route }: { route: string }) {
   return (
     <Badge
-      variant={
-        route === 'quarantine'
-          ? 'destructive'
-          : route === 'retry' || route === 'benchmark_candidate'
-            ? 'warning'
-            : 'success'
-      }
+      variant={route === 'quarantine' ? 'destructive' : route === 'retry' ? 'warning' : 'success'}
     >
       {route === 'posttrain_candidate' || route === 'reasoning_candidate'
         ? 'Post-training'
-        : route === 'benchmark_candidate'
-          ? 'Legacy benchmark'
         : humanize(route)}
     </Badge>
   );

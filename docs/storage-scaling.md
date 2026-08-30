@@ -24,7 +24,6 @@ would not add disk and a PVC autoresizer would only hide the same limitation.
 | Licence-admission ledger | Iceberg Parquet and metadata in `s2p-gold` | Append in batches. Expire old snapshots and remove orphan metadata; keep the current table state and policy audit history. |
 | Curation decisions | Iceberg Parquet and metadata in `s2p-gold` | Every accepted and rejected scored result. This is deliberate audit data and normally outgrows curated text by row count. |
 | Curated training rows | Iceberg Parquet and metadata in `s2p-gold` | Accepted-only, mixture-ready corpus. Data files are the training source of truth. |
-| Decontamination attestations | `s2p-decon` objects plus Redpanda events | Small signed audit artifacts. |
 | Post-training tasks, trajectories, and packages | `s2p-posttrain` objects plus the foundry state database | Retain accepted artifacts and the audit record according to the post-training policy. |
 | In-flight event log | Redpanda PVC | Bounded by topic retention. It is replay transport, not the only corpus copy. |
 | Curator/foundry checkpoints and queues | Their application PVCs | Operational recovery state. Back up or recreate according to each component's recovery procedure. |
