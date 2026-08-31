@@ -52,7 +52,9 @@ x-processor-environment: &processor-environment
   S2P_DOCLING_CPU_THREADS: "2"
   S2P_DOCLING_MAX_PAGES: "40"
   S2P_DOCLING_MAX_BYTES: "52428800"
-  S2P_DOCLING_DOCUMENT_TIMEOUT: "180"
+  # Temporary until the PDF duration histogram has a representative local and
+  # cloud percentile. The isolated child is replaced after this hard deadline.
+  S2P_PDF_HARD_TIMEOUT_SECONDS: "240"
 
 x-processor-service: &processor-service
   image: stream2pretrain-processor:local

@@ -41,6 +41,11 @@ from processor.operators.extract import ResiliparseExtractor
 from processor.operators.langid import LangIdentifier
 from processor.operators.minhash import MinHasher
 from processor.operators.validity import ValidityEnricher, WaybackLookup
+from processor.pdf_worker import (
+    TEMPORARY_PDF_HARD_TIMEOUT_SECONDS,
+    PdfProcessWorker,
+    PdfWorkerConfig,
+)
 from processor.probes import start_probe_server
 from processor.scientific import ScientificProcessingResult, ScientificProcessor
 from processor.source_policy import resolve_source_policy
@@ -93,6 +98,7 @@ class FetcherState:
     s3: Any
     bucket: str
     scientific: ScientificProcessor | None = None
+    pdf_worker: PdfProcessWorker | None = None
 
 
 def build_state(cfg: common.ProcessorConfig, *, with_wayback: bool = True) -> FetcherState:
@@ -118,6 +124,35 @@ def build_state(cfg: common.ProcessorConfig, *, with_wayback: bool = True) -> Fe
         user_agent=cfg.user_agent,
         require_real_models=require_real_models,
     )
+    pdf_worker: PdfProcessWorker | None = None
+    if (
+        os.environ.get("S2P_PDF_PROCESSING_ENABLED", "1") == "1"
+        and os.environ.get("S2P_DOCLING_ENABLED", "1") == "1"
+    ):
+        try:
+            hard_timeout_seconds = float(
+                os.environ.get(
+                    "S2P_PDF_HARD_TIMEOUT_SECONDS",
+                    str(TEMPORARY_PDF_HARD_TIMEOUT_SECONDS),
+                )
+            )
+        except ValueError as exc:
+            raise RuntimeError("S2P_PDF_HARD_TIMEOUT_SECONDS must be a number") from exc
+        pdf_worker = PdfProcessWorker(
+            PdfWorkerConfig(
+                minio_endpoint=cfg.minio_endpoint,
+                minio_access_key=cfg.minio_access_key,
+                minio_secret_key=cfg.minio_secret_key,
+                silver_bucket=cfg.silver_bucket,
+                models_dir=cfg.models_dir,
+                user_agent=cfg.user_agent,
+                require_real_models=require_real_models,
+            ),
+            hard_timeout_seconds=hard_timeout_seconds,
+        )
+        # Spawn before Bytewax starts its runtime threads. This both validates
+        # the child-owned model stack and avoids unsafe fork semantics.
+        pdf_worker.start()
     return FetcherState(
         extractor=extractor,
         lang_id=lang_id,
@@ -126,6 +161,7 @@ def build_state(cfg: common.ProcessorConfig, *, with_wayback: bool = True) -> Fe
         s3=s3,
         bucket=cfg.bronze_bucket,
         scientific=scientific,
+        pdf_worker=pdf_worker,
     )
 
 
@@ -366,7 +402,13 @@ def uses_scientific_extraction(bronze: BronzeRecord) -> bool:
     )
 
 
-def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> SilverRecord | None:
+def normalize(
+    state: FetcherState,
+    bronze: BronzeRecord,
+    raw_html: bytes,
+    *,
+    metrics: ProcessorMetrics | None = None,
+) -> SilverRecord | None:
     """Turn one (BronzeRecord + raw bytes) into a SilverRecord."""
     scientific_result: ScientificProcessingResult | None = None
     model_text = ""
@@ -404,12 +446,21 @@ def normalize(state: FetcherState, bronze: BronzeRecord, raw_html: bytes) -> Sil
     elif bronze.source_format == "pdf":
         if state.scientific is None:
             return None
-        scientific_result = state.scientific.process_pdf(
-            doc_id=bronze.doc_id,
-            source_url=str(bronze.url),
-            pdf=raw_html,
-            extraction_pipeline=bronze.extraction_pipeline,
-        )
+        if state.pdf_worker is not None:
+            scientific_result = state.pdf_worker.process(
+                doc_id=bronze.doc_id,
+                source_url=str(bronze.url),
+                pdf=raw_html,
+                extraction_pipeline=bronze.extraction_pipeline,
+                metrics=metrics,
+            )
+        else:
+            scientific_result = state.scientific.process_pdf(
+                doc_id=bronze.doc_id,
+                source_url=str(bronze.url),
+                pdf=raw_html,
+                extraction_pipeline=bronze.extraction_pipeline,
+            )
         text = scientific_result.text
         model_text = scientific_result.model_text
         source_metadata_text = scientific_result.source_metadata_text
@@ -616,7 +667,7 @@ def process_bronze_payload(
             # or fabricating a Silver/Gold document.
             return None
         raise RawObjectEmpty(f"raw body is unavailable for {bronze.doc_id}")
-    silver = normalize(state, bronze, raw_html)
+    silver = normalize(state, bronze, raw_html, metrics=metrics)
     if silver is None:
         if is_hf_card:
             # Frontmatter-only, comment-only, and fenced-code-only cards have

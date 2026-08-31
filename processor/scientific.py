@@ -189,6 +189,7 @@ class ScientificProcessor:
         models_dir: str | Path,
         user_agent: str,
         require_real_models: bool,
+        disable_docling_document_timeout: bool = False,
     ) -> None:
         figure_revision = os.environ.get(
             "S2P_FIGURE_CLASSIFIER_REVISION",
@@ -199,6 +200,7 @@ class ScientificProcessor:
         self._user_agent = user_agent
         self._models_dir = Path(models_dir)
         self._require_real_models = require_real_models
+        self._disable_docling_document_timeout = disable_docling_document_timeout
         self._docling_converter: Any | None = None
         self._classifier = FigureClassifier(
             Path(models_dir) / "figure-classifier",
@@ -601,7 +603,15 @@ class ScientificProcessor:
             num_threads=int(os.environ.get("S2P_DOCLING_CPU_THREADS", "2")),
             device=AcceleratorDevice.CPU,
         )
-        options.document_timeout = float(os.environ.get("S2P_DOCLING_DOCUMENT_TIMEOUT", "180"))
+        # A cooperative Docling timeout can abandon a native OCR thread and
+        # poison the next PDF in the same process. Production PDF conversion
+        # disables that internal timer and relies on the parent-enforced hard
+        # process deadline, which can terminate every native resource safely.
+        options.document_timeout = (
+            None
+            if self._disable_docling_document_timeout
+            else float(os.environ.get("S2P_DOCLING_DOCUMENT_TIMEOUT", "180"))
+        )
         options.do_ocr = True
         options.ocr_options = TesseractCliOcrOptions(lang=["eng"])
         options.do_table_structure = True

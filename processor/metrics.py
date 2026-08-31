@@ -14,6 +14,7 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 
 QUALITY_BUCKETS = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
 FLUSH_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
+PDF_PROCESSING_BUCKETS = (1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0, 600.0)
 
 
 class ProcessorMetrics:
@@ -92,6 +93,19 @@ class ProcessorMetrics:
             buckets=FLUSH_BUCKETS,
             registry=self.registry,
         )
+        self._pdf_processing_seconds = Histogram(
+            "s2p_pdf_processing_seconds",
+            "End-to-end isolated PDF processing duration by outcome.",
+            ["namespace", "outcome"],
+            buckets=PDF_PROCESSING_BUCKETS,
+            registry=self.registry,
+        )
+        self._pdf_worker_restarts = Counter(
+            "s2p_pdf_worker_restarts_total",
+            "Isolated PDF worker replacements after an unsafe outcome.",
+            ["namespace", "reason"],
+            registry=self.registry,
+        )
         self._process_up.labels(self._namespace).inc()
 
     @property
@@ -135,6 +149,14 @@ class ProcessorMetrics:
     def record_failure(self, *, stage: str, reason: str) -> None:
         with self._lock:
             self._processor_failures.labels(self._namespace, stage, reason).inc()
+
+    def record_pdf_processing(self, *, outcome: str, seconds: float) -> None:
+        with self._lock:
+            self._pdf_processing_seconds.labels(self._namespace, outcome).observe(max(0.0, seconds))
+
+    def record_pdf_worker_restart(self, *, reason: str) -> None:
+        with self._lock:
+            self._pdf_worker_restarts.labels(self._namespace, reason).inc()
 
     def record_iceberg_flush(
         self,

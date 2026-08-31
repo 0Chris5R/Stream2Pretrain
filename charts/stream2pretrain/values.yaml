@@ -245,6 +245,10 @@ processor:
     # Match the fetcher's exact expanded-object ceiling. Larger PDFs receive a
     # durable record-local failure instead of crash-looping the Bytewax flow.
     doclingMaxBytes: 67108864
+    # Temporary parent-enforced process deadline. The rollout observed valid
+    # Docling returns through 203.95s, so 240s replaces the unsafe 180s
+    # cooperative thread timeout. Tune from the emitted cloud percentile only.
+    pdfHardTimeoutSeconds: 240
     # Emergency capacity switch only. False durably defers PDF records before
     # MinIO reads while every non-PDF source continues through the full path.
     # Keep true in the portable chart; deployment overrides must explain why.

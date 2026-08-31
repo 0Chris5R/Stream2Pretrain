@@ -94,6 +94,8 @@ spec:
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
             - name: S2P_DOCLING_MAX_BYTES
               value: {{ .Values.processor.fetcher.doclingMaxBytes | int | quote }}
+            - name: S2P_PDF_HARD_TIMEOUT_SECONDS
+              value: {{ .Values.processor.fetcher.pdfHardTimeoutSeconds | quote }}
             - name: S2P_PDF_PROCESSING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
@@ -102,10 +104,12 @@ spec:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 3
           readinessProbe:
             httpGet: {path: /readyz, port: metrics}
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.processor.fetcher.resources | nindent 12 }}
           volumeMounts:
@@ -232,6 +236,8 @@ spec:
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
             - name: S2P_DOCLING_MAX_BYTES
               value: {{ .Values.processor.fetcher.doclingMaxBytes | int | quote }}
+            - name: S2P_PDF_HARD_TIMEOUT_SECONDS
+              value: {{ .Values.processor.fetcher.pdfHardTimeoutSeconds | quote }}
             - name: S2P_PDF_PROCESSING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
@@ -240,10 +246,12 @@ spec:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 3
           readinessProbe:
             httpGet: {path: /readyz, port: metrics}
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.processor.fetcher.canary.resources | nindent 12 }}
           volumeMounts:

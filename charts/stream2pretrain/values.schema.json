@@ -242,6 +242,7 @@
             "sourceBatchSize": {"type": "integer", "minimum": 1},
             "pdfProcessingEnabled": {"type": "boolean"},
             "doclingMaxBytes": {"type": "integer", "minimum": 1},
+            "pdfHardTimeoutSeconds": {"type": "number", "exclusiveMinimum": 0},
             "checkpoint": {
               "type": "object",
               "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
