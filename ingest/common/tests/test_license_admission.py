@@ -78,3 +78,16 @@ def test_per_record_license_beats_explicit_feed_default() -> None:
 
 def test_source_default_never_substitutes_for_item_evidence() -> None:
     assert effective_license(None, "CC-BY-4.0") == ("unknown", "unknown")
+
+
+def test_immutable_projection_can_bind_known_document_identity() -> None:
+    document_id = "sha256:" + "a" * 64
+    result = decide_license_admission(
+        source_url="https://huggingface.co/org/repo/blob/commit/README.md",
+        source_feed="hf-models",
+        license_value="HF-Public-Repository-Terms-2022-09-15",
+        license_source="source_terms",
+        document_id=document_id,
+    )
+
+    assert result.decision.doc_id == document_id

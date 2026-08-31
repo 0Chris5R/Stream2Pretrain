@@ -278,6 +278,14 @@ def _mutation_candidates(
                 )
             }
         )
+    for fault_id in sorted(set(task.hidden_targets.forbidden_faults)):
+        yield valid.model_copy(
+            update={
+                "answer_manifest": manifest.model_copy(
+                    update={"faults": [*manifest.faults, fault_id]}
+                )
+            }
+        )
     predicate_types = {predicate.type for predicate in spec.predicates}
     if manifest.evidence and predicate_types & {"evidence_membership", "evidence_coverage"}:
         yield valid.model_copy(
@@ -346,7 +354,7 @@ def _mutation_candidates(
             }
         )
     if manifest.relations and "required_relations" in predicate_types:
-        required = {
+        required_relation_triples = {
             (edge.source, edge.relation, edge.target)
             for edge in task.hidden_targets.required_relations
         }
@@ -354,7 +362,7 @@ def _mutation_candidates(
             (
                 edge
                 for edge in manifest.relations
-                if (edge.source, edge.relation, edge.target) in required
+                if (edge.source, edge.relation, edge.target) in required_relation_triples
             ),
             None,
         )
@@ -390,7 +398,18 @@ def _mutation_candidates(
                 }
             )
     if "configuration_constraints" in predicate_types:
-        constraints = task.hidden_targets.configuration_constraints
+        constraints = dict(task.hidden_targets.configuration_constraints)
+        required_values = dict(constraints.get("required_values", {}))
+        for predicate in spec.predicates:
+            if predicate.type != "configuration_constraints":
+                continue
+            predicate_constraints = predicate.config.get("constraints", {})
+            if isinstance(predicate_constraints, dict) and isinstance(
+                predicate_constraints.get("required_values"), dict
+            ):
+                required_values.update(predicate_constraints["required_values"])
+        if required_values:
+            constraints["required_values"] = required_values
         mutated_configuration = dict(manifest.configuration)
         constrained_keys = [
             *(

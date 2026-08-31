@@ -180,10 +180,17 @@ def decide_license_admission(
     evidence_url: str | None = None,
     evidence_revision: str | None = None,
     evidence_scope: str | None = None,
+    document_id: str | None = None,
 ) -> AdmissionResult:
-    """Build a deterministic decision before content fetch."""
+    """Build a deterministic decision before content fetch.
+
+    ``document_id`` is reserved for source projections whose immutable object
+    identity is known before the body fetch. Most sources retain the canonical
+    URL-derived id; Hugging Face README projections bind it to the README Git
+    blob so unrelated repository commits cannot create corpus revisions.
+    """
     canon = canonical_url(source_url)
-    doc_id = doc_id_for_url(canon)
+    doc_id = document_id or doc_id_for_url(canon)
     normalized = normalize_license(license_value)
     admitted = is_training_permitted(normalized, source_format=source_format)
     transform_only = not admitted and is_posttrain_transform_permitted(normalized)

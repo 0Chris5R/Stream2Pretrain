@@ -28,7 +28,7 @@ from processor.foundry.oracle_build import tree_hash
 from processor.foundry.oracles import kubernetes_job_manifest
 from processor.foundry.packaging import EnvironmentPackager, MinioPackageSink
 from processor.foundry.paper_adapter import bundle_json, bundle_prompt_json
-from processor.foundry.pipeline import FoundryPipeline, PipelineResult, _validate_sft
+from processor.foundry.pipeline import FoundryPipeline, PipelineResult, UnsolvedTask, _validate_sft
 from processor.foundry.providers import (
     OpenAICompatibleProvider,
     ProviderBudgetExhaustedError,
@@ -803,6 +803,91 @@ def test_sft_persists_good_trajectory_when_paired_solution_fails(tmp_path: Path)
     assert packaged_trajectory_ids == ["trajectory:good", "trajectory:good-independent"]
 
 
+def test_routed_sft_with_no_valid_solution_is_persisted_with_exact_failure_traces(
+    tmp_path: Path,
+) -> None:
+    task = _task().model_copy(update={"route": "sft"})
+
+    class InvalidSolverControl:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.calls.append(kwargs)
+            role = str(kwargs["role"])
+            trace = _trace(f"trace:{len(self.calls)}").model_copy(update={"role": role})
+            if role == "final_repair":
+                return {"still": "invalid"}, trace
+            return {"status": "final", "report": None, "answer_manifest": None}, trace
+
+    control = InvalidSolverControl()
+    with pytest.raises(TaskOutputError) as raised:
+        TaskFactory(control).solve(  # type: ignore[arg-type]
+            job_id="job:unsolved-sft",
+            bundle=_bundle(),
+            graph=_graph(),
+            task=task,
+        )
+
+    failure = raised.value
+    assert [value.role for value in failure.solver_failures] == ["solver_a", "solver_b"]
+    assert [[trace.trace_id for trace in value.traces] for value in failure.solver_failures] == [
+        ["trace:1", "trace:2"],
+        ["trace:3", "trace:4"],
+    ]
+
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _created = store.start_job(
+        paper_id=_bundle().paper_id,
+        paper_hash=_bundle().paper_hash,
+        doc_id="doc:unsolved-sft",
+        policy_version="posttrain-policy-v4",
+    )
+    pipeline = FoundryPipeline(
+        config=FoundryConfig(),
+        store=store,
+        control=object(),  # type: ignore[arg-type]
+        package_sink=object(),  # type: ignore[arg-type]
+    )
+    artifacts = pipeline._validate_and_package(
+        job_id=job_id,
+        bundle=_bundle(),
+        graph=_graph(),
+        solved=[],
+        common_traces=[],
+        oracle_results=[],
+        unsolved_sft=[
+            UnsolvedTask(
+                task=task,
+                reason=str(failure),
+                traces=failure.traces,
+                solver_failures=failure.solver_failures,
+            )
+        ],
+    )
+
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact.status == "rejected"
+    assert artifact.kind == "sft_trajectory"
+    assert artifact.provider_trace_ids == ["trace:1", "trace:2", "trace:3", "trace:4"]
+    details = artifact.validation.details
+    assert details["task"]["public_instruction"] == task.public_instruction
+    assert [value["role"] for value in details["solver_failures"]] == [
+        "solver_a",
+        "solver_b",
+    ]
+    assert details["solver_failures"][0]["prompt_traces"][1]["prompt_version"] == "test-v1"
+    assert details["prompt_trace_ids"] == [
+        *task.construction_provenance,
+        "trace:1",
+        "trace:2",
+        "trace:3",
+        "trace:4",
+    ]
+    assert store.artifact(artifact.artifact_id) is not None
+
+
 def test_grounding_gate_ignores_only_proven_format_false_negative() -> None:
     format_only = TrajectoryGroundingDecision(
         trajectory_id="trajectory:format-only",
@@ -1093,6 +1178,138 @@ def test_v2_report_must_expose_symbolic_result_not_hide_it_in_manifest(tmp_path:
     environment_root = tmp_path / "paper_environment"
     assert score_response(answer.model_dump_json(), environment_root) == 1.0
     assert score_response(hidden_result.model_dump_json(), environment_root) == 0.0
+
+
+def test_v2_verifier_directly_enforces_every_scientific_contract_in_package(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle()
+    relation = EvidenceEdge(source="claim:1", relation="depends_on", target="fault:required")
+    graph = PaperEvidenceGraph(
+        graph_id="graph:hard-contract",
+        paper_id=bundle.paper_id,
+        nodes=[
+            *_graph().nodes,
+            EvidenceNode(
+                id="fault:required",
+                type="fault",
+                canonical_text="Removing the assumption causes the supported failure.",
+                supporting_spans=["section-1.span1"],
+            ),
+            EvidenceNode(
+                id="fault:forbidden",
+                type="fault",
+                canonical_text="This alternative failure is explicitly unsupported.",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[relation],
+    )
+    task = _task().model_copy(
+        update={
+            "content_policy_revision": "scientific-reasoning-v2",
+            "family": "assumption_consequence",
+            "route": "rl",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["claim:1", "fault:required"],
+                required_relations=[relation],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"failure_mode": "representation collapse"},
+                required_faults=["fault:required"],
+                forbidden_faults=["fault:forbidden"],
+            ),
+        }
+    )
+    spec = deterministic_verifier(task, bundle, graph)
+    predicates = {predicate.id: predicate for predicate in spec.predicates}
+    assert predicates["hard:required_relations"].config == {
+        "relations": [relation.model_dump(mode="json")]
+    }
+    assert predicates["hard:evidence_coverage"].config == {"accepted_sets": [["section-1.span1"]]}
+    assert predicates["hard:forbidden_faults"].targets == ["fault:forbidden"]
+    assert predicates["hard:expected:failure_mode"].config == {
+        "constraints": {"required_values": {"failure_mode": "representation collapse"}}
+    }
+
+    answer = FoundryAnswer(
+        report=(
+            "Removing the stated assumption propagates through the dependency and produces "
+            "representation collapse, while the alternative fault is unsupported."
+        ),
+        answer_manifest=AnswerManifest(
+            claims=["claim:1"],
+            evidence=["section-1.span1"],
+            faults=["fault:required"],
+            relations=[relation],
+            configuration={"failure_mode": "representation collapse"},
+        ),
+    )
+    variants = {
+        "valid": answer,
+        "wrong_expected_value": answer.model_copy(
+            update={
+                "answer_manifest": answer.answer_manifest.model_copy(
+                    update={"configuration": {"failure_mode": "stable representation"}}
+                )
+            }
+        ),
+        "forbidden_fault": answer.model_copy(
+            update={
+                "answer_manifest": answer.answer_manifest.model_copy(
+                    update={"faults": ["fault:required", "fault:forbidden"]}
+                )
+            }
+        ),
+        "missing_relation": answer.model_copy(
+            update={"answer_manifest": answer.answer_manifest.model_copy(update={"relations": []})}
+        ),
+        "missing_evidence": answer.model_copy(
+            update={"answer_manifest": answer.answer_manifest.model_copy(update={"evidence": []})}
+        ),
+        "hidden_expected_value": answer.model_copy(
+            update={"report": "The dependency produces the supported scientific outcome."}
+        ),
+    }
+    assert evaluate(spec, variants["valid"], task=task, graph=graph, bundle=bundle).passed
+    for name, variant in variants.items():
+        if name != "valid":
+            assert not evaluate(spec, variant, task=task, graph=graph, bundle=bundle).passed, name
+
+    report, trajectories, cases = run_acceptance_suite(
+        task=task,
+        spec=spec,
+        bundle=bundle,
+        graph=graph,
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:hard-contract",
+                task_id=task.task_id,
+                provider_trace_id="trace:hard-contract",
+                answer=answer,
+                accepted=False,
+                reward=0.0,
+            )
+        ],
+    )
+    assert suite_passes(report)
+    package = EnvironmentPackager(signer=AttestationSigner()).build(
+        bundle=bundle,
+        graph=graph,
+        task=task,
+        trajectories=trajectories,
+        validation=report,
+        traces=[],
+        verifier=spec,
+        pool="rl",
+        dataset_split="train",
+        validation_cases=cases,
+    )
+    with tarfile.open(fileobj=io.BytesIO(package.content), mode="r:gz") as archive:
+        archive.extractall(tmp_path, filter="data")
+    environment_root = tmp_path / "paper_environment"
+    for name, variant in variants.items():
+        expected_score = 1.0 if name == "valid" else 0.0
+        assert score_response(variant.model_dump_json(), environment_root) == expected_score, name
 
 
 def test_v2_verifier_contract_cannot_be_authored_by_provider() -> None:

@@ -5,7 +5,7 @@
 ```mermaid
 flowchart LR
   arxiv["arXiv feeds"] --> arxivFetch["arXiv full-text worker"]
-  hf["Hugging Face API"] --> hfFetch["Exact-revision card fetch"]
+  hf["Hugging Face API"] --> hfFetch["Paginated README-blob change feed"]
   arxivFetch --> raw[(raw.fetched)]
   hfFetch --> raw
   raw --> fetcher["Bytewax fetcher and source projection"]
@@ -42,8 +42,9 @@ retrieval and never enter document, route, or acceptance totals.
 
 - arXiv full-text worker: licence resolution, native HTML, ar5iv fallback,
   bounded CPU PDF fallback, immutable Bronze publication.
-- Hugging Face workers: exact revision and repository terms, README-only body
-  fetch, immutable Bronze publication.
+- Hugging Face workers: durable paginated watermark, exact repository
+  provenance, immutable README-blob identity, README-only body fetch, and
+  immutable Bronze publication.
 - Fetcher: source dispatch, structured paper extraction, Markdown card
   projection, language metadata, scientific artifact persistence, Silver emit.
 - Curator: source-specific quality scoring, PII, exact and near duplicate state,

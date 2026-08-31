@@ -35,7 +35,10 @@ DocId = Annotated[
     str,
     Field(
         pattern=r"^sha256:[0-9a-f]{64}$",
-        description="Content-addressed document id, sha256 of the canonical URL.",
+        description=(
+            "Stable document-revision id. Usually the sha256 of the canonical URL; "
+            "exact content projections may bind an immutable source object."
+        ),
     ),
 ]
 TraceId = Annotated[

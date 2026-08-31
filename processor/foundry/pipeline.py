@@ -18,6 +18,7 @@ from processor.foundry.quota import QuotaExceededError
 from processor.foundry.store import FoundryStore
 from processor.foundry.tasking import (
     SolvedTask,
+    SolverFailure,
     TaskFactory,
     TaskOutputError,
     TrajectoryGroundingDecision,
@@ -66,6 +67,16 @@ class TrajectorySuite:
     trajectory: Trajectory
     report: ValidationReport
     cases: dict[str, list[FoundryAnswer]]
+
+
+@dataclass(frozen=True, slots=True)
+class UnsolvedTask:
+    """A routed task that failed before any valid trajectory could be audited."""
+
+    task: TaskSpec
+    reason: str
+    traces: tuple[ProviderTrace, ...]
+    solver_failures: tuple[SolverFailure, ...]
 
 
 class FoundryPipeline:
@@ -181,7 +192,7 @@ class FoundryPipeline:
                 },
             )
             solved: list[SolvedTask] = []
-            task_failures: list[str] = []
+            task_failures: list[UnsolvedTask] = []
             for task in tasks:
                 try:
                     solved.append(
@@ -193,8 +204,16 @@ class FoundryPipeline:
                         )
                     )
                 except TaskOutputError as exc:
-                    task_failures.append(f"{task.task_id}: {exc}")
-            if not solved:
+                    task_failures.append(
+                        UnsolvedTask(
+                            task=task,
+                            reason=str(exc),
+                            traces=exc.traces,
+                            solver_failures=exc.solver_failures,
+                        )
+                    )
+            unsolved_sft = [value for value in task_failures if value.task.route == "sft"]
+            if not solved and not unsolved_sft:
                 raise ValueError("no task produced a valid solution after bounded repairs")
             self._transition(
                 job_id,
@@ -214,6 +233,7 @@ class FoundryPipeline:
                 solved=solved,
                 common_traces=[*graph_traces, *task_traces],
                 oracle_results=oracle_results,
+                unsolved_sft=unsolved_sft,
             )
         except ProviderOutputError as exc:
             # A completed but malformed structured response is deterministic
@@ -295,8 +315,34 @@ class FoundryPipeline:
         solved: list[SolvedTask],
         common_traces: list[ProviderTrace],
         oracle_results: list[OracleResult],
+        unsolved_sft: list[UnsolvedTask] | None = None,
     ) -> list[FoundryArtifactRecord]:
-        artifacts: list[FoundryArtifactRecord] = []
+        artifacts = [
+            self._rejected_artifact(
+                job_id=job_id,
+                bundle=bundle,
+                task=failure.task,
+                traces=[*common_traces, *failure.traces],
+                reason="routed SFT task produced no valid trajectory",
+                details={
+                    "failure_stage": "solution_generation",
+                    "task": failure.task.model_dump(mode="json"),
+                    "task_failure": failure.reason,
+                    "solver_failures": [
+                        solver_failure.audit() for solver_failure in failure.solver_failures
+                    ],
+                    "prompt_trace_ids": list(
+                        dict.fromkeys(
+                            [
+                                *failure.task.construction_provenance,
+                                *(trace.trace_id for trace in failure.traces),
+                            ]
+                        )
+                    ),
+                },
+            )
+            for failure in (unsolved_sft or [])
+        ]
         verifiers_compiled = 0
         adversarial_validated = 0
         for value in solved:
@@ -342,6 +388,7 @@ class FoundryPipeline:
                     detail_context={
                         "route": "sft",
                         "grounding_critic": value.critic.model_dump(mode="json"),
+                        "solver_failures": [failure.audit() for failure in value.solution_failures],
                     },
                 )
                 accepted_suites = [suite for suite in suites if suite_passes(suite.report)]

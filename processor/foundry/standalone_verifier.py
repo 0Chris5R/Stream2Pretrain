@@ -165,10 +165,17 @@ def _predicate(
             len(targets & submitted) / len(targets | submitted) if targets | submitted else 0.0
         )
         return passed, partial
+    if kind == "forbidden_faults":
+        submitted = set(faults)
+        overlap = targets & submitted
+        passed = not overlap
+        return passed, float(passed)
     if kind == "required_relations":
         required_relations = {
             (str(edge["source"]), str(edge["relation"]), str(edge["target"]))
-            for edge in task.get("hidden_targets", {}).get("required_relations", [])
+            for edge in config.get("relations", [])
+            if isinstance(edge, dict)
+            and all(key in edge for key in ("source", "relation", "target"))
         }
         submitted_relations = {
             (str(edge["source"]), str(edge["relation"]), str(edge["target"]))
@@ -240,6 +247,10 @@ def _scientific_report_consistency(
             isinstance(expected, str)
             and task.get("family") == "derivation_completion"
             and not _symbolic_value_appears(report, expected)
+        ) or (
+            isinstance(expected, str)
+            and task.get("family") != "derivation_completion"
+            and expected.casefold() not in report.casefold()
         ):
             return False
     constraints = hidden.get("configuration_constraints", {})

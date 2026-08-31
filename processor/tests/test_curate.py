@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import ClassVar
 
 import pytest
 
 from processor import common
+from processor import curate as curate_module
 from processor.common import ProcessorConfig, gold_loads, silver_dumps
 from processor.curate import (
+    _score_quality_texts,
     _score_segment_models,
     _training_projection,
     build_state,
@@ -19,6 +22,7 @@ from processor.curate import (
     extraction_retry_payload,
     is_trainable_gold,
     process_silver_decision_payload,
+    process_silver_decision_payloads,
     process_silver_payload,
 )
 from processor.operators.kenlm_score import PerplexityResult
@@ -106,7 +110,7 @@ class _BatchQualityScorer:
         self.batches: list[list[str]] = []
 
     def score(self, text: str) -> QualityScore:
-        return QualityScore(float(len(text)), self.revision)
+        return QualityScore(min(5.0, float(len(text))), self.revision)
 
     def score_many(self, texts: list[str]) -> list[QualityScore]:
         self.batches.append(list(texts))
@@ -130,6 +134,30 @@ class _BlockingBatchQualityScorer(_BatchQualityScorer):
         self.started.set()
         assert self.release.wait(timeout=2)
         return super().score_many(texts)
+
+
+class _ConcurrentBatchQualityScorer(_BatchQualityScorer):
+    def __init__(self, expected_active: int, release: threading.Event) -> None:
+        super().__init__()
+        self.expected_active = expected_active
+        self.release = release
+        self.all_active = threading.Event()
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def score_many(self, texts: list[str]) -> list[QualityScore]:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == self.expected_active:
+                self.all_active.set()
+        try:
+            assert self.release.wait(timeout=2)
+            return super().score_many(texts)
+        finally:
+            with self._lock:
+                self.active -= 1
 
 
 def test_segment_models_batch_without_skipping_any_classifier(
@@ -215,6 +243,202 @@ def test_segment_model_families_run_concurrently_without_changing_results(
         assert result.quality.edu_score == float(len(segment.text))
         assert result.comparison is not None
         assert result.comparison.edu_score == float(len(segment.text))
+
+
+def test_document_prefetch_fills_all_six_family_request_lanes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "12")
+    release = threading.Event()
+    scorer = _ConcurrentBatchQualityScorer(expected_active=6, release=release)
+    texts = [f"text-{index}" for index in range(12)]
+
+    with ThreadPoolExecutor(max_workers=1) as caller:
+        pending = caller.submit(_score_quality_texts, scorer, texts)
+        assert scorer.all_active.wait(timeout=2)
+        release.set()
+        results = pending.result(timeout=2)
+
+    assert scorer.max_active == 6
+    assert list(results) == texts
+    assert all(result.revision == scorer.revision for result in results.values())
+
+
+def test_document_micro_batch_matches_exact_serial_decisions(
+    cfg: ProcessorConfig,
+    long_english_text: str,
+) -> None:
+    documents = [
+        _silver(long_english_text, doc_id="sha256:" + "1" * 64),
+        _silver(long_english_text, doc_id="sha256:" + "2" * 64),
+        _silver(long_english_text, doc_id="sha256:" + "3" * 64).model_copy(
+            update={
+                "source_feed": "arxiv-html-fetcher",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "model_text": long_english_text,
+                "scientific_artifact_s3_uri": "s3://silver/scientific/3/document.json",
+            }
+        ),
+        _silver(long_english_text, doc_id="sha256:" + "4" * 64).model_copy(
+            update={
+                "source_feed": "hf-models",
+                "source_format": "web",
+                "extraction_pipeline": "hf-model-card-markdown-v1",
+                "title": "Measured model",
+                "segments": [
+                    SilverSegment(
+                        segment_id="description",
+                        title="Model description",
+                        text=(
+                            long_english_text
+                            + " Transformer architecture evaluation reaches 84.2% accuracy."
+                        ),
+                        word_count=len(long_english_text.split()) + 6,
+                    ),
+                    SilverSegment(
+                        segment_id="placeholder",
+                        title="Limitations",
+                        text="More information needed.",
+                        word_count=3,
+                    ),
+                ],
+            }
+        ),
+        _silver(long_english_text, doc_id="sha256:" + "5" * 64).model_copy(
+            update={"lang": "de", "lang_score": 0.99}
+        ),
+        _silver(long_english_text, doc_id="sha256:" + "6" * 64).model_copy(
+            update={"source_format": "metadata", "source_feed": "hf-models"}
+        ),
+        _silver("brief page", doc_id="sha256:" + "7" * 64),
+        _silver(
+            long_english_text + " api_key = abcdefghijklmnopqrstuvwxyz123456",
+            doc_id="sha256:" + "8" * 64,
+        ),
+        _silver(long_english_text + " unique licence case", doc_id="sha256:" + "9" * 64).model_copy(
+            update={"spdx_license": None, "spdx_license_source": "unknown"}
+        ),
+        _silver(
+            "Function { return 42; } and a sentence. " * 30,
+            doc_id="sha256:" + "a" * 64,
+        ),
+        _silver(
+            long_english_text + " Dataset structure has 1200 rows over three splits.",
+            doc_id="sha256:" + "b" * 64,
+        ).model_copy(
+            update={
+                "source_feed": "hf-datasets",
+                "source_format": "web",
+                "extraction_pipeline": "hf-dataset-card-markdown-v1",
+                "title": "Measured dataset",
+            }
+        ),
+        _silver(
+            long_english_text + " incomplete figure extraction case",
+            doc_id="sha256:" + "c" * 64,
+        ).model_copy(
+            update={
+                "source_feed": "arxiv-html-fetcher",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "model_text": long_english_text + " incomplete figure extraction case",
+                "extraction_warnings": ["figure_enrichment_failed:ocr"],
+                "scientific_artifact_s3_uri": "s3://silver/scientific/c/document.json",
+            }
+        ),
+        _silver(
+            long_english_text + " transform-only scientific case",
+            doc_id="sha256:" + "d" * 64,
+        ).model_copy(
+            update={
+                "source_feed": "arxiv-html-fetcher",
+                "source_format": "html",
+                "extraction_pipeline": "arxiv-html-scientific-v1",
+                "model_text": long_english_text + " transform-only scientific case",
+                "training_usage": "posttrain_transform_only",
+                "spdx_license": "arxiv-non-exclusive-distribution",
+                "spdx_license_source": "arxiv_api",
+                "scientific_artifact_s3_uri": "s3://silver/scientific/d/document.json",
+            }
+        ),
+    ]
+    serial_state = build_state(replace(cfg, state_dir=f"{cfg.state_dir}-serial"))
+    batch_state = build_state(replace(cfg, state_dir=f"{cfg.state_dir}-batch"))
+    try:
+        serial = []
+        for silver in documents:
+            gold = curate_one(serial_state, silver)
+            serial.append((common.gold_dumps(gold), is_trainable_gold(gold)))
+
+        outcomes = process_silver_decision_payloads(
+            batch_state,
+            [silver_dumps(silver) for silver in documents],
+        )
+        assert all(outcome.error is None for outcome in outcomes)
+        assert [outcome.value for outcome in outcomes] == serial
+    finally:
+        serial_state.close()
+        batch_state.close()
+
+
+def test_document_micro_batch_fills_model_families_without_skipping_segments(
+    cfg: ProcessorConfig,
+    long_english_text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "12")
+    state = build_state(cfg)
+    finepdfs = _BatchQualityScorer()
+    fineweb = _BatchQualityScorer()
+    state.finepdfs_quality = finepdfs
+    state.fineweb_quality = fineweb
+    state.kenlm = _BatchKenLM()
+    documents = []
+    expected_texts = []
+    for index in range(12):
+        text = f"Batch document {index}. {long_english_text}"
+        expected_texts.append(text)
+        documents.append(
+            _silver(text, doc_id=f"sha256:{index + 1:064x}").model_copy(
+                update={
+                    "source_feed": "hf-models",
+                    "source_format": "web",
+                    "extraction_pipeline": "hf-model-card-markdown-v1",
+                    "title": f"Measured model {index}",
+                    "segments": [
+                        SilverSegment(
+                            segment_id="description",
+                            title="Model description",
+                            text=text,
+                            word_count=len(text.split()),
+                        )
+                    ],
+                }
+            )
+        )
+    try:
+        outcomes = process_silver_decision_payloads(
+            state,
+            [silver_dumps(silver) for silver in documents],
+        )
+
+        assert all(outcome.error is None for outcome in outcomes)
+        assert sorted(len(batch) for batch in finepdfs.batches) == [2] * 6
+        assert sorted(len(batch) for batch in fineweb.batches) == [2] * 6
+        assert sorted(text for batch in finepdfs.batches for text in batch) == sorted(
+            expected_texts
+        )
+        assert sorted(text for batch in fineweb.batches for text in batch) == sorted(expected_texts)
+        for outcome in outcomes:
+            assert outcome.value is not None
+            gold = common.gold_loads(outcome.value[0])
+            assert gold.segment_scores[0].finepdfs_edu_score == 5.0
+            assert gold.segment_scores[0].fineweb_edu_score == 5.0
+    finally:
+        state.close()
 
 
 def test_split_model_services_are_all_required_and_closed(
@@ -628,6 +852,68 @@ def test_decision_replay_returns_identical_cached_result(
 
         assert replay == first
         assert "near_duplicate" not in common.gold_loads(replay[0]).reject_reasons
+    finally:
+        state.close()
+
+
+def test_same_payload_twice_in_one_micro_batch_uses_ordered_cache(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        payload = silver_dumps(_silver(long_english_text))
+
+        outcomes = process_silver_decision_payloads(state, [payload, payload])
+
+        assert outcomes[0].error is None
+        assert outcomes[1].error is None
+        assert outcomes[1].value == outcomes[0].value
+        assert outcomes[0].value is not None
+        assert "near_duplicate" not in common.gold_loads(outcomes[0].value[0]).reject_reasons
+    finally:
+        state.close()
+
+
+def test_transient_batch_failure_replays_cached_prefix_without_second_lsh_mutation(
+    cfg: ProcessorConfig,
+    long_english_text: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = build_state(cfg)
+    first = _silver(long_english_text, doc_id="sha256:" + "1" * 64)
+    second = _silver(
+        (
+            "Independent compiler scheduling measurements compare latency, "
+            "throughput, memory locality, and deterministic execution. "
+        )
+        * 25,
+        doc_id="sha256:" + "2" * 64,
+    )
+    payloads = [silver_dumps(first), silver_dumps(second)]
+    real_curate_one = curate_module.curate_one
+
+    def fail_on_second(scoring_state: object, silver: SilverRecord) -> object:
+        if silver.doc_id == second.doc_id:
+            raise RuntimeError("transient second-document failure")
+        return real_curate_one(scoring_state, silver)  # type: ignore[arg-type]
+
+    try:
+        monkeypatch.setattr(curate_module, "curate_one", fail_on_second)
+        with pytest.raises(RuntimeError, match="transient second-document failure"):
+            process_silver_decision_payloads(state, payloads)
+
+        first_cache_key = curate_module._decision_cache_key(state, payloads[0])
+        cached_first = state.decision_cache.get(first_cache_key)
+        assert cached_first is not None
+
+        monkeypatch.setattr(curate_module, "curate_one", real_curate_one)
+        replayed = process_silver_decision_payloads(state, payloads)
+
+        assert replayed[0].value == cached_first
+        assert replayed[0].error is None
+        assert replayed[1].error is None
+        assert replayed[1].value is not None
+        assert "near_duplicate" not in gold_loads(replayed[1].value[0]).reject_reasons
     finally:
         state.close()
 

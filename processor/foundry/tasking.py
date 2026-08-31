@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -99,8 +99,49 @@ class GroundingCritique(BaseModel):
     findings: list[str] = Field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class SolverFailure:
+    """One failed solver attempt with the exact durable provider-call lineage."""
+
+    role: str
+    reason: str
+    traces: tuple[ProviderTrace, ...] = ()
+
+    def audit(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "reason": self.reason,
+            "provider_trace_ids": [trace.trace_id for trace in self.traces],
+            "prompt_traces": [
+                {
+                    "trace_id": trace.trace_id,
+                    "prompt_version": trace.prompt_version,
+                    "request_hash": trace.request_hash,
+                    "response_hash": trace.response_hash,
+                    "returned_model": trace.returned_model,
+                }
+                for trace in self.traces
+            ],
+        }
+
+
+def _dedupe_traces(traces: Sequence[ProviderTrace]) -> list[ProviderTrace]:
+    return list({trace.trace_id: trace for trace in traces}.values())
+
+
 class TaskOutputError(ValueError):
     """A model-authored task artifact remained invalid after one bounded repair."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        traces: Sequence[ProviderTrace] = (),
+        solver_failures: Sequence[SolverFailure] = (),
+    ) -> None:
+        super().__init__(message)
+        self.traces = tuple(_dedupe_traces(traces))
+        self.solver_failures = tuple(solver_failures)
 
 
 _MAX_SOLVER_TOOL_TURNS = 8
@@ -113,7 +154,7 @@ class SolvedTask:
     trajectories: list[Trajectory]
     traces: list[ProviderTrace]
     critic: GroundingCritique
-    solution_failures: tuple[str, ...] = ()
+    solution_failures: tuple[SolverFailure, ...] = ()
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -233,7 +274,7 @@ class TaskFactory:
     ) -> SolvedTask:
         traces: list[ProviderTrace] = []
         trajectories: list[Trajectory] = []
-        solution_failures: list[str] = []
+        solution_failures: list[SolverFailure] = []
         for role, plan in (
             ("solver_a", "Use a direct constructive plan and verify every structured commitment."),
             (
@@ -251,7 +292,11 @@ class TaskFactory:
                     plan=plan,
                 )
             except TaskOutputError as exc:
-                solution_failures.append(f"{role}: {exc}")
+                failure_traces = list(exc.traces)
+                traces.extend(failure_traces)
+                solution_failures.append(
+                    SolverFailure(role=role, reason=str(exc), traces=tuple(failure_traces))
+                )
                 continue
             traces.extend(solver_traces)
             trace = solver_traces[-1]
@@ -275,7 +320,9 @@ class TaskFactory:
             )
         if not trajectories:
             raise TaskOutputError(
-                f"task {task.task_id} produced no valid solution after bounded repairs"
+                f"task {task.task_id} produced no valid solution after bounded repairs",
+                traces=traces,
+                solver_failures=solution_failures,
             )
         critic_data, critic_trace = self.control.call(
             job_id=job_id,
@@ -287,15 +334,22 @@ class TaskFactory:
             call_key=f"grounding_critic:{task.task_id}",
         )
         traces.append(critic_trace)
-        critique, repair_trace = _validate_or_repair(
-            control=self.control,
-            model=GroundingCritique,
-            data=critic_data,
-            job_id=job_id,
-            paper_id=bundle.paper_id,
-            call_key=f"grounding_critic:{task.task_id}",
-            context="Preserve the grounding audit and repair only schema violations.",
-        )
+        try:
+            critique, repair_trace = _validate_or_repair(
+                control=self.control,
+                model=GroundingCritique,
+                data=critic_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"grounding_critic:{task.task_id}",
+                context="Preserve the grounding audit and repair only schema violations.",
+            )
+        except TaskOutputError as exc:
+            raise TaskOutputError(
+                f"grounding critique failed: {exc}",
+                traces=[*traces, *exc.traces],
+                solver_failures=solution_failures,
+            ) from exc
         if repair_trace is not None:
             traces.append(repair_trace)
         critique = _complete_grounding_decisions(critique, trajectories)
@@ -342,19 +396,22 @@ class TaskFactory:
                 call_key=f"{role}:{task.task_id}:turn:{turn_index}",
             )
             traces.append(trace)
-            turn, repair_trace = _validate_or_repair(
-                control=self.control,
-                model=SolverTurn,
-                data=data,
-                job_id=job_id,
-                paper_id=bundle.paper_id,
-                call_key=f"{role}:{task.task_id}:turn:{turn_index}",
-                context=(
-                    "Preserve the scientific solution and tool intent. Omit symbolic or unknown "
-                    "quantities from numeric_results instead of assigning null."
-                ),
-                normalizer=_normalize_solver_turn_data,
-            )
+            try:
+                turn, repair_trace = _validate_or_repair(
+                    control=self.control,
+                    model=SolverTurn,
+                    data=data,
+                    job_id=job_id,
+                    paper_id=bundle.paper_id,
+                    call_key=f"{role}:{task.task_id}:turn:{turn_index}",
+                    context=(
+                        "Preserve the scientific solution and tool intent. Omit symbolic or unknown "
+                        "quantities from numeric_results instead of assigning null."
+                    ),
+                    normalizer=_normalize_solver_turn_data,
+                )
+            except TaskOutputError as exc:
+                raise TaskOutputError(str(exc), traces=[*traces, *exc.traces]) from exc
             if repair_trace is not None:
                 traces.append(repair_trace)
             turns.append(
@@ -365,15 +422,18 @@ class TaskFactory:
                 )
             )
             if turn.status == "final":
-                turn, contract_repair_trace = _ensure_solution_contract(
-                    control=self.control,
-                    turn=turn,
-                    job_id=job_id,
-                    paper_id=bundle.paper_id,
-                    role=role,
-                    task=task,
-                    graph=graph,
-                )
+                try:
+                    turn, contract_repair_trace = _ensure_solution_contract(
+                        control=self.control,
+                        turn=turn,
+                        job_id=job_id,
+                        paper_id=bundle.paper_id,
+                        role=role,
+                        task=task,
+                        graph=graph,
+                    )
+                except TaskOutputError as exc:
+                    raise TaskOutputError(str(exc), traces=[*traces, *exc.traces]) from exc
                 if contract_repair_trace is not None:
                     traces.append(contract_repair_trace)
                     turns.append(
@@ -403,7 +463,9 @@ class TaskFactory:
                     {"tool": observation.tool, "arguments": observation.arguments}
                 )
                 if signature in failed_tool_requests:
-                    raise TaskOutputError("solver repeated the same invalid frozen-tool request")
+                    raise TaskOutputError(
+                        "solver repeated the same invalid frozen-tool request", traces=traces
+                    )
                 failed_tool_requests.add(signature)
             executed.extend(observations)
             tool_payload = [value.model_dump(mode="json") for value in observations]
@@ -415,7 +477,9 @@ class TaskFactory:
             )
             turn_index += 1
             if turn_index >= _MAX_SOLVER_TOOL_TURNS:
-                raise TaskOutputError("solver exceeded the bounded frozen-tool interaction budget")
+                raise TaskOutputError(
+                    "solver exceeded the bounded frozen-tool interaction budget", traces=traces
+                )
             turns.append(TrajectoryTurn(index=len(turns), role="tool", content=tool_payload))
 
 
@@ -503,7 +567,8 @@ def _validate_or_repair(
             return model.model_validate(repaired), repair_trace
         except ValueError as repair_error:
             raise TaskOutputError(
-                f"{model.__name__} remained invalid after schema repair: {repair_error}"
+                f"{model.__name__} remained invalid after schema repair: {repair_error}",
+                traces=[repair_trace],
             ) from repair_error
 
 
@@ -600,13 +665,18 @@ def _ensure_solution_contract(
     try:
         repaired = SolverTurn.model_validate(_normalize_solver_turn_data(repair_data))
     except ValueError as exc:
-        raise TaskOutputError(f"solution-contract repair returned invalid JSON: {exc}") from exc
+        raise TaskOutputError(
+            f"solution-contract repair returned invalid JSON: {exc}", traces=[repair_trace]
+        ) from exc
     if repaired.status != "final" or repaired.answer_manifest is None:
-        raise TaskOutputError("solution-contract repair did not return a final answer")
+        raise TaskOutputError(
+            "solution-contract repair did not return a final answer", traces=[repair_trace]
+        )
     remaining = _solution_contract_violations(repaired.answer_manifest, task, graph)
     if remaining:
         raise TaskOutputError(
-            "solution-contract repair remained incomplete: " + ", ".join(remaining)
+            "solution-contract repair remained incomplete: " + ", ".join(remaining),
+            traces=[repair_trace],
         )
     return repaired, repair_trace
 
@@ -1277,6 +1347,7 @@ __all__ = [
     "GroundingCritique",
     "SolutionPayload",
     "SolvedTask",
+    "SolverFailure",
     "TaskBatch",
     "TaskFactory",
     "TaskOutputError",

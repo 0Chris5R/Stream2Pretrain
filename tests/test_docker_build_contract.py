@@ -161,6 +161,23 @@ def test_curator_startup_probe_guards_slow_model_initialization() -> None:
     assert "initialDelaySeconds: 60" not in template
 
 
+def test_curator_uses_bounded_runtime_micro_batches_without_new_recovery_state() -> None:
+    curate = (ROOT / "processor" / "curate.py").read_text(encoding="utf-8")
+    template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "processor-curate.yaml"
+    ).read_text(encoding="utf-8")
+    values = (ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text(encoding="utf-8")
+
+    assert 'op.flat_map_batch("flat_map_batch", up, _batch_step)' in curate
+    assert '_curate_run("curate_run", inp)' in curate
+    assert 'op.filter("curate_drop_none", mapped' in curate
+    assert 'op.collect("curate_run"' not in curate
+    assert "S2P_CURATOR_DOCUMENT_BATCH_SIZE" in template
+    assert "sourceBatchSize: 12" in values
+    assert 'value: "s2p-curate-live-v5"' in template
+    assert 'value: "curate-live-v5"' in template
+
+
 def test_catalog_bootstrap_precedes_application_rollout() -> None:
     template = (
         ROOT / "charts" / "stream2pretrain" / "templates" / "job-polaris-bootstrap.yaml"

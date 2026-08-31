@@ -13,7 +13,7 @@ Stream2Pretrain solves this as a streaming curation service. Its users are data 
 The deployed content adapters cover:
 
 - arXiv full papers discovered through OAI-PMH and four RSS categories
-- exact-version Hugging Face model and dataset cards
+- immutable README-blob revisions from Hugging Face model and dataset cards
 
 Internal discovery envelopes do not appear as sources, documents, acceptances,
 or quarantines.

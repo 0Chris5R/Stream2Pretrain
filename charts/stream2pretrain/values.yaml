@@ -283,7 +283,11 @@ processor:
     # checkpoint never pins multi-GB model memory or image layers to one node.
     image: stream2pretrain/processor
     scoringVersion: pretrain-content-v2
-    sourceBatchSize: 1
+    # Bytewax exposes the Kafka connector's bounded runtime batch directly to
+    # the curator. Twelve one-segment documents produce six two-item requests,
+    # filling the measured six-Pod FinePDFs lane while final decisions and LSH
+    # observations remain serial.
+    sourceBatchSize: 12
     replicas: 1
     requireRealModels: true
     doclingEnabled: false

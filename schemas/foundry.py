@@ -309,6 +309,7 @@ PredicateType = Literal[
     "method_partial_order",
     "derivation_partial_order",
     "fault_identification",
+    "forbidden_faults",
     "required_relations",
     "required_qualifications",
     "configuration_constraints",

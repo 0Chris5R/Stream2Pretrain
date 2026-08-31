@@ -26,7 +26,7 @@ import os
 import re
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC
 from typing import Any, Protocol
 
@@ -50,7 +50,7 @@ from processor.operators.hf_card_quality import assess_hf_card, is_hf_placeholde
 from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
 from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher
-from processor.operators.pii import PiiScanner
+from processor.operators.pii import PiiSanitization, PiiScanner
 from processor.operators.quality import QualityClassifier, QualityScore
 from processor.operators.scientific_document_quality import is_publication_template
 from processor.operators.source_quality import (
@@ -98,6 +98,15 @@ class PerplexityScorer(Protocol):
     def score(self, text: str) -> PerplexityResult: ...
 
 
+class PiiSanitizer(Protocol):
+    @property
+    def revision(self) -> str: ...
+
+    def sanitize(self, text: str) -> PiiSanitization: ...
+
+    def flags(self, text: str) -> list[PiiFlag]: ...
+
+
 @dataclass(slots=True)
 class CurateState:
     """Per-worker state for the curation dataflow."""
@@ -110,7 +119,7 @@ class CurateState:
     finepdfs_quality: QualityScorer
     fineweb_quality: QualityScorer
     metadata_discovery: MetadataDiscoveryPolicy
-    pii: PiiScanner
+    pii: PiiSanitizer
     tokenizer: Tokenizer
     policy_revision: str
     scoring_version: str
@@ -129,6 +138,89 @@ class _SegmentModelSignals:
     quality: QualityScore
     comparison: QualityScore | None
     perplexity: PerplexityResult | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PayloadDecision:
+    """One batch item result without conflating record-local and transient errors."""
+
+    value: tuple[bytes, bool] | None = None
+    error: ValueError | None = None
+
+
+class _MemoizedPiiSanitizer:
+    """Reuse the exact body sanitization performed while preparing a micro-batch."""
+
+    def __init__(self, scanner: PiiSanitizer) -> None:
+        self._scanner = scanner
+        self._sanitized: dict[str, PiiSanitization] = {}
+
+    @property
+    def revision(self) -> str:
+        return self._scanner.revision
+
+    def sanitize(self, text: str) -> PiiSanitization:
+        cached = self._sanitized.get(text)
+        if cached is None:
+            cached = self._scanner.sanitize(text)
+            self._sanitized[text] = cached
+        return cached
+
+    def flags(self, text: str) -> list[PiiFlag]:
+        cached = self._sanitized.get(text)
+        if cached is not None:
+            return list(cached.flags)
+        return self._scanner.flags(text)
+
+
+class _PrefetchedQualityScorer:
+    """Serve exact pinned-model results prepared across several documents."""
+
+    def __init__(self, scorer: QualityScorer, scores: dict[str, QualityScore]) -> None:
+        self._scorer = scorer
+        self._scores = scores
+
+    @property
+    def revision(self) -> str:
+        return self._scorer.revision
+
+    @property
+    def backend(self) -> str:
+        return self._scorer.backend
+
+    def score(self, text: str) -> QualityScore:
+        cached = self._scores.get(text)
+        return cached if cached is not None else self._scorer.score(text)
+
+    def score_many(self, texts: Sequence[str]) -> list[QualityScore]:
+        missing = [text for text in texts if text not in self._scores]
+        if missing:
+            missing_scores = _score_quality_batch(self._scorer, missing)
+            self._scores.update(zip(missing, missing_scores, strict=True))
+        return [self._scores[text] for text in texts]
+
+
+class _PrefetchedPerplexityScorer:
+    """Serve exact KenLM results prepared across several documents."""
+
+    def __init__(
+        self,
+        scorer: PerplexityScorer,
+        scores: dict[str, PerplexityResult],
+    ) -> None:
+        self._scorer = scorer
+        self._scores = scores
+
+    @property
+    def scorer(self) -> str:
+        return self._scorer.scorer
+
+    def score(self, text: str) -> PerplexityResult:
+        cached = self._scores.get(text)
+        if cached is None:
+            cached = self._scorer.score(text)
+            self._scores[text] = cached
+        return cached
 
 
 def build_state(cfg: common.ProcessorConfig) -> CurateState:
@@ -372,13 +464,9 @@ def _score_quality_batch(
     return values
 
 
-def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
-    """Run the full curation pipeline on one silver record.
-
-    Always returns a scored GoldRecord. Callers must use
-    :func:`is_trainable_gold` before publishing the record to ``docs.curated``.
-    """
-    source_segments = list(silver.segments) or [
+def _source_segments(silver: SilverRecord) -> list[SilverSegment]:
+    """Return the exact segment projection consumed by classifier inference."""
+    return list(silver.segments) or [
         SilverSegment(
             segment_id="document",
             title=silver.title or "Document",
@@ -386,6 +474,125 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             word_count=len((silver.model_text or silver.text).split()),
         )
     ]
+
+
+def _unique_texts(texts: Sequence[str]) -> list[str]:
+    """Deduplicate immutable model inputs while preserving first-seen order."""
+    return list(dict.fromkeys(texts))
+
+
+def _score_quality_texts(
+    scorer: QualityScorer,
+    texts: Sequence[str],
+) -> dict[str, QualityScore]:
+    """Score one model family's unique texts across all documents in a micro-batch."""
+    unique = _unique_texts(texts)
+    if not unique:
+        return {}
+    concurrency = max(1, int(os.environ.get("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "1")))
+    family_concurrency = max(1, concurrency // 2)
+    batch_size = int(os.environ.get("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2"))
+    if batch_size < 1:
+        raise RuntimeError("S2P_CURATOR_CLASSIFIER_BATCH_SIZE must be positive")
+    pending: list[tuple[list[str], Future[list[QualityScore]]]] = []
+    with ThreadPoolExecutor(max_workers=family_concurrency) as executor:
+        for offset in range(0, len(unique), batch_size):
+            batch = unique[offset : offset + batch_size]
+            pending.append((batch, executor.submit(_score_quality_batch, scorer, batch)))
+        scores: dict[str, QualityScore] = {}
+        for batch, future in pending:
+            results = future.result()
+            if len(results) != len(batch):
+                raise RuntimeError(
+                    "quality classifier returned a different number of batch results"
+                )
+            scores.update(zip(batch, results, strict=True))
+    return scores
+
+
+def _score_perplexity_texts(
+    scorer: PerplexityScorer,
+    texts: Sequence[str],
+) -> dict[str, PerplexityResult]:
+    """Score unique KenLM inputs in their original deterministic order."""
+    return {text: scorer.score(text) for text in _unique_texts(texts)}
+
+
+def _prefetched_curate_state(
+    state: CurateState,
+    silvers: Sequence[SilverRecord],
+) -> CurateState:
+    """Prepare exact model outputs across documents without touching ordered state.
+
+    The deterministic language, body, card, C4/Gopher, licence, extraction,
+    and near-duplicate gates cannot bypass inference: their durable decisions
+    include every per-segment classifier score and revision. Instead, this
+    function removes the per-document synchronization bubble. It sanitizes
+    each model input once, fills all ready stateless classifier Pods with
+    bounded requests, and returns wrappers that replay those exact results as
+    :func:`curate_one` finalizes documents and LSH mutations in input order.
+    """
+    pii = _MemoizedPiiSanitizer(state.pii)
+    finepdfs_texts: list[str] = []
+    fineweb_texts: list[str] = []
+    kenlm_texts: list[str] = []
+    for silver in silvers:
+        policy = resolve_source_policy(
+            source_feed=silver.source_feed,
+            source_format=silver.source_format,
+            extraction_pipeline=silver.extraction_pipeline,
+        )
+        for segment in _source_segments(silver):
+            safe_text = pii.sanitize(segment.text).text
+            if policy.family == "scientific_paper" or policy.family in {
+                "hf_model_card",
+                "hf_dataset_card",
+            }:
+                # Scientific papers and Hub cards persist both the primary and
+                # comparison classifier outputs in every SegmentScore.
+                finepdfs_texts.append(safe_text)
+                fineweb_texts.append(safe_text)
+            elif policy.quality_profile == "fineweb_edu":
+                fineweb_texts.append(safe_text)
+            if policy.kenlm_mode != "off":
+                kenlm_texts.append(safe_text)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        finepdfs_future = executor.submit(
+            _score_quality_texts,
+            state.finepdfs_quality,
+            finepdfs_texts,
+        )
+        fineweb_future = executor.submit(
+            _score_quality_texts,
+            state.fineweb_quality,
+            fineweb_texts,
+        )
+        kenlm_future = executor.submit(
+            _score_perplexity_texts,
+            state.kenlm,
+            kenlm_texts,
+        )
+        finepdfs_scores = finepdfs_future.result()
+        fineweb_scores = fineweb_future.result()
+        kenlm_scores = kenlm_future.result()
+
+    return replace(
+        state,
+        finepdfs_quality=_PrefetchedQualityScorer(state.finepdfs_quality, finepdfs_scores),
+        fineweb_quality=_PrefetchedQualityScorer(state.fineweb_quality, fineweb_scores),
+        kenlm=_PrefetchedPerplexityScorer(state.kenlm, kenlm_scores),
+        pii=pii,
+    )
+
+
+def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
+    """Run the full curation pipeline on one silver record.
+
+    Always returns a scored GoldRecord. Callers must use
+    :func:`is_trainable_gold` before publishing the record to ``docs.curated``.
+    """
+    source_segments = _source_segments(silver)
     source_policy = resolve_source_policy(
         source_feed=silver.source_feed,
         source_format=silver.source_format,
@@ -825,7 +1032,7 @@ _STRUCTURED_BLOCK_START = re.compile(r"(?=\[(?:TABLE|EQUATION|FIGURE)\])")
 
 
 def _filter_structured_projection(
-    scanner: PiiScanner, structured_text: str
+    scanner: PiiSanitizer, structured_text: str
 ) -> tuple[str, list[PiiFlag], list[PiiFlag], list[str]]:
     """Sanitize structured evidence and report any artifact-blocking finding."""
     if not structured_text.strip():
@@ -934,30 +1141,116 @@ def process_silver_decision_payload(
     metrics: ProcessorMetrics | None = None,
 ) -> tuple[bytes, bool]:
     """Return the durable scored decision and whether it is trainable."""
-    cache_key = _decision_cache_key(state, payload)
-    cached = state.decision_cache.get(cache_key)
-    if cached is not None:
-        return cached
-    silver = common.silver_loads(payload)
-    gold = curate_one(state, silver)
-    if metrics is not None:
-        metrics.record_route(route=gold.route)
-        if is_trainable_gold(gold):
-            metrics.record_curated(
-                source_feed=gold.source_feed,
-                quality_score=gold.quality_score,
-                edu_score=gold.edu_score,
-            )
-        elif gold.reject_reasons:
-            metrics.record_dropped(
-                reasons=gold.reject_reasons,
-                quality_score=gold.quality_score,
-                edu_score=gold.edu_score,
-            )
+    outcome = process_silver_decision_payloads(state, [payload], metrics=metrics)[0]
+    if outcome.error is not None:
+        raise outcome.error
+    assert outcome.value is not None
+    return outcome.value
+
+
+def _record_decision_metrics(metrics: ProcessorMetrics | None, gold: GoldRecord) -> None:
+    if metrics is None:
+        return
+    metrics.record_route(route=gold.route)
+    if is_trainable_gold(gold):
+        metrics.record_curated(
+            source_feed=gold.source_feed,
+            quality_score=gold.quality_score,
+            edu_score=gold.edu_score,
+        )
+    elif gold.reject_reasons:
+        metrics.record_dropped(
+            reasons=gold.reject_reasons,
+            quality_score=gold.quality_score,
+            edu_score=gold.edu_score,
+        )
+
+
+def _materialize_uncached_decision(
+    state: CurateState,
+    scoring_state: CurateState,
+    *,
+    silver: SilverRecord,
+    cache_key: str,
+    metrics: ProcessorMetrics | None,
+) -> tuple[bytes, bool]:
+    """Finalize one decision and mutate cache/dedup state in input order."""
+    gold = curate_one(scoring_state, silver)
+    _record_decision_metrics(metrics, gold)
     decision = common.gold_dumps(gold)
     trainable = is_trainable_gold(gold)
     state.decision_cache.put(cache_key, decision, trainable=trainable)
     return decision, trainable
+
+
+def process_silver_decision_payloads(
+    state: CurateState,
+    payloads: Sequence[bytes],
+    *,
+    metrics: ProcessorMetrics | None = None,
+) -> list[_PayloadDecision]:
+    """Score a bounded document batch while preserving serial state semantics.
+
+    Cache lookup, finalization, near-duplicate observation, metric emission,
+    and cache writes retain input order. Only immutable PII projections and
+    stateless pinned-model calls are prepared across documents. A record-local
+    ``ValueError`` remains attached to that record so the Bytewax step can
+    preserve the previous drop-and-continue behavior.
+    """
+    results: list[_PayloadDecision | None] = [None] * len(payloads)
+    pending: list[tuple[int, str, SilverRecord]] = []
+    for index, payload in enumerate(payloads):
+        cache_key = _decision_cache_key(state, payload)
+        cached = state.decision_cache.get(cache_key)
+        if cached is not None:
+            results[index] = _PayloadDecision(value=cached)
+            continue
+        try:
+            silver = common.silver_loads(payload)
+        except ValueError as exc:
+            results[index] = _PayloadDecision(error=exc)
+            continue
+        pending.append((index, cache_key, silver))
+
+    if pending:
+        try:
+            scoring_state = (
+                _prefetched_curate_state(
+                    state,
+                    [silver for _, _, silver in pending],
+                )
+                if len(pending) > 1
+                else state
+            )
+        except ValueError:
+            # A record-local rejection from a shared batch request cannot be
+            # attributed safely. Re-run each item through the unchanged
+            # singleton path, which restores the former error boundary.
+            scoring_state = state
+
+        for index, cache_key, silver in pending:
+            # Another item earlier in this same runtime batch may carry the
+            # identical payload. Match one-by-one behavior by observing the
+            # decision cache again after each preceding ordered write.
+            cached = state.decision_cache.get(cache_key)
+            if cached is not None:
+                results[index] = _PayloadDecision(value=cached)
+                continue
+            try:
+                value = _materialize_uncached_decision(
+                    state,
+                    scoring_state,
+                    silver=silver,
+                    cache_key=cache_key,
+                    metrics=metrics,
+                )
+            except ValueError as exc:
+                results[index] = _PayloadDecision(error=exc)
+            else:
+                results[index] = _PayloadDecision(value=value)
+
+    assert all(result is not None for result in results)
+    return [result for result in results if result is not None]
 
 
 def extraction_retry_payload(silver: SilverRecord, gold: GoldRecord) -> bytes | None:
@@ -996,6 +1289,14 @@ def _extraction_retry_attempt(extraction_pipeline: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _curator_document_batch_size() -> int:
+    """Return the bounded stateless inference micro-batch size."""
+    value = int(os.environ.get("S2P_CURATOR_DOCUMENT_BATCH_SIZE", "12"))
+    if value < 1:
+        raise RuntimeError("S2P_CURATOR_DOCUMENT_BATCH_SIZE must be positive")
+    return value
+
+
 def build_dataflow(
     cfg: common.ProcessorConfig,
     *,
@@ -1004,7 +1305,7 @@ def build_dataflow(
     """Build the Bytewax dataflow object."""
     from bytewax import operators as op
     from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage
-    from bytewax.dataflow import Dataflow
+    from bytewax.dataflow import Dataflow, operator
 
     tracer = common.init_tracer("s2p-curate", cfg)
     flow_name = os.environ.get("S2P_BYTEWAX_FLOW_NAME", CURATOR_FLOW_NAME).strip()
@@ -1034,7 +1335,7 @@ def build_dataflow(
     # semantics; matches the Kappa/streaming-first contract). Operators can
     # override via ``S2P_KAFKA_START_OFFSET=end`` for short-lived debug runs.
     start_offset = common.kafka_starting_offset()
-    source = common.tracked_kafka_source(
+    source: Any = common.tracked_kafka_source(
         runtime_status=runtime_status,
         source_name="docs_normalized",
         brokers=cfg.redpanda_brokers.split(","),
@@ -1043,68 +1344,135 @@ def build_dataflow(
         add_config=common.kafka_consumer_config(cfg.consumer_group),
         batch_size=common.kafka_source_batch_size(),
     )
-    inp = op.input("docs_normalized", flow, source)
+    inp: Any = op.input("docs_normalized", flow, source)
 
-    def _step(
-        msg: object,
-    ) -> tuple[KafkaSinkMessage, KafkaSinkMessage | None, KafkaSinkMessage | None] | None:
-        with tracer.start_as_current_span("curate.process") as span:
-            payload = getattr(msg, "value", None)
-            if payload is None:
-                failure_writer.record(stage="curate", message=msg, reason="kafka_tombstone")
-                PROCESSOR_METRICS.record_failure(stage="curate", reason="kafka_tombstone")
-                return None
+    document_batch_size = _curator_document_batch_size()
+
+    def _batch_step(
+        messages: list[object],
+    ) -> list[
+        tuple[
+            KafkaSinkMessage[bytes, bytes],
+            KafkaSinkMessage[bytes, bytes] | None,
+            KafkaSinkMessage[bytes, bytes] | None,
+        ]
+    ]:
+        emitted: list[
+            tuple[
+                KafkaSinkMessage[bytes, bytes],
+                KafkaSinkMessage[bytes, bytes] | None,
+                KafkaSinkMessage[bytes, bytes] | None,
+            ]
+        ] = []
+        # ``flat_map_batch`` receives runtime batches from the Kafka source.
+        # Chunk again here so a future partition-count change cannot inflate
+        # the model/input memory bound beyond twelve one-segment documents:
+        # six two-item RPCs for the measured six-Pod FinePDFs lane.
+        for offset in range(0, len(messages), document_batch_size):
+            batch = messages[offset : offset + document_batch_size]
+            valid: list[tuple[object, bytes, SilverRecord]] = []
+            for msg in batch:
+                payload = getattr(msg, "value", None)
+                if payload is None:
+                    failure_writer.record(stage="curate", message=msg, reason="kafka_tombstone")
+                    PROCESSOR_METRICS.record_failure(stage="curate", reason="kafka_tombstone")
+                    continue
+                try:
+                    silver = common.silver_loads(payload)
+                except ValueError as exc:
+                    with tracer.start_as_current_span("curate.process") as span:
+                        span.record_exception(exc)
+                    reason = type(exc).__name__
+                    failure_writer.record(stage="curate", message=msg, reason=reason)
+                    PROCESSOR_METRICS.record_failure(stage="curate", reason=reason)
+                    continue
+                valid.append((msg, payload, silver))
+
+            if not valid:
+                continue
             try:
-                silver = common.silver_loads(payload)
-                decision, trainable = process_silver_decision_payload(
-                    state, payload, metrics=PROCESSOR_METRICS
+                outcomes = process_silver_decision_payloads(
+                    state,
+                    [payload for _, payload, _ in valid],
+                    metrics=PROCESSOR_METRICS,
                 )
-                if len(decision) > payload_max_bytes:
-                    raise common.DeterministicProcessingError(
-                        f"curation decision is {len(decision)} bytes; limit is {payload_max_bytes}"
-                    )
-            except ValueError as exc:
-                span.record_exception(exc)
-                reason = type(exc).__name__
-                failure_writer.record(stage="curate", message=msg, reason=reason)
-                PROCESSOR_METRICS.record_failure(stage="curate", reason=reason)
-                return None
             except Exception as exc:
-                span.record_exception(exc)
                 PROCESSOR_METRICS.record_failure(stage="curate", reason=type(exc).__name__)
-                # Do not let Bytewax snapshot past transient, model, state, or
-                # unexpected deterministic failures without a durable result.
+                # Stateless calls may finish out of order, but no Bytewax
+                # output or source frontier advances after a transient model,
+                # state, or unexpected failure.
                 raise
-            key = getattr(msg, "key", None) or b""
-            decision_message = KafkaSinkMessage(key=key, value=decision)
-            curated_message = KafkaSinkMessage(key=key, value=decision) if trainable else None
-            retry_payload = extraction_retry_payload(silver, common.gold_loads(decision))
-            retry_message = (
-                KafkaSinkMessage(key=key, value=retry_payload)
-                if retry_payload is not None
-                else None
-            )
-            return decision_message, curated_message, retry_message
 
-    mapped = op.map("curate_run", inp, _step)
-    filtered = op.filter("curate_drop_none", mapped, lambda m: m is not None)
-    decisions = op.map("curate_decision_message", filtered, lambda pair: pair[0])
+            for (msg, _payload, silver), outcome in zip(valid, outcomes, strict=True):
+                with tracer.start_as_current_span("curate.process") as span:
+                    if outcome.error is not None:
+                        span.record_exception(outcome.error)
+                        reason = type(outcome.error).__name__
+                        failure_writer.record(stage="curate", message=msg, reason=reason)
+                        PROCESSOR_METRICS.record_failure(stage="curate", reason=reason)
+                        continue
+                    assert outcome.value is not None
+                    decision, trainable = outcome.value
+                    if len(decision) > payload_max_bytes:
+                        deterministic_error = common.DeterministicProcessingError(
+                            f"curation decision is {len(decision)} bytes; "
+                            f"limit is {payload_max_bytes}"
+                        )
+                        span.record_exception(deterministic_error)
+                        reason = type(deterministic_error).__name__
+                        PROCESSOR_METRICS.record_failure(stage="curate", reason=reason)
+                        # Preserve the former one-by-one failure contract: an
+                        # oversized durable decision must stop the frontier,
+                        # not be converted into a record-local drop.
+                        raise deterministic_error
+                    key = getattr(msg, "key", None) or b""
+                    decision_message = KafkaSinkMessage(key=key, value=decision)
+                    curated_message = (
+                        KafkaSinkMessage(key=key, value=decision) if trainable else None
+                    )
+                    retry_payload = extraction_retry_payload(
+                        silver,
+                        common.gold_loads(decision),
+                    )
+                    retry_message = (
+                        KafkaSinkMessage(key=key, value=retry_payload)
+                        if retry_payload is not None
+                        else None
+                    )
+                    emitted.append((decision_message, curated_message, retry_message))
+        return emitted
+
+    @operator  # type: ignore[untyped-decorator]
+    def _curate_run(step_id: str, up: Any) -> Any:
+        # ``map(\"curate_run\", ...)`` previously expanded to this exact
+        # recovery-visible core step ID. Keep that topology while replacing
+        # only the stateless mapper callback with its batch-aware equivalent.
+        return op.flat_map_batch("flat_map_batch", up, _batch_step)
+
+    mapped: Any = _curate_run("curate_run", inp)
+    # Retain the former stateless filter step and its core step IDs. The batch
+    # callback now omits record-local failures itself, so every emitted tuple
+    # satisfies the predicate.
+    filtered: Any = op.filter("curate_drop_none", mapped, lambda _pair: True)
+    decisions: Any = op.map("curate_decision_message", filtered, lambda pair: pair[0])
     decision_sink = KafkaSink(
         brokers=cfg.redpanda_brokers.split(","),
         topic=decision_topic,
         add_config=common.kafka_producer_config(),
     )
     op.output("curate_decision_sink", decisions, decision_sink)
-    accepted_pairs = op.filter("curate_trainable_only", filtered, lambda pair: pair[1] is not None)
-    accepted = op.map("curate_accepted_message", accepted_pairs, lambda pair: pair[1])
+    accepted_pairs: Any = op.filter(
+        "curate_trainable_only", filtered, lambda pair: pair[1] is not None
+    )
+    accepted: Any = op.map("curate_accepted_message", accepted_pairs, lambda pair: pair[1])
     curated_sink = KafkaSink(
         brokers=cfg.redpanda_brokers.split(","),
         topic=curated_topic,
         add_config=common.kafka_producer_config(),
     )
     op.output("curate_sink", accepted, curated_sink)
-    retry_pairs = op.filter("curate_retry_only", filtered, lambda pair: pair[2] is not None)
-    retries = op.map("curate_retry_message", retry_pairs, lambda pair: pair[2])
+    retry_pairs: Any = op.filter("curate_retry_only", filtered, lambda pair: pair[2] is not None)
+    retries: Any = op.map("curate_retry_message", retry_pairs, lambda pair: pair[2])
     retry_sink = KafkaSink(
         brokers=cfg.redpanda_brokers.split(","),
         topic=retry_topic,

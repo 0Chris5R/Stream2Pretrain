@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -200,6 +201,11 @@ def normalize_spec(
     ]
     node_types = {node.id: node.type for node in graph.nodes}
     derivation_order = _derivation_order(task, node_types)
+    required_relations_config = {
+        "relations": [
+            edge.model_dump(mode="json") for edge in task.hidden_targets.required_relations
+        ]
+    }
     predicates: list[VerifierPredicate] = []
     for raw_predicate in spec.predicates:
         predicate = raw_predicate
@@ -257,7 +263,13 @@ def normalize_spec(
         elif predicate.type == "required_relations":
             if not task.hidden_targets.required_relations:
                 continue
-            predicate = predicate.model_copy(update={"target": None, "targets": []})
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": [],
+                    "config": required_relations_config,
+                }
+            )
         elif predicate.type == "method_partial_order":
             if not method_order:
                 continue
@@ -362,6 +374,16 @@ def normalize_spec(
                     "config": config,
                 }
             )
+        elif predicate.type == "forbidden_faults":
+            if not task.hidden_targets.forbidden_faults:
+                continue
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": list(task.hidden_targets.forbidden_faults),
+                    "config": {},
+                }
+            )
         elif predicate.type == "configuration_constraints":
             predicate = predicate.model_copy(update={"target": None, "targets": []})
 
@@ -441,6 +463,7 @@ def normalize_spec(
             type="required_relations",
             weight=0.0,
             required=True,
+            config=required_relations_config,
         )
         if method_order:
             baseline["method_partial_order"] = VerifierPredicate(
@@ -475,6 +498,14 @@ def normalize_spec(
             required=True,
             config={"forbidden": task.hidden_targets.forbidden_faults},
         )
+    if task.hidden_targets.forbidden_faults:
+        baseline["forbidden_faults"] = VerifierPredicate(
+            id="hard:forbidden_faults",
+            type="forbidden_faults",
+            targets=task.hidden_targets.forbidden_faults,
+            weight=0.0,
+            required=True,
+        )
     if task.hidden_targets.configuration_constraints:
         baseline["configuration_constraints"] = VerifierPredicate(
             id="hard:configuration_constraints",
@@ -506,6 +537,21 @@ def normalize_spec(
                 tolerance=_numeric_tolerance(expected),
                 weight=1.0,
                 required=True,
+            )
+        )
+    discrete_targets = {
+        key: expected
+        for key, expected in expected_values.items()
+        if isinstance(expected, str) and task.family != "derivation_completion"
+    }
+    for target, expected in sorted(discrete_targets.items()):
+        predicates.append(
+            VerifierPredicate(
+                id=f"hard:expected:{target}",
+                type="configuration_constraints",
+                weight=1.0,
+                required=True,
+                config={"constraints": {"required_values": {target: expected}}},
             )
         )
     if task.family == "derivation_completion":
@@ -577,6 +623,7 @@ def normalize_spec(
             "required_nodes",
             "evidence_coverage",
             "fault_identification",
+            "forbidden_faults",
             "configuration_constraints",
             "report_manifest_consistency",
             "manifest_required",
@@ -817,10 +864,19 @@ def _evaluate_predicate(
         passed = targets <= submitted and not (forbidden & submitted) and not (submitted - targets)
         score = len(targets & submitted) / len(targets | submitted) if targets | submitted else 0.0
         details = f"fault overlap {sorted(targets & submitted)}"
+    elif predicate.type == "forbidden_faults":
+        forbidden = set(predicate.targets)
+        submitted = set(manifest.faults)
+        overlap = forbidden & submitted
+        passed = not overlap
+        score = float(passed)
+        details = f"forbidden fault overlap: {sorted(overlap)}"
     elif predicate.type == "required_relations":
         required_relations = {
-            (edge.source, edge.relation, edge.target)
-            for edge in task.hidden_targets.required_relations
+            (str(edge["source"]), str(edge["relation"]), str(edge["target"]))
+            for edge in predicate.config.get("relations", [])
+            if isinstance(edge, dict)
+            and all(key in edge for key in ("source", "relation", "target"))
         }
         submitted_relations = {
             (edge.source, edge.relation, edge.target) for edge in manifest.relations
@@ -893,6 +949,12 @@ def _scientific_report_consistency(
             and not _symbolic_value_appears(report, expected)
         ):
             failures.append(f"symbolic target {target} is absent from the report")
+        elif (
+            isinstance(expected, str)
+            and task.family != "derivation_completion"
+            and expected.casefold() not in report.casefold()
+        ):
+            failures.append(f"discrete target {target} is absent from the report")
 
     required_values = task.hidden_targets.configuration_constraints.get("required_values", {})
     if isinstance(required_values, dict):
@@ -993,7 +1055,7 @@ def _configuration_constraints(
     return all(checks), score, f"{sum(checks)}/{len(checks)} configuration checks passed"
 
 
-def _derivation_order(task: TaskSpec, node_types: dict[str, str]) -> list[list[str]]:
+def _derivation_order(task: TaskSpec, node_types: Mapping[str, str]) -> list[list[str]]:
     pairs: list[list[str]] = []
     for edge in task.hidden_targets.required_relations:
         if node_types.get(edge.source) != "equation" or node_types.get(edge.target) != "equation":

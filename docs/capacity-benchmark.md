@@ -76,14 +76,76 @@ stateless Pods and gives the curator six independent requests per quality
 family. FineWeb remains bounded at three Pods because the live measurements
 identify FinePDFs, not the comparison classifier, as the saturated path.
 
+The later live-source sample changed the capacity denominator materially. The
+Hugging Face poller emitted about 85 to 93 unique immutable README revisions
+per ten-minute pass, or about 510 to 558 per hour. Combined with the earlier
+measured arXiv normalization rate of about 120 per hour, simultaneous live
+arrival is about 630 to 678 documents per hour. The curator completed about
+144 decisions per hour while `docs.normalized` held about 27,000 records.
+These are observed rates, not a synthetic benchmark.
+
+The deterministic source-quality, language, minimum-body, card-structure,
+C4/Gopher, licence, extraction, PII, and near-duplicate gates cannot safely
+skip model inference under the current audit contract. A durable rejected
+decision still contains every applicable per-segment FinePDFs, FineWeb-Edu,
+and KenLM result and revision. Skipping those calls would change the durable
+output even when the final route happened to remain quarantine. Exact-payload
+replay already avoids inference through the decision cache.
+
+The next optimization therefore removes a synchronization inefficiency rather
+than a classifier. The Kafka connector exposes bounded twelve-document runtime
+batches to Bytewax. With the unchanged two-item classifier request size, even
+twelve one-segment cards produce six independent requests. PII sanitization
+and pinned stateless model calls are prepared across those documents, filling
+the six ready FinePDFs endpoints and
+the independent FineWeb/KenLM lanes. `curate_one` then finalizes each record in
+the original order. Decision-cache lookup and writes, LSH observations,
+metrics, Kafka outputs, thresholds, routes, and revisions remain serial and
+unchanged. Bytewax uses `flat_map_batch`, not a collecting/window operator, so
+the existing flow and recovery identity acquire no new operator state. A
+compound wrapper deliberately retains the former recovery-visible
+`curate_run.flat_map_batch` core step, and the former stateless
+`curate_drop_none` topology also remains present. The source, three sinks,
+flow ID, and recovery name therefore keep their exact existing identifiers.
+
+The batch callback returns outputs only after every item in that runtime batch
+has finalized. If a transient exception interrupts a later item, Bytewax gets
+no returned iterable and cannot advance the source frontier past an un-emitted
+earlier item. The already existing decision cache is committed before output;
+on at-least-once replay it returns the exact earlier bytes without a second LSH
+mutation. Record-local `ValueError` outcomes are still omitted individually,
+as they were by the former one-by-one callback.
+
+The former 150-decision/hour provisional gate is now obsolete. With the
+already documented 1.25 capacity factor, the current 678/hour observed upper
+arrival implies a sustained gate of 848 durable decisions/hour after rounding
+up. At exactly 678/hour the worker only keeps pace and never drains the
+existing backlog. At 848/hour, a 27,000-record backlog would take about 159
+hours to drain while the same live load continues. Replace these rates when a
+new clean weekday p95 measurement exists.
+
+Resource expansion remains measurement-driven after the micro-batch rollout.
+Let `T` be its sustained durable decisions/hour and `s` the measured mean
+applicable segments/document. If `T < 848`, the remaining capacity multiplier
+is `848 / T`. Using the observed p95 inference times and the unchanged
+two-item request batch, conservative total quality-Pod counts are
+`ceil(848 * s * 27.9 / (3600 * 2))` for FinePDFs and
+`ceil(848 * s * 12.0 / (3600 * 2))` for FineWeb. The required `s` is currently
+`needs-measurement`; do not guess it. Each additional quality Pod currently
+requests 1 vCPU and 1 GiB RAM and is limited to 2 vCPU and 3 GiB RAM. Add that
+allocatable node capacity before raising KEDA maxima. If model queues are low
+but the gate still misses, measure the single state owner's PII/dedup CPU and
+RSS, then increase its CPU/RAM rather than removing a stage or adding an unsafe
+second state owner.
+
 Do not call the curator fixed after the distribution gate alone. Sustain at
-least 150 durable decisions per hour for six hours with no growing
+least 848 durable decisions per hour for six hours with shrinking
 `docs.normalized` lag, no Bytewax recovery-frontier rollback, no skipped model
 signal, and no new processing-failure object. After enough weekday evidence
-exists, replace the provisional target with at least 1.25 times the measured
-weekday p95 normalized arrival rate. If the gate misses while model queue time
-or CPU is saturated, increase stateless model replicas or worker CPU/RAM. Do
-not remove processing stages.
+exists, replace this target with at least 1.25 times the measured weekday p95
+normalized arrival rate. If the gate misses while model queue time or CPU is
+saturated, increase stateless model replicas or worker CPU/RAM. Do not remove
+processing stages.
 
 The same diagnosis found one CoreDNS Pod and an actual 3.1-second DNS timeout
 during a MinIO multipart operation. The infrastructure gate therefore requires

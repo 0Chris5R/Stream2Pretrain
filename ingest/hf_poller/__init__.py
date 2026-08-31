@@ -1,1 +1,1 @@
-"""Hugging Face exact-version model and dataset card poller."""
+"""Hugging Face durable README-blob change feed."""

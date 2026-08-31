@@ -91,8 +91,15 @@ bounded retry rather than accepting a partial paper.
 
 ### 2.2 Hugging Face model and dataset cards
 
-Only the root README at an exact API commit SHA is fetched. The Markdown
-projection removes front matter, fenced code, multi-line HTML comments, HTML
+Only the root README at an exact API commit SHA is fetched. The list API is
+followed through `Link: rel=next` until the previous durable `lastModified`
+watermark is crossed; repository id and commit SHA make timestamp ties
+deterministic. The watermark advances only after the traversal succeeds, and
+mid-scan progress resumes after failure. README Git-blob identity, retained
+per repository without count truncation, defines corpus revisions: a weights
+or data commit with unchanged README bytes emits nothing. The exact repository
+commit and README content SHA-256 remain provenance. The Markdown projection
+removes front matter, fenced code, multi-line HTML comments, HTML
 tags, link destinations, image destinations, and list markers. Link text is
 kept. Headings define sections, the first heading supplies a schema-bounded
 title, a duplicate first title is not emitted twice, and unfilled sections are
