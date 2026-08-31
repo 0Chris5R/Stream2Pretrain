@@ -327,9 +327,7 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
 
 
 def test_shadow_image_keeps_nltk_data_out_of_the_build_users_home() -> None:
-    dockerfile = (ROOT / "processor" / "Dockerfile.model-service.app").read_text(
-        encoding="utf-8"
-    )
+    dockerfile = (ROOT / "processor" / "Dockerfile.model-service.app").read_text(encoding="utf-8")
 
     assert "NLTK_DATA=/opt/models/nltk_data" in dockerfile
     assert "nltk.download('stopwords', download_dir='/opt/models/nltk_data'" in dockerfile
