@@ -182,7 +182,11 @@ spec:
             - name: S2P_CURATOR_MAX_EXTRACTION_RETRIES
               value: "2"
             - name: S2P_CURATOR_CLASSIFIER_CONCURRENCY
-              value: "6"
+              # Six independent requests per quality family let the primary
+              # FinePDFs service expose enough demand for its six-Pod KEDA
+              # ceiling. The family-specific executors preserve exact result
+              # ordering and classifier parity.
+              value: "12"
             - name: S2P_CURATOR_CLASSIFIER_BATCH_SIZE
               value: {{ .Values.processor.curate.classifierBatchSize | int | quote }}
           startupProbe:

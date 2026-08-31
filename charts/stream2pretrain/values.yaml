@@ -332,7 +332,11 @@ processor:
         image: stream2pretrain/processor-quality-model
         autoscaling:
           minReplicas: 2
-          maxReplicas: 3
+          # The measured three-Pod ceiling processed only about half of the
+          # live normalized arrival rate. FinePDFs is stateless, so let KEDA
+          # use the remaining cluster capacity without changing any score or
+          # curation gate.
+          maxReplicas: 6
         resources:
           requests: {cpu: 1, memory: 1Gi}
           limits: {cpu: 2, memory: 3Gi}

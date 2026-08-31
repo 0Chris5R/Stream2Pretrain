@@ -79,18 +79,26 @@ def main() -> None:
             raise RuntimeError("one model backend returned a different classifier revision")
         return backend
 
+    # Keep enough independent connections per ready backend for the
+    # distribution check to remain meaningful when KEDA scales beyond the
+    # original three-Pod profile.
+    distribution_requests = max(args.distribution_requests, args.expected_backends * 20)
     counts: Counter[str] = Counter()
-    with ThreadPoolExecutor(max_workers=min(args.concurrency, args.distribution_requests)) as pool:
-        counts.update(pool.map(probe, range(args.distribution_requests)))
+    with ThreadPoolExecutor(max_workers=min(args.concurrency, distribution_requests)) as pool:
+        counts.update(pool.map(probe, range(distribution_requests)))
 
     if len(counts) < args.expected_backends:
         raise RuntimeError(
             f"only {len(counts)} of {args.expected_backends} ready backends received traffic: "
             f"{dict(counts)}"
         )
-    minimum_share = min(counts.values()) / args.distribution_requests
-    if args.expected_backends > 1 and minimum_share < 0.10:
-        raise RuntimeError(f"one model backend received less than 10% of requests: {dict(counts)}")
+    minimum_share = min(counts.values()) / distribution_requests
+    minimum_required_share = min(0.10, 0.5 / args.expected_backends)
+    if args.expected_backends > 1 and minimum_share < minimum_required_share:
+        raise RuntimeError(
+            "one model backend received less than half its uniform share "
+            f"({minimum_required_share:.4f}): {dict(counts)}"
+        )
 
     texts = [
         "A controlled scientific explanation with one result.",
@@ -136,9 +144,10 @@ def main() -> None:
                 "backend_requests": dict(sorted(counts.items())),
                 "batch_parity_backend": batch_backend,
                 "concurrency": args.concurrency,
-                "distribution_requests": args.distribution_requests,
+                "distribution_requests": distribution_requests,
                 "expected_backends": args.expected_backends,
                 "minimum_backend_share": minimum_share,
+                "minimum_required_backend_share": minimum_required_share,
                 "model_family": args.model_family,
                 "ordered_batch_matches_singletons": True,
                 "revision": expected_revision,

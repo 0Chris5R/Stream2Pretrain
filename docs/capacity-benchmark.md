@@ -46,13 +46,18 @@ model family while the other ready model deployments sit idle. Results remain
 joined by stable segment ID before the unchanged policy runs.
 
 The classifier rollout gate runs inside the curator Pod against each quality
-Service. It requires at least two ready backends, observes 60 fresh inference
-requests at a bounded concurrency of 12, requires every ready backend to answer
-and no backend to receive less than ten percent of requests, and then proves
+Service. It requires at least two ready backends, observes at least 20 fresh
+inference requests per ready backend at a bounded concurrency of 12, requires
+every ready backend to answer and receive at least half of its uniform traffic
+share, and then proves
 that a two-item batch has byte-for-byte equal JSON results, order, and revisions
 to two singleton requests. Prometheus
 also records request, batch-size, queue-time, inference-time, active-request,
-model-family, and profile labels for each backend ServiceMonitor.
+model-family, and profile labels for each backend ServiceMonitor. The course
+cluster now permits FinePDFs to scale from two to six stateless Pods and gives
+the curator six independent requests per quality family. FineWeb remains
+bounded at three Pods because the live measurements identify FinePDFs, not the
+comparison classifier, as the saturated path.
 
 Do not call the curator fixed after the distribution gate alone. Sustain at
 least 315 durable decisions per hour for six hours with no growing
