@@ -161,6 +161,8 @@ def test_catalog_bootstrap_precedes_application_rollout() -> None:
     assert '"helm.sh/hook-weight": "-10"' in template
     assert "python -m processor.polaris_bootstrap" in template
     assert "--apply --register-missing --register-only" in template
+    assert "s2p-entrypoint s2p-object-lifecycle --apply" in template
+    assert "S2P_TRANSIENT_OBJECT_RETENTION_DAYS" in template
     assert "activeDeadlineSeconds: 300" in template
     assert "COPY processor" in dockerfile
 

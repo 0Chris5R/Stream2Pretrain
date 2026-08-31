@@ -235,6 +235,7 @@ RUN for command in \
       s2p-curator-model-service \
       s2p-iceberg-writer \
       s2p-iceberg-maintenance \
+      s2p-object-lifecycle \
       s2p-duckdb-api \
       s2p-local-sources-api \
       s2p-mixture-controller \
@@ -248,7 +249,7 @@ RUN for command in \
 # Import every module reached by a container command while the image is still
 # being built. This catches omitted workspace source or runtime dependencies
 # before Helm can roll a healthy Pod onto a broken image.
-RUN python -c "from processor.curate import main as curate; from processor.model_service import main as model_service; from processor.duckdb_api import main as duckdb; from processor.fetcher import main as fetcher; from processor.iceberg_maintenance import main as maintenance; from processor.iceberg_writer import main as writer; from processor.local_sources_api import main as sources; from processor.mixture_controller.controller import main as mixture; from processor.foundry.api import main as foundry_api; from processor.foundry.export_replay import main as replay; from processor.foundry.oracle_build import main as oracle; from processor.foundry.worker import main as foundry; assert all(callable(value) for value in (curate, model_service, duckdb, fetcher, maintenance, writer, sources, mixture, foundry_api, replay, oracle, foundry))"
+RUN python -c "from processor.curate import main as curate; from processor.model_service import main as model_service; from processor.duckdb_api import main as duckdb; from processor.fetcher import main as fetcher; from processor.iceberg_maintenance import main as maintenance; from processor.object_lifecycle import main as object_lifecycle; from processor.iceberg_writer import main as writer; from processor.local_sources_api import main as sources; from processor.mixture_controller.controller import main as mixture; from processor.foundry.api import main as foundry_api; from processor.foundry.export_replay import main as replay; from processor.foundry.oracle_build import main as oracle; from processor.foundry.worker import main as foundry; assert all(callable(value) for value in (curate, model_service, duckdb, fetcher, maintenance, object_lifecycle, writer, sources, mixture, foundry_api, replay, oracle, foundry))"
 
 WORKDIR /app
 USER nonroot

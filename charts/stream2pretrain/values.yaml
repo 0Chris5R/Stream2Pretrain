@@ -69,6 +69,9 @@ redpanda:
 minio:
   endpoint: http://minio.minio.svc.cluster.local:9000
   region: us-east-1
+  # Source bodies and structured scientific artifacts are transient audit and
+  # replay material. Gold corpus rows, Foundry packages, and state are exempt.
+  transientRetentionDays: 1
   buckets:
     bronze: s2p-bronze
     silver: s2p-silver
