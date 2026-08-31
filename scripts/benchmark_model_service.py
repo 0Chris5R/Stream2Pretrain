@@ -82,19 +82,34 @@ def main() -> None:
     # Keep enough independent connections per ready backend for the
     # distribution check to remain meaningful when KEDA scales beyond the
     # original three-Pod profile.
-    distribution_requests = max(args.distribution_requests, args.expected_backends * 20)
     counts: Counter[str] = Counter()
-    with ThreadPoolExecutor(max_workers=min(args.concurrency, distribution_requests)) as pool:
-        counts.update(pool.map(probe, range(distribution_requests)))
+    distribution_requests = 0
+    minimum_share = 0.0
+    minimum_required_share = 1.0
+    for round_index in range(3):
+        # KEDA can add one endpoint between reading readyReplicas and starting
+        # this gate. Accumulate another full sample when that new backend has
+        # not yet had time to receive a representative share.
+        observed_backends = max(args.expected_backends, len(counts))
+        round_requests = max(args.distribution_requests, observed_backends * 20)
+        start_index = distribution_requests
+        with ThreadPoolExecutor(max_workers=min(args.concurrency, round_requests)) as pool:
+            counts.update(pool.map(probe, range(start_index, start_index + round_requests)))
+        distribution_requests += round_requests
 
-    if len(counts) < args.expected_backends:
-        raise RuntimeError(
-            f"only {len(counts)} of {args.expected_backends} ready backends received traffic: "
-            f"{dict(counts)}"
-        )
-    minimum_share = min(counts.values()) / distribution_requests
-    minimum_required_share = min(0.10, 0.5 / args.expected_backends)
-    if args.expected_backends > 1 and minimum_share < minimum_required_share:
+        if len(counts) < args.expected_backends:
+            if round_index < 2:
+                continue
+            raise RuntimeError(
+                f"only {len(counts)} of {args.expected_backends} ready backends received traffic: "
+                f"{dict(counts)}"
+            )
+        observed_backends = len(counts)
+        minimum_share = min(counts.values()) / distribution_requests
+        minimum_required_share = min(0.10, 0.5 / observed_backends)
+        if observed_backends == 1 or minimum_share >= minimum_required_share:
+            break
+    else:
         raise RuntimeError(
             "one model backend received less than half its uniform share "
             f"({minimum_required_share:.4f}): {dict(counts)}"
@@ -146,6 +161,7 @@ def main() -> None:
                 "concurrency": args.concurrency,
                 "distribution_requests": distribution_requests,
                 "expected_backends": args.expected_backends,
+                "observed_backends": len(counts),
                 "minimum_backend_share": minimum_share,
                 "minimum_required_backend_share": minimum_required_share,
                 "model_family": args.model_family,
