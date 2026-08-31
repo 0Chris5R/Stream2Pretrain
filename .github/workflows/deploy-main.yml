@@ -3228,6 +3228,14 @@ jobs:
                                   .livenessProbe,
                                   .readinessProbe
                                 )
+                              # The one-record smoke lane uses the identical
+                              # curator and keeps the production burst limits,
+                              # but it must not reserve a second full steady-
+                              # state curator on this three-node cluster.
+                              | .resources.requests = {
+                                  cpu: "100m",
+                                  memory: "1Gi"
+                                }
                               | .env = (
                                   [
                                     .env[]
@@ -3279,6 +3287,51 @@ jobs:
               ' \
             | kubectl apply -f -
 
+          production_curator_limits="$(
+            kubectl -n stream2pretrain get \
+              statefulset/stream2pretrain-processor-curate -o json \
+              | jq -cS '
+                  first(
+                    .spec.template.spec.containers[]
+                    | select(.name == "curate")
+                    | .resources.limits
+                  )
+                '
+          )"
+          canary_curator_limits="$(
+            kubectl -n stream2pretrain get "job/$curator_canary_job" -o json \
+              | jq -cS '
+                  first(
+                    .spec.template.spec.containers[]
+                    | select(.name == "curate-canary")
+                    | .resources.limits
+                  )
+                '
+          )"
+          if [[ "$canary_curator_limits" != "$production_curator_limits" ]]; then
+            echo "Curator canary did not preserve production resource limits." >&2
+            exit 1
+          fi
+          kubectl -n stream2pretrain get "job/$curator_canary_job" -o json \
+            | jq -e '
+                first(
+                  .spec.template.spec.containers[]
+                  | select(.name == "curate-canary")
+                  | .resources.requests
+                )
+                == {cpu: "100m", memory: "1Gi"}
+              ' >/dev/null
+
+          if ! kubectl -n stream2pretrain wait \
+            --for=condition=PodScheduled \
+            "pod" \
+            -l "job-name=$curator_canary_job" \
+            --timeout=30s; then
+            kubectl -n stream2pretrain describe pod \
+              -l "job-name=$curator_canary_job" || true
+            exit 1
+          fi
+
           # The record-level timeout must measure curation, not a cold canary
           # Pod waiting for model services and initialising Presidio. The live
           # curator took longer than that startup allowance after the measured
@@ -3289,6 +3342,8 @@ jobs:
             -l "job-name=$curator_canary_job" \
             --timeout=300s; then
             kubectl -n stream2pretrain describe "job/$curator_canary_job" || true
+            kubectl -n stream2pretrain describe pod \
+              -l "job-name=$curator_canary_job" || true
             kubectl -n stream2pretrain logs "job/$curator_canary_job" \
               --all-containers --prefix || true
             exit 1
@@ -3297,6 +3352,8 @@ jobs:
             deployment/stream2pretrain-duckdb -- \
             python - < scripts/cluster_smoke.py; then
             kubectl -n stream2pretrain describe "job/$curator_canary_job" || true
+            kubectl -n stream2pretrain describe pod \
+              -l "job-name=$curator_canary_job" || true
             kubectl -n stream2pretrain logs "job/$curator_canary_job" \
               --all-containers --prefix || true
             exit 1

@@ -275,6 +275,24 @@ def test_scaled_zero_curator_cutover_uses_a_non_processing_pvc_helper() -> None:
     assert 'delete "pod/$curator_migration_pod" --wait=true' in cutover
 
 
+def test_curator_canary_keeps_limits_but_uses_a_measured_scheduler_request() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
+    start = workflow.index("# Clone the exact deployed curator Pod spec")
+    end = workflow.index('finish_phase "Core canary"')
+    canary = workflow[start:end]
+
+    assert "| .resources.requests = {" in canary
+    assert 'cpu: "100m"' in canary
+    assert 'memory: "1Gi"' in canary
+    assert "| .resources.limits =" not in canary
+    assert "canary_curator_limits" in canary
+    assert "production_curator_limits" in canary
+    assert "--for=condition=PodScheduled" in canary
+    assert "--timeout=30s" in canary
+    assert "describe pod" in canary
+    assert '-l "job-name=$curator_canary_job"' in canary
+
+
 def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 
