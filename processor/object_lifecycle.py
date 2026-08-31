@@ -47,6 +47,24 @@ def lifecycle_rule(days: int) -> dict[str, Any]:
     }
 
 
+def _is_global_filter(rule: dict[str, Any]) -> bool:
+    """Accept the equivalent global-filter shapes returned by S3 implementations."""
+    if "Filter" in rule:
+        filter_value = rule["Filter"]
+        return filter_value in ({}, {"Prefix": ""})
+    return rule.get("Prefix", "") == ""
+
+
+def _matches_rule(rule: dict[str, Any], *, days: int) -> bool:
+    return (
+        rule.get("ID") == RULE_ID
+        and rule.get("Status") == "Enabled"
+        and rule.get("Expiration", {}).get("Days") == days
+        and rule.get("AbortIncompleteMultipartUpload", {}).get("DaysAfterInitiation") == days
+        and _is_global_filter(rule)
+    )
+
+
 def _existing_rules(client: Any, bucket: str) -> list[dict[str, Any]]:
     try:
         response = client.get_bucket_lifecycle_configuration(Bucket=bucket)
@@ -66,7 +84,8 @@ def desired_rules(existing: list[dict[str, Any]], *, days: int) -> list[dict[str
 def configure_bucket(client: Any, bucket: str, *, days: int, apply: bool) -> dict[str, Any]:
     existing = _existing_rules(client, bucket)
     desired = desired_rules(existing, days=days)
-    changed = existing != desired
+    managed = [rule for rule in existing if rule.get("ID") == RULE_ID]
+    changed = len(managed) != 1 or not _matches_rule(managed[0], days=days)
     if apply and changed:
         client.put_bucket_lifecycle_configuration(
             Bucket=bucket,
@@ -75,8 +94,11 @@ def configure_bucket(client: Any, bucket: str, *, days: int, apply: bool) -> dic
     if apply:
         installed = _existing_rules(client, bucket)
         matches = [rule for rule in installed if rule.get("ID") == RULE_ID]
-        if matches != [lifecycle_rule(days)]:
-            raise RuntimeError(f"Lifecycle verification failed for {bucket}")
+        if len(matches) != 1 or not _matches_rule(matches[0], days=days):
+            observed = json.dumps(matches, sort_keys=True, default=str)
+            raise RuntimeError(
+                f"Lifecycle verification failed for {bucket}; observed managed rules: {observed}"
+            )
     return {"bucket": bucket, "changed": changed, "retention_days": days}
 
 

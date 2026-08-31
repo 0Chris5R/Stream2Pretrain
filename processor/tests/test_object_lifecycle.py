@@ -61,3 +61,43 @@ def test_configure_bucket_is_idempotent() -> None:
 
     assert report["changed"] is False
     assert client.puts == []
+
+
+def test_configure_bucket_accepts_minio_normalized_global_filter() -> None:
+    normalized = lifecycle_rule(1)
+    normalized["Filter"] = {}
+    client = FakeS3([normalized])
+
+    report = configure_bucket(client, "s2p-bronze", days=1, apply=True)
+
+    assert report["changed"] is False
+    assert client.puts == []
+
+
+def test_configure_bucket_accepts_legacy_empty_prefix() -> None:
+    normalized = lifecycle_rule(1)
+    normalized.pop("Filter")
+    normalized["Prefix"] = ""
+    client = FakeS3([normalized])
+
+    report = configure_bucket(client, "s2p-bronze", days=1, apply=True)
+
+    assert report["changed"] is False
+    assert client.puts == []
+
+
+def test_configure_bucket_rejects_non_global_filter_after_write() -> None:
+    class RewritingS3(FakeS3):
+        def put_bucket_lifecycle_configuration(self, **kwargs: Any) -> None:
+            super().put_bucket_lifecycle_configuration(**kwargs)
+            assert self.rules is not None
+            self.rules[0]["Filter"] = {"Prefix": "unexpected/"}
+
+    client = RewritingS3()
+
+    try:
+        configure_bucket(client, "s2p-bronze", days=1, apply=True)
+    except RuntimeError as exc:
+        assert "unexpected/" in str(exc)
+    else:
+        raise AssertionError("non-global lifecycle must fail verification")
