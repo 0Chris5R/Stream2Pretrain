@@ -9,7 +9,9 @@ from processor.common import ProcessorConfig
 from processor.mixture_controller.controller import (
     _ARXIV_DISCOVERY_SOURCE_ORDER,
     _BUILTIN_SOURCES,
+    _SOURCE_TEMPLATE_HASH_ANNOTATION,
     MixtureController,
+    _cleanup_obsolete_active_source_jobs,
     _cron_schedule,
     _reconcile_source_schedule,
     _source_egress_class,
@@ -110,7 +112,11 @@ def test_source_schedule_replacement_clears_obsolete_pod_fields_and_keeps_s3_sta
         ),
     )
     obsolete = client.V1CronJob(
-        metadata=client.V1ObjectMeta(name="s2p-feed-rss-arxiv-cs-cl", resource_version="42"),
+        metadata=client.V1ObjectMeta(
+            name="s2p-feed-rss-arxiv-cs-cl",
+            resource_version="42",
+            uid="cron-uid",
+        ),
         spec=client.V1CronJobSpec(
             schedule="0 */2 * * *",
             job_template=client.V1JobTemplateSpec(
@@ -149,6 +155,7 @@ def test_source_schedule_replacement_clears_obsolete_pod_fields_and_keeps_s3_sta
 
     class FakeBatchApi:
         replaced: client.V1CronJob | None = None
+        cleanup_listed = False
 
         def read_namespaced_cron_job(self, name: str, namespace: str) -> client.V1CronJob:
             assert namespace == "stream2pretrain"
@@ -163,6 +170,11 @@ def test_source_schedule_replacement_clears_obsolete_pod_fields_and_keeps_s3_sta
             assert name == "s2p-feed-rss-arxiv-cs-cl"
             assert namespace == "stream2pretrain"
             self.replaced = body
+
+        def list_namespaced_job(self, namespace: str) -> SimpleNamespace:
+            assert namespace == "stream2pretrain"
+            self.cleanup_listed = True
+            return SimpleNamespace(items=[])
 
     class FakeCoreApi:
         def create_namespaced_config_map(self, namespace: str, body: client.V1ConfigMap) -> None:
@@ -189,7 +201,20 @@ def test_source_schedule_replacement_clears_obsolete_pod_fields_and_keeps_s3_sta
     assert batch_api.replaced is not None
     assert batch_api.replaced.metadata.resource_version == "42"
     assert batch_api.replaced.spec.schedule == "37 */2 * * *"
+    template_hash = batch_api.replaced.metadata.annotations[_SOURCE_TEMPLATE_HASH_ANNOTATION]
+    assert len(template_hash) == 64
+    assert batch_api.cleanup_listed is True
+    assert (
+        batch_api.replaced.spec.job_template.metadata.annotations[_SOURCE_TEMPLATE_HASH_ANNOTATION]
+        == template_hash
+    )
     pod_spec = batch_api.replaced.spec.job_template.spec.template.spec
+    assert (
+        batch_api.replaced.spec.job_template.spec.template.metadata.annotations[
+            _SOURCE_TEMPLATE_HASH_ANNOTATION
+        ]
+        == template_hash
+    )
     assert pod_spec.node_selector is None
     assert pod_spec.affinity is None
     assert [volume.name for volume in pod_spec.volumes] == ["feeds"]
@@ -200,6 +225,105 @@ def test_source_schedule_replacement_clears_obsolete_pod_fields_and_keeps_s3_sta
     assert env["S2P_STATE_BUCKET"] == "state"
     assert env["S2P_STATE_PREFIX"] == "ingest-cursors"
     assert env["S2P_FEED_CONFIG"] == "/etc/s2p/feeds/source.json"
+
+
+def _owned_job(
+    name: str,
+    *,
+    owner_name: str = "s2p-feed-rss-arxiv-cs-cl",
+    owner_uid: str = "cron-uid",
+    active: int = 1,
+    template_hash: str | None = None,
+    completed: bool = False,
+) -> SimpleNamespace:
+    annotations = {_SOURCE_TEMPLATE_HASH_ANNOTATION: template_hash} if template_hash else {}
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=name,
+            annotations=annotations,
+            owner_references=[
+                SimpleNamespace(
+                    api_version="batch/v1",
+                    kind="CronJob",
+                    name=owner_name,
+                    uid=owner_uid,
+                )
+            ],
+        ),
+        status=SimpleNamespace(
+            active=active,
+            completion_time=(datetime(2026, 8, 31, tzinfo=UTC) if completed else None),
+            conditions=([SimpleNamespace(type="Complete", status="True")] if completed else []),
+        ),
+    )
+
+
+class _FakeJobsApi:
+    def __init__(self, jobs: list[SimpleNamespace]) -> None:
+        self.jobs = jobs
+        self.deleted: list[tuple[str, str, str]] = []
+
+    def list_namespaced_job(self, namespace: str) -> SimpleNamespace:
+        return SimpleNamespace(items=self.jobs)
+
+    def delete_namespaced_job(self, name: str, namespace: str, *, propagation_policy: str) -> None:
+        self.deleted.append((name, namespace, propagation_policy))
+
+
+def test_cleanup_deletes_legacy_active_job_but_preserves_completed_history() -> None:
+    api = _FakeJobsApi(
+        [
+            _owned_job("legacy-pending"),
+            _owned_job("stale-pending", template_hash="stale-hash"),
+            _owned_job("legacy-completed", active=1, completed=True),
+        ]
+    )
+
+    _cleanup_obsolete_active_source_jobs(
+        api,
+        namespace="stream2pretrain",
+        cronjob_name="s2p-feed-rss-arxiv-cs-cl",
+        cronjob_uid="cron-uid",
+        desired_template_hash="current-hash",
+    )
+
+    assert api.deleted == [
+        ("legacy-pending", "stream2pretrain", "Background"),
+        ("stale-pending", "stream2pretrain", "Background"),
+    ]
+
+
+def test_cleanup_preserves_matching_active_job() -> None:
+    api = _FakeJobsApi([_owned_job("current", template_hash="current-hash")])
+
+    _cleanup_obsolete_active_source_jobs(
+        api,
+        namespace="stream2pretrain",
+        cronjob_name="s2p-feed-rss-arxiv-cs-cl",
+        cronjob_uid="cron-uid",
+        desired_template_hash="current-hash",
+    )
+
+    assert api.deleted == []
+
+
+def test_cleanup_never_deletes_unrelated_active_jobs() -> None:
+    api = _FakeJobsApi(
+        [
+            _owned_job("other-schedule", owner_name="unrelated-cronjob"),
+            _owned_job("recreated-schedule", owner_uid="replacement-uid"),
+        ]
+    )
+
+    _cleanup_obsolete_active_source_jobs(
+        api,
+        namespace="stream2pretrain",
+        cronjob_name="s2p-feed-rss-arxiv-cs-cl",
+        cronjob_uid="cron-uid",
+        desired_template_hash="current-hash",
+    )
+
+    assert api.deleted == []
 
 
 def test_source_job_runtime_prefers_latest_attempt_and_retains_last_success() -> None:

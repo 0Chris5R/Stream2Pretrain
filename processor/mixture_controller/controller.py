@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import time
@@ -48,6 +49,8 @@ _ARXIV_DISCOVERY_SOURCE_ORDER = (
     "rss-arxiv-cs-cv",
 )
 _ARXIV_DISCOVERY_BASE_PHASE_MINUTES = 13
+_SOURCE_TEMPLATE_HASH_ANNOTATION = "stream2pretrain.io/template-hash"
+_SOURCE_FEED_LABEL = "stream2pretrain.io/source-feed"
 
 
 @dataclass(slots=True)
@@ -344,6 +347,87 @@ def _bind_source_config(
         container.env.append(client.V1EnvVar(name="S2P_FEED_CONFIG", value=config_path))
 
 
+def _source_template_hash(job_template: Any) -> str:
+    """Return a stable identity for the complete desired Job template."""
+    serialized = job_template.to_dict() if hasattr(job_template, "to_dict") else job_template
+    payload = json.dumps(
+        serialized,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _stamp_source_template(job_template: Any, *, source_name: str, template_hash: str) -> None:
+    """Put the desired-template identity on Jobs and Pods created by the CronJob."""
+    from kubernetes import client  # type: ignore[import-untyped]
+
+    if job_template.metadata is None:
+        job_template.metadata = client.V1ObjectMeta()
+    job_template.metadata.labels = dict(job_template.metadata.labels or {})
+    job_template.metadata.labels[_SOURCE_FEED_LABEL] = source_name
+    job_template.metadata.annotations = dict(job_template.metadata.annotations or {})
+    job_template.metadata.annotations[_SOURCE_TEMPLATE_HASH_ANNOTATION] = template_hash
+
+    pod_metadata = job_template.spec.template.metadata
+    if pod_metadata is None:
+        pod_metadata = client.V1ObjectMeta()
+        job_template.spec.template.metadata = pod_metadata
+    pod_metadata.annotations = dict(pod_metadata.annotations or {})
+    pod_metadata.annotations[_SOURCE_TEMPLATE_HASH_ANNOTATION] = template_hash
+
+
+def _cleanup_obsolete_active_source_jobs(
+    batch_api: Any,
+    *,
+    namespace: str,
+    cronjob_name: str,
+    cronjob_uid: str,
+    desired_template_hash: str,
+) -> None:
+    """Delete only active Jobs owned by this CronJob with an obsolete template."""
+    from kubernetes.client import ApiException  # type: ignore[import-untyped]
+
+    if not cronjob_uid:
+        return
+    jobs = batch_api.list_namespaced_job(namespace).items
+    for job in jobs:
+        metadata = getattr(job, "metadata", None)
+        status = getattr(job, "status", None)
+        if metadata is None or status is None or int(getattr(status, "active", 0) or 0) < 1:
+            continue
+        conditions = getattr(status, "conditions", None) or []
+        if getattr(status, "completion_time", None) is not None or any(
+            getattr(condition, "type", "") in {"Complete", "Failed"}
+            and str(getattr(condition, "status", "")).lower() == "true"
+            for condition in conditions
+        ):
+            continue
+        owner_references = getattr(metadata, "owner_references", None) or []
+        owned_by_schedule = any(
+            getattr(owner, "api_version", "") == "batch/v1"
+            and getattr(owner, "kind", "") == "CronJob"
+            and getattr(owner, "name", "") == cronjob_name
+            and str(getattr(owner, "uid", "")) == cronjob_uid
+            for owner in owner_references
+        )
+        if not owned_by_schedule:
+            continue
+        annotations = getattr(metadata, "annotations", None) or {}
+        if annotations.get(_SOURCE_TEMPLATE_HASH_ANNOTATION) == desired_template_hash:
+            continue
+        try:
+            batch_api.delete_namespaced_job(
+                metadata.name,
+                namespace,
+                propagation_policy="Background",
+            )
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+
 def _source_egress_class(source: SourceFeedSpec) -> str:
     """Allow only the audited arXiv discovery endpoints in SourceFeed CRDs."""
     endpoint_host = str(source.endpoint.host or "").lower()
@@ -398,11 +482,18 @@ def _reconcile_source_schedule(source: SourceFeedSpec, *, namespace: str, owner_
         source_name=source.name,
         egress_class=_source_egress_class(source),
     )
+    template_hash = _source_template_hash(job_template)
+    _stamp_source_template(
+        job_template,
+        source_name=source.name,
+        template_hash=template_hash,
+    )
     cron = client.V1CronJob(
         metadata=client.V1ObjectMeta(
             name=schedule_name,
             namespace=namespace,
-            labels={"stream2pretrain.io/source-feed": source.name},
+            labels={_SOURCE_FEED_LABEL: source.name},
+            annotations={_SOURCE_TEMPLATE_HASH_ANNOTATION: template_hash},
             owner_references=owner_references,
         ),
         spec=client.V1CronJobSpec(
@@ -430,6 +521,13 @@ def _reconcile_source_schedule(source: SourceFeedSpec, *, namespace: str, owner_
         # object instead of surviving a strategic-merge patch. Feed cursors
         # remain in MinIO under the unchanged component and SourceFeed names.
         batch_api.replace_namespaced_cron_job(schedule_name, namespace, cron)
+        _cleanup_obsolete_active_source_jobs(
+            batch_api,
+            namespace=namespace,
+            cronjob_name=schedule_name,
+            cronjob_uid=str(existing.metadata.uid or ""),
+            desired_template_hash=template_hash,
+        )
 
 
 def _delete_source_schedule(name: str, *, namespace: str) -> None:
