@@ -7,9 +7,11 @@ import pytest
 
 from processor.common import ProcessorConfig
 from processor.mixture_controller.controller import (
+    _ARXIV_DISCOVERY_SOURCE_ORDER,
     _BUILTIN_SOURCES,
     MixtureController,
     _cron_schedule,
+    _reconcile_source_schedule,
     _source_egress_class,
     _source_job_runtime,
     _sourcefeed_status,
@@ -50,6 +52,154 @@ def test_sourcefeed_intervals_map_to_valid_cron_schedules() -> None:
     assert _cron_schedule(900) == "*/15 * * * *"
     assert _cron_schedule(7200) == "0 */2 * * *"
     assert _cron_schedule(86400) == "0 0 * * *"
+
+
+def test_arxiv_discovery_schedules_are_evenly_staggered() -> None:
+    assert {
+        name: _cron_schedule(7200, source_name=name) for name in _ARXIV_DISCOVERY_SOURCE_ORDER
+    } == {
+        "oai-arxiv-cs": "13 */2 * * *",
+        "rss-arxiv-cs-cl": "37 */2 * * *",
+        "rss-arxiv-cs-lg": "1 1-23/2 * * *",
+        "rss-arxiv-cs-ai": "25 1-23/2 * * *",
+        "rss-arxiv-cs-cv": "49 1-23/2 * * *",
+    }
+
+
+def test_source_schedule_replacement_clears_obsolete_pod_fields_and_keeps_s3_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kubernetes import client
+    from kubernetes.client import ApiException
+
+    base_job_template = client.V1JobTemplateSpec(
+        spec=client.V1JobSpec(
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(labels={"app": "rss"}),
+                spec=client.V1PodSpec(
+                    restart_policy="OnFailure",
+                    containers=[
+                        client.V1Container(
+                            name="rss",
+                            args=["--config", "/etc/s2p/feeds/arxiv.json"],
+                            env=[
+                                client.V1EnvVar(name="S2P_COMPONENT", value="ingest-rss"),
+                                client.V1EnvVar(name="S2P_STATE_BACKEND", value="s3"),
+                                client.V1EnvVar(name="S2P_STATE_BUCKET", value="state"),
+                                client.V1EnvVar(name="S2P_STATE_PREFIX", value="ingest-cursors"),
+                            ],
+                            volume_mounts=[
+                                client.V1VolumeMount(name="feeds", mount_path="/etc/s2p/feeds")
+                            ],
+                        )
+                    ],
+                    volumes=[
+                        client.V1Volume(
+                            name="feeds",
+                            config_map=client.V1ConfigMapVolumeSource(name="base-feeds"),
+                        )
+                    ],
+                ),
+            )
+        )
+    )
+    base = client.V1CronJob(
+        metadata=client.V1ObjectMeta(name="base-rss"),
+        spec=client.V1CronJobSpec(
+            schedule="27 */2 * * *", job_template=base_job_template, suspend=True
+        ),
+    )
+    obsolete = client.V1CronJob(
+        metadata=client.V1ObjectMeta(name="s2p-feed-rss-arxiv-cs-cl", resource_version="42"),
+        spec=client.V1CronJobSpec(
+            schedule="0 */2 * * *",
+            job_template=client.V1JobTemplateSpec(
+                spec=client.V1JobSpec(
+                    template=client.V1PodTemplateSpec(
+                        spec=client.V1PodSpec(
+                            restart_policy="OnFailure",
+                            node_selector={"kubernetes.io/hostname": "obsolete-worker"},
+                            affinity=client.V1Affinity(node_affinity=client.V1NodeAffinity()),
+                            containers=[
+                                client.V1Container(
+                                    name="rss",
+                                    volume_mounts=[
+                                        client.V1VolumeMount(
+                                            name="state", mount_path="/var/lib/s2p-state"
+                                        )
+                                    ],
+                                )
+                            ],
+                            volumes=[
+                                client.V1Volume(
+                                    name="state",
+                                    persistent_volume_claim=(
+                                        client.V1PersistentVolumeClaimVolumeSource(
+                                            claim_name="obsolete-state"
+                                        )
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                )
+            ),
+        ),
+    )
+
+    class FakeBatchApi:
+        replaced: client.V1CronJob | None = None
+
+        def read_namespaced_cron_job(self, name: str, namespace: str) -> client.V1CronJob:
+            assert namespace == "stream2pretrain"
+            return base if name == "base-rss" else obsolete
+
+        def create_namespaced_cron_job(self, namespace: str, body: client.V1CronJob) -> None:
+            raise ApiException(status=409)
+
+        def replace_namespaced_cron_job(
+            self, name: str, namespace: str, body: client.V1CronJob
+        ) -> None:
+            assert name == "s2p-feed-rss-arxiv-cs-cl"
+            assert namespace == "stream2pretrain"
+            self.replaced = body
+
+    class FakeCoreApi:
+        def create_namespaced_config_map(self, namespace: str, body: client.V1ConfigMap) -> None:
+            assert namespace == "stream2pretrain"
+
+    batch_api = FakeBatchApi()
+    monkeypatch.setattr(client, "BatchV1Api", lambda: batch_api)
+    monkeypatch.setattr(client, "CoreV1Api", FakeCoreApi)
+    monkeypatch.setenv("S2P_RSS_CRONJOB", "base-rss")
+
+    source = SourceFeedSpec.model_validate(
+        {
+            "name": "rss-arxiv-cs-cl",
+            "protocol": "rss",
+            "endpoint": "https://rss.arxiv.org/rss/cs.CL",
+            "pollIntervalSeconds": 7200,
+            "rateLimit": {"requestsPerSecond": 1.0, "burst": 4},
+            "licenseDefault": "per-record",
+            "enabled": True,
+        }
+    )
+    _reconcile_source_schedule(source, namespace="stream2pretrain", owner_uid="source-uid")
+
+    assert batch_api.replaced is not None
+    assert batch_api.replaced.metadata.resource_version == "42"
+    assert batch_api.replaced.spec.schedule == "37 */2 * * *"
+    pod_spec = batch_api.replaced.spec.job_template.spec.template.spec
+    assert pod_spec.node_selector is None
+    assert pod_spec.affinity is None
+    assert [volume.name for volume in pod_spec.volumes] == ["feeds"]
+    assert [mount.name for mount in pod_spec.containers[0].volume_mounts] == ["feeds"]
+    env = {item.name: item.value for item in pod_spec.containers[0].env}
+    assert env["S2P_COMPONENT"] == "ingest-rss"
+    assert env["S2P_STATE_BACKEND"] == "s3"
+    assert env["S2P_STATE_BUCKET"] == "state"
+    assert env["S2P_STATE_PREFIX"] == "ingest-cursors"
+    assert env["S2P_FEED_CONFIG"] == "/etc/s2p/feeds/source.json"
 
 
 def test_source_job_runtime_prefers_latest_attempt_and_retains_last_success() -> None:

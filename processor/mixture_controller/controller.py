@@ -40,6 +40,15 @@ from processor.mixture_controller.metrics import MixtureMetrics, PromotionDecisi
 from processor.mixture_controller.proxy_lm import ProxyLM
 from schemas.sourcefeed import MixtureRecipeSpec, SourceFeedSpec
 
+_ARXIV_DISCOVERY_SOURCE_ORDER = (
+    "oai-arxiv-cs",
+    "rss-arxiv-cs-cl",
+    "rss-arxiv-cs-lg",
+    "rss-arxiv-cs-ai",
+    "rss-arxiv-cs-cv",
+)
+_ARXIV_DISCOVERY_BASE_PHASE_MINUTES = 13
+
 
 @dataclass(slots=True)
 class _BranchState:
@@ -289,14 +298,26 @@ def _source_config_name(name: str) -> str:
     return f"{_source_schedule_name(name)}-config"[:63].rstrip("-")
 
 
-def _cron_schedule(interval_seconds: int) -> str:
+def _cron_schedule(interval_seconds: int, *, source_name: str | None = None) -> str:
     """Map a SourceFeed interval onto a conservative five-field Cron schedule."""
     minutes = max(1, round(interval_seconds / 60))
     if minutes < 60:
         return "* * * * *" if minutes == 1 else f"*/{minutes} * * * *"
     hours = max(1, round(minutes / 60))
     if hours < 24:
-        return "0 * * * *" if hours == 1 else f"0 */{hours} * * *"
+        phase_minutes = 0
+        if source_name in _ARXIV_DISCOVERY_SOURCE_ORDER:
+            source_index = _ARXIV_DISCOVERY_SOURCE_ORDER.index(source_name)
+            phase_minutes = (
+                _ARXIV_DISCOVERY_BASE_PHASE_MINUTES
+                + round(minutes * source_index / len(_ARXIV_DISCOVERY_SOURCE_ORDER))
+            ) % minutes
+        minute = phase_minutes % 60
+        hour_phase = phase_minutes // 60
+        if hours == 1:
+            return f"{minute} * * * *"
+        hour_field = f"*/{hours}" if hour_phase == 0 else f"{hour_phase}-23/{hours}"
+        return f"{minute} {hour_field} * * *"
     days = max(1, round(hours / 24))
     return "0 0 * * *" if days == 1 else f"0 0 */{min(days, 31)} * *"
 
@@ -385,7 +406,10 @@ def _reconcile_source_schedule(source: SourceFeedSpec, *, namespace: str, owner_
             owner_references=owner_references,
         ),
         spec=client.V1CronJobSpec(
-            schedule=_cron_schedule(source.poll_interval_seconds),
+            schedule=_cron_schedule(
+                source.poll_interval_seconds,
+                source_name=source.name,
+            ),
             suspend=not source.enabled,
             concurrency_policy="Forbid",
             successful_jobs_history_limit=2,
@@ -398,7 +422,14 @@ def _reconcile_source_schedule(source: SourceFeedSpec, *, namespace: str, owner_
     except ApiException as exc:
         if exc.status != 409:
             raise
-        batch_api.patch_namespaced_cron_job(schedule_name, namespace, cron)
+        existing = batch_api.read_namespaced_cron_job(schedule_name, namespace)
+        cron.metadata.resource_version = existing.metadata.resource_version
+        # This controller owns the complete generated CronJob. Replace it so
+        # fields removed from the source template (for example an obsolete
+        # nodeSelector, affinity, or state PVC) are removed from the live
+        # object instead of surviving a strategic-merge patch. Feed cursors
+        # remain in MinIO under the unchanged component and SourceFeed names.
+        batch_api.replace_namespaced_cron_job(schedule_name, namespace, cron)
 
 
 def _delete_source_schedule(name: str, *, namespace: str) -> None:
