@@ -34,15 +34,12 @@ spec:
             - >-
               python -m processor.polaris_bootstrap &&
               python -m processor.iceberg_maintenance
-              --apply --register-missing --register-only &&
-              s2p-entrypoint s2p-object-lifecycle --apply
+              --apply --register-missing --register-only
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           env:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
-            - name: S2P_TRANSIENT_OBJECT_RETENTION_DAYS
-              value: {{ .Values.minio.transientRetentionDays | quote }}
           resources:
             requests:
               cpu: 50m

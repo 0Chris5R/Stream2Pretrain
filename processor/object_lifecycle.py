@@ -88,7 +88,12 @@ def _client() -> Any:
         aws_secret_access_key=os.environ.get("MINIO_SECRET_KEY")
         or _required("AWS_SECRET_ACCESS_KEY"),
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-        config=Config(signature_version="s3v4"),
+        config=Config(
+            signature_version="s3v4",
+            connect_timeout=5,
+            read_timeout=10,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
     )
 
 

@@ -3047,6 +3047,14 @@ jobs:
           fi
           finish_phase "Changed workload readiness"
 
+          # Bronze bodies and Silver extraction artifacts are transient. Apply
+          # and read back the bucket-native one-day lifecycle from a Ready
+          # processor Pod, with visible logs and no opaque Helm-hook retries.
+          kubectl -n stream2pretrain exec -i \
+            deployment/stream2pretrain-duckdb -- \
+            s2p-entrypoint s2p-object-lifecycle --apply
+          finish_phase "Transient object retention"
+
           if [[ "$MODEL_RUNTIME_CHANGED" == "true" ]]; then
             for profile_and_family in \
               "finepdfs finepdfs-edu-v2" \
