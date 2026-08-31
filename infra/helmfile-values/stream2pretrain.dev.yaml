@@ -87,6 +87,13 @@ processor:
       maxReplicas: 3
   iceberg:
     replicas: 1
+    # Measured 2026-08-31: the 1 GiB writer limit OOM-killed PyIceberg while
+    # reopening the retained decision and licence frontiers. The 32 GiB
+    # checkpoint node has room for the real recovery peak; no batches, rows,
+    # or quality fields are dropped to control memory.
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {cpu: 2, memory: 4Gi}
   duckdbApi:
     replicas: 1
     # The live Iceberg dedup/window scan peaks above the previous 1 GiB Pod
