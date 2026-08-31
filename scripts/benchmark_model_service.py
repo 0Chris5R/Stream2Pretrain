@@ -96,7 +96,7 @@ def main() -> None:
         "A controlled scientific explanation with one result.",
         "A reproducible implementation documents its evaluation protocol.",
     ]
-    batch, _ = _request(
+    batch, batch_backend = _request(
         opener,
         f"{base_url}/v1/quality:batch",
         payload={"model_family": args.model_family, "texts": texts},
@@ -106,21 +106,35 @@ def main() -> None:
         raise RuntimeError("bounded batch returned the wrong result count")
     singletons = []
     for text in texts:
-        singleton, _ = _request(
-            opener,
-            f"{base_url}/v1/quality",
-            payload={"model_family": args.model_family, "text": text},
-        )
-        singletons.append(singleton)
+        # Batch parity is a property of one immutable runtime. A ClusterIP may
+        # route these independent connections to CPUs with slightly different
+        # kernels, so compare against the exact Pod that served the batch. The
+        # distribution probe above separately proves all ready Pods receive
+        # traffic and expose the same pinned revision.
+        for _ in range(max(10, args.expected_backends * 10)):
+            singleton, backend = _request(
+                opener,
+                f"{base_url}/v1/quality",
+                payload={"model_family": args.model_family, "text": text},
+            )
+            if backend == batch_backend:
+                singletons.append(singleton)
+                break
+        else:
+            raise RuntimeError(
+                f"could not route singleton parity probe to batch backend {batch_backend}"
+            )
     if results != singletons:
         raise RuntimeError(
-            "quality batch changed an ordered one-by-one score or classifier revision"
+            "quality batch changed an ordered one-by-one score or classifier revision "
+            f"on backend {batch_backend}: batch={results!r}, singletons={singletons!r}"
         )
 
     print(
         json.dumps(
             {
                 "backend_requests": dict(sorted(counts.items())),
+                "batch_parity_backend": batch_backend,
                 "concurrency": args.concurrency,
                 "distribution_requests": args.distribution_requests,
                 "expected_backends": args.expected_backends,

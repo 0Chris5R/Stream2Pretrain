@@ -70,6 +70,7 @@ def test_distribution_gate_runs_real_inference_and_checks_batch_parity(
 
     result = json.loads(capsys.readouterr().out)
     assert result["backend_requests"] == {"backend-a": 30, "backend-b": 30}
+    assert result["batch_parity_backend"] == "backend-a"
     assert result["ordered_batch_matches_singletons"] is True
     assert result["revision"] == "finepdfs@test"
-    assert len(inference_calls) == 63
+    assert len(inference_calls) == 65
