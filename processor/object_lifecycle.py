@@ -43,7 +43,6 @@ def lifecycle_rule(days: int) -> dict[str, Any]:
         "Status": "Enabled",
         "Filter": {"Prefix": ""},
         "Expiration": {"Days": days},
-        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": days},
     }
 
 
@@ -60,7 +59,6 @@ def _matches_rule(rule: dict[str, Any], *, days: int) -> bool:
         rule.get("ID") == RULE_ID
         and rule.get("Status") == "Enabled"
         and rule.get("Expiration", {}).get("Days") == days
-        and rule.get("AbortIncompleteMultipartUpload", {}).get("DaysAfterInitiation") == days
         and _is_global_filter(rule)
     )
 

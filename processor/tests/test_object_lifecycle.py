@@ -26,13 +26,12 @@ class FakeS3:
         self.puts.append((kwargs["Bucket"], self.rules))
 
 
-def test_rule_expires_transient_objects_and_incomplete_uploads() -> None:
+def test_rule_expires_transient_objects() -> None:
     assert lifecycle_rule(1) == {
         "ID": RULE_ID,
         "Status": "Enabled",
         "Filter": {"Prefix": ""},
         "Expiration": {"Days": 1},
-        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
     }
 
 
