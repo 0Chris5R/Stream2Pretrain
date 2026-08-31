@@ -40,29 +40,22 @@ class _FakeConnection:
 class _OverviewConnection(_FakeConnection):
     def execute(self, sql: str, parameters: Sequence[Any] | None = None) -> _OverviewConnection:
         self.calls.append((sql, parameters))
-        self.description = [("kind",), ("key",), ("count",)]
-        if "WITH current_decisions AS MATERIALIZED" in sql:
-            self.rows = [
-                ("total", "", 9),
-                ("source", "arxiv-live", 3),
-                ("source", "fixtures", 6),
-                ("reason", "near_duplicate", 1),
-                ("reason", "pii_detected", 1),
-            ]
-        elif "WITH current_gold AS MATERIALIZED" in sql:
-            self.rows = [
-                ("total", "", 4),
-                ("source", "arxiv-live", 3),
-                ("source", "fixtures", 1),
-            ]
-        elif "WITH early_license AS MATERIALIZED" in sql:
-            self.rows = [
-                ("total", "", 2),
-                ("source", "arxiv-live", 2),
-                ("reason", "license_missing", 2),
-            ]
-        else:
+        self.description = [("scope",), ("kind",), ("key",), ("count",)]
+        if "WITH all_decisions AS MATERIALIZED" not in sql:
             raise AssertionError(f"unexpected SQL: {sql}")
+        self.rows = [
+            ("decision", "total", "", 9),
+            ("decision", "source", "arxiv-live", 3),
+            ("decision", "source", "fixtures", 6),
+            ("decision", "reason", "near_duplicate", 1),
+            ("decision", "reason", "pii_detected", 1),
+            ("gold", "total", "", 4),
+            ("gold", "source", "arxiv-live", 3),
+            ("gold", "source", "fixtures", 1),
+            ("license", "total", "", 2),
+            ("license", "source", "arxiv-live", 2),
+            ("license", "reason", "license_missing", 2),
+        ]
         return self
 
 
@@ -140,9 +133,119 @@ def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
             {"source": "fixtures", "accepted": 1, "total": 6},
         ],
     }
-    assert len(connection.calls) == 3
-    accepted_query = next(sql for sql, _ in connection.calls if "WITH current_gold" in sql)
-    assert "scoring_version = 'pretrain-content-v2'" in accepted_query
+    assert len(connection.calls) == 1
+    overview_query = connection.calls[0][0]
+    assert "scoring_version = 'pretrain-content-v2'" in overview_query
+
+
+def test_corpus_overview_scans_each_durable_relation_once() -> None:
+    connection = _OverviewConnection()
+    service = DuckDBQueryService(connection)
+
+    service.corpus_overview()
+
+    sql = connection.calls[0][0]
+    assert sql.count("FROM decisions") == 1
+    assert sql.count("FROM gold") == 1
+    assert sql.count("FROM license_admissions AS admission") == 1
+    assert "FROM all_decisions AS decision" in sql
+
+
+def test_corpus_overview_prepares_all_snapshots_before_single_statement(monkeypatch) -> None:
+    connection = _OverviewConnection()
+    iceberg_registrations: list[tuple[str, str]] = []
+    license_registrations: list[str] = []
+    monkeypatch.setattr(
+        "processor.duckdb_api._register_iceberg_relation",
+        lambda _conn, relation, table: iceberg_registrations.append((relation, table)),
+    )
+    monkeypatch.setattr(
+        "processor.duckdb_api._register_license_relation",
+        lambda _conn, relation: license_registrations.append(relation),
+    )
+    service = DuckDBQueryService(
+        connection,
+        refresh_iceberg=True,
+        catalog_refresh_seconds=30,
+    )
+
+    service.corpus_overview()
+
+    assert iceberg_registrations == [
+        ("decisions", "curation_decisions"),
+        ("gold", "curated"),
+    ]
+    assert license_registrations == ["license_admissions"]
+    assert len(connection.calls) == 1
+
+
+def test_corpus_overview_one_pass_preserves_filter_and_anti_join_contract() -> None:
+    duckdb = pytest.importorskip("duckdb")
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        """
+        CREATE TABLE decisions (
+          doc_id VARCHAR,
+          source_feed VARCHAR,
+          reject_reasons VARCHAR[],
+          scoring_version VARCHAR
+        );
+        INSERT INTO decisions VALUES
+          ('d1', 'arxiv-html', [], 'pretrain-content-v2'),
+          ('d2', 'hf-models', ['near_duplicate'], 'pretrain-content-v2'),
+          ('d3', 'oai-arxiv-cs', [], 'pretrain-content-v2'),
+          ('d4', 'arxiv-html', ['c4_nopunc_filter'], 'pretrain-content-v2'),
+          ('d5', 'arxiv-html', [], 'old-policy'),
+          ('d6', 'local-smoke', [], 'pretrain-content-v2'),
+          ('d7', 'hf-datasets', [], 'pretrain-content-v2');
+
+        CREATE TABLE gold (
+          source_feed VARCHAR,
+          reject_reasons VARCHAR[],
+          scoring_version VARCHAR
+        );
+        INSERT INTO gold VALUES
+          ('arxiv-html', [], 'pretrain-content-v2'),
+          ('hf-datasets', [], 'pretrain-content-v2'),
+          ('oai-arxiv-cs', [], 'pretrain-content-v2');
+
+        CREATE TABLE license_admissions (
+          doc_id VARCHAR,
+          source_feed VARCHAR,
+          license_id VARCHAR,
+          status VARCHAR,
+          policy_revision VARCHAR,
+          source_format VARCHAR
+        );
+        INSERT INTO license_admissions VALUES
+          ('l1', 'arxiv-html', 'unknown', 'quarantined',
+           'license-policy-2026-08-25', 'html'),
+          ('l2', 'hf-models', 'CC-BY-ND-4.0', 'quarantined',
+           'license-policy-2026-08-25', 'html'),
+          ('d1', 'arxiv-html', 'unknown', 'quarantined',
+           'license-policy-2026-08-25', 'html'),
+          ('l3', 'local-smoke', 'unknown', 'quarantined',
+           'license-policy-2026-08-25', 'html'),
+          ('l4', 'arxiv-html', 'unknown', 'quarantined',
+           'license-policy-2026-08-25', 'metadata');
+        """
+    )
+    service = DuckDBQueryService(connection)
+
+    assert service.corpus_overview() == {
+        "durable_decisions": 5,
+        "training_export_documents": 2,
+        "rejected_by_reason": {
+            "near_duplicate": 1,
+            "license_missing": 1,
+            "license_not_permitted": 1,
+        },
+        "per_source_acceptance": [
+            {"source": "arxiv-html", "accepted": 1, "total": 2},
+            {"source": "hf-datasets", "accepted": 1, "total": 1},
+            {"source": "hf-models", "accepted": 0, "total": 2},
+        ],
+    }
 
 
 class _LicenseAdmissionsConnection:

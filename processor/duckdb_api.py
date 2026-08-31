@@ -259,49 +259,33 @@ class DuckDBQueryService:
 
         Prometheus process counters correctly describe activity since a worker
         started, but they cannot describe the current corpus after recovery.
-        Dashboard totals therefore come from the decision and Gold tables.
+        Dashboard totals therefore come from the decision and Gold tables. All
+        three current Iceberg relations are materialized in one statement so a
+        dashboard refresh reads each de-duplicated history once. In particular,
+        the early-license anti-join reuses the decisions materialization instead
+        of starting a second remote scan.
         """
-        decision_rows = self._rows(
+        if self._refresh_iceberg:
+            self._prepare_relation(self._decisions)
+            self._prepare_relation(self._gold)
+            self._prepare_relation(self._license_admissions)
+        overview_rows = self._rows(
             f"""
-            WITH current_decisions AS MATERIALIZED (
-              SELECT source_feed, reject_reasons
+            WITH all_decisions AS MATERIALIZED (
+              SELECT doc_id, source_feed, reject_reasons, scoring_version
               FROM {self._decisions}
+            ),
+            current_decisions AS MATERIALIZED (
+              SELECT source_feed, reject_reasons
+              FROM all_decisions
               WHERE {_current_decision_predicate()}
-            )
-            SELECT 'total' AS kind, '' AS key, CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_decisions
-            UNION ALL
-            SELECT 'source' AS kind, source_feed AS key, CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_decisions
-            GROUP BY source_feed
-            UNION ALL
-            SELECT 'reason' AS kind, reason AS key, CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_decisions, UNNEST(reject_reasons) AS rejected(reason)
-            GROUP BY reason
-            """,
-            [],
-            relation=self._decisions,
-        )
-        gold_rows = self._rows(
-            f"""
-            WITH current_gold AS MATERIALIZED (
+            ),
+            current_gold AS MATERIALIZED (
               SELECT source_feed
               FROM {self._gold}
               WHERE {_current_decision_predicate()}
-            )
-            SELECT 'total' AS kind, '' AS key, CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_gold
-            UNION ALL
-            SELECT 'source' AS kind, source_feed AS key, CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_gold
-            GROUP BY source_feed
-            """,
-            [],
-            relation=self._gold,
-        )
-        early_license_rows = self._rows(
-            f"""
-            WITH early_license AS MATERIALIZED (
+            ),
+            early_license AS MATERIALIZED (
               SELECT
                 admission.source_feed,
                 CASE WHEN admission.license_id = 'unknown'
@@ -314,24 +298,53 @@ class DuckDBQueryService:
                 AND admission.source_format IS DISTINCT FROM 'metadata'
                 AND {_visible_source_predicate("admission.source_feed")}
                 AND NOT EXISTS (
-                  SELECT 1 FROM {self._decisions} AS decision
+                  SELECT 1 FROM all_decisions AS decision
                   WHERE decision.doc_id = admission.doc_id
                 )
             )
-            SELECT 'total' AS kind, '' AS key, CAST(COUNT(*) AS BIGINT) AS count
+            SELECT 'decision' AS scope, 'total' AS kind, '' AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_decisions
+            UNION ALL
+            SELECT 'decision' AS scope, 'source' AS kind, source_feed AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_decisions
+            GROUP BY source_feed
+            UNION ALL
+            SELECT 'decision' AS scope, 'reason' AS kind, reason AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_decisions, UNNEST(reject_reasons) AS rejected(reason)
+            GROUP BY reason
+            UNION ALL
+            SELECT 'gold' AS scope, 'total' AS kind, '' AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_gold
+            UNION ALL
+            SELECT 'gold' AS scope, 'source' AS kind, source_feed AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_gold
+            GROUP BY source_feed
+            UNION ALL
+            SELECT 'license' AS scope, 'total' AS kind, '' AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
             FROM early_license
             UNION ALL
-            SELECT 'source' AS kind, source_feed AS key, CAST(COUNT(*) AS BIGINT) AS count
+            SELECT 'license' AS scope, 'source' AS kind, source_feed AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
             FROM early_license
             GROUP BY source_feed
             UNION ALL
-            SELECT 'reason' AS kind, reason AS key, CAST(COUNT(*) AS BIGINT) AS count
+            SELECT 'license' AS scope, 'reason' AS kind, reason AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
             FROM early_license
             GROUP BY reason
             """,
             [],
-            relation=self._license_admissions,
+            relation=None,
         )
+        decision_rows = [row for row in overview_rows if row.get("scope") == "decision"]
+        gold_rows = [row for row in overview_rows if row.get("scope") == "gold"]
+        early_license_rows = [row for row in overview_rows if row.get("scope") == "license"]
         durable_decisions = _overview_total(decision_rows)
         training_documents = _overview_total(gold_rows)
         accepted_by_source = _overview_counts(gold_rows, kind="source")

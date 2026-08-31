@@ -261,6 +261,10 @@ kubectl -n stream2pretrain patch mixturerecipe production \
   production catalog.
 - See [`storage-scaling.md`](./storage-scaling.md) for the complete ownership
   and lifecycle contract.
+- The dashboard `/corpus-overview` query materializes the current decisions,
+  Gold, and licence-admission relations once in one DuckDB statement. The
+  early-licence anti-join reuses that decisions materialization, preserving
+  exact durable counts without a second full-history decisions scan.
 
 ## 9. Quotas and DHBWCloud caveats
 
