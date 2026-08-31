@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-CONTENT_POLICY_GENERATION = "pretrain-content-v2"
+CONTENT_POLICY_GENERATION = "pretrain-content-v3"
 
 __all__ = ["CONTENT_POLICY_GENERATION"]

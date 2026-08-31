@@ -6,7 +6,7 @@ description: |
   ScaledObject, NetworkPolicy, ServiceMonitor, and Grafana dashboard.
 
   Tech stack: Redpanda, Bytewax, MinIO, Iceberg V2,
-  Polaris, Resiliparse, Rensa, LSHBloom, FineWeb-Edu (ONNX INT8), Next.js 14,
+  Polaris, Resiliparse, Rensa, LSHBloom, FinePDFs Edu v2, Next.js 14,
   DuckDB API, KEDA, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
   cert-manager, OPA Gatekeeper.
 type: application

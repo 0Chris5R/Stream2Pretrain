@@ -1,6 +1,6 @@
 {{- $component := "processor-curate" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
-{{- $externalModels := or .Values.processor.curate.modelBundle.bootstrap (ne .Values.processor.curate.modelBundle.url "") }}
+{{- $externalModels := .Values.processor.curate.modelBundle.bootstrap }}
 {{- if ne (int .Values.processor.curate.replicas) 1 }}
 {{- fail "processor.curate.replicas must be exactly 1 until coordinated Bytewax multi-worker recovery is implemented" }}
 {{- end }}
@@ -48,7 +48,6 @@ spec:
 
               urls = [
                   "http://{{ printf "%s-processor-model-service-finepdfs" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
-                  "http://{{ printf "%s-processor-model-service-fineweb" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
                   "http://{{ printf "%s-processor-model-service-kenlm" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
               ]
               deadline = time.monotonic() + 900
@@ -80,44 +79,12 @@ spec:
               value: "1"
             - name: FINEPDFS_EDU_V2_REVISION
               value: "90ddef285f67230389057c14b2f6bbfeb70d40ea"
-            - name: FINEWEB_EDU_REVISION
-              value: "284663cbb2dabf9bda30d8f8cc49601251ee1631"
             - name: KENLM_REVISION
               value: "3fbe35c83b1a39f420a345b7c96a186c8030d834"
             - name: FIGURE_CLASSIFIER_REVISION
               value: "f859dfbff5c9916cd996942d4b0db7fa25808220"
           resources:
             {{- toYaml .Values.processor.curate.modelBundle.resources | nindent 12 }}
-          volumeMounts:
-            - name: models
-              mountPath: /models
-      {{- else if .Values.processor.curate.modelBundle.url }}
-      initContainers:
-        - name: fetch-onnx-model
-          image: {{ .Values.processor.curate.modelBundle.image | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
-          command: ["sh", "-ec"]
-          args:
-            - |
-              set -euo pipefail
-              dst="/models/$(basename {{ .Values.processor.curate.onnxModel | quote }})"
-              if [ -s "$dst" ]; then
-                echo "model already present: $dst"
-                exit 0
-              fi
-              echo "downloading $S2P_MODEL_URL -> $dst"
-              curl --fail --silent --show-error --location --max-time 600 \
-                -o "$dst.tmp" "$S2P_MODEL_URL"
-              if [ -n "${S2P_MODEL_SHA256:-}" ]; then
-                echo "$S2P_MODEL_SHA256  $dst.tmp" | sha256sum -c -
-              fi
-              mv "$dst.tmp" "$dst"
-          env:
-            - name: S2P_MODEL_URL
-              value: {{ .Values.processor.curate.modelBundle.url | quote }}
-            - name: S2P_MODEL_SHA256
-              value: {{ .Values.processor.curate.modelBundle.sha256 | quote }}
           volumeMounts:
             - name: models
               mountPath: /models
@@ -158,10 +125,6 @@ spec:
               value: {{ printf "http://%s-processor-model-service-finepdfs:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             - name: S2P_FINEPDFS_MODEL_SERVICE_DISCOVERY_HOST
               value: {{ printf "%s-processor-model-service-finepdfs-headless" (include "stream2pretrain.fullname" .) | trunc 63 | trimSuffix "-" | quote }}
-            - name: S2P_FINEWEB_MODEL_SERVICE_URL
-              value: {{ printf "http://%s-processor-model-service-fineweb:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
-            - name: S2P_FINEWEB_MODEL_SERVICE_DISCOVERY_HOST
-              value: {{ printf "%s-processor-model-service-fineweb-headless" (include "stream2pretrain.fullname" .) | trunc 63 | trimSuffix "-" | quote }}
             - name: S2P_KENLM_MODEL_SERVICE_URL
               value: {{ printf "http://%s-processor-model-service-kenlm:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             - name: S2P_KENLM_MODEL_SERVICE_DISCOVERY_HOST
@@ -173,8 +136,6 @@ spec:
               value: {{ .Values.processor.curate.scoringVersion | quote }}
             - name: S2P_FINEPDFS_EDU_REVISION
               value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
-            - name: S2P_FINEWEB_EDU_REVISION
-              value: "fineweb-edu@284663cbb2dabf9bda30d8f8cc49601251ee1631"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.curate.doclingEnabled | quote }}
             - name: S2P_USE_PRESIDIO
@@ -190,10 +151,9 @@ spec:
             - name: S2P_CURATOR_MAX_EXTRACTION_RETRIES
               value: "2"
             - name: S2P_CURATOR_CLASSIFIER_CONCURRENCY
-              # Six independent requests per quality family let the primary
-              # FinePDFs service expose enough demand for its six-Pod KEDA
-              # ceiling. The family-specific executors preserve exact result
-              # ordering and classifier parity.
+              # Twelve independent requests let the sole FinePDFs family
+              # expose enough demand for its six-Pod KEDA
+              # ceiling while preserving exact result ordering.
               value: "12"
             - name: S2P_CURATOR_CLASSIFIER_BATCH_SIZE
               value: {{ .Values.processor.curate.classifierBatchSize | int | quote }}

@@ -282,24 +282,9 @@ class LSHBloomIndex:
         """
         bands = sig.band_keys(self._num_bands)
         cluster_keys = [self._cluster_key(i, b) for i, b in enumerate(bands)]
-        candidate_clusters: list[str] = []
-        for ck in cluster_keys:
-            cid = self._lookup_cluster(ck)
-            if cid is not None and cid not in candidate_clusters:
-                candidate_clusters.append(cid)
-        for cluster_id in candidate_clusters:
-            anchor_doc_id = self._lookup_anchor(cluster_id)
-            anchor_signature = self._lookup_anchor_signature(cluster_id)
-            # At-least-once delivery replays the same document after its
-            # curation completed but before the source offset committed.
-            if anchor_doc_id == doc_id:
-                return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
-            if (
-                anchor_signature is not None
-                and _signature_similarity(sig.digest, anchor_signature)
-                >= self._similarity_threshold
-            ):
-                return NearDupResult(is_near_duplicate=True, cluster_id=cluster_id)
+        existing = self._probe_cluster_keys(doc_id, sig, cluster_keys)
+        if existing is not None:
+            return existing
 
         # No candidate passed verification. Register a new anchor and fill
         # every still-empty band bucket. Existing buckets remain attached to
@@ -325,6 +310,41 @@ class LSHBloomIndex:
         self._observations_since_bloom_checkpoint += 1
         self._checkpoint_dirty_bands()
         return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
+
+    def probe(self, doc_id: str, sig: MinHashSignature) -> NearDupResult:
+        """Check existing anchors without mutating durable deduplication state."""
+        cluster_keys = [
+            self._cluster_key(index, band)
+            for index, band in enumerate(sig.band_keys(self._num_bands))
+        ]
+        existing = self._probe_cluster_keys(doc_id, sig, cluster_keys)
+        return existing or NearDupResult(is_near_duplicate=False, cluster_id=None)
+
+    def _probe_cluster_keys(
+        self,
+        doc_id: str,
+        sig: MinHashSignature,
+        cluster_keys: list[str],
+    ) -> NearDupResult | None:
+        candidate_clusters: list[str] = []
+        for ck in cluster_keys:
+            cid = self._lookup_cluster(ck)
+            if cid is not None and cid not in candidate_clusters:
+                candidate_clusters.append(cid)
+        for cluster_id in candidate_clusters:
+            anchor_doc_id = self._lookup_anchor(cluster_id)
+            anchor_signature = self._lookup_anchor_signature(cluster_id)
+            # At-least-once delivery replays the same document after its
+            # curation completed but before the source offset committed.
+            if anchor_doc_id == doc_id:
+                return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
+            if (
+                anchor_signature is not None
+                and _signature_similarity(sig.digest, anchor_signature)
+                >= self._similarity_threshold
+            ):
+                return NearDupResult(is_near_duplicate=True, cluster_id=cluster_id)
+        return None
 
     def _mint_cluster_id(self, doc_id: str) -> str:
         self._cluster_counter += 1

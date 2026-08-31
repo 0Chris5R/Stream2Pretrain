@@ -103,7 +103,7 @@ def test_as_of_uses_half_open_validity_predicate() -> None:
     sql, params = conn.calls[-1]
     assert "valid_from <= CAST(? AS TIMESTAMP)" in sql
     assert "valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP)" in sql
-    assert "scoring_version = 'pretrain-content-v2'" in sql
+    assert "scoring_version = 'pretrain-content-v3'" in sql
     assert params == ["2026-06-17T10:00:00Z", "2026-06-17T10:00:00Z"]
 
 
@@ -135,7 +135,7 @@ def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
     }
     assert len(connection.calls) == 1
     overview_query = connection.calls[0][0]
-    assert "scoring_version = 'pretrain-content-v2'" in overview_query
+    assert "scoring_version = 'pretrain-content-v3'" in overview_query
 
 
 def test_corpus_overview_scans_each_durable_relation_once() -> None:
@@ -191,13 +191,13 @@ def test_corpus_overview_one_pass_preserves_filter_and_anti_join_contract() -> N
           scoring_version VARCHAR
         );
         INSERT INTO decisions VALUES
-          ('d1', 'arxiv-html', [], 'pretrain-content-v2'),
-          ('d2', 'hf-models', ['near_duplicate'], 'pretrain-content-v2'),
-          ('d3', 'oai-arxiv-cs', [], 'pretrain-content-v2'),
-          ('d4', 'arxiv-html', ['c4_nopunc_filter'], 'pretrain-content-v2'),
+          ('d1', 'arxiv-html', [], 'pretrain-content-v3'),
+          ('d2', 'hf-models', ['near_duplicate'], 'pretrain-content-v3'),
+          ('d3', 'oai-arxiv-cs', [], 'pretrain-content-v3'),
+          ('d4', 'arxiv-html', ['c4_nopunc_filter'], 'pretrain-content-v3'),
           ('d5', 'arxiv-html', [], 'old-policy'),
-          ('d6', 'local-smoke', [], 'pretrain-content-v2'),
-          ('d7', 'hf-datasets', [], 'pretrain-content-v2');
+          ('d6', 'local-smoke', [], 'pretrain-content-v3'),
+          ('d7', 'hf-datasets', [], 'pretrain-content-v3');
 
         CREATE TABLE gold (
           source_feed VARCHAR,
@@ -205,9 +205,9 @@ def test_corpus_overview_one_pass_preserves_filter_and_anti_join_contract() -> N
           scoring_version VARCHAR
         );
         INSERT INTO gold VALUES
-          ('arxiv-html', [], 'pretrain-content-v2'),
-          ('hf-datasets', [], 'pretrain-content-v2'),
-          ('oai-arxiv-cs', [], 'pretrain-content-v2');
+          ('arxiv-html', [], 'pretrain-content-v3'),
+          ('hf-datasets', [], 'pretrain-content-v3'),
+          ('oai-arxiv-cs', [], 'pretrain-content-v3');
 
         CREATE TABLE license_admissions (
           doc_id VARCHAR,
@@ -551,7 +551,7 @@ def test_document_filters_are_parameterized_and_hide_fixtures() -> None:
     )
 
     assert "source_feed NOT LIKE 'local-%'" in where
-    assert "scoring_version = 'pretrain-content-v2'" in where
+    assert "scoring_version = 'pretrain-content-v3'" in where
     assert "LIST_CONTAINS(content_tags, ?)" in where
     assert "route = ?" in where
     assert "eligible_routes" not in where

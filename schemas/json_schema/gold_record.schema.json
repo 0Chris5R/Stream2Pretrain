@@ -9,18 +9,6 @@
           "title": "C4 Pass",
           "type": "boolean"
         },
-        "comparison_classifier_revision": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Comparison Classifier Revision"
-        },
         "decision": {
           "default": "included",
           "enum": [
@@ -65,20 +53,6 @@
           ],
           "default": null,
           "title": "Finepdfs Edu Score"
-        },
-        "fineweb_edu_score": {
-          "anyOf": [
-            {
-              "maximum": 5.0,
-              "minimum": 0.0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Fineweb Edu Score"
         },
         "perplexity": {
           "anyOf": [
@@ -230,13 +204,13 @@
       "type": "array"
     },
     "doc_id": {
-      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "description": "Stable document-revision id. Usually the sha256 of the canonical URL; exact content projections may bind an immutable source object.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Doc Id",
       "type": "string"
     },
     "edu_score": {
-      "description": "Primary source-aware educational-quality output. Scientific PDF/HTML uses FinePDFs Edu v2; general web content uses FineWeb-Edu.",
+      "description": "FinePDFs Edu v2 educational-quality output for every trainable source family.",
       "maximum": 5.0,
       "minimum": 0.0,
       "title": "Edu Score",

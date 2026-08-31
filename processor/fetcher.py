@@ -290,7 +290,7 @@ def _markdown_prose_sections(
     """Extract card/README prose while excluding YAML and fenced code.
 
     The immutable Bronze object remains the exact source. This projection is
-    the text sent to FineWeb-Edu, privacy, deduplication, and export.
+    the text sent to the quality model, privacy, deduplication, and export.
     """
     raw = payload.decode("utf-8", errors="replace").strip()
     lines = raw.splitlines()
@@ -389,7 +389,7 @@ def _markdown_prose_sections(
 def uses_scientific_extraction(bronze: BronzeRecord) -> bool:
     """Return whether an HTML record belongs to a scientific-document source.
 
-    General blogs and crawled web pages must stay on Resiliparse/FineWeb. The
+    General blogs and crawled web pages must stay on the web-prose extractor. The
     presence of an HTML wire format alone does not make a page a paper.
     """
     return (

@@ -85,9 +85,7 @@ class SegmentScore(BaseModel):
         description="Primary source-aware educational-quality model output.",
     )
     finepdfs_edu_score: float | None = Field(default=None, ge=0.0, le=5.0)
-    fineweb_edu_score: float | None = Field(default=None, ge=0.0, le=5.0)
     quality_classifier_revision: str | None = None
-    comparison_classifier_revision: str | None = None
     perplexity: float | None = Field(default=None, ge=0.0)
     perplexity_bucket: Literal["head", "middle", "tail"] | None = None
     c4_pass: bool = True
@@ -118,8 +116,7 @@ class GoldRecord(BaseModel):
         ge=0.0,
         le=5.0,
         description=(
-            "Primary source-aware educational-quality output. Scientific PDF/HTML uses "
-            "FinePDFs Edu v2; general web content uses FineWeb-Edu."
+            "FinePDFs Edu v2 educational-quality output for every trainable source family."
         ),
     )
     structural_quality_score: float = Field(default=0.0, ge=0.0, le=5.0)

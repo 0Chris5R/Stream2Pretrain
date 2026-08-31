@@ -1,4 +1,4 @@
-"""CPU wrappers for the official FinePDFs and FineWeb-Edu regressors.
+"""CPU wrapper for the official FinePDFs Edu v2 regressor.
 
 The wrapper:
 
@@ -43,8 +43,8 @@ class QualityClassifier:
         Identifier persisted into the gold record; defaults to the
         path's basename.
     max_length
-        Tokeniser truncation length. 512 matches the FineWeb-Edu training
-        config.
+        Tokeniser truncation length. The pinned model configuration is used
+        when no explicit value is supplied.
     """
 
     def __init__(
@@ -52,7 +52,7 @@ class QualityClassifier:
         model_path: str | Path | None,
         *,
         revision: str | None = None,
-        model_family: str = "fineweb-edu",
+        model_family: str = "finepdfs-edu-v2",
         max_length: int | None = None,
         allow_fallback: bool = True,
     ) -> None:
@@ -72,7 +72,7 @@ class QualityClassifier:
 
     @property
     def is_model_loaded(self) -> bool:
-        """Whether inference uses a real FineWeb-Edu model artifact."""
+        """Whether inference uses a real FinePDFs model artifact."""
         return self._tokenizer is not None and (
             self._session is not None or self._torch_model is not None
         )
@@ -193,7 +193,7 @@ class QualityClassifier:
         if "token_type_ids" in encoded:
             feeds["token_type_ids"] = encoded["token_type_ids"].astype("int64")
         outputs = self._session.run(None, feeds)  # type: ignore[union-attr]
-        # FineWeb-Edu emits a single regression head in [0, 5].
+        # FinePDFs Edu v2 emits a single regression head in [0, 5].
         score = float(outputs[0].reshape(-1)[0])
         clamped = max(0.0, min(5.0, score))
         return QualityScore(

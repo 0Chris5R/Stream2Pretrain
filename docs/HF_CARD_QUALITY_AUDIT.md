@@ -63,10 +63,8 @@ The deterministic gate follows the official Hugging Face card structure:
 - Compact format and runtime documentation can pass without template headings
   when it establishes independent artifact-format and runtime evidence.
 
-This gate is independent of the learned educational-quality scores. Every
-retained section receives both FineWeb-Edu and FinePDFs Edu v2. FineWeb-Edu is
-the primary reported card signal because its official training set is web
-content, which is closer to a Markdown repository README. Its model card still
+This gate runs before learned inference. Every retained section receives the
+FinePDFs Edu v2 score. Its model card still
 describes a school-focused web rubric and warns about specialized higher
 education, so it is audit-only for cards. FinePDFs Edu v2 was trained on PDF
 samples and explicitly documents out-of-domain limitations, so it is retained
@@ -110,7 +108,7 @@ IEEEtran starter file. A narrow literal template detector removes that starter
 without imposing a minimum paper length or requiring conventional headings.
 Equations, tables, figures, and captions remain in the scientific projection.
 
-The `pretrain-content-v2` scoring generation is the clean-output boundary.
+The `pretrain-content-v3` scoring generation is the FinePDF-only clean-output boundary.
 Normal documents, aggregates, as-of views, and dataset exports expose only that
 generation. Historical rows remain durable audit history but do not masquerade
 as current clean output. Deployment must replay eligible live input through the
@@ -120,9 +118,9 @@ new generation before expecting current exports to repopulate.
 
 The next classifier step is a small card-specific model trained on manually
 audited live cards using the listed labels. Sampling must be stratified by
-model versus dataset card and by deterministic outcome. The comparison report
-must record precision and recall per class, CPU latency, peak RSS, exact model
-revision, and the same-sample FineWeb-Edu versus FinePDFs results. All values
+model versus dataset card and by deterministic outcome. The evaluation report
+must record precision and recall per class, CPU latency, peak RSS, and the exact
+FinePDFs model revision. All values
 remain `needs-measurement` until the deployed evaluation is complete.
 
 Primary references:
@@ -130,5 +128,4 @@ Primary references:
 - <https://huggingface.co/docs/hub/model-cards>
 - <https://huggingface.co/docs/hub/model-card-annotated>
 - <https://huggingface.co/docs/hub/datasets-cards>
-- <https://huggingface.co/HuggingFaceFW/fineweb-edu-classifier>
 - <https://huggingface.co/HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn>

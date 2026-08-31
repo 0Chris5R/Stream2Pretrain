@@ -95,7 +95,7 @@ Constraint that:
 
 - Throughput per stage (`s2p_documents_emitted_total`)
 - Topic lag and KEDA replica counts
-- FineWeb-Edu quality-score histogram
+- FinePDFs Edu v2 quality-score histogram
 - Iceberg flush latency p95
 - SourceFeed poll outcomes
 - Foundry SFT/RL acceptance, provider usage and latency, validation gates,

@@ -8,9 +8,8 @@ This file records the product decisions that implementation work must preserve.
   author blocks, references, acknowledgements, navigation, and other excluded
   sections before scoring or export. Preserve headings, prose, equations,
   tables, figure captions, selected OCR, and stable source-element provenance.
-- FinePDFs Edu v2 is the primary scientific quality model. FineWeb-Edu is a
-  comparison signal and KenLM is an audit signal for papers, not a hard
-  scientific-paper rejection gate.
+- FinePDFs Edu v2 is the sole learned document-quality model. KenLM is an audit
+  signal where applicable, not a hard scientific-paper rejection gate.
 - Hugging Face cards use exact-revision README prose and the dedicated card
   structure policy. Hosted weights, dataset rows, binaries, generated upload
   mirrors, blank templates, and marketing-only cards are excluded.

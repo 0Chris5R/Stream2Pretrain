@@ -101,7 +101,7 @@
       "type": "integer"
     },
     "doc_id": {
-      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "description": "Stable document-revision id. Usually the sha256 of the canonical URL; exact content projections may bind an immutable source object.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Doc Id",
       "type": "string"
@@ -132,7 +132,7 @@
     },
     "extraction_pipeline": {
       "default": "resiliparse-0.14",
-      "description": "Operator-chain identifier of the extractor that produced ``text``. Distinct from ``extracted_with`` so a single extractor binary can ship multiple named pipelines (e.g. 'arxiv-html-2026-06' vs 'fineweb-edu-html').",
+      "description": "Operator-chain identifier of the extractor that produced ``text``. Distinct from ``extracted_with`` so a single extractor binary can ship multiple named pipelines.",
       "maxLength": 128,
       "minLength": 1,
       "title": "Extraction Pipeline",

@@ -21,9 +21,9 @@ fabricated zero.
 | arXiv RSS `cs.AI` | ArXiv id only | None. Internal scheduling only. | Schedules one canonical paper. |
 | arXiv RSS `cs.CV` | ArXiv id only | None. Internal scheduling only. | Schedules one canonical paper. |
 | arXiv OAI-PMH `set=cs` | ArXiv id only | None. Internal current-frontier scheduling only. | Schedules one canonical paper; canonical ids deduplicate overlap with RSS. |
-| arXiv full paper | Native arXiv HTML, ar5iv fallback, then bounded CPU Docling PDF fallback. Retain main sections, equations, tables, figure captions, selected OCR, and provenance. Remove authors, references, navigation, and excluded sections from the training projection. | FinePDFs Edu v2 at revision `90ddef285f67230389057c14b2f6bbfeb70d40ea`; structured scientific completeness and reasoning signals; narrow publication-starter rejection; CPU language ID; segment-level privacy removal; exact/MinHash dedup. FineWeb-Edu is comparison-only and KenLM/C4 web gates are off for scientific text. | Permissive clean papers can enter pretraining and, when methods/results evidence is sufficient, the paper Foundry. Posttrain-only clean papers can enter only the Foundry. |
-| Hugging Face model card | Exact-revision README prose split by Markdown section after YAML, fenced-code, HTML, and asset removal. | Grounded card-content gate; FineWeb-Edu primary audit signal and FinePDFs Edu v2 out-of-domain comparison; CPU language ID; redactable PII handling; exact/MinHash dedup. C4/Gopher and KenLM remain off. | Substantive technical documentation enters pretraining only. Synthetic scripts, templates, upload/quantization shells, minimal inventories, ungrounded marketing, wrong-type, and insufficient cards quarantine. |
-| Hugging Face dataset card | Exact-revision README prose split by Markdown section after YAML, fenced-code, HTML, and asset removal. Dataset rows and hosted binaries are excluded. | Dataset-specific grounded card-content gate plus the same learned-model comparison, privacy, and deduplication policy as model cards. | Substantive dataset documentation enters pretraining only. It never licenses or imports dataset rows. |
+| arXiv full paper | Native arXiv HTML, ar5iv fallback, then bounded CPU Docling PDF fallback. Retain main sections, equations, tables, figure captions, selected OCR, and provenance. Remove authors, references, navigation, and excluded sections from the training projection. | Deterministic extraction, language, privacy, licence, and publication-template rejection first; then FinePDFs Edu v2 at revision `90ddef285f67230389057c14b2f6bbfeb70d40ea`; structured scientific completeness and reasoning signals; exact/MinHash dedup. KenLM/C4 web gates are off for scientific text. | Permissive clean papers can enter pretraining and, when methods/results evidence is sufficient, the paper Foundry. Posttrain-only clean papers can enter only the Foundry. |
+| Hugging Face model card | Exact-revision README prose split by Markdown section after YAML, fenced-code, HTML, and asset removal. | Grounded deterministic card-content, language, privacy, and licence rejection first; then FinePDFs Edu v2; exact/MinHash dedup. C4/Gopher and KenLM remain off. | Substantive technical documentation enters pretraining only. Synthetic scripts, templates, upload/quantization shells, minimal inventories, ungrounded marketing, wrong-type, and insufficient cards quarantine. |
+| Hugging Face dataset card | Exact-revision README prose split by Markdown section after YAML, fenced-code, HTML, and asset removal. Dataset rows and hosted binaries are excluded. | Dataset-specific grounded deterministic card-content gate, privacy, licence, and language checks first; then FinePDFs Edu v2 and deduplication. | Substantive dataset documentation enters pretraining only. It never licenses or imports dataset rows. |
 
 ## Routing rules
 
@@ -43,15 +43,13 @@ fabricated zero.
 
 - FinePDFs Edu v2 model revision:
   `90ddef285f67230389057c14b2f6bbfeb70d40ea`
-- FineWeb-Edu comparison model revision:
-  `284663cbb2dabf9bda30d8f8cc49601251ee1631`
 - CPU inference runs through the pinned ONNX/transformers runtime in the model
   service. Throughput on the target cluster remains `needs-measurement` until
   the fresh-frontier measurement is complete.
 
 ## Current-output boundary
 
-`pretrain-content-v2` is the active content generation. It versions the HF card
+`pretrain-content-v3` is the active content generation. It versions the HF card
 gate, publication-template rejection, and corrected near-duplicate policy.
 Normal UI queries and dataset exports include only this generation. Historical
 decisions remain in Iceberg for audit but require replay through the current

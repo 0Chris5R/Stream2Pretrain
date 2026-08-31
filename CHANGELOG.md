@@ -85,7 +85,7 @@ query on day 1 of the demo. Driven by two research reports:
   shared 5000 req/h GitHub rate-limit helper).
 - **Processor**: `processor/seed_loader.py` - one-shot Bytewax Job that
   streams the 5-component HF seed mixture (peS2o cs.* + RedPajama-arxiv +
-  FineWeb-Edu URL-filtered + Stack-Edu Python+ML + custom Wayback backfill)
+  filtered web data + Stack-Edu Python+ML + custom Wayback backfill)
   into `docs.normalized` as Silver records. Native publication-date columns
   populate `valid_from`.
 - **Schemas**: `source_format`
@@ -152,7 +152,7 @@ Initial public preview. This is the v0.1 reference cut described in
   `processor/curate.py`, and `processor/iceberg_writer.py`. Operators in
   `processor/operators/` cover
   Resiliparse extraction, fastText langid, Gopher / C4 taggers, MinHash
-  (Rensa), LSHBloom near-dup, FineWeb-Edu ONNX classifier, KenLM
+  (Rensa), LSHBloom near-dup, FinePDFs Edu v2 classifier, KenLM
   perplexity, PII regex, validity-interval enricher.
 - **Storage**: MinIO buckets for bronze / silver / gold / checkpoints; Iceberg
   V3 tables with row lineage; Polaris-lite catalog.

@@ -25,10 +25,6 @@ def _metadata() -> dict[str, object]:
                 "backend": "transformers-cpu",
                 "revision": "finepdfs@pinned",
             },
-            "fineweb-edu": {
-                "backend": "transformers-cpu",
-                "revision": "fineweb@pinned",
-            },
         },
         "kenlm": {
             "backend": "kenlm-sentencepiece",
@@ -43,13 +39,13 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
             return httpx.Response(200, json=_metadata())
         if request.url.path == "/v1/quality:batch":
             body = request.read().decode()
-            revision = "finepdfs@pinned" if "finepdfs" in body else "fineweb@pinned"
             item_count = body.count('"paper"') + body.count('"page"')
             return httpx.Response(
                 200,
                 json={
                     "results": [
-                        {"edu_score": 4.25, "revision": revision} for _ in range(item_count)
+                        {"edu_score": 4.25, "revision": "finepdfs@pinned"}
+                        for _ in range(item_count)
                     ]
                 },
             )
@@ -68,7 +64,6 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
     http_client = httpx.Client(base_url="http://models", transport=transport)
     client = CuratorModelClient("http://models", client=http_client)
     finepdfs = RemoteQualityClassifier(client, "finepdfs-edu-v2")
-    fineweb = RemoteQualityClassifier(client, "fineweb-edu")
     kenlm = RemoteKenLMScorer(client)
 
     assert finepdfs.score("paper").edu_score == 4.25
@@ -77,7 +72,6 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
         "finepdfs@pinned",
     ]
     assert finepdfs.revision == "finepdfs@pinned"
-    assert fineweb.score("page").revision == "fineweb@pinned"
     assert kenlm.score("text").perplexity == 42.0
     client.close()
 

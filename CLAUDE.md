@@ -25,7 +25,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Table format: **Apache Iceberg V3** + **Polaris** REST catalog (Iceberg picked over Delta for vendor-neutrality and row lineage).
 - HTML extraction: **Resiliparse** (DCLM-Baseline default, faster than Trafilatura).
 - MinHash: **Rensa** (Rust). Near-dup index: **LSHBloom** (band-partitioned Bloom).
-- Quality classifier: **FineWeb-Edu** distilled to ONNX INT8 for CPU.
+- Quality classifier: **FinePDFs Edu v2** on CPU.
 - UI: **Next.js 14 App Router + shadcn/ui + TanStack Query**.
 - Lakehouse query: **DuckDB + iceberg extension**.
 - Submit API: **FastAPI** (in v0.1.0 only; removed in v0.2.0 - see decision log).
@@ -71,7 +71,7 @@ provide" section. Tracked here for the AI pair.
 - **TODO (v0.3.0): SeedDocument.extra metadata propagation.**
   Per-component loaders populate `SeedDocument.extra` with `pes2o_version`,
   `redpajama_config`, `wayback_timestamp`, `feed_name`, `repository_name`,
-  `fineweb_edu_score`, `language` but `to_silver()` drops the map and
+  `language` but `to_silver()` drops the map and
   `SilverRecord` has no general-purpose extras column. v0.2.0 mitigation:
   the docstring on `SeedDocument.extra` and the README seed-loader notes
   document the drop honestly so operators do not rely on these tags. Real
@@ -150,7 +150,7 @@ cadence on MinIO bronze, and DHBWCloud quotas.
   existing 5000 req/h rate-limit helper).
 - **Add `processor/seed_loader.py`** - one-shot Bytewax Job that streams the
   5-component HF seed mixture (peS2o cs.* + RedPajama-arxiv +
-  FineWeb-Edu URL-filtered + Stack-Edu Python+ML + custom Wayback backfill)
+  filtered web data + Stack-Edu Python+ML + custom Wayback backfill)
   directly into `docs.normalized` as Silver records. Native publication-date
   metadata populates `valid_from` so the N2 validity-interval novelty has
   data on day 1.

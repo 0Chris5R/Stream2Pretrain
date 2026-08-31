@@ -80,15 +80,18 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert "processor-quality-model" in workflow
     assert "processor-kenlm-model" in workflow
     assert "processor-fetcher-model" in workflow
+    assert "COPY processor/pdf_worker.py" in (
+        ROOT / "processor" / "Dockerfile.fetcher.app"
+    ).read_text(encoding="utf-8")
+    assert "processor/pdf_worker.py" in workflow
     assert "image: stream2pretrain/processor-quality-model" in values
     assert "image: stream2pretrain/processor-kenlm-model" in values
     assert "image: stream2pretrain/processor-fetcher-model" in values
     assert "bootstrap: false" in values
     assert 'ternary "/models" "/opt/models" $externalModels' in curate_template
     assert "S2P_FINEPDFS_MODEL_SERVICE_URL" in curate_template
-    assert "S2P_FINEWEB_MODEL_SERVICE_URL" in curate_template
     assert "S2P_KENLM_MODEL_SERVICE_URL" in curate_template
-    assert curate_template.count("MODEL_SERVICE_DISCOVERY_HOST") == 3
+    assert curate_template.count("MODEL_SERVICE_DISCOVERY_HOST") == 2
     assert "kind: ScaledObject" in model_service_template
     assert "clusterIP: None" in model_service_template
     assert "s2p_model_active_requests" in model_service_template
@@ -209,7 +212,6 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "pin_component processor_quality_model processor-quality-model" in workflow
     assert "processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}" in workflow
     assert '"finepdfs finepdfs-edu-v2"' in workflow
-    assert '"fineweb fineweb-edu"' in workflow
     assert "scripts/benchmark_model_service.py" in workflow
     assert "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}" in workflow
     assert "service/stream2pretrain-ui 18080:http" in workflow
@@ -317,9 +319,10 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
         "inputs: .dockerignore schemas processor/Dockerfile.model-service.app "
         "processor/__init__.py processor/common.py processor/model_service.py "
         "processor/operators/__init__.py "
-        "processor/operators/quality.py processor/operators/kenlm_score.py"
+        "processor/operators/quality.py processor/operators/kenlm_score.py "
+        "processor/operators/shadow_models.py"
     )
-    assert workflow.count(model_input) == 2
+    assert workflow.count(model_input) == 3
     assert "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml" not in workflow
 
 

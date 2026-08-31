@@ -24,7 +24,6 @@ SourceFamily = Literal[
 ]
 QualityProfile = Literal[
     "finepdfs_edu_v2",
-    "fineweb_edu",
     "not_applicable",
 ]
 KenlmMode = Literal["gate", "diagnostic", "off"]
@@ -57,40 +56,40 @@ SCIENTIFIC_PAPER = SourceProcessingPolicy(
     kenlm_mode="off",
 )
 WEB_PROSE = SourceProcessingPolicy(
-    policy_id="web-fineweb-datatrove",
+    policy_id="web-finepdfs-v2",
     family="web_prose",
     extraction_profile="resiliparse-main-content",
-    quality_profile="fineweb_edu",
+    quality_profile="finepdfs_edu_v2",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=True,
     kenlm_mode="gate",
 )
 TECHNICAL_DOCUMENTATION = SourceProcessingPolicy(
-    policy_id="technical-docs-fineweb",
+    policy_id="technical-docs-finepdfs-v2",
     family="web_prose",
     extraction_profile="markdown-prose",
-    quality_profile="fineweb_edu",
+    quality_profile="finepdfs_edu_v2",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=False,
     kenlm_mode="off",
 )
 HF_MODEL_CARD = SourceProcessingPolicy(
-    policy_id="hf-model-card-fineweb",
+    policy_id="hf-model-card-finepdfs-v2",
     family="hf_model_card",
     extraction_profile="hf-card-markdown-prose",
-    quality_profile="fineweb_edu",
+    quality_profile="finepdfs_edu_v2",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=False,
     kenlm_mode="off",
 )
 HF_DATASET_CARD = SourceProcessingPolicy(
-    policy_id="hf-dataset-card-fineweb",
+    policy_id="hf-dataset-card-finepdfs-v2",
     family="hf_dataset_card",
     extraction_profile="hf-card-markdown-prose",
-    quality_profile="fineweb_edu",
+    quality_profile="finepdfs_edu_v2",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=False,
@@ -135,9 +134,8 @@ def resolve_source_policy(
     if "hf-dataset-card" in pipeline or feed == "hf-datasets":
         return HF_DATASET_CARD
     # The synthetic cluster canary is technical documentation, not randomly
-    # crawled web prose. It still exercises the real FineWeb-Edu service, but
-    # uses the documentation policy where that score is an audit signal rather
-    # than an out-of-domain hard gate.
+    # crawled web prose. It exercises the same FinePDFs service through the
+    # documentation policy, where the score remains an audit signal.
     if feed == "cluster-smoke":
         return TECHNICAL_DOCUMENTATION
 

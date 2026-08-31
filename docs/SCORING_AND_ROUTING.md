@@ -3,7 +3,7 @@
 Status: implementation contract
 Policy implementation: `processor/scientific_policy.py` and `processor/curate.py`
 Current policy id: `S2P_POLICY_REVISION`
-Current scoring id: `S2P_SCORING_VERSION`, default `pretrain-content-v2`
+Current scoring id: `S2P_SCORING_VERSION`, default `pretrain-content-v3`
 
 This document defines every score shown in the Stream2Pretrain UI. A model
 score, a deterministic evidence score, and a composite policy score are
@@ -18,9 +18,9 @@ Scientific sources are not scored as one flattened paper.
 2. Every retained heading-delimited section becomes a `SilverSegment`.
 3. PII checks run on every retained section. C4 section isolation runs only on
    ordinary web prose.
-4. The source-appropriate classifier runs on every retained section.
-   Scientific sections also retain FineWeb-Edu as a labelled comparison.
-   KenLM runs only on ordinary web prose.
+4. Existing deterministic rejection checks run before model inference.
+   FinePDFs Edu v2 then runs on every retained section of eligible papers and
+   Hugging Face cards. KenLM runs only where its source policy enables it.
 5. The final model text is rebuilt from sections that survived section-level
    safety checks.
 6. Source-authored captions, alt text, structured tables, and display
@@ -46,22 +46,11 @@ Scientific HTML, PDF, and LaTeX records use
 score. The implementation follows the model card's 10,000-character and
 2,046-token top/bottom chunk rule and takes the maximum chunk score.
 
-During calibration, the same scientific sections also run
-`HuggingFaceFW/fineweb-edu-classifier` at revision
-`284663cbb2dabf9bda30d8f8cc49601251ee1631`. This is an A/B measurement, not a
-second headline score. General web/blog content uses FineWeb-Edu as its primary
-educational score and follows the model-card recommendation to retain scores 3
-and above.
-
-Hugging Face cards remove front matter and fenced
-code before FineWeb-Edu scoring. The score remains an audit signal because the
-ordinary-web threshold was not calibrated for structured Markdown. Discovery
+Hugging Face cards remove front matter, fenced code, HTML comments, asset-only
+sections, templates, mirrors, and other deterministic slop before FinePDFs
+scoring. FinePDFs remains a continuous audit and ranking signal for cards until
+a reviewed same-source calibration establishes a safe threshold. Discovery
 metadata has no educational classifier and cannot reach Gold.
-
-FinePDFs Edu v2 remains a labelled comparison on Hugging Face cards, not their
-primary signal or gate. Its official training domain is PDFs. Using its often
-higher card score as admission evidence would be an out-of-domain substitution,
-not a quality improvement.
 
 The document educational score is the word-weighted mean of measured, retained
 sections. Each section weight is `max(1, min(word_count, 512))`.
@@ -105,7 +94,7 @@ retains privacy, licence, exact/near-duplicate, and validity checks.
   against the durable anchor signature. State is retained across worker
   restarts and namespaced by scoring generation.
 Strict laptop and Kubernetes profiles set `S2P_REQUIRE_REAL_MODELS=1` and fail
-startup if FinePDFs, FineWeb-Edu, KenLM/SentencePiece, Presidio, Rensa,
+startup if FinePDFs, KenLM/SentencePiece, Presidio, Rensa,
 Plyvel, or the required tokenizer artifacts cannot load.
 
 ## 4. Deterministic evidence scores
@@ -167,7 +156,7 @@ renormalized to sum to one before multiplication by 5.
 `heuristic_pass_rate` is the mean of Gopher pass and C4 pass. Typicality maps
 head to 1.0, middle to 0.72, and tail to 0.25. Non-applicable signals contribute
 neither a value nor weight. This composite supports sorting and dashboards. It
-is never displayed as FinePDFs, FineWeb-Edu, or KenLM.
+is never displayed as FinePDFs or KenLM.
 
 ## 6. Blocking rules and route precedence
 
@@ -183,10 +172,9 @@ Blocking reasons are applied before corpus-use routes:
 
 Current curation emits only the route values listed above.
 
-The low-quality blocker uses the official FineWeb-Edu score 3 boundary only for
-ordinary web prose. Scientific papers and cards use their
-source-specific blockers and do not inherit that web
-threshold.
+FinePDFs has no transferable hard threshold for both papers and cards. Its
+score contributes to ranking and the composite, while source-specific
+deterministic blockers make admission decisions.
 
 ## 7. Content taxonomy
 
@@ -219,9 +207,8 @@ labels:
 | The FineWeb Datasets | 4.385 | 5.000 | 4.595 | 437.8 | reasoning candidate |
 | Dolma | 3.873 | 5.000 | 4.398 | 649.4 | reasoning candidate |
 
-The values explained the original UI issue: FineWeb-Edu's web rubric produced
-low values for scientific prose, while FinePDFs v2 produces a useful spread
-without being copied into the composite score. All values describe the clean
+The values show that FinePDFs v2 produces a useful scientific-quality spread.
+All values describe the clean
 training projection rather than authors, acknowledgements, or references.
 The current policy scores every retained scientific section and disables
 KenLM for scientific text, so a new cloud validation report must not compare
@@ -247,7 +234,7 @@ Report:
 - precision, recall, and confusion matrices for routes;
 - OCR character error rate, word error rate, and numeric exact match;
 - score distributions by source format and content category;
-- FinePDFs v2 versus FineWeb-Edu on identical sampled sections.
+- FinePDFs v2 distributions on independently reviewed paper and card samples.
 
 Any threshold or weight change requires a new scoring version, the evaluation
 report, and a policy revision. Unknown deployment capacity or performance is

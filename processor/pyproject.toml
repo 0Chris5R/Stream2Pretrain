@@ -112,6 +112,25 @@ quality-service = [
     "torch>=2.3,<3",
     "safetensors>=0.4",
 ]
+shadow-service = [
+    "transformers>=4.48,<5",
+    "tokenizers>=0.21",
+    "torch>=2.3,<3",
+    "safetensors>=0.4",
+    "sentencepiece>=0.2",
+    # CSO 4.0.1 incorrectly pins requests==2.25.1, which conflicts with the
+    # secured workspace HTTP stack. Its wheel is installed with --no-deps in
+    # the immutable shadow image after these audited runtime dependencies.
+    "igraph==0.10.4",
+    "gensim==4.3.3",
+    "hurry.filesize==0.9",
+    "kneed==0.8.5",
+    "nltk>=3.9,<4",
+    "rapidfuzz==2.11.1",
+    "strsimpy==0.2.0",
+    "update-checker==0.18.0",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+]
 kenlm-service = [
     "huggingface-hub>=0.24",
     "sentencepiece>=0.2",
@@ -169,6 +188,7 @@ dev = [
 s2p-fetcher = "processor.fetcher:main"
 s2p-curate = "processor.curate:main"
 s2p-curator-model-service = "processor.model_service:main"
+s2p-shadow-classifier = "processor.shadow_classifier:main"
 s2p-iceberg-writer = "processor.iceberg_writer:main"
 s2p-iceberg-maintenance = "processor.iceberg_maintenance:main"
 s2p-duckdb-api = "processor.duckdb_api:main"

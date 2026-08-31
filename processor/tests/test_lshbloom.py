@@ -33,6 +33,21 @@ def test_identical_text_is_near_dup() -> None:
     assert second.cluster_id == first.cluster_id
 
 
+def test_probe_reports_duplicate_without_inserting_a_new_anchor() -> None:
+    h = MinHasher(num_perms=64)
+    sig = h.signature("probe before model inference must not mutate durable dedup state")
+    idx = LSHBloomIndex(num_bands=16, bits_per_band=1 << 14)
+
+    before_insert = idx.probe("sha256:" + "a" * 64, sig)
+    first = idx.observe("sha256:" + "b" * 64, sig)
+    after_insert = idx.probe("sha256:" + "c" * 64, sig)
+
+    assert before_insert == type(before_insert)(is_near_duplicate=False, cluster_id=None)
+    assert first.is_near_duplicate is False
+    assert after_insert.is_near_duplicate is True
+    assert after_insert.cluster_id == first.cluster_id
+
+
 def test_lightly_edited_repository_card_is_near_duplicate() -> None:
     h = MinHasher(num_perms=64)
     common = (

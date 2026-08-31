@@ -12,7 +12,8 @@ COPY processor/__init__.py      \
      processor/model_service.py /app/processor/
 COPY processor/operators/__init__.py     \
      processor/operators/kenlm_score.py  \
-     processor/operators/quality.py      /app/processor/operators/
+     processor/operators/quality.py      \
+     processor/operators/shadow_models.py /app/processor/operators/
 
 # Each immutable profile base validates its exact native/model dependencies.
 # Repository tests validate this source-only layer without reloading that base.

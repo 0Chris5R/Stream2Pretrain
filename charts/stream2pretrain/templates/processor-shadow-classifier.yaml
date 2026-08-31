@@ -1,0 +1,145 @@
+{{- if .Values.processor.shadowClassifier.enabled }}
+{{- $component := "processor-shadow-classifier" }}
+{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- if ne (int .Values.processor.shadowClassifier.replicas) 1 }}
+{{- fail "processor.shadowClassifier.replicas must be exactly 1 while Bytewax recovery uses one RWO checkpoint" }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: wait-shadow-model
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.shadowClassifier.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import time
+              import urllib.request
+              url = "http://{{ printf "%s-processor-model-service-shadow" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz"
+              deadline = time.monotonic() + 1800
+              while True:
+                  try:
+                      with urllib.request.urlopen(url, timeout=3) as response:
+                          if response.status == 200:
+                              break
+                  except Exception:
+                      pass
+                  if time.monotonic() >= deadline:
+                      raise SystemExit(f"shadow model service did not become ready: {url}")
+                  time.sleep(5)
+      containers:
+        - name: shadow-classifier
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.shadowClassifier.image) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command: ["python", "-m", "processor.shadow_classifier"]
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
+            - name: S2P_COMPONENT
+              value: {{ $component | quote }}
+            # A new experimental lane starts at the live frontier once. Its
+            # retained Bytewax checkpoint owns every subsequent restart.
+            - name: S2P_KAFKA_START_OFFSET
+              value: "end"
+            - name: S2P_CONSUMER_GROUP
+              value: "s2p-public-shadow-v1"
+            - name: S2P_BYTEWAX_FLOW_NAME
+              value: "s2p-public-shadow-v1"
+            - name: S2P_BYTEWAX_RECOVERY_NAME
+              value: "public-shadow-v1"
+            - name: S2P_CHECKPOINT_DIR
+              value: /var/lib/s2p/checkpoint
+            - name: S2P_STATE_DIR
+              value: /var/lib/s2p/checkpoint
+            - name: S2P_BYTEWAX_RECOVERY_PARTITIONS
+              value: {{ .Values.processor.shadowClassifier.checkpoint.recoveryPartitions | int | quote }}
+            - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
+              value: {{ .Values.processor.shadowClassifier.checkpoint.snapshotSeconds | quote }}
+            - name: S2P_SHADOW_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-shadow:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_SHADOW_MODEL_TIMEOUT_SECONDS
+              value: {{ .Values.processor.shadowClassifier.modelTimeoutSeconds | quote }}
+            - name: S2P_SHADOW_BUCKET
+              value: {{ .Values.minio.buckets.gold | quote }}
+          startupProbe:
+            httpGet: {path: /readyz, port: metrics}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 180
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 30
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.processor.shadowClassifier.resources | nindent 12 }}
+          volumeMounts:
+            - name: checkpoint
+              mountPath: /var/lib/s2p/checkpoint
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: checkpoint
+        labels:
+          {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.processor.shadowClassifier.checkpoint.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.processor.shadowClassifier.checkpoint.size | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+  selector:
+    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+{{- end }}

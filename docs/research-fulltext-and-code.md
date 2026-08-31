@@ -30,7 +30,7 @@ Verified 2026-06-15. All numerical figures sourced; values not yet measured on t
 
 What public curators do:
 
-- **FineWeb / FineWeb-Edu** is a Common Crawl pipeline (Trafilatura), it does not handle arXiv natively [arxiv.org/html/2406.17557v1].
+- Common Crawl curation pipelines do not handle arXiv structure natively [arxiv.org/html/2406.17557v1].
 - **NeMo Curator** ships an arXiv download/extract helper (output: JSONL) but the public docs do not specify whether it goes through LaTeX source or PDF [developer.nvidia.com/blog/scale-and-curate-high-quality-datasets-for-llm-training-with-nemo-curator].
 - **Dolma / RedPajama / The Pile** historically built the arXiv subset from `s3://arxiv/src` LaTeX with custom strip-comment and inline-macro expansion. Public confirmation in the cited results is partial.
 

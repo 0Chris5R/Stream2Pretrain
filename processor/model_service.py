@@ -19,10 +19,11 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from processor import common
 from processor.operators.kenlm_score import KenLMScorer
 from processor.operators.quality import QualityClassifier
+from processor.operators.shadow_models import CsoShadowClassifier, TransformerShadowScorer
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
-ModelProfile = Literal["finepdfs", "fineweb", "quality", "kenlm", "all"]
-MODEL_PROFILES: frozenset[str] = frozenset({"finepdfs", "fineweb", "quality", "kenlm", "all"})
+ModelProfile = Literal["finepdfs", "quality", "kenlm", "shadow", "all"]
+MODEL_PROFILES: frozenset[str] = frozenset({"finepdfs", "quality", "kenlm", "shadow", "all"})
 _Result = TypeVar("_Result")
 
 MODEL_REQUESTS = Counter(
@@ -67,20 +68,15 @@ class CuratorModelRuntime:
         root = Path(models_dir)
         self.profile = profile
         self.finepdfs: QualityClassifier | None = None
-        self.fineweb: QualityClassifier | None = None
         self.kenlm: KenLMScorer | None = None
+        self.meta_rater: TransformerShadowScorer | None = None
+        self.finemath: TransformerShadowScorer | None = None
+        self.cso: CsoShadowClassifier | None = None
         if profile in {"finepdfs", "quality", "all"}:
             self.finepdfs = QualityClassifier(
                 root / "finepdfs-edu-v2",
                 revision=os.environ.get("S2P_FINEPDFS_EDU_REVISION"),
                 model_family="finepdfs-edu-v2",
-                allow_fallback=False,
-            )
-        if profile in {"fineweb", "quality", "all"}:
-            self.fineweb = QualityClassifier(
-                root / "fineweb-edu",
-                revision=os.environ.get("S2P_FINEWEB_EDU_REVISION"),
-                model_family="fineweb-edu",
                 allow_fallback=False,
             )
         if profile in {"kenlm", "all"}:
@@ -89,14 +85,30 @@ class CuratorModelRuntime:
                 root / "kenlm" / "en.sp.model",
                 allow_fallback=False,
             )
-        # Each model instance has an independent lock.  FinePDFs and FineWeb
-        # are separate immutable runtimes in production, while the ``all``
-        # profile used by local tests can still execute distinct models in
-        # parallel without entering the same global critical section.
+        if profile in {"shadow", "all"}:
+            self.meta_rater = TransformerShadowScorer(
+                root / "meta-rater-reasoning",
+                family="meta-rater-reasoning",
+                revision="opendatalab/meta-rater-reasoning-rating@0072a9a83971eb4af6d689dfc64f8f203c45b398",
+                max_length=4096,
+                max_chunks=_positive_int_env("S2P_META_RATER_MAX_CHUNKS", 16),
+                stride=256,
+            )
+            self.finemath = TransformerShadowScorer(
+                root / "finemath-classifier",
+                family="finemath",
+                revision="HuggingFaceTB/finemath-classifier@bd0b0e330750ccaafb16c47066f875b3fcb707c3",
+                max_length=512,
+                max_chunks=_positive_int_env("S2P_FINEMATH_MAX_CHUNKS", 64),
+                stride=64,
+            )
+            self.cso = CsoShadowClassifier()
         self.locks = {
             "finepdfs-edu-v2": threading.Lock(),
-            "fineweb-edu": threading.Lock(),
             "kenlm": threading.Lock(),
+            "meta-rater-reasoning": threading.Lock(),
+            "finemath": threading.Lock(),
+            "cso-topics": threading.Lock(),
         }
         self.max_batch_items = _positive_int_env("S2P_MODEL_SERVICE_MAX_BATCH_ITEMS", 8)
 
@@ -108,11 +120,6 @@ class CuratorModelRuntime:
                 "backend": self.finepdfs.backend,
                 "revision": self.finepdfs.revision,
             }
-        if self.fineweb is not None:
-            quality["fineweb-edu"] = {
-                "backend": self.fineweb.backend,
-                "revision": self.fineweb.revision,
-            }
         if quality:
             metadata["quality"] = quality
         if self.kenlm is not None:
@@ -120,13 +127,16 @@ class CuratorModelRuntime:
                 "backend": "kenlm-sentencepiece",
                 "scorer": self.kenlm.scorer,
             }
+        if self.meta_rater is not None and self.finemath is not None and self.cso is not None:
+            metadata["shadow"] = {
+                "meta_rater": self.meta_rater.revision,
+                "finemath": self.finemath.revision,
+                "cso": self.cso.revision,
+            }
         return metadata
 
     def quality_many(self, family: str, texts: Sequence[str]) -> list[dict[str, Any]]:
-        classifiers = {
-            "finepdfs-edu-v2": self.finepdfs,
-            "fineweb-edu": self.fineweb,
-        }
+        classifiers = {"finepdfs-edu-v2": self.finepdfs}
         classifier = classifiers.get(family)
         if classifier is None:
             raise ValueError("unsupported model_family")
@@ -156,6 +166,25 @@ class CuratorModelRuntime:
             lock=self.locks["kenlm"],
             callback=lambda: self.kenlm.score(text),
         )
+
+    def shadow_scores(self, text: str) -> dict[str, Any]:
+        """Run all public shadow classifiers without changing curation routes."""
+        if self.meta_rater is None or self.finemath is None or self.cso is None:
+            raise ValueError("shadow classifiers are unavailable in this model profile")
+        results: dict[str, Any] = {}
+        for family, classifier in (
+            ("meta-rater-reasoning", self.meta_rater),
+            ("finemath", self.finemath),
+            ("cso-topics", self.cso),
+        ):
+            results[family] = self._run_locked(
+                operation="shadow",
+                model_family=family,
+                item_count=1,
+                lock=self.locks[family],
+                callback=lambda classifier=classifier: classifier.score(text),
+            )
+        return results
 
     def _run_locked(
         self,
@@ -261,6 +290,9 @@ class _Handler(BaseHTTPRequestHandler):
                         "scorer": perplexity_result.scorer,
                     },
                 )
+                return
+            if self.path == "/v1/shadow":
+                self._write(HTTPStatus.OK, {"classifiers": self.runtime.shadow_scores(text)})
                 return
             self._write(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except (ValueError, orjson.JSONDecodeError) as exc:

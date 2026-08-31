@@ -29,7 +29,7 @@ scheduled source ingest
 
 arXiv uses full scientific extraction and FinePDFs Edu v2. Hugging Face uses
 exact-revision README projection and its dedicated card-structure policy.
-FineWeb-Edu and FinePDFs comparison values on cards are audit-only. KenLM and
+FinePDFs Edu v2 values on cards are audit-only. KenLM and
 web heuristics are not applied to papers or cards.
 
 ## Bounded fixtures

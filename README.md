@@ -117,12 +117,13 @@ The fetcher turns raw bytes into normalized document records. It extracts readab
 
 Quality is source-aware:
 
-- Scientific HTML, PDF, and LaTeX use the FinePDFs profile.
-- General web text uses the FineWeb-Edu profile.
-- Hugging Face cards use a Markdown prose projection, a deterministic card-structure gate, and FineWeb-Edu plus FinePDFs comparison signals without Common-Crawl page-shape gates.
+- Scientific HTML, PDF, LaTeX, and eligible Hugging Face card prose use the
+  FinePDFs Edu v2 profile.
+- Hugging Face cards use a Markdown prose projection and deterministic card
+  gate before any learned-model inference.
 - RSS, OAI, and Hub-list envelopes are internal discovery messages and never become training text or UI corpus rows.
 
-The DHBW chart fails closed on missing models. FinePDFs, FineWeb-Edu, and KenLM
+The DHBW chart fails closed on missing models. FinePDFs and KenLM
 run from pinned immutable images behind independently scalable stateless
 inference services; Presidio, MinHash, and tokenization stay with the
 lightweight stateful curator. Every row records its classifier revision and

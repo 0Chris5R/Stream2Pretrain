@@ -61,17 +61,13 @@ class _SplitModelClient:
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
-        if any(value in base_url for value in ("quality", "finepdfs", "fineweb")):
+        if any(value in base_url for value in ("quality", "finepdfs")):
             self.metadata = {
                 "ready": True,
                 "quality": {
                     "finepdfs-edu-v2": {
                         "backend": "transformers-cpu",
                         "revision": "finepdfs@pinned",
-                    },
-                    "fineweb-edu": {
-                        "backend": "transformers-cpu",
-                        "revision": "fineweb@pinned",
                     },
                 },
             }
@@ -160,13 +156,12 @@ class _ConcurrentBatchQualityScorer(_BatchQualityScorer):
                 self.active -= 1
 
 
-def test_segment_models_batch_without_skipping_any_classifier(
+def test_segment_models_batch_the_sole_quality_classifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
     monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "6")
-    primary = _BatchQualityScorer()
-    comparison = _BatchQualityScorer()
+    quality = _BatchQualityScorer()
     segments = [
         SilverSegment(
             segment_id=f"section-{index}",
@@ -179,40 +174,30 @@ def test_segment_models_batch_without_skipping_any_classifier(
 
     results = _score_segment_models(
         segments,
-        primary_quality=primary,
-        comparison_quality=comparison,
+        quality=quality,
         kenlm=_BatchKenLM(),
         use_kenlm=True,
     )
 
-    assert sorted(len(batch) for batch in primary.batches) == [1, 2, 2]
-    assert sorted(len(batch) for batch in comparison.batches) == [1, 2, 2]
-    assert sorted(text for batch in primary.batches for text in batch) == sorted(
-        segment.text for segment in segments
-    )
-    assert sorted(text for batch in comparison.batches for text in batch) == sorted(
+    assert sorted(len(batch) for batch in quality.batches) == [1, 2, 2]
+    assert sorted(text for batch in quality.batches for text in batch) == sorted(
         segment.text for segment in segments
     )
     assert set(results) == {segment.segment_id for segment in segments}
     for segment in segments:
         result = results[segment.segment_id]
+        assert result.quality is not None
         assert result.quality.edu_score == float(len(segment.text))
-        assert result.comparison is not None
-        assert result.comparison.edu_score == float(len(segment.text))
         assert result.perplexity is not None
         assert result.perplexity.perplexity == float(len(segment.text))
 
 
-def test_segment_model_families_run_concurrently_without_changing_results(
+def test_segment_models_can_skip_quality_for_a_deterministic_reject(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
     monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "6")
-    release = threading.Event()
-    primary_started = threading.Event()
-    comparison_started = threading.Event()
-    primary = _BlockingBatchQualityScorer(primary_started, release)
-    comparison = _BlockingBatchQualityScorer(comparison_started, release)
+    quality = _BatchQualityScorer()
     segments = [
         SilverSegment(
             segment_id=f"section-{index}",
@@ -223,26 +208,19 @@ def test_segment_model_families_run_concurrently_without_changing_results(
         for index in range(1, 5)
     ]
 
-    with ThreadPoolExecutor(max_workers=1) as caller:
-        pending = caller.submit(
-            _score_segment_models,
-            segments,
-            primary_quality=primary,
-            comparison_quality=comparison,
-            kenlm=_BatchKenLM(),
-            use_kenlm=True,
-        )
-        assert primary_started.wait(timeout=2)
-        assert comparison_started.wait(timeout=2)
-        release.set()
-        results = pending.result(timeout=2)
+    results = _score_segment_models(
+        segments,
+        quality=None,
+        kenlm=_BatchKenLM(),
+        use_kenlm=False,
+    )
 
     assert list(results) == [segment.segment_id for segment in segments]
+    assert quality.batches == []
     for segment in segments:
         result = results[segment.segment_id]
-        assert result.quality.edu_score == float(len(segment.text))
-        assert result.comparison is not None
-        assert result.comparison.edu_score == float(len(segment.text))
+        assert result.quality is None
+        assert result.perplexity is None
 
 
 def test_document_prefetch_fills_all_six_family_request_lanes(
@@ -383,7 +361,7 @@ def test_document_micro_batch_matches_exact_serial_decisions(
         batch_state.close()
 
 
-def test_document_micro_batch_fills_model_families_without_skipping_segments(
+def test_document_micro_batch_fills_finepdfs_without_skipping_eligible_segments(
     cfg: ProcessorConfig,
     long_english_text: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -392,14 +370,16 @@ def test_document_micro_batch_fills_model_families_without_skipping_segments(
     monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "12")
     state = build_state(cfg)
     finepdfs = _BatchQualityScorer()
-    fineweb = _BatchQualityScorer()
     state.finepdfs_quality = finepdfs
-    state.fineweb_quality = fineweb
     state.kenlm = _BatchKenLM()
     documents = []
     expected_texts = []
     for index in range(12):
-        text = f"Batch document {index}. {long_english_text}"
+        text = (
+            f"Batch document {index}. {long_english_text} "
+            "The architecture has 12 attention layers and was trained for 20 epochs. "
+            "Evaluation accuracy is 91.5 percent on research/example-dataset."
+        )
         expected_texts.append(text)
         documents.append(
             _silver(text, doc_id=f"sha256:{index + 1:064x}").model_copy(
@@ -427,16 +407,76 @@ def test_document_micro_batch_fills_model_families_without_skipping_segments(
 
         assert all(outcome.error is None for outcome in outcomes)
         assert sorted(len(batch) for batch in finepdfs.batches) == [2] * 6
-        assert sorted(len(batch) for batch in fineweb.batches) == [2] * 6
         assert sorted(text for batch in finepdfs.batches for text in batch) == sorted(
             expected_texts
         )
-        assert sorted(text for batch in fineweb.batches for text in batch) == sorted(expected_texts)
         for outcome in outcomes:
             assert outcome.value is not None
             gold = common.gold_loads(outcome.value[0])
             assert gold.segment_scores[0].finepdfs_edu_score == 5.0
-            assert gold.segment_scores[0].fineweb_edu_score == 5.0
+    finally:
+        state.close()
+
+
+def test_hf_card_deterministic_reject_skips_finepdfs_inference(
+    cfg: ProcessorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
+    state = build_state(cfg)
+    finepdfs = _BatchQualityScorer()
+    state.finepdfs_quality = finepdfs
+    rejected_text = "This is a model card. More information needed. " * 20
+    rejected = _silver(rejected_text).model_copy(
+        update={
+            "source_feed": "hf-models",
+            "source_format": "web",
+            "extraction_pipeline": "hf-model-card-markdown-v2",
+            "title": "Automatic model card",
+            "segments": [
+                SilverSegment(
+                    segment_id="description",
+                    title="Model description",
+                    text=rejected_text,
+                    word_count=len(rejected_text.split()),
+                )
+            ],
+        }
+    )
+    try:
+        outcomes = process_silver_decision_payloads(state, [silver_dumps(rejected)])
+
+        assert finepdfs.batches == []
+        assert outcomes[0].value is not None
+        gold = common.gold_loads(outcomes[0].value[0])
+        assert "hf_card_quality_filter" in gold.reject_reasons
+        assert gold.segment_scores[0].finepdfs_edu_score is None
+        assert gold.classifier_revision == "not-run:deterministic-reject"
+    finally:
+        state.close()
+
+
+def test_known_near_duplicate_skips_finepdfs_before_durable_rejection(
+    cfg: ProcessorConfig,
+    long_english_text: str,
+) -> None:
+    state = build_state(cfg)
+    finepdfs = _BatchQualityScorer()
+    state.finepdfs_quality = finepdfs
+    first = _silver(long_english_text, doc_id="sha256:" + "a" * 64)
+    duplicate = _silver(long_english_text, doc_id="sha256:" + "b" * 64)
+    try:
+        first_outcome = process_silver_decision_payloads(state, [silver_dumps(first)])[0]
+        assert first_outcome.value is not None
+        finepdfs.batches.clear()
+
+        duplicate_outcome = process_silver_decision_payloads(state, [silver_dumps(duplicate)])[0]
+
+        assert finepdfs.batches == []
+        assert duplicate_outcome.value is not None
+        gold = common.gold_loads(duplicate_outcome.value[0])
+        assert "near_duplicate" in gold.reject_reasons
+        assert gold.segment_scores[0].finepdfs_edu_score is None
     finally:
         state.close()
 
@@ -459,23 +499,21 @@ def test_split_model_services_are_all_required_and_closed(
     }
 
 
-def test_independent_quality_model_services_are_all_required_and_closed(
+def test_independent_model_services_are_all_required_and_closed(
     cfg: ProcessorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("S2P_MODEL_SERVICE_URL", raising=False)
     monkeypatch.delenv("S2P_QUALITY_MODEL_SERVICE_URL", raising=False)
     monkeypatch.setenv("S2P_FINEPDFS_MODEL_SERVICE_URL", "http://finepdfs")
-    monkeypatch.setenv("S2P_FINEWEB_MODEL_SERVICE_URL", "http://fineweb")
     monkeypatch.setenv("S2P_KENLM_MODEL_SERVICE_URL", "http://kenlm")
     monkeypatch.setattr("processor.curate.CuratorModelClient", _SplitModelClient)
     _SplitModelClient.closed.clear()
 
     state = build_state(cfg)
-    assert len(state.model_clients) == 3
+    assert len(state.model_clients) == 2
     state.close()
     assert set(_SplitModelClient.closed) == {
         "http://finepdfs",
-        "http://fineweb",
         "http://kenlm",
     }
 
@@ -504,12 +542,12 @@ def test_curate_clean_text_passes(cfg: ProcessorConfig, long_english_text: str) 
         state.close()
 
 
-def test_cluster_smoke_observes_but_does_not_gate_on_fineweb_score(
+def test_cluster_smoke_observes_but_does_not_gate_on_finepdfs_score(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
     state = build_state(cfg)
     try:
-        state.fineweb_quality = _LowQualityScorer()
+        state.finepdfs_quality = _LowQualityScorer()
         silver = _silver(long_english_text).model_copy(
             update={
                 "source_feed": "cluster-smoke",
@@ -520,7 +558,7 @@ def test_cluster_smoke_observes_but_does_not_gate_on_fineweb_score(
 
         gold = curate_one(state, silver)
 
-        assert gold.segment_scores[0].fineweb_edu_score == 1.0
+        assert gold.segment_scores[0].finepdfs_edu_score == 1.0
         assert "low_quality_score" not in gold.reject_reasons
         assert is_trainable_gold(gold)
     finally:
@@ -1005,9 +1043,8 @@ def test_metadata_is_discovery_only_and_never_trainable(cfg: ProcessorConfig) ->
 
         gold = curate_one(state, silver)
 
-        assert gold.classifier_revision == "metadata-discovery-only-v1"
+        assert gold.classifier_revision == "not-run:deterministic-reject"
         assert gold.segment_scores[0].finepdfs_edu_score is None
-        assert gold.segment_scores[0].fineweb_edu_score is None
         assert "discovery_metadata" in gold.content_tags
         assert "metadata_only" in gold.reject_reasons
         assert gold.route == "quarantine"

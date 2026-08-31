@@ -157,8 +157,7 @@ class SilverRecord(BaseModel):
         description=(
             "Operator-chain identifier of the extractor that produced ``text``. "
             "Distinct from ``extracted_with`` so a single extractor binary can "
-            "ship multiple named pipelines (e.g. 'arxiv-html-2026-06' vs "
-            "'fineweb-edu-html')."
+            "ship multiple named pipelines."
         ),
     )
     spdx_license: str | None = Field(

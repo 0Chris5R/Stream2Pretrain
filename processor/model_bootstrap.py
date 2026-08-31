@@ -20,9 +20,6 @@ REVISIONS = {
     "finepdfs_edu_v2": os.environ.get(
         "FINEPDFS_EDU_V2_REVISION", "90ddef285f67230389057c14b2f6bbfeb70d40ea"
     ),
-    "fineweb_edu": os.environ.get(
-        "FINEWEB_EDU_REVISION", "284663cbb2dabf9bda30d8f8cc49601251ee1631"
-    ),
     "kenlm": os.environ.get("KENLM_REVISION", "3fbe35c83b1a39f420a345b7c96a186c8030d834"),
     "figure_classifier": os.environ.get(
         "FIGURE_CLASSIFIER_REVISION", "f859dfbff5c9916cd996942d4b0db7fa25808220"
@@ -93,8 +90,6 @@ def _validate() -> None:
     required = {
         "FinePDFs Edu v2 weights": MODELS_DIR / "finepdfs-edu-v2" / "model.safetensors",
         "FinePDFs Edu v2 tokenizer": MODELS_DIR / "finepdfs-edu-v2" / "tokenizer.json",
-        "FineWeb-Edu weights": MODELS_DIR / "fineweb-edu" / "model.safetensors",
-        "FineWeb-Edu tokenizer": MODELS_DIR / "fineweb-edu" / "tokenizer.json",
         "figure ONNX model": MODELS_DIR / "figure-classifier" / "model.onnx",
         "KenLM binary": MODELS_DIR / "kenlm" / "en.arpa.bin",
         "KenLM tokenizer": MODELS_DIR / "kenlm" / "en.sp.model",
@@ -118,13 +113,6 @@ def main() -> None:
         repo_id="HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn",
         revision=REVISIONS["finepdfs_edu_v2"],
         destination=MODELS_DIR / "finepdfs-edu-v2",
-        patterns=["*.json", "*.txt", "*.safetensors"],
-    )
-    print("Downloading pinned FineWeb-Edu classifier", flush=True)
-    _snapshot(
-        repo_id="HuggingFaceFW/fineweb-edu-classifier",
-        revision=REVISIONS["fineweb_edu"],
-        destination=MODELS_DIR / "fineweb-edu",
         patterns=["*.json", "*.txt", "*.safetensors"],
     )
     print("Downloading pinned document-figure ONNX classifier", flush=True)

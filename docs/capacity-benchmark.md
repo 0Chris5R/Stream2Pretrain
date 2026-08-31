@@ -20,8 +20,35 @@ cluster. The second is only a flavor name. Consequently the chart uses one
 strict curator replica and conservative KEDA maxima by default. The larger
 `values-prod.yaml` maxima are generic production examples and must not be used
 for the course cluster until the probe below records allocatable resources.
-FinePDFs v2 plus FineWeb-Edu comparison inference also makes the curator
-materially larger than the older FineWeb-only configuration.
+FinePDFs v2 is the only learned quality inference path. Its stateless service
+is the measured curation bottleneck.
+
+### FinePDF-only post-prefilter load projection, 2026-08-31
+
+This is a projection from two measured samples, not a replacement for the
+required 24-hour production counter:
+
+- A 32.7-minute live input window contained 597 new Hugging Face README
+  revisions and 9 arXiv papers. The direct daily extrapolation is about 26,290
+  HF revisions and 396 papers.
+- The audited recent HF sample retained 36 of 87 reachable cards after the
+  deterministic card gate, or 41.4 percent. Applying only that measured
+  fraction gives about 10,879 HF cards per day that would reach FinePDFs.
+- The reviewed arXiv sample retained 19 of 20 after deterministic document
+  checks. Applying that small-sample fraction gives about 376 papers per day
+  that would reach FinePDFs.
+- The resulting projected FinePDF load is about 11,255 documents per day.
+  The current six-Pod lane completed about 144 to 148 durable decisions per
+  hour in the measured mix, or 3,456 to 3,552 per day.
+
+On those measurements the FinePDF lane is still short by about 3.2 times and
+would add roughly 7,700 to 7,800 candidates per day to the normalized backlog.
+The point estimate is uncertain because the HF 87-card sample and arXiv
+20-paper sample are small and the live source mix changes. The acceptance
+fraction and throughput must be replaced by one aligned 24-hour measurement
+after deployment. Removing the second learned service releases its CPU
+reservation to the rest of the cluster, but does not itself increase the six
+FinePDF workers' measured throughput.
 
 ## 2026-08-30 live baseline and remediation gates
 
@@ -85,11 +112,10 @@ arrival is about 630 to 678 documents per hour. The curator completed about
 These are observed rates, not a synthetic benchmark.
 
 The deterministic source-quality, language, minimum-body, card-structure,
-C4/Gopher, licence, extraction, PII, and near-duplicate gates cannot safely
-skip model inference under the current audit contract. A durable rejected
-decision still contains every applicable per-segment FinePDFs, FineWeb-Edu,
-and KenLM result and revision. Skipping those calls would change the durable
-output even when the final route happened to remain quarantine. Exact-payload
+Language, body, Hugging Face card structure, C4/Gopher, licence, extraction,
+and blocking-PII predicates run before FinePDFs. A deterministic reject remains
+a durable decision with null segment model fields and an explicit not-run
+revision. Near-duplicate state remains ordered after inference. Exact-payload
 replay already avoids inference through the decision cache.
 
 The next optimization therefore removes a synchronization inefficiency rather

@@ -88,7 +88,7 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `text` | string | yes | post-PII-scrubbed |
 | `lang` | ISO code | yes | |
 | `tokens` | int >=0 | yes | GPT-2-tokenizer token count |
-| `edu_score` | float 0..5 | yes | Raw source-aware quality signal: FinePDFs v2, FineWeb-Edu, or Stack/Dolma code rules |
+| `edu_score` | float 0..5 | yes | FinePDFs Edu v2 score, or zero when the model is not applicable or skipped after a deterministic rejection |
 | `quality_score` | float 0..5 | yes | Explainable composite of source quality, source-appropriate structure, language, and only applicable heuristic/KenLM signals |
 | `lang_score` | float 0..1 | yes | language-confidence signal |
 | `gopher_pass` | bool | yes | Gopher heuristic outcome |
@@ -104,7 +104,7 @@ into the Iceberg `gold` table and be queryable by DuckDB.
 | `valid_to` | UTC datetime \| null | no | |
 | `reject_reasons` | list[enum] | no | Includes language, web heuristics, duplicate, source quality, PII/secret, licence, validity, incomplete extraction, and `metadata_only` blockers |
 | `scoring_version` | string | yes | recipe version |
-| `classifier_revision` | string | yes | e.g. `fineweb-edu-onnx-int8-2026-05-31` |
+| `classifier_revision` | string | yes | Pinned FinePDFs revision, or `not-run:deterministic-reject` |
 | `policy_revision` | `git:<sha>` | yes | git commit of the policy bundle |
 | `snapshot_id` | int \| null | no | populated by Iceberg commit |
 | `_row_id` | int \| null | no | reserved; null in the current Iceberg V2 writer |

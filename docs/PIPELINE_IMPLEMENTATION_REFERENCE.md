@@ -174,12 +174,9 @@ projection where appropriate.
 
 ### 3.1 Quality models
 
-- Scientific sections: primary
+- Eligible scientific and Hugging Face card sections:
   `HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn` revision
-  `90ddef285f67230389057c14b2f6bbfeb70d40ea`, plus FineWeb-Edu comparison.
-- Hugging Face card sections: primary
-  `HuggingFaceFW/fineweb-edu-classifier` revision
-  `284663cbb2dabf9bda30d8f8cc49601251ee1631`, plus FinePDFs v2 comparison.
+  `90ddef285f67230389057c14b2f6bbfeb70d40ea`.
 - Strict profiles require real CPU model artifacts. ONNX Runtime is preferred;
   Safetensors/Transformers CPU is the second path. The heuristic proxy is test
   and non-faithful-development only.

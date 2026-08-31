@@ -141,7 +141,7 @@ jobs:
             dns_infra=true
           fi
           if grep -Eq \
-            '^(processor/(curate|model_client|model_service)\.py|processor/operators/quality\.py|charts/stream2pretrain/templates/(processor-curate|processor-model-service|servicemonitors)\.yaml|charts/stream2pretrain/values\.yaml|scripts/benchmark_model_service\.py)$' \
+            '^(processor/(curate|model_client|model_service|shadow_classifier)\.py|processor/operators/(quality|shadow_models)\.py|charts/stream2pretrain/templates/(processor-curate|processor-model-service|processor-shadow-classifier|servicemonitors)\.yaml|charts/stream2pretrain/values\.yaml|scripts/benchmark_model_service\.py)$' \
             "$changed"; then
             model_runtime=true
           fi
@@ -268,7 +268,7 @@ jobs:
               if resource is None or resource.get("spec", {}).get("replicas") != 1:
                   raise SystemExit(f"core workload must render exactly one replica: {name}")
 
-          for profile in ("finepdfs", "fineweb"):
+          for profile in ("finepdfs",):
               name = f"stream2pretrain-processor-model-service-{profile}"
               deployment = by_name.get(("Deployment", name))
               service = by_name.get(("Service", name))
@@ -463,6 +463,9 @@ jobs:
           - profile: fetcher
             repository: processor-base-fetcher
             extra: fetcher-service
+          - profile: shadow
+            repository: processor-base-shadow
+            extra: shadow-service
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -566,6 +569,7 @@ jobs:
       quality_image: ${{ steps.pin.outputs.quality_image }}
       kenlm_image: ${{ steps.pin.outputs.kenlm_image }}
       fetcher_image: ${{ steps.pin.outputs.fetcher_image }}
+      shadow_image: ${{ steps.pin.outputs.shadow_image }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -638,6 +642,7 @@ jobs:
           pin_image quality_image "$(resolve_image quality processor-base-quality quality-service)"
           pin_image kenlm_image "$(resolve_image kenlm processor-base-kenlm kenlm-service)"
           pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher fetcher-service)"
+          pin_image shadow_image "$(resolve_image shadow processor-base-shadow shadow-service)"
 
   build:
     name: Build ${{ matrix.image }}
@@ -681,16 +686,21 @@ jobs:
             model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
           - image: processor-kenlm-model
             model_profile: kenlm
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.fetcher.app
-            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/source_policy.py
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/pdf_worker.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/source_policy.py
+          - image: processor-shadow-model
+            model_profile: shadow
+            context: .
+            dockerfile: processor/Dockerfile.model-service.app
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
           - image: ui
             context: ui
             dockerfile: Dockerfile
@@ -720,6 +730,7 @@ jobs:
           PROCESSOR_QUALITY_IMAGE: ${{ needs.processor-base-pin.outputs.quality_image }}
           PROCESSOR_KENLM_IMAGE: ${{ needs.processor-base-pin.outputs.kenlm_image }}
           PROCESSOR_FETCHER_IMAGE: ${{ needs.processor-base-pin.outputs.fetcher_image }}
+          PROCESSOR_SHADOW_IMAGE: ${{ needs.processor-base-pin.outputs.shadow_image }}
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
@@ -729,6 +740,7 @@ jobs:
             processor-quality-model) selected_processor_base="$PROCESSOR_QUALITY_IMAGE" ;;
             processor-kenlm-model) selected_processor_base="$PROCESSOR_KENLM_IMAGE" ;;
             processor-fetcher-model) selected_processor_base="$PROCESSOR_FETCHER_IMAGE" ;;
+            processor-shadow-model) selected_processor_base="$PROCESSOR_SHADOW_IMAGE" ;;
           esac
           component_tree_hash() {
             local revision="$1"
@@ -856,6 +868,7 @@ jobs:
       processor_quality_model: ${{ steps.pin.outputs.processor_quality_model }}
       processor_kenlm_model: ${{ steps.pin.outputs.processor_kenlm_model }}
       processor_fetcher_model: ${{ steps.pin.outputs.processor_fetcher_model }}
+      processor_shadow_model: ${{ steps.pin.outputs.processor_shadow_model }}
       ui: ${{ steps.pin.outputs.ui }}
     steps:
       - name: Set up Docker Buildx
@@ -899,6 +912,7 @@ jobs:
           pin_component processor_quality_model processor-quality-model
           pin_component processor_kenlm_model processor-kenlm-model
           pin_component processor_fetcher_model processor-fetcher-model
+          pin_component processor_shadow_model processor-shadow-model
           pin_component ui ui
 
   deploy:
@@ -944,6 +958,7 @@ jobs:
       IMAGE_DIGEST_PROCESSOR_QUALITY: ${{ needs.image-pin.outputs.processor_quality_model }}
       IMAGE_DIGEST_PROCESSOR_KENLM: ${{ needs.image-pin.outputs.processor_kenlm_model }}
       IMAGE_DIGEST_PROCESSOR_FETCHER: ${{ needs.image-pin.outputs.processor_fetcher_model }}
+      IMAGE_DIGEST_PROCESSOR_SHADOW: ${{ needs.image-pin.outputs.processor_shadow_model }}
       IMAGE_DIGEST_UI: ${{ needs.image-pin.outputs.ui }}
     steps:
       - name: Check out source
@@ -2802,6 +2817,7 @@ jobs:
           : "${IMAGE_DIGEST_PROCESSOR_QUALITY:?Missing pinned quality digest}"
           : "${IMAGE_DIGEST_PROCESSOR_KENLM:?Missing pinned KenLM digest}"
           : "${IMAGE_DIGEST_PROCESSOR_FETCHER:?Missing pinned fetcher digest}"
+          : "${IMAGE_DIGEST_PROCESSOR_SHADOW:?Missing pinned public shadow-model digest}"
           : "${IMAGE_DIGEST_UI:?Missing pinned UI digest}"
 
           helm_overrides=(
@@ -2815,8 +2831,8 @@ jobs:
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
             --set "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.modelService.profiles.finepdfs.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
-            --set "processor.modelService.profiles.fineweb.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
             --set "processor.modelService.profiles.kenlm.image=stream2pretrain/processor-kenlm-model@${IMAGE_DIGEST_PROCESSOR_KENLM}"
+            --set "processor.modelService.profiles.shadow.image=stream2pretrain/processor-shadow-model@${IMAGE_DIGEST_PROCESSOR_SHADOW}"
             --set "processor.iceberg.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.duckdbApi.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.foundry.image=stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
@@ -2843,14 +2859,15 @@ jobs:
           # digest actually changes. Unchanged services keep their Pods, model
           # memory, HPA state, and readiness throughout the release.
           model_image_changed=false
-          for profile in finepdfs fineweb kenlm; do
+          for profile in finepdfs kenlm shadow; do
             model="stream2pretrain-processor-model-service-${profile}"
             case "$profile" in
-              finepdfs|fineweb) digest="$IMAGE_DIGEST_PROCESSOR_QUALITY" ;;
+              finepdfs) digest="$IMAGE_DIGEST_PROCESSOR_QUALITY" ;;
               kenlm) digest="$IMAGE_DIGEST_PROCESSOR_KENLM" ;;
+              shadow) digest="$IMAGE_DIGEST_PROCESSOR_SHADOW" ;;
             esac
             case "$profile" in
-              finepdfs|fineweb) repository="processor-quality-model" ;;
+              finepdfs) repository="processor-quality-model" ;;
               *) repository="processor-${profile}-model" ;;
             esac
             target_image="${registry}/stream2pretrain/${repository}@${digest}"
@@ -3057,8 +3074,7 @@ jobs:
 
           if [[ "$MODEL_RUNTIME_CHANGED" == "true" ]]; then
             for profile_and_family in \
-              "finepdfs finepdfs-edu-v2" \
-              "fineweb fineweb-edu"; do
+              "finepdfs finepdfs-edu-v2"; do
               read -r profile family <<< "$profile_and_family"
               model="stream2pretrain-processor-model-service-${profile}"
               expected_backends="$(

@@ -79,9 +79,9 @@ Distinct policies are required for the active content families:
 - scientific papers;
 - model and dataset cards.
 
-FinePDFs Edu v2 remains the scientific-quality default unless same-sample
-evidence justifies a change. FineWeb-Edu must not score code or structured
-metadata as if it were web prose. Every profile retains the shared privacy,
+FinePDFs Edu v2 is the sole learned quality model for eligible papers and
+Hugging Face card prose. Code and structured metadata never enter that model.
+Every profile retains the shared privacy,
 deduplication, provenance, and audit contracts where those
 operations are meaningful.
 

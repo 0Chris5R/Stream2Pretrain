@@ -80,8 +80,8 @@ class ProcessorMetrics:
             registry=self.registry,
         )
         self._edu_score = Histogram(
-            "s2p_fineweb_edu_score",
-            "Official FineWeb-Edu model score distribution.",
+            "s2p_finepdfs_edu_score",
+            "Official FinePDFs Edu v2 model score distribution.",
             ["namespace"],
             buckets=QUALITY_BUCKETS,
             registry=self.registry,
