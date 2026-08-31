@@ -9,7 +9,7 @@ ENV S2P_MODEL_SERVICE_PROFILE=${S2P_MODEL_SERVICE_PROFILE} \
 
 # CSO's package downloads stopwords into the image builder's home by default,
 # which is not visible to the nonroot runtime user. Keep the corpus in the
-# immutable shadow application layer instead.
+# immutable shadow application layer where that runtime can always resolve it.
 RUN if [ "${S2P_MODEL_SERVICE_PROFILE}" = "shadow" ]; then \
       python -c "import nltk; assert nltk.download('stopwords', download_dir='/opt/models/nltk_data', quiet=True)"; \
       chown -R nonroot:nonroot /opt/models/nltk_data; \
