@@ -3073,6 +3073,7 @@ jobs:
                 statefulset/stream2pretrain-processor-curate -c curate -- \
                 python - \
                   --base-url "http://${model}:8094" \
+                  --headless-host "${model}-headless" \
                   --model-family "$family" \
                   --expected-backends "$expected_backends" \
                   < scripts/benchmark_model_service.py

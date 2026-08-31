@@ -154,10 +154,16 @@ spec:
             {{- if and .Values.processor.modelService.enabled (not $externalModels) }}
             - name: S2P_FINEPDFS_MODEL_SERVICE_URL
               value: {{ printf "http://%s-processor-model-service-finepdfs:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_FINEPDFS_MODEL_SERVICE_DISCOVERY_HOST
+              value: {{ printf "%s-processor-model-service-finepdfs-headless" (include "stream2pretrain.fullname" .) | trunc 63 | trimSuffix "-" | quote }}
             - name: S2P_FINEWEB_MODEL_SERVICE_URL
               value: {{ printf "http://%s-processor-model-service-fineweb:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_FINEWEB_MODEL_SERVICE_DISCOVERY_HOST
+              value: {{ printf "%s-processor-model-service-fineweb-headless" (include "stream2pretrain.fullname" .) | trunc 63 | trimSuffix "-" | quote }}
             - name: S2P_KENLM_MODEL_SERVICE_URL
               value: {{ printf "http://%s-processor-model-service-kenlm:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_KENLM_MODEL_SERVICE_DISCOVERY_HOST
+              value: {{ printf "%s-processor-model-service-kenlm-headless" (include "stream2pretrain.fullname" .) | trunc 63 | trimSuffix "-" | quote }}
             {{- end }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.curate.requireRealModels | quote }}

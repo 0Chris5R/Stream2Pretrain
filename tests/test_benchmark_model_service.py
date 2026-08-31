@@ -209,3 +209,76 @@ def test_distribution_gate_resamples_backend_that_joins_mid_probe(
     assert result["distribution_requests"] == 120
     assert result["observed_backends"] == 3
     assert result["minimum_backend_share"] >= result["minimum_required_backend_share"]
+
+
+def test_headless_gate_probes_each_ready_endpoint_directly(
+    monkeypatch,
+    capsys,
+) -> None:
+    cluster_calls = count(0)
+
+    def fake_request(
+        _opener: object,
+        url: str,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        if url.endswith("/v1/metadata"):
+            return (
+                {
+                    "ready": True,
+                    "quality": {
+                        "finepdfs-edu-v2": {"revision": "finepdfs@test"},
+                    },
+                },
+                "backend-a",
+            )
+        assert payload is not None
+        if url.startswith("http://10.0.0.1"):
+            backend = "backend-a"
+        elif url.startswith("http://10.0.0.2"):
+            backend = "backend-b"
+        else:
+            backend = "backend-a" if next(cluster_calls) % 2 == 0 else "backend-b"
+        if url.endswith("/v1/quality:batch"):
+            texts = payload["texts"]
+            assert isinstance(texts, list)
+            return (
+                {
+                    "results": [
+                        {"edu_score": len(str(text)), "revision": "finepdfs@test"} for text in texts
+                    ]
+                },
+                backend,
+            )
+        text = str(payload["text"])
+        return ({"edu_score": len(text), "revision": "finepdfs@test"}, backend)
+
+    monkeypatch.setattr(benchmark_model_service, "_request", fake_request)
+    monkeypatch.setattr(
+        benchmark_model_service,
+        "resolved_endpoint_urls",
+        lambda *_args, **_kwargs: ["http://10.0.0.1:8094", "http://10.0.0.2:8094"],
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_model_service.py",
+            "--base-url",
+            "http://quality:8094",
+            "--headless-host",
+            "quality-headless",
+            "--model-family",
+            "finepdfs-edu-v2",
+            "--expected-backends",
+            "2",
+        ],
+    )
+
+    benchmark_model_service.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["direct_endpoint_count"] == 2
+    assert result["direct_backends"] == ["backend-a", "backend-b"]
+    assert result["ordered_batch_matches_singletons"] is True

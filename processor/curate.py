@@ -42,6 +42,7 @@ from processor.model_client import (
     CuratorModelClient,
     RemoteKenLMScorer,
     RemoteQualityClassifier,
+    headless_endpoint_resolver,
 )
 from processor.operators.c4 import C4Filter
 from processor.operators.gopher import GopherFilter
@@ -139,6 +140,11 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     finepdfs_service_url = os.environ.get("S2P_FINEPDFS_MODEL_SERVICE_URL", "").strip()
     fineweb_service_url = os.environ.get("S2P_FINEWEB_MODEL_SERVICE_URL", "").strip()
     kenlm_service_url = os.environ.get("S2P_KENLM_MODEL_SERVICE_URL", "").strip()
+    finepdfs_discovery_host = os.environ.get(
+        "S2P_FINEPDFS_MODEL_SERVICE_DISCOVERY_HOST", ""
+    ).strip()
+    fineweb_discovery_host = os.environ.get("S2P_FINEWEB_MODEL_SERVICE_DISCOVERY_HOST", "").strip()
+    kenlm_discovery_host = os.environ.get("S2P_KENLM_MODEL_SERVICE_DISCOVERY_HOST", "").strip()
     kenlm_path = os.path.join(models, "kenlm", "en.arpa.bin")
     kenlm_sentencepiece_path = os.path.join(models, "kenlm", "en.sp.model")
     finepdfs_quality_dir = os.path.join(models, "finepdfs-edu-v2")
@@ -174,13 +180,35 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             )
         ):
             raise RuntimeError("all split curator model service URLs are required")
-        finepdfs_client = CuratorModelClient(resolved_finepdfs_url)
+
+        def split_model_client(url: str, profile: str, discovery_host: str) -> CuratorModelClient:
+            if not discovery_host:
+                return CuratorModelClient(url)
+            return CuratorModelClient(
+                url,
+                profile=profile,
+                endpoint_resolver=headless_endpoint_resolver(url, discovery_host),
+            )
+
+        finepdfs_client = split_model_client(
+            resolved_finepdfs_url,
+            "finepdfs",
+            finepdfs_discovery_host,
+        )
         fineweb_client = (
             finepdfs_client
             if resolved_fineweb_url == resolved_finepdfs_url
-            else CuratorModelClient(resolved_fineweb_url)
+            else split_model_client(
+                resolved_fineweb_url,
+                "fineweb",
+                fineweb_discovery_host,
+            )
         )
-        kenlm_client = CuratorModelClient(kenlm_service_url)
+        kenlm_client = split_model_client(
+            kenlm_service_url,
+            "kenlm",
+            kenlm_discovery_host,
+        )
         kenlm = RemoteKenLMScorer(kenlm_client)
         finepdfs_quality = RemoteQualityClassifier(finepdfs_client, "finepdfs-edu-v2")
         fineweb_quality = RemoteQualityClassifier(fineweb_client, "fineweb-edu")

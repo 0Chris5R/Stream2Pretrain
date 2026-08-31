@@ -64,6 +64,9 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     model_service_template = (
         ROOT / "charts" / "stream2pretrain" / "templates" / "processor-model-service.yaml"
     ).read_text(encoding="utf-8")
+    network_policy_template = (
+        ROOT / "charts" / "stream2pretrain" / "templates" / "networkpolicies.yaml"
+    ).read_text(encoding="utf-8")
     fetcher_template = (
         ROOT / "charts" / "stream2pretrain" / "templates" / "processor-fetcher.yaml"
     ).read_text(encoding="utf-8")
@@ -85,9 +88,16 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert "S2P_FINEPDFS_MODEL_SERVICE_URL" in curate_template
     assert "S2P_FINEWEB_MODEL_SERVICE_URL" in curate_template
     assert "S2P_KENLM_MODEL_SERVICE_URL" in curate_template
+    assert curate_template.count("MODEL_SERVICE_DISCOVERY_HOST") == 3
     assert "kind: ScaledObject" in model_service_template
+    assert "clusterIP: None" in model_service_template
     assert "s2p_model_active_requests" in model_service_template
     assert "s2p_model_waiting_requests" in model_service_template
+    assert "s2p_curator_model_waiting_requests" in model_service_template
+    # Direct headless-Service Pod IPs remain governed by the same label-based
+    # same-namespace ingress and egress rules as ClusterIP traffic.
+    assert network_policy_template.count("app.kubernetes.io/part-of: stream2pretrain") >= 4
+    assert "- podSelector:" in network_policy_template
     assert "requiredDuringSchedulingIgnoredDuringExecution" not in model_service_template
     assert "preferredDuringSchedulingIgnoredDuringExecution" in model_service_template
     assert "$curatorComponent" in model_service_template

@@ -4,6 +4,7 @@
 {{- range $profile, $service := .Values.processor.modelService.profiles }}
 {{- $component := printf "processor-model-service-%s" $profile }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" $root) $component }}
+{{- $headlessName := printf "%s-headless" $name | trunc 63 | trimSuffix "-" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -112,6 +113,24 @@ spec:
       targetPort: http
   selector:
     {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $headlessName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: false
+  ports:
+    - name: http
+      port: {{ $root.Values.processor.modelService.port }}
+      targetPort: http
+  selector:
+    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
 {{- if $root.Values.processor.modelService.autoscaling.enabled }}
 ---
 apiVersion: keda.sh/v1alpha1
@@ -139,7 +158,7 @@ spec:
         serverAddress: {{ $root.Values.processor.modelService.autoscaling.prometheusServerAddress | quote }}
         metricName: {{ printf "s2p_model_demand_%s" $profile | quote }}
         threshold: "1"
-        query: {{ printf "(sum(s2p_model_active_requests{profile=\"%s\"}) or vector(0)) + (sum(s2p_model_waiting_requests{profile=\"%s\"}) or vector(0))" $profile $profile | quote }}
+        query: {{ printf "(sum(s2p_model_active_requests{profile=\"%s\"}) or vector(0)) + (sum(s2p_model_waiting_requests{profile=\"%s\"}) or vector(0)) + (sum(s2p_curator_model_waiting_requests{profile=\"%s\"}) or vector(0))" $profile $profile $profile | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import urllib.parse
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+
+from processor.model_client import resolved_endpoint_urls
 
 
 def _request(
@@ -42,6 +45,7 @@ def main() -> None:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--model-family", required=True)
     parser.add_argument("--expected-backends", required=True, type=int)
+    parser.add_argument("--headless-host")
     parser.add_argument("--distribution-requests", type=int, default=60)
     parser.add_argument("--concurrency", type=int, default=12)
     args = parser.parse_args()
@@ -62,6 +66,46 @@ def main() -> None:
     )
     if not expected_revision:
         raise RuntimeError("model service metadata omitted the requested classifier revision")
+
+    direct_backends: set[str] = set()
+    direct_endpoint_count = 0
+    if args.headless_host:
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.port is None:
+            raise RuntimeError("base URL must contain the model service port")
+        endpoint_urls = resolved_endpoint_urls(
+            args.headless_host,
+            scheme=parsed.scheme,
+            port=parsed.port,
+        )
+        if len(endpoint_urls) != args.expected_backends:
+            raise RuntimeError(
+                f"headless service resolved {len(endpoint_urls)} endpoints; "
+                f"expected {args.expected_backends}"
+            )
+
+        def direct_probe(endpoint: str) -> str:
+            direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            result, backend = _request(
+                direct_opener,
+                f"{endpoint}/v1/quality",
+                payload={
+                    "model_family": args.model_family,
+                    "text": f"Direct classifier endpoint probe for {endpoint}.",
+                },
+            )
+            if str(result.get("revision", "")) != expected_revision:
+                raise RuntimeError("one direct model endpoint returned a different revision")
+            return backend
+
+        with ThreadPoolExecutor(max_workers=len(endpoint_urls)) as pool:
+            direct_backends.update(pool.map(direct_probe, endpoint_urls))
+        direct_endpoint_count = len(endpoint_urls)
+        if len(direct_backends) != direct_endpoint_count:
+            raise RuntimeError(
+                "headless endpoint routing did not reach one distinct backend per ready Pod: "
+                f"{sorted(direct_backends)}"
+            )
 
     def probe(index: int) -> str:
         # A private opener guarantees one independent TCP connection for this
@@ -160,6 +204,8 @@ def main() -> None:
                 "batch_parity_backend": batch_backend,
                 "concurrency": args.concurrency,
                 "distribution_requests": distribution_requests,
+                "direct_backends": sorted(direct_backends),
+                "direct_endpoint_count": direct_endpoint_count,
                 "expected_backends": args.expected_backends,
                 "observed_backends": len(counts),
                 "minimum_backend_share": minimum_share,

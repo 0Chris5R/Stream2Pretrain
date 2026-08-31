@@ -27,40 +27,57 @@ materially larger than the older FineWeb-only configuration.
 
 The cluster diagnosis that triggered this remediation observed, over the same
 one-hour interval, 218 fetched records, 210 normalized records, 91 curation
-decisions, and 57 durable exports. That made curation the limiting stage at
-43 percent of the observed normalized arrival rate, or 2.31 times below
-break-even. The first rollout target is therefore 315 decisions per hour:
-1.5 times the measured 210 normalized records per hour. This is a calculated
-gate from that observation, not a claim about long-term source traffic.
+decisions, and 57 durable exports. That interval included catch-up work and is
+historical bottleneck evidence, not the clean live capacity denominator. The
+2026-08-31 post-scale sample measured arXiv normalization at about 120 records
+per hour while the Bytewax frontier advanced at about 89 records per hour and
+the 15-minute route rate was about 74.5 records per hour. The immediate clean
+rollout gate is therefore 150 durable decisions per hour, 1.25 times that
+measured live arrival. Replace this provisional gate with 1.25 times the
+weekday p95 normalized arrival after enough uncontaminated evidence exists.
 
 At diagnosis time the single stateful curator used about 1,580 MiB and 1.5 CPU
 cores. One combined quality-model Pod used about 2 CPU cores while the other
 ready replicas were nearly idle. The remediation leaves Bytewax, its recovery
 partition count, every content classifier, OCR, PII scan, deduplication step,
 and quality gate intact. It instead separates FinePDFs and FineWeb runtimes,
-uses fresh service connections plus bounded two-segment requests, and retains
-the exact one-by-one classifier implementation and pinned revision in each
-batch result. FinePDFs, FineWeb, and KenLM have independent bounded executor
-pools in the curator, so a long paper cannot fill one shared FIFO with one
-model family while the other ready model deployments sit idle. Results remain
-joined by stable segment ID before the unchanged policy runs.
+uses bounded two-segment requests, and retains the exact one-by-one classifier
+implementation and pinned revision in each batch result. FinePDFs, FineWeb,
+and KenLM have independent bounded executor pools in the curator, so a long
+paper cannot fill one shared FIFO with one model family while the other ready
+model deployments sit idle. Results remain joined by stable segment ID before
+the unchanged policy runs.
+
+The 2026-08-31 post-scale audit found a second, narrower bottleneck. Six
+simultaneous FinePDFs connections sent through a ClusterIP reached only about
+four distinct Pods at a time, which is the expected random-routing occupancy
+`6 * (1 - (5 / 6)^6) = 3.99`. One live sample showed per-Pod demand of
+`2, 2, 1, 0, 0, 0`, while model queue p95 reached 46.9 seconds and one worker
+node remained at 12 percent CPU. The curator now resolves a readiness-filtered
+headless Service and leases each Pod endpoint to at most one request. Requests
+wait centrally only when every ready Pod is busy. Endpoint discovery refreshes
+during HPA changes, one network or 5xx failure retries the byte-identical
+payload once on a different ready Pod, and failure after that still prevents
+the Bytewax frontier from advancing. This changes scheduling only. Request
+payloads, classifier revisions, score values, result order, gates, the single
+state owner, and at-least-once recovery remain unchanged.
 
 The classifier rollout gate runs inside the curator Pod against each quality
-Service. It requires at least two ready backends, observes at least 20 fresh
-inference requests per ready backend at a bounded concurrency of 12, requires
-every ready backend to answer and receive at least half of its uniform traffic
-share, and then proves
-that a two-item batch has byte-for-byte equal JSON results, order, and revisions
-to two singleton requests. Prometheus
-also records request, batch-size, queue-time, inference-time, active-request,
-model-family, and profile labels for each backend ServiceMonitor. The course
-cluster now permits FinePDFs to scale from two to six stateless Pods and gives
-the curator six independent requests per quality family. FineWeb remains
-bounded at three Pods because the live measurements identify FinePDFs, not the
-comparison classifier, as the saturated path.
+Service. It requires at least two ready backends, resolves exactly the Ready
+Pod count through the headless Service, sends one concurrent direct inference
+to every resolved endpoint, and requires one distinct backend response per
+endpoint. It also observes at least 20 fresh ClusterIP inference requests per
+ready backend and proves that a two-item batch has byte-for-byte equal JSON
+results, order, and revisions to two singleton requests. Prometheus records
+server-side request, batch-size, queue-time, inference-time and active-request
+metrics, plus curator-side endpoint count, endpoint wait, direct backend and
+retry metrics. The course cluster permits FinePDFs to scale from two to six
+stateless Pods and gives the curator six independent requests per quality
+family. FineWeb remains bounded at three Pods because the live measurements
+identify FinePDFs, not the comparison classifier, as the saturated path.
 
 Do not call the curator fixed after the distribution gate alone. Sustain at
-least 315 durable decisions per hour for six hours with no growing
+least 150 durable decisions per hour for six hours with no growing
 `docs.normalized` lag, no Bytewax recovery-frontier rollback, no skipped model
 signal, and no new processing-failure object. After enough weekday evidence
 exists, replace the provisional target with at least 1.25 times the measured
