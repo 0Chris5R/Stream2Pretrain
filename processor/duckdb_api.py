@@ -86,6 +86,18 @@ def _current_decision_predicate(
     )
 
 
+def _overview_total(rows: Sequence[dict[str, Any]]) -> int:
+    return sum(int(row["count"]) for row in rows if row.get("kind") == "total")
+
+
+def _overview_counts(rows: Sequence[dict[str, Any]], *, kind: str) -> dict[str, int]:
+    return {
+        str(row["key"]): int(row["count"])
+        for row in rows
+        if row.get("kind") == kind and row.get("key") is not None
+    }
+
+
 class DuckDBConnection(Protocol):
     description: Sequence[tuple[Any, ...]] | None
 
@@ -249,103 +261,83 @@ class DuckDBQueryService:
         started, but they cannot describe the current corpus after recovery.
         Dashboard totals therefore come from the decision and Gold tables.
         """
-        decision_totals = self._rows(
+        decision_rows = self._rows(
             f"""
-            SELECT CAST(COUNT(*) AS BIGINT) AS durable_decisions
-            FROM {self._decisions}
-            WHERE {_current_decision_predicate()}
+            WITH current_decisions AS MATERIALIZED (
+              SELECT source_feed, reject_reasons
+              FROM {self._decisions}
+              WHERE {_current_decision_predicate()}
+            )
+            SELECT 'total' AS kind, '' AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_decisions
+            UNION ALL
+            SELECT 'source' AS kind, source_feed AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_decisions
+            GROUP BY source_feed
+            UNION ALL
+            SELECT 'reason' AS kind, reason AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_decisions, UNNEST(reject_reasons) AS rejected(reason)
+            GROUP BY reason
             """,
             [],
             relation=self._decisions,
         )
-        training_totals = self._rows(
+        gold_rows = self._rows(
             f"""
-            SELECT CAST(COUNT(*) AS BIGINT) AS training_export_documents
-            FROM {self._gold}
-            WHERE {_current_decision_predicate()}
+            WITH current_gold AS MATERIALIZED (
+              SELECT source_feed
+              FROM {self._gold}
+              WHERE {_current_decision_predicate()}
+            )
+            SELECT 'total' AS kind, '' AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_gold
+            UNION ALL
+            SELECT 'source' AS kind, source_feed AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM current_gold
+            GROUP BY source_feed
             """,
             [],
             relation=self._gold,
         )
-        reasons = self._rows(
+        early_license_rows = self._rows(
             f"""
-            SELECT reason, CAST(COUNT(*) AS BIGINT) AS count
-            FROM {self._decisions}, UNNEST(reject_reasons) AS rejected(reason)
-            WHERE {_current_decision_predicate()}
-            GROUP BY 1
-            ORDER BY count DESC, reason ASC
-            """,
-            [],
-            relation=self._decisions,
-        )
-        decision_sources = self._rows(
-            f"""
-            SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
-            FROM {self._decisions}
-            WHERE {_current_decision_predicate()}
+            WITH early_license AS MATERIALIZED (
+              SELECT
+                admission.source_feed,
+                CASE WHEN admission.license_id = 'unknown'
+                     THEN 'license_missing'
+                     ELSE 'license_not_permitted'
+                END AS reason
+              FROM {self._license_admissions} AS admission
+              WHERE admission.status = 'quarantined'
+                AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+                AND admission.source_format IS DISTINCT FROM 'metadata'
+                AND {_visible_source_predicate("admission.source_feed")}
+                AND NOT EXISTS (
+                  SELECT 1 FROM {self._decisions} AS decision
+                  WHERE decision.doc_id = admission.doc_id
+                )
+            )
+            SELECT 'total' AS kind, '' AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM early_license
+            UNION ALL
+            SELECT 'source' AS kind, source_feed AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM early_license
             GROUP BY source_feed
-            ORDER BY source_feed ASC
-            """,
-            [],
-            relation=self._decisions,
-        )
-        accepted_sources = self._rows(
-            f"""
-            SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS accepted
-            FROM {self._gold}
-            WHERE {_current_decision_predicate()}
-            GROUP BY source_feed
-            ORDER BY source_feed ASC
-            """,
-            [],
-            relation=self._gold,
-        )
-        early_license_reasons = self._rows(
-            f"""
-            SELECT
-              CASE WHEN admission.license_id = 'unknown'
-                   THEN 'license_missing'
-                   ELSE 'license_not_permitted'
-              END AS reason,
-              CAST(COUNT(*) AS BIGINT) AS count
-            FROM {self._license_admissions} AS admission
-            WHERE admission.status = 'quarantined'
-              AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
-              AND admission.source_format IS DISTINCT FROM 'metadata'
-              AND {_visible_source_predicate("admission.source_feed")}
-              AND NOT EXISTS (
-                SELECT 1 FROM {self._decisions} AS decision
-                WHERE decision.doc_id = admission.doc_id
-              )
-            GROUP BY 1
-            ORDER BY count DESC, reason ASC
+            UNION ALL
+            SELECT 'reason' AS kind, reason AS key, CAST(COUNT(*) AS BIGINT) AS count
+            FROM early_license
+            GROUP BY reason
             """,
             [],
             relation=self._license_admissions,
         )
-        early_license_sources = self._rows(
-            f"""
-            SELECT admission.source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
-            FROM {self._license_admissions} AS admission
-            WHERE admission.status = 'quarantined'
-              AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
-              AND admission.source_format IS DISTINCT FROM 'metadata'
-              AND {_visible_source_predicate("admission.source_feed")}
-              AND NOT EXISTS (
-                SELECT 1 FROM {self._decisions} AS decision
-                WHERE decision.doc_id = admission.doc_id
-              )
-            GROUP BY admission.source_feed
-            ORDER BY admission.source_feed ASC
-            """,
-            [],
-            relation=self._license_admissions,
-        )
-        accepted_by_source = {str(row["source"]): int(row["accepted"]) for row in accepted_sources}
-        totals_by_source = {str(row["source"]): int(row["total"]) for row in decision_sources}
-        for row in early_license_sources:
-            source = str(row["source"])
-            totals_by_source[source] = totals_by_source.get(source, 0) + int(row["total"])
+        durable_decisions = _overview_total(decision_rows)
+        training_documents = _overview_total(gold_rows)
+        accepted_by_source = _overview_counts(gold_rows, kind="source")
+        totals_by_source = _overview_counts(decision_rows, kind="source")
+        for source, count in _overview_counts(early_license_rows, kind="source").items():
+            totals_by_source[source] = totals_by_source.get(source, 0) + count
         per_source = [
             {
                 "source": source,
@@ -354,14 +346,13 @@ class DuckDBQueryService:
             }
             for source, total in sorted(totals_by_source.items())
         ]
-        rejection_counts = {str(row["reason"]): int(row["count"]) for row in reasons}
-        for row in early_license_reasons:
-            reason = str(row["reason"])
-            rejection_counts[reason] = rejection_counts.get(reason, 0) + int(row["count"])
-        early_total = sum(int(row["count"]) for row in early_license_reasons)
+        rejection_counts = _overview_counts(decision_rows, kind="reason")
+        for reason, count in _overview_counts(early_license_rows, kind="reason").items():
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + count
+        early_total = _overview_total(early_license_rows)
         return {
-            "durable_decisions": int(decision_totals[0]["durable_decisions"]) + early_total,
-            "training_export_documents": int(training_totals[0]["training_export_documents"]),
+            "durable_decisions": durable_decisions + early_total,
+            "training_export_documents": training_documents,
             "rejected_by_reason": rejection_counts,
             "per_source_acceptance": per_source,
         }

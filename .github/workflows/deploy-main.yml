@@ -1965,7 +1965,11 @@ jobs:
           def request(path: str, params: list[tuple[str, str]] | None = None) -> dict:
               query = urllib.parse.urlencode(params or [])
               url = f"{base}{path}" + (f"?{query}" if query else "")
-              with opener.open(url, timeout=60) as response:
+              # First access after an Iceberg snapshot refresh can enumerate
+              # historical manifests. Product queries are consolidated, but
+              # diagnostics must still wait long enough to report the cost
+              # rather than hiding it behind a client-side timeout.
+              with opener.open(url, timeout=180) as response:
                   payload = json.load(response)
               if not isinstance(payload, dict):
                   raise RuntimeError(f"non-object response from {path}")
@@ -2088,7 +2092,14 @@ jobs:
                 'redpanda_application_uptime_seconds_total' \
                 'redpanda_kafka_max_offset{redpanda_namespace="kafka"}' \
                 's2p_processor_ingested_total' \
-                's2p_processor_routed_total'; do
+                's2p_processor_routed_total' \
+                'sum by (source) (rate(s2p_processor_ingested_total[15m]))' \
+                'sum by (source) (rate(s2p_processor_curated_total[15m]))' \
+                'sum by (route) (rate(s2p_processor_routed_total[15m]))' \
+                'sum by (profile, pod) (rate(s2p_model_requests_total{status="success"}[15m]))' \
+                'histogram_quantile(0.95, sum by (le, profile) (rate(s2p_model_inference_seconds_bucket[15m])))' \
+                'histogram_quantile(0.95, sum by (le, profile) (rate(s2p_model_queue_seconds_bucket[15m])))' \
+                'sum by (profile, pod) (s2p_model_active_requests + s2p_model_waiting_requests)'; do
                 echo "Prometheus query: $query"
                 curl --fail --silent --show-error --get \
                   --data-urlencode "query=$query" \

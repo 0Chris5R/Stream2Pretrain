@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import ClassVar
 
@@ -118,6 +120,18 @@ class _BatchKenLM:
         return PerplexityResult(float(len(text)), "head", self.scorer)
 
 
+class _BlockingBatchQualityScorer(_BatchQualityScorer):
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    def score_many(self, texts: list[str]) -> list[QualityScore]:
+        self.started.set()
+        assert self.release.wait(timeout=2)
+        return super().score_many(texts)
+
+
 def test_segment_models_batch_without_skipping_any_classifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,6 +173,48 @@ def test_segment_models_batch_without_skipping_any_classifier(
         assert result.comparison.edu_score == float(len(segment.text))
         assert result.perplexity is not None
         assert result.perplexity.perplexity == float(len(segment.text))
+
+
+def test_segment_model_families_run_concurrently_without_changing_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
+    monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "6")
+    release = threading.Event()
+    primary_started = threading.Event()
+    comparison_started = threading.Event()
+    primary = _BlockingBatchQualityScorer(primary_started, release)
+    comparison = _BlockingBatchQualityScorer(comparison_started, release)
+    segments = [
+        SilverSegment(
+            segment_id=f"section-{index}",
+            title=f"Section {index}",
+            text="x" * index,
+            word_count=1,
+        )
+        for index in range(1, 5)
+    ]
+
+    with ThreadPoolExecutor(max_workers=1) as caller:
+        pending = caller.submit(
+            _score_segment_models,
+            segments,
+            primary_quality=primary,
+            comparison_quality=comparison,
+            kenlm=_BatchKenLM(),
+            use_kenlm=True,
+        )
+        assert primary_started.wait(timeout=2)
+        assert comparison_started.wait(timeout=2)
+        release.set()
+        results = pending.result(timeout=2)
+
+    assert list(results) == [segment.segment_id for segment in segments]
+    for segment in segments:
+        result = results[segment.segment_id]
+        assert result.quality.edu_score == float(len(segment.text))
+        assert result.comparison is not None
+        assert result.comparison.edu_score == float(len(segment.text))
 
 
 def test_split_model_services_are_all_required_and_closed(

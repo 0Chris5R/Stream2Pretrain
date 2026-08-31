@@ -40,7 +40,10 @@ partition count, every content classifier, OCR, PII scan, deduplication step,
 and quality gate intact. It instead separates FinePDFs and FineWeb runtimes,
 uses fresh service connections plus bounded two-segment requests, and retains
 the exact one-by-one classifier implementation and pinned revision in each
-batch result.
+batch result. FinePDFs, FineWeb, and KenLM have independent bounded executor
+pools in the curator, so a long paper cannot fill one shared FIFO with one
+model family while the other ready model deployments sit idle. Results remain
+joined by stable segment ID before the unchanged policy runs.
 
 The classifier rollout gate runs inside the curator Pod against each quality
 Service. It requires at least two ready backends, observes 60 fresh inference

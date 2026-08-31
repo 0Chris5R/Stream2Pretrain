@@ -257,15 +257,27 @@ def _score_segment_models(
     kenlm: PerplexityScorer,
     use_kenlm: bool,
 ) -> dict[str, _SegmentModelSignals]:
-    """Run bounded model batches concurrently across stateless replicas."""
+    """Run exact model batches concurrently across independent model families.
+
+    A shared FIFO executor lets a long paper queue every FinePDFs batch before
+    FineWeb or KenLM can start. Give each independently deployed family its own
+    bounded pool so Kubernetes can use all ready model replicas at the same
+    time. Results remain keyed by segment ID, so scheduling cannot change
+    scores, revisions, order, or downstream gates.
+    """
     concurrency = max(1, int(os.environ.get("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "1")))
+    quality_family_concurrency = max(1, concurrency // 2)
     batch_size = int(os.environ.get("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2"))
     if batch_size < 1:
         raise RuntimeError("S2P_CURATOR_CLASSIFIER_BATCH_SIZE must be positive")
     quality_results: dict[str, QualityScore] = {}
     comparison_results: dict[str, QualityScore] = {}
     perplexity_results: dict[str, PerplexityResult] = {}
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+    with (
+        ThreadPoolExecutor(max_workers=quality_family_concurrency) as primary_executor,
+        ThreadPoolExecutor(max_workers=quality_family_concurrency) as comparison_executor,
+        ThreadPoolExecutor(max_workers=1) as kenlm_executor,
+    ):
         quality_batches: list[
             tuple[
                 list[SilverSegment],
@@ -273,9 +285,9 @@ def _score_segment_models(
                 dict[str, QualityScore],
             ]
         ] = []
-        for scorer, destination in (
-            (primary_quality, quality_results),
-            (comparison_quality, comparison_results),
+        for scorer, destination, executor in (
+            (primary_quality, quality_results, primary_executor),
+            (comparison_quality, comparison_results, comparison_executor),
         ):
             if scorer is None:
                 continue
@@ -293,7 +305,7 @@ def _score_segment_models(
                     )
                 )
         perplexity_pending = {
-            segment.segment_id: executor.submit(kenlm.score, segment.text)
+            segment.segment_id: kenlm_executor.submit(kenlm.score, segment.text)
             for segment in segments
             if use_kenlm
         }

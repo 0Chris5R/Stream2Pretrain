@@ -40,27 +40,27 @@ class _FakeConnection:
 class _OverviewConnection(_FakeConnection):
     def execute(self, sql: str, parameters: Sequence[Any] | None = None) -> _OverviewConnection:
         self.calls.append((sql, parameters))
-        if "admission.license_id" in sql:
-            self.description = [("reason",), ("count",)]
-            self.rows = [("license_missing", 2)]
-        elif "admission.source_feed" in sql:
-            self.description = [("source",), ("total",)]
-            self.rows = [("arxiv-live", 2)]
-        elif "durable_decisions" in sql:
-            self.description = [("durable_decisions",)]
-            self.rows = [(9,)]
-        elif "training_export_documents" in sql:
-            self.description = [("training_export_documents",)]
-            self.rows = [(4,)]
-        elif "UNNEST(reject_reasons)" in sql:
-            self.description = [("reason",), ("count",)]
-            self.rows = [("near_duplicate", 1), ("pii_detected", 1)]
-        elif "AS total" in sql:
-            self.description = [("source",), ("total",)]
-            self.rows = [("arxiv-live", 3), ("fixtures", 6)]
-        elif "AS accepted" in sql:
-            self.description = [("source",), ("accepted",)]
-            self.rows = [("arxiv-live", 3), ("fixtures", 1)]
+        self.description = [("kind",), ("key",), ("count",)]
+        if "WITH current_decisions AS MATERIALIZED" in sql:
+            self.rows = [
+                ("total", "", 9),
+                ("source", "arxiv-live", 3),
+                ("source", "fixtures", 6),
+                ("reason", "near_duplicate", 1),
+                ("reason", "pii_detected", 1),
+            ]
+        elif "WITH current_gold AS MATERIALIZED" in sql:
+            self.rows = [
+                ("total", "", 4),
+                ("source", "arxiv-live", 3),
+                ("source", "fixtures", 1),
+            ]
+        elif "WITH early_license AS MATERIALIZED" in sql:
+            self.rows = [
+                ("total", "", 2),
+                ("source", "arxiv-live", 2),
+                ("reason", "license_missing", 2),
+            ]
         else:
             raise AssertionError(f"unexpected SQL: {sql}")
         return self
@@ -140,7 +140,8 @@ def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
             {"source": "fixtures", "accepted": 1, "total": 6},
         ],
     }
-    accepted_query = next(sql for sql, _ in connection.calls if "AS accepted" in sql)
+    assert len(connection.calls) == 3
+    accepted_query = next(sql for sql, _ in connection.calls if "WITH current_gold" in sql)
     assert "scoring_version = 'pretrain-content-v2'" in accepted_query
 
 

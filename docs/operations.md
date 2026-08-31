@@ -59,9 +59,10 @@ Ordinary Kafka-lag KEDA must not independently scale either core execution:
 broker commits are not the authoritative Bytewax progress boundary. A core
 rescale is a coordinated stop, worker-count change, and restart using the
 pre-created recovery partitions. FinePDFs, FineWeb, and KenLM remain
-stateless `processor-model-service-*` deployments with CPU HPA and cross-node
-spreading. FinePDFs and FineWeb use independent Services and runtimes so their
-CPU work scales independently. The curator sends bounded batches over fresh
+stateless `processor-model-service-*` deployments with demand-based KEDA
+scaling and cross-node spreading. FinePDFs and FineWeb use independent
+Services, runtimes, and bounded curator executor pools so their CPU work runs
+and scales concurrently. The curator sends bounded batches over fresh
 in-cluster connections so Kubernetes distributes them across ready backends;
 the batch endpoint invokes the same pinned classifier once per input and
 preserves exact one-by-one order, score, and revision.
