@@ -293,7 +293,7 @@ class DuckDBQueryService:
             f"""
             SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS accepted
             FROM {self._gold}
-            WHERE {_visible_source_predicate()}
+            WHERE {_current_decision_predicate()}
             GROUP BY source_feed
             ORDER BY source_feed ASC
             """,

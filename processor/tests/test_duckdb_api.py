@@ -124,7 +124,8 @@ def test_quality_histogram_shape() -> None:
 
 
 def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
-    service = DuckDBQueryService(_OverviewConnection())
+    connection = _OverviewConnection()
+    service = DuckDBQueryService(connection)
 
     assert service.corpus_overview() == {
         "durable_decisions": 11,
@@ -139,6 +140,8 @@ def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
             {"source": "fixtures", "accepted": 1, "total": 6},
         ],
     }
+    accepted_query = next(sql for sql, _ in connection.calls if "AS accepted" in sql)
+    assert "scoring_version = 'pretrain-content-v2'" in accepted_query
 
 
 class _LicenseAdmissionsConnection:
