@@ -597,7 +597,8 @@ Required externally managed Secrets are:
 
 - `stream2pretrain-foundry-providers` with
   `HETZNER_INFERENCE_API_KEY` and a random `controlToken`;
-- `stream2pretrain-foundry-signing` with `ed25519.key` and `ed25519.crt`;
+- `stream2pretrain-foundry-signing` with `ed25519.key` and `ed25519.crt`,
+  created once by deployment bootstrap unless it was pre-provisioned;
 - the existing MinIO and Polaris Secrets.
 
 The worker starts after `Qwen3.8-27B` is visible through authenticated model

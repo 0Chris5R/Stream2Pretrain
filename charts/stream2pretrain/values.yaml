@@ -358,7 +358,9 @@ processor:
       enabled: true
       minReplicas: 1
       maxReplicas: 3
-      targetCPUUtilizationPercentage: 75
+      pollingIntervalSeconds: 15
+      cooldownPeriodSeconds: 300
+      prometheusServerAddress: http://kps-prometheus.monitoring.svc.cluster.local:9090
   iceberg:
     image: stream2pretrain/processor-iceberg-writer
     sourceBatchSize: 1

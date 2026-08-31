@@ -163,6 +163,12 @@ bootstrap_polaris() {
     python - < "$ROOT_DIR/scripts/bootstrap_polaris.py"
 }
 
+ensure_foundry_signing_identity() {
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  bash "$ROOT_DIR/scripts/ensure_foundry_signing_secret.sh" \
+    stream2pretrain stream2pretrain-foundry-signing
+}
+
 required_secrets() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local missing=0
@@ -196,9 +202,7 @@ required_secrets() {
     | grep -q '^kind: StatefulSet$'; then
     for item in \
       stream2pretrain/stream2pretrain-foundry-providers/HETZNER_INFERENCE_API_KEY \
-      stream2pretrain/stream2pretrain-foundry-providers/controlToken \
-      stream2pretrain/stream2pretrain-foundry-signing/ed25519.key \
-      stream2pretrain/stream2pretrain-foundry-signing/ed25519.crt; do
+      stream2pretrain/stream2pretrain-foundry-providers/controlToken; do
       namespace="${item%%/*}"
       remainder="${item#*/}"
       secret="${remainder%%/*}"
@@ -333,6 +337,7 @@ case "$COMMAND" in
     ;;
   application)
     validate
+    ensure_foundry_signing_identity
     required_secrets
     required_application_services
     required_topics

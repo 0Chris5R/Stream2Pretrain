@@ -85,7 +85,6 @@ processor:
       # The stateful Bytewax curator remains a single recovery owner and sends
       # bounded concurrent segment calls across these replicas.
       maxReplicas: 3
-      targetCPUUtilizationPercentage: 80
   iceberg:
     replicas: 1
   duckdbApi:

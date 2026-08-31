@@ -62,7 +62,7 @@ via `sealed-secrets` or External Secrets Operator before `helm install`:
 |-----------------------------------------------------|-----------------------------------|-------------------------------|
 | `stream2pretrain-minio` (`.Values.minio.credentialsSecret`)      | `accessKey`, `secretKey`          | every component               |
 | `stream2pretrain-hf` (`.Values.sources.huggingface.models.tokenSecret`) | `token` (HF user token)           | ingest-hf                     |
-| `stream2pretrain-foundry-signing` (`.Values.processor.foundry.signingKeySecret`) | `ed25519.key` (raw 32-byte or PEM key), `ed25519.crt` | Foundry artifact signer |
+| `stream2pretrain-foundry-signing` (`.Values.processor.foundry.signingKeySecret`) | `ed25519.key` (PEM), `ed25519.crt` | Persistent Foundry artifact signer, created once by deployment bootstrap unless pre-provisioned |
 | `stream2pretrain-keda-redpanda` (`.Values.keda.triggerAuthSecret`) | `sasl`, `tls`, `username`, `password` | KEDA Kafka trigger            |
 | `stream2pretrain-foundry-providers` (`.Values.processor.foundry.providerSecret`, when enabled) | `HETZNER_INFERENCE_API_KEY`, `controlToken` | foundry worker, API, and UI manual trigger |
 

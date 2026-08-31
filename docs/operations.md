@@ -185,8 +185,10 @@ kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --
 
 ## 5. Rotate the Foundry artifact-signing key
 
-The Foundry uses a single in-cluster Ed25519 key in a Kubernetes Secret to sign
-generated packages.
+The Foundry uses a persistent in-cluster Ed25519 key in a Kubernetes Secret to
+sign generated packages. Deployment bootstrap creates the identity once when
+it is absent and never overwrites an existing Secret. Operators may instead
+pre-provision that Secret with their managed key before the first deployment.
 
 ```bash
 # 5.1 Generate a fresh key pair.

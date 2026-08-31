@@ -6,7 +6,6 @@ import asyncio
 import importlib.util
 import io
 import json
-import sqlite3
 import sys
 import tarfile
 import threading
@@ -1778,26 +1777,6 @@ def test_candidate_queue_ranks_snapshot_by_composite_score(tmp_path: Path) -> No
         "high-reasoning",
         "low-reasoning",
     ]
-
-
-def test_candidate_queue_removes_retired_pretraining_score(tmp_path: Path) -> None:
-    path = tmp_path / "control.sqlite3"
-    store = FoundryStore(str(path))
-    store.close()
-    connection = sqlite3.connect(path)
-    connection.execute(
-        "ALTER TABLE candidate_queue ADD COLUMN benchmark_score REAL NOT NULL DEFAULT 0"
-    )
-    connection.close()
-
-    migrated = FoundryStore(str(path))
-    columns = {
-        str(row[1])
-        for row in migrated._conn.execute("PRAGMA table_info(candidate_queue)").fetchall()
-    }
-    migrated.close()
-
-    assert "benchmark_score" not in columns
 
 
 def test_candidate_queue_updates_changed_payload_and_removes_only_waiting_rows(

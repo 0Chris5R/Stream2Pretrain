@@ -91,24 +91,6 @@ def _ensure_optional_columns(table: Table, columns: tuple[tuple[str, object], ..
     update.commit()
 
 
-def _drop_obsolete_columns(table: Table, columns: tuple[str, ...]) -> None:
-    """Remove retired product fields from an existing Iceberg schema."""
-    existing: list[str] = []
-    schema = table.schema()
-    for name in columns:
-        try:
-            schema.find_field(name)
-        except ValueError:
-            continue
-        existing.append(name)
-    if not existing:
-        return
-    update = table.update_schema()
-    for name in existing:
-        update.delete_column(name)
-    update.commit()
-
-
 class LicenseAdmissionWriter:
     """Append deduplicated pre-fetch licence decisions in Iceberg batches."""
 
@@ -543,7 +525,6 @@ class IcebergWriter:
                 raise
         else:
             _ensure_optional_columns(table, (("training_usage", StringType()),))
-            _drop_obsolete_columns(table, ("benchmark_score",))
             return table
         # Bring up an empty namespace if it does not yet exist.
         with suppress(Exception):

@@ -222,8 +222,6 @@ class FoundryStore:
         for name, declaration in additions.items():
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE candidate_queue ADD COLUMN {name} {declaration}")
-        if "benchmark_score" in existing:
-            self._conn.execute("ALTER TABLE candidate_queue DROP COLUMN benchmark_score")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS candidate_queue_snapshot_idx "
             "ON candidate_queue(state,enqueue_ordinal)"

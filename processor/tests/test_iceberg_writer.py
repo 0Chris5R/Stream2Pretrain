@@ -9,7 +9,6 @@ import pytest
 from processor.iceberg_writer import (
     IcebergWriter,
     LicenseAdmissionWriter,
-    _drop_obsolete_columns,
     gold_identifier,
 )
 from schemas.gold import GoldRecord
@@ -50,35 +49,6 @@ def test_to_arrow_includes_v2_provenance_columns() -> None:
     assert table.column("extraction_pipeline").to_pylist() == ["hf-model-card-markdown-v1"]
     assert table.column("spdx_license").to_pylist() == ["Apache-2.0"]
     assert table.column("spdx_license_source").to_pylist() == ["source_terms"]
-    assert "benchmark_score" not in table.column_names
-
-
-def test_obsolete_pretraining_score_is_removed_from_existing_table() -> None:
-    deleted: list[str] = []
-
-    class _Schema:
-        def find_field(self, name: str) -> object:
-            if name != "benchmark_score":
-                raise ValueError(name)
-            return object()
-
-    class _Update:
-        def delete_column(self, name: str) -> None:
-            deleted.append(name)
-
-        def commit(self) -> None:
-            deleted.append("committed")
-
-    class _Table:
-        def schema(self) -> _Schema:
-            return _Schema()
-
-        def update_schema(self) -> _Update:
-            return _Update()
-
-    _drop_obsolete_columns(_Table(), ("benchmark_score",))  # type: ignore[arg-type]
-
-    assert deleted == ["benchmark_score", "committed"]
 
 
 class _Snapshot:

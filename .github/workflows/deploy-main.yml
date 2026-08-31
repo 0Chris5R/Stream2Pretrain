@@ -272,12 +272,16 @@ jobs:
               name = f"stream2pretrain-processor-model-service-{profile}"
               deployment = by_name.get(("Deployment", name))
               service = by_name.get(("Service", name))
-              hpa = by_name.get(("HorizontalPodAutoscaler", name))
+              scaler = by_name.get(("ScaledObject", name))
               monitor = by_name.get(("ServiceMonitor", name))
-              if any(value is None for value in (deployment, service, hpa, monitor)):
+              if any(value is None for value in (deployment, service, scaler, monitor)):
                   raise SystemExit(f"classifier runtime contract is incomplete: {name}")
-              if hpa.get("spec", {}).get("minReplicas") != 2:
+              if scaler.get("spec", {}).get("minReplicaCount") != 2:
                   raise SystemExit(f"classifier must retain two baseline replicas: {name}")
+              trigger = scaler.get("spec", {}).get("triggers", [{}])[0]
+              query = trigger.get("metadata", {}).get("query", "")
+              if "s2p_model_active_requests" not in query or "s2p_model_waiting_requests" not in query:
+                  raise SystemExit(f"classifier queue autoscaling drifted: {name}")
               runtime_profile = next(
                   item.get("value")
                   for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
@@ -2504,6 +2508,13 @@ jobs:
           fi
           finish_phase "Capacity preflight"
 
+          # Artifact signing is an internal cluster identity, not an external
+          # provider credential. Create it once when absent and reuse it on
+          # every later release; malformed existing Secrets fail closed.
+          bash scripts/ensure_foundry_signing_secret.sh \
+            stream2pretrain stream2pretrain-foundry-signing
+          finish_phase "Foundry signing identity"
+
           # Preserve any pre-native Bytewax progress in the broker group before
           # the native-consumer-to-Bytewax cutback. The durable marker makes
           # this a one-time handoff even when the workflow or Helm deployment
@@ -2849,7 +2860,11 @@ jobs:
             fi
             echo "Quiescing ${profile} model service for an actual image change."
             model_image_changed=true
-            kubectl -n stream2pretrain delete "horizontalpodautoscaler/$model" \
+            kubectl -n stream2pretrain delete "scaledobject/$model" \
+              --ignore-not-found --wait=true
+            kubectl -n stream2pretrain delete \
+              "horizontalpodautoscaler/$model" \
+              "horizontalpodautoscaler/keda-hpa-$model" \
               --ignore-not-found --wait=true
             if kubectl -n stream2pretrain get "deployment/$model" >/dev/null 2>&1; then
               kubectl -n stream2pretrain scale "deployment/$model" --replicas=1
@@ -2985,7 +3000,12 @@ jobs:
           for workload in "${changed_workloads[@]}"; do
             [[ -n "$workload" ]] || continue
             workload_timeout=60
-            if [[ "$workload" == deployment/stream2pretrain-processor-model-service-* ]]; then
+            if [[ "$workload" == deployment/stream2pretrain-processor-fetcher* ]]; then
+              # The fetcher image includes the full CPU scientific extraction
+              # stack and is about 1.7 GB. A cold node pull was measured at 48s,
+              # leaving no time for process startup under the old 60s bound.
+              workload_timeout=180
+            elif [[ "$workload" == deployment/stream2pretrain-processor-model-service-* ]]; then
               workload_timeout=600
             elif [[ "$workload" == statefulset/* ]]; then
               # Stateful workers flush durable state before exiting. Foundry's

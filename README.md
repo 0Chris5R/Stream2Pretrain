@@ -287,9 +287,11 @@ Required Secret names are:
 - `stream2pretrain/stream2pretrain-minio`
 - `stream2pretrain/stream2pretrain-polaris`
 - `stream2pretrain/stream2pretrain-hf`
-- `stream2pretrain/stream2pretrain-foundry-signing`
 - `stream2pretrain/stream2pretrain-foundry-providers` with
   `HETZNER_INFERENCE_API_KEY` and `controlToken` when the foundry is enabled
+
+The deployment creates the persistent Foundry signing identity once if it was
+not pre-provisioned; it is not an external provider credential.
 
 ### Run the end-to-end check
 

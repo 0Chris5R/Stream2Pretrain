@@ -85,15 +85,12 @@ def test_processor_model_images_are_component_specific_and_immutable() -> None:
     assert "S2P_FINEPDFS_MODEL_SERVICE_URL" in curate_template
     assert "S2P_FINEWEB_MODEL_SERVICE_URL" in curate_template
     assert "S2P_KENLM_MODEL_SERVICE_URL" in curate_template
-    assert "kind: HorizontalPodAutoscaler" in model_service_template
-    assert "requiredDuringSchedulingIgnoredDuringExecution" in model_service_template
+    assert "kind: ScaledObject" in model_service_template
+    assert "s2p_model_active_requests" in model_service_template
+    assert "s2p_model_waiting_requests" in model_service_template
+    assert "requiredDuringSchedulingIgnoredDuringExecution" not in model_service_template
     assert "preferredDuringSchedulingIgnoredDuringExecution" in model_service_template
-    required_index = model_service_template.index("requiredDuringSchedulingIgnoredDuringExecution")
-    preferred_index = model_service_template.index(
-        "preferredDuringSchedulingIgnoredDuringExecution"
-    )
-    assert "$curatorComponent" not in model_service_template[required_index:preferred_index]
-    assert "$curatorComponent" in model_service_template[preferred_index:]
+    assert "$curatorComponent" in model_service_template
     assert "type: Recreate" in model_service_template
     assert "maxSurge:" not in model_service_template
     assert "from docling.document_converter import DocumentConverter" in dockerfile
@@ -194,7 +191,8 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "exit 1" not in unschedulable_gate
     assert 'contains "@sha256:" .image' in helper
     assert 'printf "%s/%s" $ctx.Values.image.registry .image' in helper
-    assert 'delete "horizontalpodautoscaler/$model"' in workflow
+    assert 'delete "scaledobject/$model"' in workflow
+    assert '"horizontalpodautoscaler/keda-hpa-$model"' in workflow
     assert 'scale "deployment/$model" --replicas=1' in workflow
     assert "--field-selector=status.phase=Failed" in workflow
     assert "release_applied=false" in workflow
@@ -210,6 +208,8 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "--wait=false" in helm_release
     assert "--wait-for-jobs=false" in helm_release
     assert "workload_timeout=60" in helm_release
+    assert '"$workload" == deployment/stream2pretrain-processor-fetcher*' in helm_release
+    assert "workload_timeout=180" in helm_release
     assert '"$workload" == deployment/stream2pretrain-processor-model-service-*' in helm_release
     assert "workload_timeout=600" in helm_release
     helmfile = (ROOT / "helmfile.yaml").read_text(encoding="utf-8")

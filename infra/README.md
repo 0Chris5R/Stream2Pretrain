@@ -76,7 +76,7 @@ Required externally managed objects for enabled components:
 | `stream2pretrain` | Secret `stream2pretrain-polaris` | `credential`, `scope` |
 | `stream2pretrain` | Secret `stream2pretrain-github` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-hf` | `token` |
-| `stream2pretrain` | Secret `stream2pretrain-foundry-signing` | `ed25519.key`, `ed25519.crt` |
+| `stream2pretrain` | Secret `stream2pretrain-foundry-signing` | `ed25519.key`, `ed25519.crt`; deployment creates it once unless pre-provisioned |
 | `stream2pretrain` | Secret `stream2pretrain-foundry-providers` (foundry only) | `HETZNER_INFERENCE_API_KEY`, `controlToken` |
 
 Use Sealed Secrets, External Secrets, or another team-approved mechanism. The

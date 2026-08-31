@@ -32,19 +32,19 @@ spec:
       serviceAccountName: {{ include "stream2pretrain.serviceAccountName" $root }}
       {{- include "stream2pretrain.imagePullSecrets" $root | nindent 6 }}
       {{- include "stream2pretrain.podSecurityContext" $root | nindent 6 }}
-      # Keep large models off the stateful curator node and spread replicas of
-      # the same model family. Curator separation is deliberately preferred,
-      # not required: its local-path PVC fixes it to one node, so a model Pod
-      # placed while the curator is down must never make that PVC unschedulable.
-      # Different model families may share a worker node.
+      # Prefer spreading replicas without making an optional scale-out Pod
+      # permanently unschedulable on a smaller three-node teaching cluster.
+      # Curator separation is also preferred: its local-path PVC fixes it to
+      # one node, so model placement must never prevent recovery of that state.
       affinity:
         podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" $component) | nindent 18 }}
-              topologyKey: kubernetes.io/hostname
           preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" $component) | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
             - weight: 100
               podAffinityTerm:
                 labelSelector:
@@ -114,8 +114,8 @@ spec:
     {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
 {{- if $root.Values.processor.modelService.autoscaling.enabled }}
 ---
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
 metadata:
   name: {{ $name }}
   namespace: {{ $root.Release.Namespace }}
@@ -123,21 +123,23 @@ metadata:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" $root "component" $component) | nindent 4 }}
 spec:
   scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
     name: {{ $name }}
-  minReplicas: {{ default $root.Values.processor.modelService.autoscaling.minReplicas $service.autoscaling.minReplicas }}
-  maxReplicas: {{ default $root.Values.processor.modelService.autoscaling.maxReplicas $service.autoscaling.maxReplicas }}
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ $root.Values.processor.modelService.autoscaling.targetCPUUtilizationPercentage }}
+  pollingInterval: {{ $root.Values.processor.modelService.autoscaling.pollingIntervalSeconds }}
+  cooldownPeriod: {{ $root.Values.processor.modelService.autoscaling.cooldownPeriodSeconds }}
+  minReplicaCount: {{ default $root.Values.processor.modelService.autoscaling.minReplicas $service.autoscaling.minReplicas }}
+  maxReplicaCount: {{ default $root.Values.processor.modelService.autoscaling.maxReplicas $service.autoscaling.maxReplicas }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ $root.Values.processor.modelService.autoscaling.prometheusServerAddress | quote }}
+        metricName: {{ printf "s2p_model_demand_%s" $profile | quote }}
+        threshold: "1"
+        query: {{ printf "(sum(s2p_model_active_requests{profile=\"%s\"}) or vector(0)) + (sum(s2p_model_waiting_requests{profile=\"%s\"}) or vector(0))" $profile $profile | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

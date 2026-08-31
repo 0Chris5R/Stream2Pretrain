@@ -53,6 +53,11 @@ MODEL_ACTIVE = Gauge(
     "Model requests currently executing in this Pod.",
     ["profile", "operation", "model_family"],
 )
+MODEL_WAITING = Gauge(
+    "s2p_model_waiting_requests",
+    "Model requests waiting for the model-family inference lock in this Pod.",
+    ["profile", "operation", "model_family"],
+)
 
 
 class CuratorModelRuntime:
@@ -164,7 +169,12 @@ class CuratorModelRuntime:
         labels = (self.profile, operation, model_family)
         MODEL_BATCH_ITEMS.labels(*labels).observe(item_count)
         queued_at = time.monotonic()
-        lock.acquire()
+        waiting = MODEL_WAITING.labels(*labels)
+        waiting.inc()
+        try:
+            lock.acquire()
+        finally:
+            waiting.dec()
         MODEL_QUEUE_SECONDS.labels(*labels).observe(time.monotonic() - queued_at)
         MODEL_ACTIVE.labels(*labels).inc()
         started_at = time.monotonic()
