@@ -2,6 +2,7 @@
 {{- $root := . }}
 {{- $curatorComponent := "processor-curate" }}
 {{- range $profile, $service := .Values.processor.modelService.profiles }}
+{{- if not (and (hasKey $service "enabled") (eq $service.enabled false)) }}
 {{- $component := printf "processor-model-service-%s" $profile }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" $root) $component }}
 {{- $headlessName := printf "%s-headless" $name | trunc 63 | trimSuffix "-" }}
@@ -157,6 +158,7 @@ spec:
         metricName: {{ printf "s2p_model_demand_%s" $profile | quote }}
         threshold: "1"
         query: {{ printf "(sum(s2p_model_active_requests{profile=\"%s\"}) or vector(0)) + (sum(s2p_model_waiting_requests{profile=\"%s\"}) or vector(0)) + (sum(s2p_curator_model_waiting_requests{profile=\"%s\"}) or vector(0))" $profile $profile $profile | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

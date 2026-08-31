@@ -359,6 +359,7 @@ processor:
       # Experimental only: these public models write independent shadow
       # scores and never change pretraining or post-training admission.
       shadow:
+        enabled: false
         runtimeProfile: shadow
         image: stream2pretrain/processor-shadow-model
         autoscaling:
@@ -375,7 +376,7 @@ processor:
       cooldownPeriodSeconds: 300
       prometheusServerAddress: http://kps-prometheus.monitoring.svc.cluster.local:9090
   shadowClassifier:
-    enabled: true
+    enabled: false
     image: stream2pretrain/processor
     replicas: 1
     modelTimeoutSeconds: 900

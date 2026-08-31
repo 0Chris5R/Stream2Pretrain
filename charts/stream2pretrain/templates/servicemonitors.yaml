@@ -1,6 +1,10 @@
 {{- if .Values.observability.serviceMonitor.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
-{{- range $component := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-shadow-classifier" "processor-iceberg-writer" "mixture-controller" "foundry" }}
+{{- $components := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "mixture-controller" "foundry" }}
+{{- if .Values.processor.shadowClassifier.enabled }}
+{{- $components = append $components "processor-shadow-classifier" }}
+{{- end }}
+{{- range $component := $components }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -27,7 +31,8 @@ spec:
 {{- end }}
 {{- $root := . }}
 {{- if .Values.processor.modelService.enabled }}
-{{- range $profile, $_service := .Values.processor.modelService.profiles }}
+{{- range $profile, $service := .Values.processor.modelService.profiles }}
+{{- if not (and (hasKey $service "enabled") (eq $service.enabled false)) }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -51,6 +56,7 @@ spec:
       interval: {{ $root.Values.observability.serviceMonitor.interval }}
       scrapeTimeout: {{ $root.Values.observability.serviceMonitor.scrapeTimeout }}
       path: /metrics
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
