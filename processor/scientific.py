@@ -72,6 +72,29 @@ class ScientificProcessingResult:
     document: ScientificDocument
 
 
+class PdfExceedsDoclingLimitError(ValueError):
+    """The exact expanded PDF body exceeds the configured Docling limit."""
+
+    def __init__(self, *, actual_bytes: int, limit_bytes: int) -> None:
+        self.actual_bytes = actual_bytes
+        self.limit_bytes = limit_bytes
+        super().__init__(
+            f"PDF body is {actual_bytes} bytes; configured Docling limit is {limit_bytes} bytes"
+        )
+
+
+class DoclingDocumentConversionError(ValueError):
+    """Docling conclusively rejected one document rather than its runtime."""
+
+
+def _is_docling_conversion_error(exc: Exception) -> bool:
+    """Recognize Docling's document-level exception without importing its optional runtime."""
+    exception_type = type(exc)
+    return exception_type.__name__ == "ConversionError" and exception_type.__module__.startswith(
+        "docling"
+    )
+
+
 class FigureClassifier:
     """Docling DocumentFigureClassifier-v2.5 ONNX CPU wrapper."""
 
@@ -192,7 +215,9 @@ class ScientificProcessor:
         self._docling_enabled = os.environ.get("S2P_DOCLING_ENABLED", "1") == "1"
         self._docling_models = self._models_dir / "docling"
         self._max_pdf_pages = int(os.environ.get("S2P_DOCLING_MAX_PAGES", "0"))
-        self._max_pdf_bytes = int(os.environ.get("S2P_DOCLING_MAX_BYTES", "52428800"))
+        self._max_pdf_bytes = int(os.environ.get("S2P_DOCLING_MAX_BYTES", "67108864"))
+        if self._max_pdf_bytes <= 0:
+            raise RuntimeError("S2P_DOCLING_MAX_BYTES must be positive")
         if require_real_models and self._docling_enabled:
             if importlib.util.find_spec("docling") is None:
                 raise RuntimeError("the pinned Docling CPU PDF fallback is required")
@@ -245,6 +270,15 @@ class ScientificProcessor:
         extraction_pipeline: str,
     ) -> ScientificProcessingResult:
         """Convert a PDF with Docling, falling back to bounded text extraction."""
+        # Bronze ``bytes_size`` is the stored gzip size, so the exact guard
+        # belongs here after decompression and before converter/model startup.
+        # Oversized input is not sent through pypdf because that would silently
+        # discard tables, figures, and OCR at a configurable capacity boundary.
+        if len(pdf) > self._max_pdf_bytes:
+            raise PdfExceedsDoclingLimitError(
+                actual_bytes=len(pdf),
+                limit_bytes=self._max_pdf_bytes,
+            )
         if self._docling_enabled:
             try:
                 return self._process_pdf_docling(
@@ -254,6 +288,8 @@ class ScientificProcessor:
                     extraction_pipeline=extraction_pipeline,
                 )
             except Exception as exc:
+                if _is_docling_conversion_error(exc):
+                    raise DoclingDocumentConversionError(str(exc)) from exc
                 if self._require_real_models:
                     raise
                 fallback_warning = f"docling_fallback:{type(exc).__name__}"

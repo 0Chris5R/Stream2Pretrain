@@ -241,6 +241,7 @@
             "replicas": {"type": "integer", "const": 1},
             "sourceBatchSize": {"type": "integer", "minimum": 1},
             "pdfProcessingEnabled": {"type": "boolean"},
+            "doclingMaxBytes": {"type": "integer", "minimum": 1},
             "checkpoint": {
               "type": "object",
               "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],

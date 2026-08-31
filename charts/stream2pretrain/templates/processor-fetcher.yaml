@@ -92,6 +92,8 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_DOCLING_MAX_BYTES
+              value: {{ .Values.processor.fetcher.doclingMaxBytes | int | quote }}
             - name: S2P_PDF_PROCESSING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
@@ -228,6 +230,8 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_DOCLING_MAX_BYTES
+              value: {{ .Values.processor.fetcher.doclingMaxBytes | int | quote }}
             - name: S2P_PDF_PROCESSING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
