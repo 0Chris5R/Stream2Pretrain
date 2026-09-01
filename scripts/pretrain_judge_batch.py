@@ -237,7 +237,6 @@ def build_request(row: Mapping[str, Any], *, index: int, evaluation_date: str) -
         "pipeline": {
             "valid_from": row.get("valid_from"),
             "tokens": row.get("tokens"),
-            "finepdfs_edu_v2": row.get("edu_score"),
             "projection_version": row.get("projection_version"),
             "scoring_version": row.get("scoring_version"),
         },

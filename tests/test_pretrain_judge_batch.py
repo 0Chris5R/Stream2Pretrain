@@ -43,6 +43,10 @@ def test_arxiv_request_contains_role_aware_labels_and_full_sections() -> None:
     assert "An abstract should" in developer_prompt
     assert "Evaluation date: 2026-09-01" in developer_prompt
     assert payload["complete_input"] is True
+    assert "finepdfs_edu_v2" not in payload["pipeline"]
+    assert "route" not in payload
+    assert "license" not in payload
+    assert "reject_reasons" not in payload
     assert [section["text"] for section in payload["sections"]] == [
         "Motivation and contribution.",
         "Exact method.",
