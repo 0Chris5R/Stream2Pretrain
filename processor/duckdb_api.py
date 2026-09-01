@@ -7,6 +7,8 @@ read-only ``SELECT`` statements; dashboards should prefer the typed endpoints.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 import time
@@ -144,7 +146,7 @@ class DuckDBQueryService:
         license_admissions_relation = os.environ.get(
             "S2P_DUCKDB_LICENSE_ADMISSIONS_RELATION", "license_admissions"
         )
-        conn = duckdb.connect(db_path, read_only=False)
+        conn: Any = duckdb.connect(db_path, read_only=False)
         _load_extensions(conn)
         if os.environ.get("S2P_DUCKDB_UNSAFE_VERSION_GUESSING") == "1":
             # The laptop profile uses a single PyIceberg SQLite-catalog writer,
@@ -523,6 +525,7 @@ class DuckDBQueryService:
         *,
         page: int = 1,
         page_size: int = 25,
+        cursor: str | None = None,
         search: str | None = None,
         routes: Sequence[str] = (),
         sources: Sequence[str] = (),
@@ -541,7 +544,7 @@ class DuckDBQueryService:
         max_quality: float | None = None,
         sort: str = "newest",
     ) -> dict[str, Any]:
-        """Return a paginated, server-filtered collection of durable decisions."""
+        """Return a cursor-paginated collection from the current serving view."""
         bounded_page = max(1, page)
         bounded_size = max(1, min(page_size, 100))
         where, params = self._document_where(
@@ -565,10 +568,59 @@ class DuckDBQueryService:
         order_by = {
             "newest": "valid_from DESC, doc_id ASC",
             "oldest": "valid_from ASC, doc_id ASC",
-            "quality_desc": "quality_score DESC, valid_from DESC",
-            "edu_desc": "edu_score DESC, valid_from DESC",
-            "perplexity_asc": "perplexity ASC, valid_from DESC",
+            "quality_desc": "quality_score DESC, valid_from DESC, doc_id ASC",
+            "edu_desc": "edu_score DESC, valid_from DESC, doc_id ASC",
+            "perplexity_asc": "perplexity ASC, valid_from DESC, doc_id ASC",
         }.get(sort, "valid_from DESC, doc_id ASC")
+        cursor_values = _decode_document_cursor(cursor) if cursor else None
+        cursor_sql = ""
+        cursor_params: list[Any] = []
+        if cursor_values is not None:
+            if cursor_values["sort"] != sort:
+                raise ValueError("document cursor sort does not match request")
+            cursor_valid_from = str(cursor_values["valid_from"])
+            cursor_doc_id = str(cursor_values["doc_id"])
+            if sort == "oldest":
+                cursor_sql = (
+                    "AND (valid_from > CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))"
+                )
+                cursor_params = [cursor_valid_from, cursor_valid_from, cursor_doc_id]
+            elif sort in {"quality_desc", "edu_desc"}:
+                column = "quality_score" if sort == "quality_desc" else "edu_score"
+                score = float(cursor_values["score"])
+                cursor_sql = (
+                    f"AND ({column} < ? OR ({column} = ? AND "
+                    "(valid_from < CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))))"
+                )
+                cursor_params = [
+                    score,
+                    score,
+                    cursor_valid_from,
+                    cursor_valid_from,
+                    cursor_doc_id,
+                ]
+            elif sort == "perplexity_asc":
+                score = float(cursor_values["score"])
+                cursor_sql = (
+                    "AND (perplexity > ? OR (perplexity = ? AND "
+                    "(valid_from < CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))))"
+                )
+                cursor_params = [
+                    score,
+                    score,
+                    cursor_valid_from,
+                    cursor_valid_from,
+                    cursor_doc_id,
+                ]
+            else:
+                cursor_sql = (
+                    "AND (valid_from < CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))"
+                )
+                cursor_params = [cursor_valid_from, cursor_valid_from, cursor_doc_id]
         sql = f"""
         WITH document_rows AS (
           SELECT
@@ -653,28 +705,47 @@ class DuckDBQueryService:
           citation_count,
           scientific_artifact_s3_uri,
           admission_only,
-          SUBSTR(text, 1, 320) AS text_preview,
-          CAST(COUNT(*) OVER () AS BIGINT) AS _total
+          SUBSTR(text, 1, 320) AS text_preview
         FROM document_rows
         {where}
+        {cursor_sql}
         ORDER BY {order_by}
-        LIMIT ? OFFSET ?
+        LIMIT ?
         """
         if self._refresh_iceberg:
             self._prepare_relation(self._decisions)
             self._prepare_relation(self._license_admissions)
         rows = self._rows(
             sql,
-            [*params, bounded_size, (bounded_page - 1) * bounded_size],
+            [*params, *cursor_params, bounded_size + 1],
             relation=None,
         )
-        total = int(rows[0].pop("_total")) if rows else 0
+        has_more = len(rows) > bounded_size
+        rows = rows[:bounded_size]
+        next_cursor = None
+        if has_more and rows:
+            tail = rows[-1]
+            next_cursor = _encode_document_cursor(tail, sort=sort)
+        # This count scans only the retained current-state index, never Iceberg
+        # history. It remains fast and exact while event upserts add the diff.
+        count_query = sql.rsplit("ORDER BY", 1)[0]
+        if cursor_sql:
+            count_query = count_query.replace(cursor_sql, "", 1)
+        total = int(
+            self._rows(
+                f"SELECT CAST(COUNT(*) AS BIGINT) AS count FROM ({count_query}) AS counted",
+                params,
+                relation=None,
+            )[0]["count"]
+        )
         return {
             "items": rows,
             "total": total,
             "page": bounded_page,
             "page_size": bounded_size,
             "pages": (total + bounded_size - 1) // bounded_size,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
         }
 
     def document_facets(self, *, include_fixtures: bool = False) -> dict[str, list[str]]:
@@ -1502,21 +1573,40 @@ def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
+async def serve(
+    service: DuckDBQueryService,
+    *,
+    port: int = 8090,
+    historical_service: DuckDBQueryService | None = None,
+    serving_index: Any | None = None,
+) -> None:
     import asyncio
 
     from aiohttp import web  # type: ignore[import-untyped]
 
-    query_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="duckdb-query")
+    query_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="serving-query")
+    historical_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-query")
 
     async def run_query(function: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(query_executor, partial(function, *args, **kwargs))
 
+    async def run_historical(function: Any, /, *args: Any, **kwargs: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(historical_executor, partial(function, *args, **kwargs))
+
     async def stop_query_executor(_: web.Application) -> None:
         query_executor.shutdown(wait=False, cancel_futures=True)
+        historical_executor.shutdown(wait=False, cancel_futures=True)
+        if serving_index is not None:
+            serving_index.close()
 
     async def probe(_: web.Request) -> web.Response:
+        return web.Response(text="ok\n", content_type="text/plain")
+
+    async def ready(_: web.Request) -> web.Response:
+        if serving_index is not None and not serving_index.running:
+            return web.Response(text="serving index unavailable\n", status=503)
         return web.Response(text="ok\n", content_type="text/plain")
 
     async def as_of(request: web.Request) -> web.Response:
@@ -1524,7 +1614,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         if not ts:
             return web.json_response({"detail": "missing ts"}, status=400)
         try:
-            return web.json_response(await run_query(service.as_of, ts))
+            target = historical_service or service
+            return web.json_response(await run_historical(target.as_of, ts))
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 
@@ -1579,6 +1670,7 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
                     service.documents,
                     page=int(request.query.get("page", "1")),
                     page_size=int(request.query.get("page_size", "25")),
+                    cursor=request.query.get("cursor"),
                     search=request.query.get("search"),
                     routes=request.query.getall("route", []),
                     sources=request.query.getall("source", []),
@@ -1720,8 +1812,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         body = await request.json()
         try:
             return web.json_response(
-                await run_query(
-                    service.safe_query,
+                await run_historical(
+                    (historical_service or service).safe_query,
                     str(body.get("sql", "")),
                     body.get("params", []),
                 )
@@ -1732,8 +1824,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
             return web.json_response({"detail": str(exc)}, status=503)
 
     app = web.Application()
-    app.router.add_get("/healthz", probe)
-    app.router.add_get("/readyz", probe)
+    app.router.add_get("/healthz", ready if serving_index is not None else probe)
+    app.router.add_get("/readyz", ready)
     app.router.add_get("/as-of", as_of)
     app.router.add_get("/quality-histogram", quality)
     app.router.add_get("/curation-summary", curation_summary)
@@ -1759,8 +1851,29 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
 def main() -> None:
     import asyncio
 
-    service = DuckDBQueryService.from_env()
-    asyncio.run(serve(service, port=int(os.environ.get("S2P_DUCKDB_API_PORT", "8090"))))
+    historical_service = DuckDBQueryService.from_env()
+    if os.environ.get("S2P_SERVING_INDEX_ENABLED", "0") == "1":
+        from processor.serving_index import ServingIndex, wait_until_running
+
+        index = ServingIndex.from_env()
+        index.start()
+        wait_until_running(index)
+        service = index.query_service()
+        asyncio.run(
+            serve(
+                service,
+                port=int(os.environ.get("S2P_DUCKDB_API_PORT", "8090")),
+                historical_service=historical_service,
+                serving_index=index,
+            )
+        )
+        return
+    asyncio.run(
+        serve(
+            historical_service,
+            port=int(os.environ.get("S2P_DUCKDB_API_PORT", "8090")),
+        )
+    )
 
 
 def _optional_bool(value: str | None) -> bool | None:
@@ -1772,6 +1885,42 @@ def _optional_bool(value: str | None) -> bool | None:
     if normalized in {"0", "false", "no"}:
         return False
     raise ValueError("expected a boolean")
+
+
+def _encode_document_cursor(row: dict[str, Any], *, sort: str) -> str:
+    score = None
+    if sort == "quality_desc":
+        score = float(row["quality_score"])
+    elif sort == "edu_desc":
+        score = float(row["edu_score"])
+    elif sort == "perplexity_asc":
+        score = float(row["perplexity"])
+    payload = json.dumps(
+        {
+            "sort": sort,
+            "valid_from": str(row["valid_from"]),
+            "doc_id": str(row["doc_id"]),
+            "score": score,
+        },
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_document_cursor(value: str) -> dict[str, Any]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(value + padding))
+    except Exception as exc:
+        raise ValueError("invalid document cursor") from exc
+    if (
+        not isinstance(decoded, dict)
+        or not isinstance(decoded.get("sort"), str)
+        or not isinstance(decoded.get("valid_from"), str)
+        or not isinstance(decoded.get("doc_id"), str)
+    ):
+        raise ValueError("invalid document cursor")
+    return decoded
 
 
 def _optional_float(value: str | None) -> float | None:

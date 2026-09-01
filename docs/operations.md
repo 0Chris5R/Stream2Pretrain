@@ -261,10 +261,21 @@ kubectl -n stream2pretrain patch mixturerecipe production \
   production catalog.
 - See [`storage-scaling.md`](./storage-scaling.md) for the complete ownership
   and lifecycle contract.
-- The dashboard `/corpus-overview` query materializes the current decisions,
-  Gold, and licence-admission relations once in one DuckDB statement. The
-  early-licence anti-join reuses that decisions materialization, preserving
-  exact durable counts without a second full-history decisions scan.
+
+### Dashboard serving index
+
+Normal monitoring routes never query complete Iceberg history. The DuckDB API
+keeps a retained current-state read model from `curation.decisions` and
+`license.admissions`, acknowledging Kafka records only after the local upsert.
+Headline totals, Documents, Sources, and Dataset selection query this compact
+index. Documents use cursor pagination and fetch further rows only on demand.
+The explicit `as-of` and read-only SQL routes use a separate executor against
+Iceberg, so an expensive historical query cannot block monitoring pages.
+
+The serving-index PVC is retained across Helm releases. If that PVC is
+deliberately removed, use a fresh index identity and replay the still-retained
+Kafka topics from `earliest`; never point an empty index at an existing
+committed consumer group.
 
 ## 9. Quotas and DHBWCloud caveats
 

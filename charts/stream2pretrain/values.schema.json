@@ -315,9 +315,19 @@
         },
         "duckdbApi": {
           "type": "object",
-          "required": ["activeScoringVersion"],
+          "required": ["activeScoringVersion", "servingIndex"],
           "properties": {
-            "activeScoringVersion": {"type": "string", "minLength": 1}
+            "activeScoringVersion": {"type": "string", "minLength": 1},
+            "servingIndex": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["existingClaim", "storageClass", "size"],
+              "properties": {
+                "existingClaim": {"type": "string"},
+                "storageClass": {"type": "string"},
+                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"}
+              }
+            }
           }
         }
       }

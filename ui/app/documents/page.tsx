@@ -1,10 +1,8 @@
 'use client';
 
 import { useDeferredValue, useEffect, useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import {
-  ArrowLeft,
-  ArrowRight,
   Check,
   ChevronRight,
   ExternalLink,
@@ -104,16 +102,19 @@ async function fetchDocument(docId: string): Promise<DocumentDetail> {
 
 export default function DocumentsPage() {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState('');
   const deferredSearch = useDeferredValue(filters.search);
   const query = useMemo(
-    () => buildQuery({ ...filters, search: deferredSearch }, page),
-    [filters, deferredSearch, page],
+    () => buildQuery({ ...filters, search: deferredSearch }),
+    [filters, deferredSearch],
   );
-  const list = useQuery({
+  const list = useInfiniteQuery({
     queryKey: queryKeys.documents(query),
-    queryFn: () => fetchDocuments(query),
+    queryFn: ({ pageParam }) =>
+      fetchDocuments(pageParam ? `${query}&cursor=${encodeURIComponent(pageParam)}` : query),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more && lastPage.next_cursor ? lastPage.next_cursor : undefined,
     refetchInterval: 10_000,
   });
   const facets = useQuery({
@@ -129,8 +130,14 @@ export default function DocumentsPage() {
 
   function update(patch: Partial<Filters>) {
     setFilters((current) => ({ ...current, ...patch }));
-    setPage(1);
   }
+
+  const items = Array.from(
+    new Map(
+      (list.data?.pages.flatMap((value) => value.items) ?? []).map((item) => [item.doc_id, item]),
+    ).values(),
+  );
+  const total = list.data?.pages[0]?.total;
 
   const activeFilters = countActiveFilters(filters);
 
@@ -145,7 +152,6 @@ export default function DocumentsPage() {
         rejectionReason: values.get('rejection_reason') ?? '',
         includeFixtures: values.get('include_fixtures') === 'true',
       }));
-      setPage(1);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -155,7 +161,7 @@ export default function DocumentsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">Documents</h1>
         <div className="text-sm tabular-nums text-muted-foreground">
-          {list.data ? `${formatInt(list.data.total)} results` : 'Loading'}
+          {total !== undefined ? `${formatInt(total)} results` : 'Loading'}
         </div>
       </div>
 
@@ -212,7 +218,7 @@ export default function DocumentsPage() {
       {list.error ? <ErrorBox error={list.error} /> : null}
 
       <DocumentTable
-        page={list.data}
+        items={items}
         loading={list.isLoading}
         selected={selectedId}
         select={setSelected}
@@ -234,26 +240,15 @@ export default function DocumentsPage() {
         </DialogContent>
       </Dialog>
 
-      {list.data && list.data.pages > 1 ? (
-        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+      {list.hasNextPage ? (
+        <div className="flex justify-center">
           <Button
             variant="outline"
             size="sm"
-            disabled={page === 1}
-            onClick={() => setPage(page - 1)}
+            disabled={list.isFetchingNextPage}
+            onClick={() => list.fetchNextPage()}
           >
-            <ArrowLeft className="mr-1 h-4 w-4" /> Previous
-          </Button>
-          <span className="text-sm tabular-nums">
-            Page {page} of {list.data.pages}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={page >= list.data.pages}
-            onClick={() => setPage(page + 1)}
-          >
-            Next <ArrowRight className="ml-1 h-4 w-4" />
+            {list.isFetchingNextPage ? 'Loading' : 'Show more'}
           </Button>
         </div>
       ) : null}
@@ -262,12 +257,12 @@ export default function DocumentsPage() {
 }
 
 function DocumentTable({
-  page,
+  items,
   loading,
   selected,
   select,
 }: {
-  page?: DocumentPage;
+  items: DocumentPage['items'];
   loading: boolean;
   selected: string;
   select: (docId: string) => void;
@@ -287,7 +282,7 @@ function DocumentTable({
         </TableHeader>
         <TableBody>
           {loading ? <LoadingRows /> : null}
-          {page?.items.map((item) => (
+          {items.map((item) => (
             <TableRow
               key={item.doc_id}
               data-state={selected === item.doc_id ? 'selected' : undefined}
@@ -321,7 +316,7 @@ function DocumentTable({
               </TableCell>
             </TableRow>
           ))}
-          {!loading && page?.items.length === 0 ? (
+          {!loading && items.length === 0 ? (
             <TableRow>
               <TableCell colSpan={6} className="h-40 text-center text-muted-foreground">
                 No documents match these filters.
@@ -872,8 +867,8 @@ function routeColor(route: CorpusRoute): string {
   return 'bg-emerald-500';
 }
 
-function buildQuery(filters: Filters, page: number): string {
-  const query = new URLSearchParams({ page: String(page), page_size: '25', sort: filters.sort });
+function buildQuery(filters: Filters): string {
+  const query = new URLSearchParams({ page_size: '50', sort: filters.sort });
   if (filters.search.trim()) query.set('search', filters.search.trim());
   filters.routes.forEach((value) => query.append('route', value));
   filters.tags.forEach((value) => query.append('tag', value));

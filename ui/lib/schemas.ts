@@ -403,6 +403,8 @@ export const DocumentPageSchema = z.object({
   page: z.number().int().positive(),
   page_size: z.number().int().positive(),
   pages: z.number().int().nonnegative(),
+  next_cursor: z.string().nullable().optional(),
+  has_more: z.boolean().optional(),
 });
 
 export const DocumentFacetsSchema = z.object({

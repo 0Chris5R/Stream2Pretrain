@@ -434,6 +434,12 @@ processor:
     threads: 1
     maxTempDirectorySize: 3GB
     tempStorageSizeLimit: 4Gi
+    # Kafka-backed current-state read model. Iceberg remains authoritative;
+    # this retained index prevents interactive pages from scanning history.
+    servingIndex:
+      existingClaim: ""
+      storageClass: local-path
+      size: 10Gi
     resources:
       requests: {cpu: 100m, memory: 512Mi}
       limits: {cpu: 1, memory: 1Gi}
