@@ -424,7 +424,6 @@ processor:
     replicas: 1
     apiPort: 8090
     goldRelation: gold
-    activeScoringVersion: pretrain-content-v3
     # Bound catalog staleness while avoiding one Polaris metadata reload for
     # every aggregate in a single dashboard request.
     catalogRefreshSeconds: 30

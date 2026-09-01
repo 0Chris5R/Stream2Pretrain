@@ -269,7 +269,6 @@ services:
       S2P_DUCKDB_API_PORT: "8090"
       S2P_BIND_HOST: 0.0.0.0
       S2P_DUCKDB_UNSAFE_VERSION_GUESSING: "1"
-      S2P_ACTIVE_SCORING_VERSION: pretrain-content-v2
     depends_on:
       lakehouse-bootstrap:
         condition: service_completed_successfully

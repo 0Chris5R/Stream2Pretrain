@@ -315,9 +315,8 @@
         },
         "duckdbApi": {
           "type": "object",
-          "required": ["activeScoringVersion", "servingIndex"],
+          "required": ["servingIndex"],
           "properties": {
-            "activeScoringVersion": {"type": "string", "minLength": 1},
             "servingIndex": {
               "type": "object",
               "additionalProperties": false,

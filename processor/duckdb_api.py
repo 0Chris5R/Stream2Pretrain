@@ -20,15 +20,12 @@ from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
 from ingest.common.license_admission import LICENSE_POLICY_REVISION, PERMISSIVE_TRAINING_LICENSES
-from processor.content_policy import CONTENT_POLICY_GENERATION
 
 _RELATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 _TRAINING_LICENSE_SQL = ", ".join(
     f"'{value.replace(chr(39), chr(39) * 2)}'" for value in sorted(PERMISSIVE_TRAINING_LICENSES)
 )
 _LICENSE_POLICY_SQL = LICENSE_POLICY_REVISION.replace("'", "''")
-_ACTIVE_CONTENT_GENERATION = os.environ.get("S2P_ACTIVE_SCORING_VERSION", CONTENT_POLICY_GENERATION)
-_ACTIVE_CONTENT_GENERATION_SQL = _ACTIVE_CONTENT_GENERATION.replace("'", "''")
 _REMOVED_CORPUS_SOURCES = (
     "github-events",
     "github-releases",
@@ -74,23 +71,6 @@ def _visible_source_predicate(
         )
     )
     return " AND ".join(clauses)
-
-
-def _current_decision_predicate(
-    source_column: str = "source_feed",
-    reject_column: str = "reject_reasons",
-    *,
-    include_fixtures: bool = False,
-) -> str:
-    """Hide superseded policy rows from every normal product view."""
-    historical = " OR ".join(
-        f"LIST_CONTAINS({reject_column}, '{reason}')" for reason in _LEGACY_DISPLAY_REJECTIONS
-    )
-    return (
-        f"{_visible_source_predicate(source_column, include_fixtures=include_fixtures)} "
-        f"AND scoring_version = '{_ACTIVE_CONTENT_GENERATION_SQL}' "
-        f"AND NOT ({historical})"
-    )
 
 
 def _dashboard_decision_predicate(
@@ -189,14 +169,23 @@ class DuckDBQueryService:
 
     def as_of(self, ts: str) -> list[dict[str, Any]]:
         sql = f"""
+        WITH valid_decisions AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._gold}
+          WHERE valid_from <= CAST(? AS TIMESTAMP)
+            AND (valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP))
+        )
         SELECT
           source_feed,
           CAST(COALESCE(SUM(tokens), 0) AS BIGINT) AS tokens,
           CAST(COUNT(*) AS BIGINT) AS documents
-        FROM {self._gold}
-        WHERE valid_from <= CAST(? AS TIMESTAMP)
-          AND (valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP))
-          AND {_current_decision_predicate()}
+        FROM valid_decisions
+        WHERE revision_rank = 1
+          AND {_dashboard_decision_predicate()}
         GROUP BY source_feed
         ORDER BY tokens DESC, source_feed ASC
         """
@@ -701,11 +690,10 @@ class DuckDBQueryService:
             content_tags, reject_reasons, source_word_count, training_word_count,
             included_section_count, excluded_section_count, figure_count,
             table_count, equation_count, citation_count,
-            scoring_version,
             scientific_artifact_s3_uri,
             FALSE AS admission_only
-          FROM {self._decisions}
-          WHERE {_current_decision_predicate()}
+          FROM {self._latest_decisions_relation()}
+          WHERE {_dashboard_decision_predicate()}
           UNION ALL
           SELECT
             admission.doc_id,
@@ -735,7 +723,6 @@ class DuckDBQueryService:
             0 AS table_count,
             0 AS equation_count,
             0 AS citation_count,
-            '{_ACTIVE_CONTENT_GENERATION_SQL}' AS scoring_version,
             CAST(NULL AS VARCHAR) AS scientific_artifact_s3_uri,
             TRUE AS admission_only
           FROM {self._license_admissions} AS admission
@@ -796,8 +783,9 @@ class DuckDBQueryService:
         if has_more and rows:
             tail = rows[-1]
             next_cursor = _encode_document_cursor(tail, sort=sort)
-        # This count scans only the retained current-state index, never Iceberg
-        # history. It remains fast and exact while event upserts add the diff.
+        # The serving index retains policy revisions for audit. The ranked
+        # relation above collapses them to one authoritative document before
+        # this exact filtered count is evaluated.
         count_query = sql.rsplit("ORDER BY", 1)[0]
         if cursor_sql:
             count_query = count_query.replace(cursor_sql, "", 1)
@@ -824,7 +812,8 @@ class DuckDBQueryService:
             self._prepare_relation(self._decisions)
             self._prepare_relation(self._license_admissions)
         fixture_clause = f"WHERE {_visible_source_predicate(include_fixtures=include_fixtures)}"
-        current_decisions = _current_decision_predicate(include_fixtures=include_fixtures)
+        visible_decisions = _dashboard_decision_predicate(include_fixtures=include_fixtures)
+        latest_decisions = self._latest_decisions_relation()
         admission_rows = f"""
           SELECT admission.source_feed,
                  COALESCE(admission.source_format, 'unfetched') AS source_format,
@@ -844,7 +833,7 @@ class DuckDBQueryService:
             f"""
             SELECT DISTINCT source_feed AS value
             FROM (
-              SELECT source_feed FROM {self._decisions} WHERE {current_decisions}
+              SELECT source_feed FROM {latest_decisions} WHERE {visible_decisions}
               UNION ALL
               SELECT source_feed FROM ({admission_rows}) AS early
             ) AS source_rows
@@ -858,8 +847,8 @@ class DuckDBQueryService:
             f"""
             SELECT DISTINCT source_format AS value
             FROM (
-              SELECT source_feed, source_format FROM {self._decisions}
-              WHERE {current_decisions}
+              SELECT source_feed, source_format FROM {latest_decisions}
+              WHERE {visible_decisions}
               UNION ALL
               SELECT source_feed, source_format FROM ({admission_rows}) AS early
             ) AS format_rows
@@ -871,8 +860,8 @@ class DuckDBQueryService:
         )
         conjunction = "WHERE" if not fixture_clause else "AND"
         tags = self._rows(
-            f"SELECT DISTINCT tag AS value FROM {self._decisions}, "
-            f"UNNEST(content_tags) AS values(tag) WHERE {current_decisions} "
+            f"SELECT DISTINCT tag AS value FROM {latest_decisions}, "
+            f"UNNEST(content_tags) AS values(tag) WHERE {visible_decisions} "
             f"AND tag IS NOT NULL ORDER BY value",
             [],
             relation=self._decisions,
@@ -882,8 +871,8 @@ class DuckDBQueryService:
             SELECT DISTINCT reason AS value
             FROM (
               SELECT source_feed, reason
-              FROM {self._decisions}, UNNEST(reject_reasons) AS values(reason)
-              WHERE {current_decisions}
+              FROM {latest_decisions}, UNNEST(reject_reasons) AS values(reason)
+              WHERE {visible_decisions}
               UNION ALL
               SELECT source_feed, reason FROM ({admission_rows}) AS early
             ) AS reason_rows
@@ -926,7 +915,6 @@ class DuckDBQueryService:
             min_edu=min_edu,
             min_quality=min_quality,
             include_fixtures=False,
-            latest_per_document=True,
         )
         decisions = self._latest_decisions_relation()
         sql = f"""
@@ -974,7 +962,6 @@ class DuckDBQueryService:
             min_edu=min_edu,
             min_quality=min_quality,
             include_fixtures=False,
-            latest_per_document=True,
         )
         decisions = self._latest_decisions_relation()
         rows = self._rows(
@@ -1019,7 +1006,6 @@ class DuckDBQueryService:
             min_edu=min_edu,
             min_quality=min_quality,
             include_fixtures=False,
-            latest_per_document=True,
         )
         available_tags = self._rows(
             f"""
@@ -1098,14 +1084,8 @@ class DuckDBQueryService:
         max_edu: float | None = None,
         min_quality: float | None = None,
         max_quality: float | None = None,
-        latest_per_document: bool = False,
     ) -> tuple[str, list[Any]]:
-        predicate = (
-            _dashboard_decision_predicate
-            if latest_per_document
-            else _current_decision_predicate
-        )
-        clauses: list[str] = [predicate(include_fixtures=include_fixtures)]
+        clauses: list[str] = [_dashboard_decision_predicate(include_fixtures=include_fixtures)]
         params: list[Any] = []
         if search and search.strip():
             clauses.append(
@@ -1168,6 +1148,9 @@ class DuckDBQueryService:
 
     def document(self, doc_id: str) -> dict[str, Any] | None:
         """Return one full decision with its structured scientific artifact."""
+        if self._refresh_iceberg:
+            self._prepare_relation(self._decisions)
+            self._prepare_relation(self._license_admissions)
         sql = f"""
         SELECT
           doc_id, TRIM(LEADING '# ' FROM SPLIT_PART(text, '\n', 1)) AS title,
@@ -1193,12 +1176,11 @@ class DuckDBQueryService:
           gopher_stopword_ratio, gopher_bullet_line_ratio,
           gopher_ellipsis_line_ratio, gopher_symbol_word_ratio,
           gopher_alpha_word_ratio
-        FROM {self._decisions}
-        WHERE doc_id = ? AND {_current_decision_predicate()}
-        ORDER BY valid_from DESC
+        FROM {self._latest_decisions_relation()}
+        WHERE doc_id = ? AND {_dashboard_decision_predicate()}
         LIMIT 1
         """
-        rows = self._rows(sql, [doc_id], relation=self._decisions)
+        rows = self._rows(sql, [doc_id], relation=None)
         if not rows:
             admission_only = self._rows(
                 f"""

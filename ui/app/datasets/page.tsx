@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Download, FileJson, Layers3 } from 'lucide-react';
 
@@ -58,17 +58,8 @@ export default function DatasetsPage() {
   });
   const facets = useQuery({ queryKey: queryKeys.documentFacets(false), queryFn: fetchFacets });
 
-  useEffect(() => {
-    if (
-      contentTag &&
-      summary.data &&
-      !summary.data.available_content_tags.includes(contentTag)
-    ) {
-      setContentTag('');
-    }
-  }, [contentTag, summary.data]);
-
   function toggleRoute(route: string) {
+    setContentTag('');
     setRoutes((current) =>
       current.includes(route) ? current.filter((item) => item !== route) : [...current, route],
     );
@@ -108,21 +99,30 @@ export default function DatasetsPage() {
               <Input
                 type="date"
                 value={dateFrom}
-                onChange={(event) => setDateFrom(event.target.value)}
+                onChange={(event) => {
+                  setContentTag('');
+                  setDateFrom(event.target.value);
+                }}
               />
             </Field>
             <Field label="To">
               <Input
                 type="date"
                 value={dateTo}
-                onChange={(event) => setDateTo(event.target.value)}
+                onChange={(event) => {
+                  setContentTag('');
+                  setDateTo(event.target.value);
+                }}
               />
             </Field>
             <Field label="Source">
               <select
                 className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                 value={source}
-                onChange={(event) => setSource(event.target.value)}
+                onChange={(event) => {
+                  setContentTag('');
+                  setSource(event.target.value);
+                }}
               >
                 <option value="">All sources</option>
                 {facets.data?.sources.map((item) => <option key={item}>{item}</option>)}

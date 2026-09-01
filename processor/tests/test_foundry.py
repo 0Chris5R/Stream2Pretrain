@@ -104,6 +104,13 @@ from schemas.scientific import ScientificDocument, ScientificParagraph, Scientif
 FIXED_TIME = datetime(2026, 8, 19, tzinfo=UTC)
 
 
+def _extract_test_archive(archive: tarfile.TarFile, target: Path) -> None:
+    if sys.version_info >= (3, 12):
+        archive.extractall(target, filter="data")
+    else:
+        archive.extractall(target)
+
+
 def test_foundry_reconciles_loaded_tables_to_scheduled_cleanup_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1174,7 +1181,7 @@ def test_v2_report_must_expose_symbolic_result_not_hide_it_in_manifest(tmp_path:
         validation_cases=cases,
     )
     with tarfile.open(fileobj=io.BytesIO(package.content), mode="r:gz") as archive:
-        archive.extractall(tmp_path, filter="data")
+        _extract_test_archive(archive, tmp_path)
     environment_root = tmp_path / "paper_environment"
     assert score_response(answer.model_dump_json(), environment_root) == 1.0
     assert score_response(hidden_result.model_dump_json(), environment_root) == 0.0
@@ -1305,7 +1312,7 @@ def test_v2_verifier_directly_enforces_every_scientific_contract_in_package(
         validation_cases=cases,
     )
     with tarfile.open(fileobj=io.BytesIO(package.content), mode="r:gz") as archive:
-        archive.extractall(tmp_path, filter="data")
+        _extract_test_archive(archive, tmp_path)
     environment_root = tmp_path / "paper_environment"
     for name, variant in variants.items():
         expected_score = 1.0 if name == "valid" else 0.0
@@ -2744,7 +2751,7 @@ def test_acceptance_suite_and_signed_package_are_reproducible(tmp_path: Path) ->
         # framework optional. CI runs this same test once with the exact pin so
         # the generated package must import, load, and execute its reward.
         if importlib.util.find_spec("verifiers") is not None:
-            archive.extractall(tmp_path, filter="data")
+            _extract_test_archive(archive, tmp_path)
             environment_root = tmp_path / "paper_environment"
             export_root = environment_root / "prime_verifiers"
             sys.path[:0] = [str(environment_root), str(export_root)]

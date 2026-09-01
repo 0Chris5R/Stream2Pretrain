@@ -96,6 +96,28 @@ class _DatasetConnection(_FakeConnection):
         return self
 
 
+class _EmptyDocumentConnection(_FakeConnection):
+    def execute(
+        self, sql: str, parameters: Sequence[Any] | None = None
+    ) -> _EmptyDocumentConnection:
+        self.calls.append((sql, parameters))
+        if "CAST(COUNT(*) AS BIGINT) AS count" in sql:
+            self.description = [("count",)]
+            self.rows = [(0,)]
+        else:
+            self.description = [("doc_id",)]
+            self.rows = []
+        return self
+
+
+class _EmptyFacetConnection(_FakeConnection):
+    def execute(self, sql: str, parameters: Sequence[Any] | None = None) -> _EmptyFacetConnection:
+        self.calls.append((sql, parameters))
+        self.description = [("value",)]
+        self.rows = []
+        return self
+
+
 def test_as_of_uses_half_open_validity_predicate() -> None:
     conn = _FakeConnection()
     service = DuckDBQueryService(conn)
@@ -106,8 +128,45 @@ def test_as_of_uses_half_open_validity_predicate() -> None:
     sql, params = conn.calls[-1]
     assert "valid_from <= CAST(? AS TIMESTAMP)" in sql
     assert "valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP)" in sql
-    assert "scoring_version = 'pretrain-content-v3'" in sql
+    assert "PARTITION BY doc_id" in sql
+    assert "revision_rank = 1" in sql
+    assert "scoring_version = 'pretrain-content-v3'" not in sql
     assert params == ["2026-06-17T10:00:00Z", "2026-06-17T10:00:00Z"]
+
+
+def test_as_of_collapses_policy_generations_to_latest_document() -> None:
+    duckdb = pytest.importorskip("duckdb")
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        """
+        CREATE TABLE gold (
+          doc_id VARCHAR,
+          source_feed VARCHAR,
+          reject_reasons VARCHAR[],
+          scoring_version VARCHAR,
+          policy_revision VARCHAR,
+          trace_id VARCHAR,
+          valid_from TIMESTAMP,
+          valid_to TIMESTAMP,
+          tokens BIGINT
+        );
+        INSERT INTO gold VALUES
+          ('d1', 'arxiv-html', [], 'pretrain-content-v2', 'p2', 't2',
+           '2026-08-01', NULL, 100),
+          ('d1', 'arxiv-html', [], 'pretrain-content-v3', 'p3', 't3',
+           '2026-09-01', NULL, 120),
+          ('d2', 'hf-models', [], 'pretrain-content-v2', 'p2', 't4',
+           '2026-08-15', NULL, 40),
+          ('d3', 'hf-datasets', ['c4_nopunc_filter'], 'pretrain-content-v3', 'p3', 't5',
+           '2026-08-20', NULL, 60);
+        """
+    )
+    service = DuckDBQueryService(connection, gold_relation="gold")
+
+    assert service.as_of("2026-09-02T00:00:00Z") == [
+        {"source_feed": "arxiv-html", "tokens": 120, "documents": 1},
+        {"source_feed": "hf-models", "tokens": 40, "documents": 1},
+    ]
 
 
 def test_quality_histogram_shape() -> None:
@@ -342,8 +401,10 @@ class _AdmissionOnlyDetailConnection:
     def __init__(self) -> None:
         self.description: list[tuple[str]] = []
         self.rows: list[tuple[object, ...]] = []
+        self.calls: list[tuple[str, list[object]]] = []
 
     def execute(self, sql: str, _params: list[object]) -> _AdmissionOnlyDetailConnection:
+        self.calls.append((sql, _params))
         if "FROM decisions" in sql:
             self.description = [("doc_id",)]
             self.rows = []
@@ -449,6 +510,10 @@ def test_document_exposes_prefetch_license_quarantine_for_audit() -> None:
     assert document["training_usage"] == "quarantined"
     assert document["reject_reasons"] == ["license_missing"]
     assert document["license_admission"]["resolver"] == "web-page-license-probe"
+    decision_sql = service._conn.calls[0][0]
+    assert "ROW_NUMBER() OVER" in decision_sql
+    assert "PARTITION BY doc_id" in decision_sql
+    assert "scoring_version = 'pretrain-content-v3'" not in decision_sql
 
 
 def test_safe_query_rejects_writes_and_multiple_statements() -> None:
@@ -508,6 +573,38 @@ def test_dataset_summary_uses_latest_document_decisions_and_exportable_tags() ->
     assert "LIST_CONTAINS(content_tags, ?)" not in tag_sql
     assert "COALESCE(spdx_license, license) IN" in tag_sql
     assert "risk_tier = 1" in tag_sql
+
+
+def test_documents_collection_uses_latest_decision_across_policy_generations() -> None:
+    connection = _EmptyDocumentConnection()
+    service = DuckDBQueryService(connection)
+
+    result = service.documents()
+
+    assert result["items"] == []
+    page_sql = connection.calls[0][0]
+    count_sql = connection.calls[1][0]
+    for sql in (page_sql, count_sql):
+        assert "ROW_NUMBER() OVER" in sql
+        assert "PARTITION BY doc_id" in sql
+        assert "scoring_version = 'pretrain-content-v3'" not in sql
+
+
+def test_document_facets_use_latest_decisions_across_policy_generations() -> None:
+    connection = _EmptyFacetConnection()
+    service = DuckDBQueryService(connection)
+
+    assert service.document_facets() == {
+        "sources": [],
+        "source_formats": [],
+        "content_tags": [],
+        "rejection_reasons": [],
+    }
+    assert len(connection.calls) == 4
+    for sql, _params in connection.calls:
+        assert "ROW_NUMBER() OVER" in sql
+        assert "PARTITION BY doc_id" in sql
+        assert "scoring_version = 'pretrain-content-v3'" not in sql
 
 
 def test_gold_relation_is_validated() -> None:
@@ -589,7 +686,7 @@ def test_document_filters_are_parameterized_and_hide_fixtures() -> None:
     )
 
     assert "source_feed NOT LIKE 'local-%'" in where
-    assert "scoring_version = 'pretrain-content-v3'" in where
+    assert "scoring_version = 'pretrain-content-v3'" not in where
     assert "LIST_CONTAINS(content_tags, ?)" in where
     assert "route = ?" in where
     assert "eligible_routes" not in where
