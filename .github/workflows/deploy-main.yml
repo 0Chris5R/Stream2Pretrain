@@ -1387,7 +1387,7 @@ jobs:
             > /tmp/pretrain-archive.log 2>&1
           status=$?
           if [ "$status" -eq 0 ]; then
-            split -b 8m -d -a 3 \
+            split -b 1m -d -a 4 \
               /tmp/pretrain-judge-jsonl.tar.gz /tmp/pretrain-judge-chunk-
             status=$?
           fi
