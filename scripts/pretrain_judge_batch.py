@@ -386,7 +386,14 @@ def _api_request(request: urllib.request.Request, *, attempts: int = 6) -> dict[
 
 
 def _auth_headers(api_key: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {api_key}"}
+    headers = {"Authorization": f"Bearer {api_key}"}
+    project_id = os.environ.get("OPENAI_PROJECT_ID", "").strip()
+    organization_id = os.environ.get("OPENAI_ORG_ID", "").strip()
+    if project_id:
+        headers["OpenAI-Project"] = project_id
+    if organization_id:
+        headers["OpenAI-Organization"] = organization_id
+    return headers
 
 
 def upload_file(path: Path, *, api_key: str) -> dict[str, Any]:

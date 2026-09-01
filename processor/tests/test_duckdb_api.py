@@ -135,7 +135,8 @@ def test_corpus_overview_uses_durable_decision_and_gold_counts() -> None:
     }
     assert len(connection.calls) == 1
     overview_query = connection.calls[0][0]
-    assert "scoring_version = 'pretrain-content-v3'" in overview_query
+    assert "PARTITION BY doc_id" in overview_query
+    assert "scoring_version = 'pretrain-content-v3'" not in overview_query
 
 
 def test_corpus_overview_scans_each_durable_relation_once() -> None:
@@ -188,26 +189,38 @@ def test_corpus_overview_one_pass_preserves_filter_and_anti_join_contract() -> N
           doc_id VARCHAR,
           source_feed VARCHAR,
           reject_reasons VARCHAR[],
-          scoring_version VARCHAR
+          scoring_version VARCHAR,
+          classifier_revision VARCHAR,
+          policy_revision VARCHAR,
+          trace_id VARCHAR,
+          valid_from TIMESTAMP
         );
         INSERT INTO decisions VALUES
-          ('d1', 'arxiv-html', [], 'pretrain-content-v3'),
-          ('d2', 'hf-models', ['near_duplicate'], 'pretrain-content-v3'),
-          ('d3', 'oai-arxiv-cs', [], 'pretrain-content-v3'),
-          ('d4', 'arxiv-html', ['c4_nopunc_filter'], 'pretrain-content-v3'),
-          ('d5', 'arxiv-html', [], 'old-policy'),
-          ('d6', 'local-smoke', [], 'pretrain-content-v3'),
-          ('d7', 'hf-datasets', [], 'pretrain-content-v3');
+          ('d1', 'arxiv-html', [], 'pretrain-content-v2', 'c2', 'p2', 't2', '2026-08-01'),
+          ('d1', 'arxiv-html', [], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01'),
+          ('d2', 'hf-models', ['near_duplicate'], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01'),
+          ('d3', 'oai-arxiv-cs', [], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01'),
+          ('d4', 'arxiv-html', ['c4_nopunc_filter'], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01'),
+          ('d5', 'arxiv-html', [], 'old-policy', 'c1', 'p1', 't1', '2026-07-01'),
+          ('d6', 'local-smoke', [], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01'),
+          ('d7', 'hf-datasets', [], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01');
 
         CREATE TABLE gold (
+          doc_id VARCHAR,
           source_feed VARCHAR,
           reject_reasons VARCHAR[],
-          scoring_version VARCHAR
+          scoring_version VARCHAR,
+          classifier_revision VARCHAR,
+          policy_revision VARCHAR,
+          trace_id VARCHAR,
+          valid_from TIMESTAMP
         );
         INSERT INTO gold VALUES
-          ('arxiv-html', [], 'pretrain-content-v3'),
-          ('hf-datasets', [], 'pretrain-content-v3'),
-          ('oai-arxiv-cs', [], 'pretrain-content-v3');
+          ('d1', 'arxiv-html', [], 'pretrain-content-v2', 'c2', 'p2', 't2', '2026-08-01'),
+          ('d1', 'arxiv-html', [], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01'),
+          ('d5', 'arxiv-html', [], 'old-policy', 'c1', 'p1', 't1', '2026-07-01'),
+          ('d7', 'hf-datasets', [], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01'),
+          ('d3', 'oai-arxiv-cs', [], 'pretrain-content-v3', 'c3', 'p3', 't3', '2026-09-01');
 
         CREATE TABLE license_admissions (
           doc_id VARCHAR,
@@ -233,15 +246,15 @@ def test_corpus_overview_one_pass_preserves_filter_and_anti_join_contract() -> N
     service = DuckDBQueryService(connection)
 
     assert service.corpus_overview() == {
-        "durable_decisions": 5,
-        "training_export_documents": 2,
+        "durable_decisions": 6,
+        "training_export_documents": 3,
         "rejected_by_reason": {
             "near_duplicate": 1,
             "license_missing": 1,
             "license_not_permitted": 1,
         },
         "per_source_acceptance": [
-            {"source": "arxiv-html", "accepted": 1, "total": 2},
+            {"source": "arxiv-html", "accepted": 2, "total": 3},
             {"source": "hf-datasets", "accepted": 1, "total": 1},
             {"source": "hf-models", "accepted": 0, "total": 2},
         ],
@@ -520,7 +533,7 @@ def test_iceberg_relation_refresh_is_cached_between_aggregate_queries(monkeypatc
 
     service.quality_histogram()
 
-    assert registrations == [("gold", "curated")]
+    assert registrations == [("decisions", "curation_decisions")]
 
 
 def test_duckdb_runtime_limits_enable_bounded_spilling(monkeypatch, tmp_path) -> None:

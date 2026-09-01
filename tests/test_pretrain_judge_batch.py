@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scripts import pretrain_judge_batch
 from scripts.pretrain_judge_batch import (
+    _auth_headers,
     batch_status,
     build_request,
     parse_sections,
@@ -113,6 +114,9 @@ def test_exporter_uses_exact_processed_full_text_pool_without_route_filtering() 
 
 def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None:
     workflow = (ROOT / ".github/workflows/deploy-main.yml").read_text()
+    assert "OPENAI_PROJECT_ID: ${{ secrets.OPENAI_PROJECT_ID }}" in workflow
+    assert "OPENAI_ORG_ID: ${{ secrets.OPENAI_ORG_ID }}" in workflow
+    assert '"${OPENAI_PROJECT_ID:?Missing OPENAI_PROJECT_ID Actions secret}"' in workflow
     assert 'export_job="pretrain-judge-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in workflow
     assert '"app.kubernetes.io/component": "pretrain-judge-export"' in workflow
     assert '.name != "S2P_SERVING_INDEX_ENABLED"' in workflow
@@ -156,3 +160,14 @@ def test_wait_for_file_requires_processed_status(monkeypatch) -> None:
     result = wait_for_file("file_test", api_key="secret", poll_seconds=0)
 
     assert result["status"] == "processed"
+
+
+def test_auth_headers_keep_file_and_batch_requests_in_one_project(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj_stream2pretrain")
+    monkeypatch.setenv("OPENAI_ORG_ID", "org_course")
+
+    assert _auth_headers("secret") == {
+        "Authorization": "Bearer secret",
+        "OpenAI-Project": "proj_stream2pretrain",
+        "OpenAI-Organization": "org_course",
+    }

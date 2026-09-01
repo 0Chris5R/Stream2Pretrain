@@ -46,6 +46,11 @@ _LEGACY_DISPLAY_REJECTIONS = (
     "c4_nopunc_filter",
     "gopher_filter",
 )
+_TRAINABLE_DECISION_SQL = (
+    "risk_tier = 1 AND route IN ('pretrain', 'broad_pretraining', "
+    "'posttrain_candidate', 'reasoning_candidate') "
+    "AND ARRAY_LENGTH(reject_reasons) = 0 AND ARRAY_LENGTH(pii_flags) = 0"
+)
 
 
 def _visible_source_predicate(
@@ -84,6 +89,22 @@ def _current_decision_predicate(
     return (
         f"{_visible_source_predicate(source_column, include_fixtures=include_fixtures)} "
         f"AND scoring_version = '{_ACTIVE_CONTENT_GENERATION_SQL}' "
+        f"AND NOT ({historical})"
+    )
+
+
+def _dashboard_decision_predicate(
+    source_column: str = "source_feed",
+    reject_column: str = "reject_reasons",
+    *,
+    include_fixtures: bool = False,
+) -> str:
+    """Select visible corpus rows without restricting their processing version."""
+    historical = " OR ".join(
+        f"LIST_CONTAINS({reject_column}, '{reason}')" for reason in _LEGACY_DISPLAY_REJECTIONS
+    )
+    return (
+        f"{_visible_source_predicate(source_column, include_fixtures=include_fixtures)} "
         f"AND NOT ({historical})"
     )
 
@@ -183,31 +204,66 @@ class DuckDBQueryService:
 
     def quality_histogram(self) -> dict[str, list[dict[str, Any]]]:
         composite_sql = f"""
+        WITH latest AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._decisions}
+        )
         SELECT
           CAST(FLOOR(quality_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
-        FROM {self._gold}
-        WHERE {_current_decision_predicate()}
+        FROM latest
+        WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+          AND {_TRAINABLE_DECISION_SQL}
         GROUP BY score
         ORDER BY score ASC
         """
         edu_sql = f"""
+        WITH latest AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._decisions}
+        )
         SELECT
           CAST(FLOOR(edu_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
-        FROM {self._gold}
-        WHERE {_current_decision_predicate()}
+        FROM latest
+        WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+          AND {_TRAINABLE_DECISION_SQL}
         GROUP BY score
         ORDER BY score ASC
         """
         return {
-            "buckets": self._rows(composite_sql, [], relation=self._gold),
-            "edu_buckets": self._rows(edu_sql, [], relation=self._gold),
+            "buckets": self._rows(composite_sql, [], relation=self._decisions),
+            "edu_buckets": self._rows(edu_sql, [], relation=self._decisions),
         }
 
     def curation_summary(self) -> list[dict[str, Any]]:
         """Aggregate the durable decision stream by final corpus route."""
         sql = f"""
+        WITH latest AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._decisions}
+        ), canonical AS (
+          SELECT * EXCLUDE (route),
+                 CASE
+                   WHEN route = 'broad_pretraining' THEN 'pretrain'
+                   WHEN route = 'reasoning_candidate' THEN 'posttrain_candidate'
+                   ELSE route
+                 END AS route
+          FROM latest
+          WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+        )
         SELECT
           route,
           CAST(COUNT(*) AS BIGINT) AS documents,
@@ -215,8 +271,7 @@ class DuckDBQueryService:
           CAST(COALESCE(SUM(training_word_count), 0) AS BIGINT) AS training_words,
           CAST(COALESCE(AVG(quality_score), 0) AS DOUBLE) AS mean_quality,
           CAST(COALESCE(AVG(edu_score), 0) AS DOUBLE) AS mean_edu
-        FROM {self._decisions}
-        WHERE {_current_decision_predicate()}
+        FROM canonical
         GROUP BY route
         ORDER BY documents DESC, route ASC
         """
@@ -261,11 +316,12 @@ class DuckDBQueryService:
 
         Prometheus process counters correctly describe activity since a worker
         started, but they cannot describe the current corpus after recovery.
-        Dashboard totals therefore come from the decision and Gold tables. All
-        three current Iceberg relations are materialized in one statement so a
-        dashboard refresh reads each de-duplicated history once. In particular,
-        the early-license anti-join reuses the decisions materialization instead
-        of starting a second remote scan.
+        Dashboard totals therefore select the latest durable decision for every
+        unique document across all processing versions. All three Iceberg
+        relations are materialized in one statement so a dashboard refresh
+        reads each de-duplicated history once. In particular, the early-license
+        anti-join reuses the decisions materialization instead of starting a
+        second remote scan.
         """
         if self._refresh_iceberg:
             self._prepare_relation(self._decisions)
@@ -274,18 +330,32 @@ class DuckDBQueryService:
         overview_rows = self._rows(
             f"""
             WITH all_decisions AS MATERIALIZED (
-              SELECT doc_id, source_feed, reject_reasons, scoring_version
+              SELECT doc_id, source_feed, reject_reasons, scoring_version,
+                     classifier_revision, policy_revision, trace_id, valid_from
               FROM {self._decisions}
             ),
-            current_decisions AS MATERIALIZED (
-              SELECT source_feed, reject_reasons
+            latest_decisions AS MATERIALIZED (
+              SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY doc_id
+                ORDER BY valid_from DESC, scoring_version DESC,
+                         policy_revision DESC, trace_id ASC
+              ) AS revision_rank
               FROM all_decisions
-              WHERE {_current_decision_predicate()}
             ),
-            current_gold AS MATERIALIZED (
-              SELECT source_feed
-              FROM {self._gold}
-              WHERE {_current_decision_predicate()}
+            overall_decisions AS MATERIALIZED (
+              SELECT *
+              FROM latest_decisions
+              WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+            ),
+            overall_gold AS MATERIALIZED (
+              SELECT gold.source_feed
+              FROM {self._gold} AS gold
+              INNER JOIN overall_decisions AS decision
+                ON gold.doc_id = decision.doc_id
+               AND gold.scoring_version = decision.scoring_version
+               AND gold.classifier_revision = decision.classifier_revision
+               AND gold.policy_revision = decision.policy_revision
+               AND gold.trace_id = decision.trace_id
             ),
             early_license AS MATERIALIZED (
               SELECT
@@ -306,25 +376,25 @@ class DuckDBQueryService:
             )
             SELECT 'decision' AS scope, 'total' AS kind, '' AS key,
                    CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_decisions
+            FROM overall_decisions
             UNION ALL
             SELECT 'decision' AS scope, 'source' AS kind, source_feed AS key,
                    CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_decisions
+            FROM overall_decisions
             GROUP BY source_feed
             UNION ALL
             SELECT 'decision' AS scope, 'reason' AS kind, reason AS key,
                    CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_decisions, UNNEST(reject_reasons) AS rejected(reason)
+            FROM overall_decisions, UNNEST(reject_reasons) AS rejected(reason)
             GROUP BY reason
             UNION ALL
             SELECT 'gold' AS scope, 'total' AS kind, '' AS key,
                    CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_gold
+            FROM overall_gold
             UNION ALL
             SELECT 'gold' AS scope, 'source' AS kind, source_feed AS key,
                    CAST(COUNT(*) AS BIGINT) AS count
-            FROM current_gold
+            FROM overall_gold
             GROUP BY source_feed
             UNION ALL
             SELECT 'license' AS scope, 'total' AS kind, '' AS key,

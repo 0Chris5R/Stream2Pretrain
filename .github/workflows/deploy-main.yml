@@ -949,6 +949,8 @@ jobs:
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_PROJECT_ID: ${{ secrets.OPENAI_PROJECT_ID }}
+      OPENAI_ORG_ID: ${{ secrets.OPENAI_ORG_ID }}
       PRETRAIN_BATCH_IDS: ${{ inputs.batch_ids }}
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
       CORE_CHANGED: ${{ needs.changes.outputs.core }}
@@ -1200,6 +1202,7 @@ jobs:
           if [[ "$DEPLOY_MODE" == "label-pretrain" ]]; then
             echo "::group::Export exact processed full-text classifier pool"
             : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
+            : "${OPENAI_PROJECT_ID:?Missing OPENAI_PROJECT_ID Actions secret}"
             pool="$RUNNER_TEMP/pretrain-pool.jsonl"
             batch_dir="$RUNNER_TEMP/pretrain-judge"
             export_job="pretrain-judge-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -1322,6 +1325,7 @@ jobs:
 
           if [[ "$DEPLOY_MODE" == "check-pretrain" ]]; then
             : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
+            : "${OPENAI_PROJECT_ID:?Missing OPENAI_PROJECT_ID Actions secret}"
             : "${PRETRAIN_BATCH_IDS:?Missing batch_ids workflow input}"
             status_args=()
             IFS=',' read -r -a batch_ids <<< "$PRETRAIN_BATCH_IDS"
