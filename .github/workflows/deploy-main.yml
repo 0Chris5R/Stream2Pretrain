@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, diagnose, audit UI, validate sources/foundry, inspect storage, or recover storage
+        description: Deploy, diagnose, audit UI, label corpus, validate sources/foundry, inspect storage, or recover storage
         required: true
         default: deploy
         type: choice
@@ -15,6 +15,7 @@ on:
           - deploy
           - diagnose
           - audit-ui
+          - label-pretrain
           - repair-monitoring
           - validate-sources
           - validate-foundry
@@ -942,6 +943,7 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
       CORE_CHANGED: ${{ needs.changes.outputs.core }}
       SOURCES_CHANGED: ${{ needs.changes.outputs.sources }}
@@ -1188,6 +1190,54 @@ jobs:
             fi
           fi
           finish_phase "CoreDNS availability preflight"
+
+          if [[ "$DEPLOY_MODE" == "label-pretrain" ]]; then
+            echo "::group::Export exact processed full-text classifier pool"
+            : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
+            pool="$RUNNER_TEMP/pretrain-pool.jsonl"
+            batch_dir="$RUNNER_TEMP/pretrain-judge"
+            pod="$(kubectl -n stream2pretrain get pods \
+              -l app.kubernetes.io/component=duckdb \
+              -o jsonpath='{.items[0].metadata.name}')"
+            [[ -n "$pod" ]]
+            kubectl -n stream2pretrain exec -i "$pod" -- env \
+              S2P_JUDGE_ARXIV_LIMIT=3000 \
+              S2P_JUDGE_HF_LIMIT=5000 \
+              python - < scripts/export_pretrain_judge_pool.py > "$pool"
+            python - "$pool" <<'PY'
+          import collections
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          counts = collections.Counter()
+          tokens = collections.Counter()
+          for line in path.open():
+              row = json.loads(line)
+              counts[row["source_feed"]] += 1
+              tokens[row["source_feed"]] += int(row.get("tokens") or 0)
+          arxiv = counts["arxiv-html-fetcher"]
+          hf = counts["hf-models"] + counts["hf-datasets"]
+          if arxiv != 3000 or hf != 5000:
+              raise SystemExit(f"exact pool sample mismatch: arxiv={arxiv}, hf={hf}")
+          print(json.dumps({"counts": counts, "tokens": tokens, "bytes": path.stat().st_size}, indent=2))
+          PY
+            echo "::endgroup::"
+
+            echo "::group::Prepare and submit section-aware GPT-5.6 Luna batches"
+            python scripts/pretrain_judge_batch.py prepare \
+              --input "$pool" \
+              --output-dir "$batch_dir" \
+              --evaluation-date "$(date -u +%F)"
+            python scripts/pretrain_judge_batch.py submit \
+              --input-dir "$batch_dir" \
+              --output "$batch_dir/submitted.json"
+            jq '{model,prompt_revision,evaluation_date,requests,source_counts,source_tokens,batches}' \
+              "$batch_dir/submitted.json"
+            echo "::endgroup::"
+            exit 0
+          fi
 
           # One explicitly approved reset discards only the historical Kafka
           # backlog. Existing Iceberg data and dedup state remain intact. Core
@@ -3393,3 +3443,14 @@ jobs:
           name: stream2pretrain-ui-audit-${{ github.run_id }}
           path: ${{ runner.temp }}/ui-audit
           if-no-files-found: error
+
+      - name: Upload pretraining judge submission manifest
+        if: ${{ always() && inputs.mode == 'label-pretrain' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: pretrain-judge-submission-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pretrain-judge/manifest.json
+            ${{ runner.temp }}/pretrain-judge/submitted.json
+          if-no-files-found: warn
+          retention-days: 30
