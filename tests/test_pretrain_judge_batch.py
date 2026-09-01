@@ -119,6 +119,8 @@ def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None
     assert 'select(.name != "serving-index")' in workflow
     assert 'limits: {cpu: "1", memory: "6Gi"}' in workflow
     assert 'kubectl -n stream2pretrain exec -i "$pod" -- env' in workflow
+    assert '"$workload" == deployment/stream2pretrain-duckdb' in workflow
+    assert "workload_timeout=600" in workflow
 
 
 def test_batch_status_returns_only_safe_progress_fields(monkeypatch) -> None:

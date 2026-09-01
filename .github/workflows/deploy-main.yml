@@ -3168,7 +3168,13 @@ jobs:
           for workload in "${changed_workloads[@]}"; do
             [[ -n "$workload" ]] || continue
             workload_timeout=60
-            if [[ "$workload" == deployment/stream2pretrain-processor-fetcher* ]]; then
+            if [[ "$workload" == deployment/stream2pretrain-duckdb ]]; then
+              # A new serving-index schema deliberately replays the retained
+              # monitoring topics before readiness. This is finite bootstrap
+              # work, not an unhealthy API, and must not be judged by the
+              # generic one-minute rollout bound.
+              workload_timeout=600
+            elif [[ "$workload" == deployment/stream2pretrain-processor-fetcher* ]]; then
               # The fetcher image includes the full CPU scientific extraction
               # stack and is about 1.7 GB. A cold node pull was measured at 48s,
               # leaving no time for process startup under the old 60s bound.
