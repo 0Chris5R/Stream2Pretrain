@@ -1199,7 +1199,6 @@ jobs:
 
           if [[ "$DEPLOY_MODE" == "label-pretrain" ]]; then
             echo "::group::Export exact processed full-text classifier pool"
-            : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
             pool="$RUNNER_TEMP/pretrain-pool.jsonl"
             batch_dir="$RUNNER_TEMP/pretrain-judge"
             export_job="pretrain-judge-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -1352,7 +1351,7 @@ jobs:
           PY
             echo "::endgroup::"
 
-            echo "::group::Prepare and submit section-aware GPT-5.6 Luna batches"
+            echo "::group::Prepare section-aware GPT-5.6 Luna Batch JSONL"
             kubectl -n stream2pretrain exec -i "$pod" -- \
               sh -c 'cat > /tmp/pretrain_judge_batch.py' \
               < scripts/pretrain_judge_batch.py
@@ -1375,46 +1374,22 @@ jobs:
               "OpenAI Batch JSONL preparation" \
               /tmp/pretrain-prepare.exit \
               /tmp/pretrain-prepare.log
-            # The serving image intentionally has no package installer. Install
-            # the official client on the runner, then copy that small runtime
-            # into the export pod while the large Batch files stay in-cluster.
-            python -m pip install --disable-pip-version-check --no-cache-dir \
-              --target "$RUNNER_TEMP/openai-sdk" openai==3.6.0
-            tar -C "$RUNNER_TEMP/openai-sdk" -cf - . \
-              | kubectl -n stream2pretrain exec -i "$pod" -- \
-                  sh -c 'mkdir -p /tmp/openai-sdk && tar -xf - -C /tmp/openai-sdk'
-            kubectl -n stream2pretrain exec -i "$pod" -- \
-              sh -c 'cat > /tmp/run-pretrain-submit.sh && chmod 700 /tmp/run-pretrain-submit.sh' <<'SH'
-          #!/bin/sh
-          : > /tmp/pretrain-submit.log
-          PYTHONPATH="/tmp/openai-sdk${PYTHONPATH:+:$PYTHONPATH}" \
-            python /tmp/pretrain_judge_batch.py submit \
-            --input-dir /tmp/pretrain-judge \
-            --output /tmp/pretrain-judge/submitted.json \
-            > /tmp/pretrain-submit.log 2>&1
-          status=$?
-          printf '%s\n' "$status" > /tmp/pretrain-submit.exit
-          exit "$status"
-          SH
-            {
-              printf '%s\n' "$OPENAI_API_KEY"
-            } | kubectl -n stream2pretrain exec -i "$pod" -- sh -c '
-              IFS= read -r OPENAI_API_KEY
-              export OPENAI_API_KEY
-              nohup /tmp/run-pretrain-submit.sh \
-                >/tmp/pretrain-submit-launch.log 2>&1 </dev/null &
-            '
-            wait_remote_step \
-              "OpenAI Batch submission" \
-              /tmp/pretrain-submit.exit \
-              /tmp/pretrain-submit.log
             mkdir -p "$batch_dir"
-            kubectl -n stream2pretrain exec "$pod" -- \
-              cat /tmp/pretrain-judge/manifest.json > "$batch_dir/manifest.json"
-            kubectl -n stream2pretrain exec "$pod" -- \
-              cat /tmp/pretrain-judge/submitted.json > "$batch_dir/submitted.json"
-            jq '{model,prompt_revision,evaluation_date,requests,source_counts,source_tokens,batches}' \
-              "$batch_dir/submitted.json"
+            # Compress inside the cluster so only the final JSONL files cross
+            # the Kubernetes exec stream. No OpenAI request is made here.
+            kubectl -n stream2pretrain exec "$pod" -- sh -c \
+              'cd /tmp/pretrain-judge && tar -czf - manifest.json judge-*.jsonl' \
+              > "$RUNNER_TEMP/pretrain-judge-jsonl.tar.gz"
+            tar -xzf "$RUNNER_TEMP/pretrain-judge-jsonl.tar.gz" -C "$batch_dir"
+            while IFS=$'\t' read -r file expected_sha; do
+              actual_sha="$(sha256sum "$batch_dir/$file" | cut -d' ' -f1)"
+              if [[ "$actual_sha" != "$expected_sha" ]]; then
+                echo "Batch JSONL checksum mismatch for $file" >&2
+                exit 1
+              fi
+            done < <(jq -r '.files[] | [.path, .sha256] | @tsv' "$batch_dir/manifest.json")
+            jq '{model,prompt_revision,evaluation_date,requests,source_counts,source_tokens,files}' \
+              "$batch_dir/manifest.json"
             cleanup_pretrain_export
             trap - EXIT
             echo "::endgroup::"
@@ -3647,13 +3622,11 @@ jobs:
           path: ${{ runner.temp }}/ui-audit
           if-no-files-found: error
 
-      - name: Upload pretraining judge submission manifest
+      - name: Upload pretraining judge Batch JSONL
         if: ${{ always() && inputs.mode == 'label-pretrain' }}
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: pretrain-judge-submission-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/pretrain-judge/manifest.json
-            ${{ runner.temp }}/pretrain-judge/submitted.json
-          if-no-files-found: warn
+          name: pretrain-judge-jsonl-${{ github.run_id }}
+          path: ${{ runner.temp }}/pretrain-judge
+          if-no-files-found: error
           retention-days: 30
