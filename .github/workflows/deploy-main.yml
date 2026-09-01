@@ -1282,10 +1282,20 @@ jobs:
               -l "job-name=$export_job" \
               -o jsonpath='{.items[0].metadata.name}')"
             [[ -n "$pod" ]]
+            # Keep the large corpus export inside the Pod first. Streaming the
+            # roughly full-corpus JSONL directly over the Kubernetes exec
+            # websocket can outlive the proxy connection and lose the entire
+            # transfer. Only the small script travels inbound; the completed
+            # file then travels outbound compressed with pipefail preserving
+            # either-side failures.
             kubectl -n stream2pretrain exec -i "$pod" -- env \
               S2P_JUDGE_ARXIV_LIMIT=3000 \
               S2P_JUDGE_HF_LIMIT=5000 \
-              python - < scripts/export_pretrain_judge_pool.py > "$pool"
+              sh -c 'python - > /tmp/pretrain-pool.jsonl' \
+              < scripts/export_pretrain_judge_pool.py
+            kubectl -n stream2pretrain exec "$pod" -- \
+              python -c 'import gzip, shutil, sys; source = open("/tmp/pretrain-pool.jsonl", "rb"); target = gzip.GzipFile(fileobj=sys.stdout.buffer, mode="wb", compresslevel=1); shutil.copyfileobj(source, target); target.close(); source.close()' \
+              | gzip -dc > "$pool"
             cleanup_pretrain_export
             trap - EXIT
             python - "$pool" <<'PY'
