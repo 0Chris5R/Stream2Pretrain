@@ -23,6 +23,7 @@ from schemas.license_admission import LicenseAdmissionDecision
 _LOG = logging.getLogger("s2p.serving-index")
 _DECISION_TABLE = "_serving_decision_records"
 _ADMISSION_TABLE = "_serving_license_admission_records"
+_INDEX_SCHEMA_REVISION = "serving-index-v2"
 
 
 def _decision_values(record: GoldRecord) -> dict[str, Any]:
@@ -158,13 +159,28 @@ class ServingIndex:
         if not records:
             return
         columns = self._columns(connection, _DECISION_TABLE)
-        rows: list[list[Any]] = []
+        # The retained topics are at-least-once and can contain the same key
+        # several times in one poll. DuckDB's indexed ON CONFLICT path can hit
+        # an internal constraint failure when one executemany transaction
+        # mutates the same key repeatedly, so collapse the poll first. This is
+        # also exact Iceberg parity: the smallest trace_id wins for one scoring
+        # identity.
+        selected: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for record in records:
             row = _decision_values(record)
             missing = sorted(set(columns) - set(row))
             if missing:
                 raise ValueError(f"decision is missing serving columns: {missing}")
-            rows.append([row[column] for column in columns])
+            key = (
+                str(row["doc_id"]),
+                str(row["scoring_version"]),
+                str(row["classifier_revision"]),
+                str(row["policy_revision"]),
+            )
+            current = selected.get(key)
+            if current is None or str(row["trace_id"]) < str(current["trace_id"]):
+                selected[key] = row
+        rows = [[row[column] for column in columns] for row in selected.values()]
         placeholders = ", ".join("?" for _ in columns)
         names = ", ".join(columns)
         assignments = ", ".join(
@@ -195,13 +211,16 @@ class ServingIndex:
         if not records:
             return
         columns = self._columns(connection, _ADMISSION_TABLE)
-        rows: list[list[Any]] = []
+        # Preserve the previous ON CONFLICT semantics for duplicate delivery:
+        # the last occurrence in the consumed poll is the current projection.
+        selected: dict[str, dict[str, Any]] = {}
         for record in records:
             row = _admission_values(record)
             missing = sorted(set(columns) - set(row))
             if missing:
                 raise ValueError(f"admission is missing serving columns: {missing}")
-            rows.append([row[column] for column in columns])
+            selected[str(row["decision_id"])] = row
+        rows = [[row[column] for column in columns] for row in selected.values()]
         placeholders = ", ".join("?" for _ in columns)
         names = ", ".join(columns)
         assignments = ", ".join(
@@ -237,6 +256,27 @@ class ServingIndex:
             _create_empty_gold_relation(connection, "_serving_gold_shape")
             _create_empty_license_relation(connection, "_serving_admission_shape")
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS _serving_metadata (key VARCHAR PRIMARY KEY, value VARCHAR)"
+            )
+            schema_row = connection.execute(
+                "SELECT value FROM _serving_metadata WHERE key = 'schema_revision'"
+            ).fetchone()
+            if schema_row is None or str(schema_row[0]) != _INDEX_SCHEMA_REVISION:
+                # This database is a derived Kafka projection, never the
+                # authority. Rebuild once when its physical schema changes and
+                # rotate the consumer identity so the complete topics replay
+                # into the empty projection instead of resuming old offsets.
+                connection.execute("DROP VIEW IF EXISTS serving_gold")
+                connection.execute("DROP VIEW IF EXISTS serving_decisions")
+                connection.execute("DROP VIEW IF EXISTS serving_license_admissions")
+                connection.execute(f"DROP TABLE IF EXISTS {_DECISION_TABLE}")
+                connection.execute(f"DROP TABLE IF EXISTS {_ADMISSION_TABLE}")
+                connection.execute("DELETE FROM _serving_metadata")
+                connection.execute(
+                    "INSERT INTO _serving_metadata VALUES ('schema_revision', ?), ('instance_id', ?)",
+                    [_INDEX_SCHEMA_REVISION, uuid.uuid4().hex],
+                )
+            connection.execute(
                 f"CREATE TABLE IF NOT EXISTS {_DECISION_TABLE} AS SELECT * FROM _serving_gold_shape"
             )
             connection.execute(
@@ -250,9 +290,6 @@ class ServingIndex:
             connection.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS serving_admission_key ON {_ADMISSION_TABLE} "
                 "(decision_id)"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS _serving_metadata (key VARCHAR PRIMARY KEY, value VARCHAR)"
             )
             existing = connection.execute(
                 "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"

@@ -111,6 +111,16 @@ def test_exporter_uses_exact_processed_full_text_pool_without_route_filtering() 
     assert "PERMISSIVE_TRAINING_LICENSES" not in source
 
 
+def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None:
+    workflow = (ROOT / ".github/workflows/deploy-main.yml").read_text()
+    assert 'export_job="pretrain-judge-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in workflow
+    assert '"app.kubernetes.io/component": "pretrain-judge-export"' in workflow
+    assert '.name != "S2P_SERVING_INDEX_ENABLED"' in workflow
+    assert 'select(.name != "serving-index")' in workflow
+    assert 'limits: {cpu: "1", memory: "6Gi"}' in workflow
+    assert 'kubectl -n stream2pretrain exec -i "$pod" -- env' in workflow
+
+
 def test_batch_status_returns_only_safe_progress_fields(monkeypatch) -> None:
     monkeypatch.setattr(
         pretrain_judge_batch,

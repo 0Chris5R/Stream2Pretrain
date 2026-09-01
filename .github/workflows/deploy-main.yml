@@ -1202,14 +1202,86 @@ jobs:
             : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
             pool="$RUNNER_TEMP/pretrain-pool.jsonl"
             batch_dir="$RUNNER_TEMP/pretrain-judge"
-            pod="$(kubectl -n stream2pretrain get pods \
-              -l app.kubernetes.io/component=duckdb \
+            export_job="pretrain-judge-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            cleanup_pretrain_export() {
+              kubectl -n stream2pretrain delete "job/$export_job" \
+                --ignore-not-found --wait=false >/dev/null 2>&1 || true
+            }
+            trap cleanup_pretrain_export EXIT
+            # Keep this one-off historical read out of the live serving pod.
+            # It has its own bounded memory and no serving-index PVC, so a
+            # large Iceberg scan cannot evict or compete with the dashboard.
+            kubectl -n stream2pretrain get deployment/stream2pretrain-duckdb -o json \
+              | jq --arg name "$export_job" '
+                  {
+                    apiVersion: "batch/v1",
+                    kind: "Job",
+                    metadata: {
+                      name: $name,
+                      namespace: .metadata.namespace,
+                      labels: {
+                        "app.kubernetes.io/name": "stream2pretrain",
+                        "app.kubernetes.io/component": "pretrain-judge-export",
+                        "app.kubernetes.io/part-of": "stream2pretrain"
+                      }
+                    },
+                    spec: {
+                      backoffLimit: 0,
+                      ttlSecondsAfterFinished: 600,
+                      template: {
+                        metadata: {
+                          labels: (
+                            .spec.template.metadata.labels
+                            + {"app.kubernetes.io/component": "pretrain-judge-export"}
+                          )
+                        },
+                        spec: (
+                          .spec.template.spec
+                          | .restartPolicy = "Never"
+                          | .containers[0].command = ["sh", "-c", "sleep 1800"]
+                          | del(
+                              .containers[0].livenessProbe,
+                              .containers[0].readinessProbe,
+                              .containers[0].startupProbe
+                            )
+                          | .containers[0].env = (
+                              [.containers[0].env[] | select(
+                                .name != "S2P_SERVING_INDEX_ENABLED"
+                                and .name != "S2P_SERVING_INDEX_DATABASE"
+                                and .name != "S2P_SERVING_INDEX_BATCH_SIZE"
+                                and .name != "S2P_DUCKDB_MEMORY_LIMIT"
+                              )]
+                              + [{name: "S2P_DUCKDB_MEMORY_LIMIT", value: "4GB"}]
+                            )
+                          | .containers[0].resources = {
+                              requests: {cpu: "100m", memory: "2Gi"},
+                              limits: {cpu: "1", memory: "6Gi"}
+                            }
+                          | .containers[0].volumeMounts = [
+                              .containers[0].volumeMounts[]
+                              | select(.name != "serving-index")
+                            ]
+                          | .volumes = [
+                              .volumes[] | select(.name != "serving-index")
+                            ]
+                        )
+                      }
+                    }
+                  }
+                ' | kubectl apply -f -
+            kubectl -n stream2pretrain wait \
+              --for=condition=Ready "pod" \
+              -l "job-name=$export_job" --timeout=180s
+            pod="$(kubectl -n stream2pretrain get pod \
+              -l "job-name=$export_job" \
               -o jsonpath='{.items[0].metadata.name}')"
             [[ -n "$pod" ]]
             kubectl -n stream2pretrain exec -i "$pod" -- env \
               S2P_JUDGE_ARXIV_LIMIT=3000 \
               S2P_JUDGE_HF_LIMIT=5000 \
               python - < scripts/export_pretrain_judge_pool.py > "$pool"
+            cleanup_pretrain_export
+            trap - EXIT
             python - "$pool" <<'PY'
           import collections
           import json

@@ -91,6 +91,49 @@ def test_index_batches_decisions_and_keeps_smallest_trace_for_iceberg_parity(
     connection.close()
 
 
+def test_index_collapses_exact_duplicate_decisions_in_one_poll(tmp_path) -> None:
+    path = tmp_path / "serving.duckdb"
+    index = ServingIndex(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    connection = duckdb.connect(str(path))
+    record = _gold(1)
+
+    index.apply_decisions(connection, [record] * 250)
+
+    assert connection.execute("SELECT COUNT(*) FROM serving_decisions").fetchone() == (1,)
+    connection.close()
+
+
+def test_index_schema_change_rebuilds_projection_and_rotates_consumer_identity(
+    tmp_path,
+) -> None:
+    path = tmp_path / "serving.duckdb"
+    first = ServingIndex(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    connection = duckdb.connect(str(path))
+    first.apply_decision(connection, _gold(1))
+    first_identity = connection.execute(
+        "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"
+    ).fetchone()
+    connection.execute(
+        "UPDATE _serving_metadata SET value = 'obsolete' WHERE key = 'schema_revision'"
+    )
+    connection.close()
+
+    ServingIndex(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    check = duckdb.connect(str(path))
+    second_identity = check.execute(
+        "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"
+    ).fetchone()
+    assert check.execute("SELECT COUNT(*) FROM serving_decisions").fetchone() == (0,)
+    assert second_identity != first_identity
+    check.close()
+
+
 def test_index_keeps_pre_body_quarantine_in_same_monitoring_view(tmp_path) -> None:
     path = tmp_path / "serving.duckdb"
     index = ServingIndex(
