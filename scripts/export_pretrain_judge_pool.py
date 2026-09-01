@@ -63,7 +63,6 @@ def _selected_keys(
         ) AS revision_rank
       FROM decisions
       WHERE source_feed IN ({quoted_sources})
-        AND LENGTH(TRIM(text)) > 0
     )
     SELECT
       doc_id, scoring_version, classifier_revision, policy_revision, trace_id
@@ -79,7 +78,10 @@ def _stream_rows(
     service: DuckDBQueryService, *, sources: tuple[str, ...], limit: int
 ) -> Iterator[dict[str, Any]]:
     """Join selected identities back to bodies without buffering the bodies."""
-    keys = _selected_keys(service, sources=sources, limit=limit)
+    # A small identity-only buffer replaces selected latest decisions whose
+    # projection is empty. The join stays streaming and stops at the requested
+    # count; no body participates in the ranking or hash sort.
+    keys = _selected_keys(service, sources=sources, limit=min(10_000, limit + 500))
     connection = service._conn
     connection.execute(
         """
@@ -127,9 +129,13 @@ def _stream_rows(
         WHERE LENGTH(TRIM(decision.text)) > 0
         """
     )
+    emitted = 0
     while rows := cursor.fetchmany(8):  # type: ignore[attr-defined]
         for values in rows:
             yield dict(zip(_OUTPUT_COLUMNS, values, strict=True))
+            emitted += 1
+            if emitted >= limit:
+                return
 
 
 def main() -> None:
