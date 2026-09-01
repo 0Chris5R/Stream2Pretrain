@@ -1375,10 +1375,59 @@ jobs:
               /tmp/pretrain-prepare.exit \
               /tmp/pretrain-prepare.log
             mkdir -p "$batch_dir"
-            # Compress inside the cluster so only the final JSONL files cross
-            # the Kubernetes exec stream. No OpenAI request is made here.
-            kubectl -n stream2pretrain exec "$pod" -- sh -c \
-              'cd /tmp/pretrain-judge && tar -czf - manifest.json judge-*.jsonl' \
+            # The API-server exec proxy drops long stdout streams. Build a
+            # compressed archive remotely, split it into short checksumed
+            # transfers, and reconstruct it on the runner. No OpenAI request
+            # is made here.
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              sh -c 'cat > /tmp/run-pretrain-archive.sh && chmod 700 /tmp/run-pretrain-archive.sh' <<'SH'
+          #!/bin/sh
+          cd /tmp/pretrain-judge || exit 1
+          tar -czf /tmp/pretrain-judge-jsonl.tar.gz manifest.json judge-*.jsonl \
+            > /tmp/pretrain-archive.log 2>&1
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            split -b 8m -d -a 3 \
+              /tmp/pretrain-judge-jsonl.tar.gz /tmp/pretrain-judge-chunk-
+            status=$?
+          fi
+          if [ "$status" -eq 0 ]; then
+            sha256sum /tmp/pretrain-judge-chunk-* \
+              > /tmp/pretrain-judge-chunks.sha256
+            status=$?
+          fi
+          printf '%s\n' "$status" > /tmp/pretrain-archive.exit
+          exit "$status"
+          SH
+            kubectl -n stream2pretrain exec "$pod" -- \
+              sh -c 'nohup /tmp/run-pretrain-archive.sh >/tmp/pretrain-archive-launch.log 2>&1 </dev/null &'
+            wait_remote_step \
+              "Batch JSONL archive preparation" \
+              /tmp/pretrain-archive.exit \
+              /tmp/pretrain-archive.log
+            kubectl -n stream2pretrain exec "$pod" -- \
+              cat /tmp/pretrain-judge-chunks.sha256 \
+              > "$RUNNER_TEMP/pretrain-judge-chunks.sha256"
+            while read -r expected_sha remote_chunk; do
+              chunk="$(basename "$remote_chunk")"
+              copied=false
+              for attempt in 1 2 3; do
+                if kubectl -n stream2pretrain exec "$pod" -- cat "$remote_chunk" \
+                    > "$RUNNER_TEMP/$chunk.tmp" \
+                   && [[ "$(sha256sum "$RUNNER_TEMP/$chunk.tmp" | cut -d' ' -f1)" == "$expected_sha" ]]; then
+                  mv "$RUNNER_TEMP/$chunk.tmp" "$RUNNER_TEMP/$chunk"
+                  copied=true
+                  break
+                fi
+                rm -f "$RUNNER_TEMP/$chunk.tmp"
+                echo "Retrying $chunk transfer ($attempt/3)" >&2
+              done
+              if [[ "$copied" != true ]]; then
+                echo "Could not transfer $chunk with a valid checksum." >&2
+                exit 1
+              fi
+            done < "$RUNNER_TEMP/pretrain-judge-chunks.sha256"
+            cat "$RUNNER_TEMP"/pretrain-judge-chunk-* \
               > "$RUNNER_TEMP/pretrain-judge-jsonl.tar.gz"
             tar -xzf "$RUNNER_TEMP/pretrain-judge-jsonl.tar.gz" -C "$batch_dir"
             while IFS=$'\t' read -r file expected_sha; do

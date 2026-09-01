@@ -128,9 +128,10 @@ def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None
     assert "nohup /tmp/run-pretrain-prepare.sh" in workflow
     assert "nohup /tmp/run-pretrain-submit.sh" not in workflow
     assert "wait_remote_step" in workflow
-    assert "tar -czf - manifest.json judge-*.jsonl" in workflow
+    assert "split -b 8m -d -a 3" in workflow
+    assert "pretrain-judge-chunks.sha256" in workflow
     assert 'name: pretrain-judge-jsonl-${{ github.run_id }}' in workflow
-    assert "No OpenAI request is made here" in workflow
+    assert "No OpenAI request" in workflow
     assert '"$workload" == deployment/stream2pretrain-duckdb' in workflow
     assert "workload_timeout=600" in workflow
 
