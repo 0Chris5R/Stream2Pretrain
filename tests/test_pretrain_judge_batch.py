@@ -128,8 +128,11 @@ def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None
     assert "nohup /tmp/run-pretrain-prepare.sh" in workflow
     assert "nohup /tmp/run-pretrain-submit.sh" not in workflow
     assert "wait_remote_step" in workflow
-    assert "split -b 1m -d -a 4" in workflow
-    assert "pretrain-judge-chunks.sha256" in workflow
+    assert "upload_pretrain_judge_minio.py" in workflow
+    assert "internal.upload_file" in workflow
+    assert "generate_presigned_url" in workflow
+    assert "port-forward service/minio 19000:9000" in workflow
+    assert "--continue-at -" in workflow
     assert 'name: pretrain-judge-jsonl-${{ github.run_id }}' in workflow
     assert "No OpenAI request" in workflow
     assert '"$workload" == deployment/stream2pretrain-duckdb' in workflow

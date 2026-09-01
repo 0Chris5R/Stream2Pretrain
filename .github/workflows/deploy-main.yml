@@ -1375,68 +1375,150 @@ jobs:
               /tmp/pretrain-prepare.exit \
               /tmp/pretrain-prepare.log
             mkdir -p "$batch_dir"
-            # The API-server exec proxy drops long stdout streams. Build a
-            # compressed archive remotely, split it into short checksumed
-            # transfers, and reconstruct it on the runner. No OpenAI request
-            # is made here.
+            # Persist the prepared inputs in MinIO, then download them through
+            # resumable S3 range requests. Only the small manifest and signed
+            # download descriptors cross kubectl exec. No OpenAI request is made.
             kubectl -n stream2pretrain exec -i "$pod" -- \
-              sh -c 'cat > /tmp/run-pretrain-archive.sh && chmod 700 /tmp/run-pretrain-archive.sh' <<'SH'
+              sh -c 'cat > /tmp/upload_pretrain_judge_minio.py' <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          import boto3
+          from boto3.s3.transfer import TransferConfig
+          from botocore.config import Config
+
+          root = Path("/tmp/pretrain-judge")
+          manifest = json.loads((root / "manifest.json").read_text())
+          bucket = os.environ["S2P_STATE_BUCKET"]
+          prefix = os.environ["S2P_EXPORT_PREFIX"].strip("/")
+          region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+          access_key = os.environ["MINIO_ACCESS_KEY"]
+          secret_key = os.environ["MINIO_SECRET_KEY"]
+          config = Config(signature_version="s3v4", s3={"addressing_style": "path"})
+          internal = boto3.client(
+              "s3",
+              endpoint_url=os.environ["MINIO_ENDPOINT"],
+              aws_access_key_id=access_key,
+              aws_secret_access_key=secret_key,
+              region_name=region,
+              config=config,
+          )
+          download = boto3.client(
+              "s3",
+              endpoint_url="http://127.0.0.1:19000",
+              aws_access_key_id=access_key,
+              aws_secret_access_key=secret_key,
+              region_name=region,
+              config=config,
+          )
+          transfer = TransferConfig(
+              multipart_threshold=8 * 1024 * 1024,
+              multipart_chunksize=8 * 1024 * 1024,
+              max_concurrency=2,
+          )
+          files = []
+          for entry in manifest["files"]:
+              name = entry["path"]
+              key = f"{prefix}/{name}"
+              internal.upload_file(
+                  str(root / name),
+                  bucket,
+                  key,
+                  ExtraArgs={"ContentType": "application/x-ndjson"},
+                  Config=transfer,
+              )
+              head = internal.head_object(Bucket=bucket, Key=key)
+              if int(head["ContentLength"]) != int(entry["bytes"]):
+                  raise RuntimeError(f"MinIO size mismatch for {name}")
+              files.append(
+                  {
+                      "path": name,
+                      "bytes": int(entry["bytes"]),
+                      "sha256": entry["sha256"],
+                      "bucket": bucket,
+                      "key": key,
+                      "url": download.generate_presigned_url(
+                          "get_object",
+                          Params={"Bucket": bucket, "Key": key},
+                          ExpiresIn=3600,
+                      ),
+                  }
+              )
+          Path("/tmp/pretrain-minio-downloads.json").write_text(
+              json.dumps({"files": files}, separators=(",", ":"))
+          )
+          PY
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              sh -c 'cat > /tmp/run-pretrain-minio-upload.sh && chmod 700 /tmp/run-pretrain-minio-upload.sh' <<'SH'
           #!/bin/sh
-          cd /tmp/pretrain-judge || exit 1
-          tar -czf /tmp/pretrain-judge-jsonl.tar.gz manifest.json judge-*.jsonl \
-            > /tmp/pretrain-archive.log 2>&1
+          python /tmp/upload_pretrain_judge_minio.py \
+            > /tmp/pretrain-minio-upload.log 2>&1
           status=$?
-          if [ "$status" -eq 0 ]; then
-            split -b 1m -d -a 4 \
-              /tmp/pretrain-judge-jsonl.tar.gz /tmp/pretrain-judge-chunk-
-            status=$?
-          fi
-          if [ "$status" -eq 0 ]; then
-            sha256sum /tmp/pretrain-judge-chunk-* \
-              > /tmp/pretrain-judge-chunks.sha256
-            status=$?
-          fi
-          printf '%s\n' "$status" > /tmp/pretrain-archive.exit
+          printf '%s\n' "$status" > /tmp/pretrain-minio-upload.exit
           exit "$status"
           SH
+            export_prefix="exports/pretrain-judge/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             kubectl -n stream2pretrain exec "$pod" -- \
-              sh -c 'nohup /tmp/run-pretrain-archive.sh >/tmp/pretrain-archive-launch.log 2>&1 </dev/null &'
+              env S2P_EXPORT_PREFIX="$export_prefix" \
+              sh -c 'nohup /tmp/run-pretrain-minio-upload.sh >/tmp/pretrain-minio-upload-launch.log 2>&1 </dev/null &'
             wait_remote_step \
-              "Batch JSONL archive preparation" \
-              /tmp/pretrain-archive.exit \
-              /tmp/pretrain-archive.log
+              "Batch JSONL MinIO upload" \
+              /tmp/pretrain-minio-upload.exit \
+              /tmp/pretrain-minio-upload.log
             kubectl -n stream2pretrain exec "$pod" -- \
-              cat /tmp/pretrain-judge-chunks.sha256 \
-              > "$RUNNER_TEMP/pretrain-judge-chunks.sha256"
-            while read -r expected_sha remote_chunk; do
-              chunk="$(basename "$remote_chunk")"
-              copied=false
-              for attempt in 1 2 3; do
-                if kubectl -n stream2pretrain exec "$pod" -- cat "$remote_chunk" \
-                    > "$RUNNER_TEMP/$chunk.tmp" \
-                   && [[ "$(sha256sum "$RUNNER_TEMP/$chunk.tmp" | cut -d' ' -f1)" == "$expected_sha" ]]; then
-                  mv "$RUNNER_TEMP/$chunk.tmp" "$RUNNER_TEMP/$chunk"
-                  copied=true
-                  break
+              cat /tmp/pretrain-minio-downloads.json \
+              > "$RUNNER_TEMP/pretrain-minio-downloads.json"
+            kubectl -n stream2pretrain exec "$pod" -- \
+              cat /tmp/pretrain-judge/manifest.json > "$batch_dir/manifest.json"
+            minio_port_forward_pid=""
+            start_minio_port_forward() {
+              if [[ -n "$minio_port_forward_pid" ]]; then
+                kill "$minio_port_forward_pid" 2>/dev/null || true
+                wait "$minio_port_forward_pid" 2>/dev/null || true
+              fi
+              kubectl -n minio port-forward service/minio 19000:9000 \
+                >"$RUNNER_TEMP/minio-port-forward.log" 2>&1 &
+              minio_port_forward_pid=$!
+              for _ in $(seq 1 30); do
+                if curl --fail --silent http://127.0.0.1:19000/minio/health/ready \
+                    >/dev/null; then
+                  return 0
                 fi
-                rm -f "$RUNNER_TEMP/$chunk.tmp"
-                echo "Retrying $chunk transfer ($attempt/3)" >&2
+                sleep 1
               done
-              if [[ "$copied" != true ]]; then
-                echo "Could not transfer $chunk with a valid checksum." >&2
+              cat "$RUNNER_TEMP/minio-port-forward.log" >&2 || true
+              return 1
+            }
+            start_minio_port_forward
+            while IFS=$'\t' read -r file expected_sha url; do
+              target="$batch_dir/$file"
+              downloaded=false
+              for attempt in $(seq 1 10); do
+                if ! kill -0 "$minio_port_forward_pid" 2>/dev/null; then
+                  start_minio_port_forward
+                fi
+                if curl --fail --location --silent --show-error \
+                    --connect-timeout 10 --speed-time 30 --speed-limit 1024 \
+                    --continue-at - --output "$target" "$url"; then
+                  actual_sha="$(sha256sum "$target" | cut -d' ' -f1)"
+                  if [[ "$actual_sha" == "$expected_sha" ]]; then
+                    downloaded=true
+                    break
+                  fi
+                  rm -f "$target"
+                fi
+                echo "Retrying resumable MinIO download for $file ($attempt/10)" >&2
+                start_minio_port_forward
+              done
+              if [[ "$downloaded" != true ]]; then
+                echo "Could not download $file from MinIO with a valid checksum." >&2
                 exit 1
               fi
-            done < "$RUNNER_TEMP/pretrain-judge-chunks.sha256"
-            cat "$RUNNER_TEMP"/pretrain-judge-chunk-* \
-              > "$RUNNER_TEMP/pretrain-judge-jsonl.tar.gz"
-            tar -xzf "$RUNNER_TEMP/pretrain-judge-jsonl.tar.gz" -C "$batch_dir"
-            while IFS=$'\t' read -r file expected_sha; do
-              actual_sha="$(sha256sum "$batch_dir/$file" | cut -d' ' -f1)"
-              if [[ "$actual_sha" != "$expected_sha" ]]; then
-                echo "Batch JSONL checksum mismatch for $file" >&2
-                exit 1
-              fi
-            done < <(jq -r '.files[] | [.path, .sha256] | @tsv' "$batch_dir/manifest.json")
+            done < <(jq -r '.files[] | [.path, .sha256, .url] | @tsv' \
+              "$RUNNER_TEMP/pretrain-minio-downloads.json")
+            kill "$minio_port_forward_pid" 2>/dev/null || true
+            wait "$minio_port_forward_pid" 2>/dev/null || true
             jq '{model,prompt_revision,evaluation_date,requests,source_counts,source_tokens,files}' \
               "$batch_dir/manifest.json"
             cleanup_pretrain_export
