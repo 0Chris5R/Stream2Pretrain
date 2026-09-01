@@ -926,7 +926,9 @@ class DuckDBQueryService:
             min_edu=min_edu,
             min_quality=min_quality,
             include_fixtures=False,
+            latest_per_document=True,
         )
+        decisions = self._latest_decisions_relation()
         sql = f"""
         SELECT
           doc_id, text, source_feed, source_format, CAST(valid_from AS VARCHAR) AS valid_from,
@@ -934,7 +936,7 @@ class DuckDBQueryService:
           reasoning_score, tokens, policy_revision, scoring_version,
           classifier_revision, projection_version, scientific_artifact_s3_uri
           , spdx_license, spdx_license_source
-        FROM {self._decisions}
+        FROM {decisions}
         {where}
           AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
           AND risk_tier = 1
@@ -972,7 +974,9 @@ class DuckDBQueryService:
             min_edu=min_edu,
             min_quality=min_quality,
             include_fixtures=False,
+            latest_per_document=True,
         )
+        decisions = self._latest_decisions_relation()
         rows = self._rows(
             f"""
             SELECT
@@ -981,7 +985,7 @@ class DuckDBQueryService:
               CAST(COALESCE(SUM(source_word_count), 0) AS BIGINT) AS source_words,
               CAST(COALESCE(SUM(training_word_count), 0) AS BIGINT) AS projection_words,
               CAST(COUNT(DISTINCT source_feed) AS BIGINT) AS source_count
-            FROM {self._decisions}
+            FROM {decisions}
             {where}
               AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
               AND risk_tier = 1
@@ -996,7 +1000,7 @@ class DuckDBQueryService:
               policy_revision, scoring_version, classifier_revision, classifier_backend,
               projection_version, extraction_pipeline, pii_scanner_revision, lang_detector_revision,
               tokenizer_revision, perplexity_scorer, minhash_backend, lsh_backend
-            FROM {self._decisions}
+            FROM {decisions}
             {where}
               AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
               AND risk_tier = 1
@@ -1004,6 +1008,31 @@ class DuckDBQueryService:
             ORDER BY policy_revision, classifier_revision
             """,
             params,
+            relation=self._decisions,
+        )
+        facet_where, facet_params = self._document_where(
+            routes=routes,
+            sources=sources,
+            source_formats=source_formats,
+            date_from=date_from,
+            date_to=date_to,
+            min_edu=min_edu,
+            min_quality=min_quality,
+            include_fixtures=False,
+            latest_per_document=True,
+        )
+        available_tags = self._rows(
+            f"""
+            SELECT DISTINCT tag AS value
+            FROM {decisions}, UNNEST(content_tags) AS values(tag)
+            {facet_where}
+              AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
+              AND risk_tier = 1
+              AND ARRAY_LENGTH(reject_reasons) = 0
+              AND tag IS NOT NULL
+            ORDER BY value
+            """,
+            facet_params,
             relation=self._decisions,
         )
         revision_keys = (
@@ -1023,6 +1052,7 @@ class DuckDBQueryService:
         decisions_table = os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions")
         return {
             **rows,
+            "available_content_tags": [str(row["value"]) for row in available_tags],
             "selection": {
                 "date_from": date_from,
                 "date_to": date_to,
@@ -1068,8 +1098,14 @@ class DuckDBQueryService:
         max_edu: float | None = None,
         min_quality: float | None = None,
         max_quality: float | None = None,
+        latest_per_document: bool = False,
     ) -> tuple[str, list[Any]]:
-        clauses: list[str] = [_current_decision_predicate(include_fixtures=include_fixtures)]
+        predicate = (
+            _dashboard_decision_predicate
+            if latest_per_document
+            else _current_decision_predicate
+        )
+        clauses: list[str] = [predicate(include_fixtures=include_fixtures)]
         params: list[Any] = []
         if search and search.strip():
             clauses.append(
@@ -1114,6 +1150,21 @@ class DuckDBQueryService:
                 clauses.append(f"{score_column} {threshold_operator} ?")
                 params.append(threshold)
         return ("WHERE " + " AND ".join(clauses) if clauses else "", params)
+
+    def _latest_decisions_relation(self) -> str:
+        """Return one authoritative latest decision per document across policy versions."""
+        return f"""(
+          SELECT * EXCLUDE (revision_rank)
+          FROM (
+            SELECT *, ROW_NUMBER() OVER (
+              PARTITION BY doc_id
+              ORDER BY valid_from DESC, scoring_version DESC,
+                       policy_revision DESC, trace_id ASC
+            ) AS revision_rank
+            FROM {self._decisions}
+          ) AS ranked_decisions
+          WHERE revision_rank = 1
+        ) AS latest_decisions"""
 
     def document(self, doc_id: str) -> dict[str, Any] | None:
         """Return one full decision with its structured scientific artifact."""

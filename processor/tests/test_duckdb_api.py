@@ -71,6 +71,9 @@ class _DatasetConnection(_FakeConnection):
                 ("source_count",),
             ]
             self.rows = [(3, 1200, 900, 800, 1)]
+        elif "SELECT DISTINCT tag AS value" in sql:
+            self.description = [("value",)]
+            self.rows = [("scientific_reasoning",), ("tables",)]
         elif "SELECT DISTINCT" in sql:
             keys = [
                 "policy_revision",
@@ -477,12 +480,34 @@ def test_dataset_summary_contains_reproducible_revision_manifest() -> None:
     )
 
     assert result["documents"] == 3
+    assert result["available_content_tags"] == ["scientific_reasoning", "tables"]
     assert result["selection"]["include_structured"] is False
     assert result["selection"]["license_policy"] == "strict_allowlist"
     assert "CC-BY-4.0" in result["selection"]["allowed_licenses"]
     assert result["manifest"]["revisions"]["classifier_revision"] == ["classifier_revision-v1"]
     assert result["manifest"]["decision_table"]["table"] == "curation_decisions"
     assert result["manifest"]["export_limit"] == 5_000
+
+
+def test_dataset_summary_uses_latest_document_decisions_and_exportable_tags() -> None:
+    connection = _DatasetConnection()
+    service = DuckDBQueryService(connection)
+
+    service.dataset_summary(
+        date_from="2026-08-01T00:00:00Z",
+        date_to="2026-09-01T23:59:59Z",
+        routes=["pretrain"],
+        tags=["scientific_reasoning"],
+    )
+
+    aggregate_sql = connection.calls[0][0]
+    tag_sql = connection.calls[2][0]
+    assert "ROW_NUMBER() OVER" in aggregate_sql
+    assert "PARTITION BY doc_id" in aggregate_sql
+    assert "scoring_version = 'pretrain-content-v3'" not in aggregate_sql
+    assert "LIST_CONTAINS(content_tags, ?)" not in tag_sql
+    assert "COALESCE(spdx_license, license) IN" in tag_sql
+    assert "risk_tier = 1" in tag_sql
 
 
 def test_gold_relation_is_validated() -> None:

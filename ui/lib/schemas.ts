@@ -216,6 +216,7 @@ export const DatasetSummarySchema = z.object({
   source_words: z.number().int().nonnegative(),
   projection_words: z.number().int().nonnegative(),
   source_count: z.number().int().nonnegative(),
+  available_content_tags: z.array(z.string()),
   selection: z.object({
     date_from: z.string(),
     date_to: z.string(),

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Download, FileJson, Layers3 } from 'lucide-react';
 
@@ -57,6 +57,16 @@ export default function DatasetsPage() {
     enabled: routes.length > 0,
   });
   const facets = useQuery({ queryKey: queryKeys.documentFacets(false), queryFn: fetchFacets });
+
+  useEffect(() => {
+    if (
+      contentTag &&
+      summary.data &&
+      !summary.data.available_content_tags.includes(contentTag)
+    ) {
+      setContentTag('');
+    }
+  }, [contentTag, summary.data]);
 
   function toggleRoute(route: string) {
     setRoutes((current) =>
@@ -125,7 +135,7 @@ export default function DatasetsPage() {
                 onChange={(event) => setContentTag(event.target.value)}
               >
                 <option value="">All content</option>
-                {facets.data?.content_tags.map((item) => (
+                {summary.data?.available_content_tags.map((item) => (
                   <option key={item} value={item}>
                     {item.replaceAll('_', ' ')}
                   </option>

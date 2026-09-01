@@ -1375,18 +1375,18 @@ jobs:
               "OpenAI Batch JSONL preparation" \
               /tmp/pretrain-prepare.exit \
               /tmp/pretrain-prepare.log
+            # The serving image intentionally has no package installer. Install
+            # the official client on the runner, then copy that small runtime
+            # into the export pod while the large Batch files stay in-cluster.
+            python -m pip install --disable-pip-version-check --no-cache-dir \
+              --target "$RUNNER_TEMP/openai-sdk" openai==3.6.0
+            tar -C "$RUNNER_TEMP/openai-sdk" -cf - . \
+              | kubectl -n stream2pretrain exec -i "$pod" -- \
+                  sh -c 'mkdir -p /tmp/openai-sdk && tar -xf - -C /tmp/openai-sdk'
             kubectl -n stream2pretrain exec -i "$pod" -- \
               sh -c 'cat > /tmp/run-pretrain-submit.sh && chmod 700 /tmp/run-pretrain-submit.sh' <<'SH'
           #!/bin/sh
-          python -m pip install --disable-pip-version-check --no-cache-dir \
-            --target /tmp/openai-sdk openai==3.6.0 \
-            > /tmp/openai-sdk-install.log 2>&1
-          install_status=$?
-          if [ "$install_status" -ne 0 ]; then
-            cat /tmp/openai-sdk-install.log >&2
-            printf '%s\n' "$install_status" > /tmp/pretrain-submit.exit
-            exit "$install_status"
-          fi
+          : > /tmp/pretrain-submit.log
           PYTHONPATH="/tmp/openai-sdk${PYTHONPATH:+:$PYTHONPATH}" \
             python /tmp/pretrain_judge_batch.py submit \
             --input-dir /tmp/pretrain-judge \
