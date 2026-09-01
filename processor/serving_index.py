@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -59,8 +60,14 @@ class ServingIndex:
         self.decisions_topic = decisions_topic
         self.admissions_topic = admissions_topic
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._running = threading.Event()
+        self._threads: dict[str, threading.Thread] = {}
+        self._running_topics: set[str] = set()
+        self._running_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._caught_up = {
+            self.decisions_topic: threading.Event(),
+            self.admissions_topic: threading.Event(),
+        }
         self._initialize()
 
     @classmethod
@@ -76,22 +83,35 @@ class ServingIndex:
 
     @property
     def running(self) -> bool:
-        return self._running.is_set() and self._thread is not None and self._thread.is_alive()
+        with self._running_lock:
+            running = set(self._running_topics)
+        return running == {self.decisions_topic, self.admissions_topic} and all(
+            thread.is_alive() for thread in self._threads.values()
+        )
+
+    @property
+    def ready(self) -> bool:
+        return self.running and all(event.is_set() for event in self._caught_up.values())
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._threads:
             return
-        self._thread = threading.Thread(
-            target=self._consume,
-            name="serving-index-consumer",
-            daemon=True,
-        )
-        self._thread.start()
+        for topic, kind in (
+            (self.decisions_topic, "decision"),
+            (self.admissions_topic, "admission"),
+        ):
+            thread = threading.Thread(
+                target=self._consume_topic,
+                kwargs={"topic": topic, "kind": kind},
+                name=f"serving-index-{kind}",
+                daemon=True,
+            )
+            self._threads[topic] = thread
+            thread.start()
 
     def close(self) -> None:
         self._stop.set()
-        thread = self._thread
-        if thread is not None:
+        for thread in self._threads.values():
             thread.join(timeout=10)
 
     def query_service(self) -> Any:
@@ -132,68 +152,73 @@ class ServingIndex:
             connection.close()
 
     def apply_decision(self, connection: Any, record: GoldRecord) -> None:
-        row = _decision_values(record)
+        self.apply_decisions(connection, [record])
+
+    def apply_decisions(self, connection: Any, records: Sequence[GoldRecord]) -> None:
+        if not records:
+            return
         columns = self._columns(connection, _DECISION_TABLE)
-        missing = sorted(set(columns) - set(row))
-        if missing:
-            raise ValueError(f"decision is missing serving columns: {missing}")
-        values = [row[column] for column in columns]
-        connection.execute("BEGIN TRANSACTION")
-        try:
-            existing = connection.execute(
-                f"SELECT trace_id FROM {_DECISION_TABLE} WHERE doc_id = ? "
-                "AND scoring_version = ? AND classifier_revision = ? AND policy_revision = ?",
-                [
-                    record.doc_id,
-                    record.scoring_version,
-                    record.classifier_revision,
-                    record.policy_revision,
-                ],
-            ).fetchone()
-            if existing is not None and str(existing[0]) <= record.trace_id:
+        rows: list[list[Any]] = []
+        for record in records:
+            row = _decision_values(record)
+            missing = sorted(set(columns) - set(row))
+            if missing:
+                raise ValueError(f"decision is missing serving columns: {missing}")
+            rows.append([row[column] for column in columns])
+        placeholders = ", ".join("?" for _ in columns)
+        names = ", ".join(columns)
+        assignments = ", ".join(
+            f"{column} = excluded.{column}"
+            for column in columns
+            if column not in {"doc_id", "scoring_version", "classifier_revision", "policy_revision"}
+        )
+        statement = (
+            f"INSERT INTO {_DECISION_TABLE} ({names}) VALUES ({placeholders}) "
+            "ON CONFLICT (doc_id, scoring_version, classifier_revision, policy_revision) "
+            f"DO UPDATE SET {assignments} WHERE excluded.trace_id < {_DECISION_TABLE}.trace_id"
+        )
+        with self._write_lock:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.executemany(statement, rows)
                 connection.execute("COMMIT")
-                return
-            connection.execute(
-                f"DELETE FROM {_DECISION_TABLE} WHERE doc_id = ? AND scoring_version = ? "
-                "AND classifier_revision = ? AND policy_revision = ?",
-                [
-                    record.doc_id,
-                    record.scoring_version,
-                    record.classifier_revision,
-                    record.policy_revision,
-                ],
-            )
-            placeholders = ", ".join("?" for _ in columns)
-            names = ", ".join(columns)
-            connection.execute(
-                f"INSERT INTO {_DECISION_TABLE} ({names}) VALUES ({placeholders})", values
-            )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def apply_admission(self, connection: Any, record: LicenseAdmissionDecision) -> None:
-        row = _admission_values(record)
+        self.apply_admissions(connection, [record])
+
+    def apply_admissions(
+        self, connection: Any, records: Sequence[LicenseAdmissionDecision]
+    ) -> None:
+        if not records:
+            return
         columns = self._columns(connection, _ADMISSION_TABLE)
-        missing = sorted(set(columns) - set(row))
-        if missing:
-            raise ValueError(f"admission is missing serving columns: {missing}")
-        values = [row[column] for column in columns]
-        connection.execute("BEGIN TRANSACTION")
-        try:
-            connection.execute(
-                f"DELETE FROM {_ADMISSION_TABLE} WHERE decision_id = ?", [record.decision_id]
-            )
-            placeholders = ", ".join("?" for _ in columns)
-            names = ", ".join(columns)
-            connection.execute(
-                f"INSERT INTO {_ADMISSION_TABLE} ({names}) VALUES ({placeholders})", values
-            )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
+        rows: list[list[Any]] = []
+        for record in records:
+            row = _admission_values(record)
+            missing = sorted(set(columns) - set(row))
+            if missing:
+                raise ValueError(f"admission is missing serving columns: {missing}")
+            rows.append([row[column] for column in columns])
+        placeholders = ", ".join("?" for _ in columns)
+        names = ", ".join(columns)
+        assignments = ", ".join(
+            f"{column} = excluded.{column}" for column in columns if column != "decision_id"
+        )
+        statement = (
+            f"INSERT INTO {_ADMISSION_TABLE} ({names}) VALUES ({placeholders}) "
+            f"ON CONFLICT (decision_id) DO UPDATE SET {assignments}"
+        )
+        with self._write_lock:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.executemany(statement, rows)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def _initialize(self) -> None:
         import duckdb  # type: ignore[import-untyped]
@@ -263,15 +288,18 @@ class ServingIndex:
         )
         return f"s2p-serving-index-{instance}"
 
-    def _consume(self) -> None:
+    def _consume_topic(self, *, topic: str, kind: str) -> None:
         import duckdb  # type: ignore[import-untyped]
         from confluent_kafka import Consumer, KafkaError  # type: ignore[import-untyped]
 
         connection: Any = duckdb.connect(self.database_path, read_only=False)
+        batch_size = max(1, int(os.environ.get("S2P_SERVING_INDEX_BATCH_SIZE", "1000")))
+        target_offsets: dict[int, int] = {}
+        progress_offsets: dict[int, int] = {}
         consumer = Consumer(
             {
                 "bootstrap.servers": self.brokers,
-                "group.id": self._consumer_group(connection),
+                "group.id": f"{self._consumer_group(connection)}-{kind}",
                 "auto.offset.reset": "earliest",
                 "enable.auto.commit": False,
                 "fetch.message.max.bytes": int(
@@ -282,51 +310,81 @@ class ServingIndex:
                 ),
             }
         )
-        consumer.subscribe([self.decisions_topic, self.admissions_topic])
-        self._running.set()
+
+        def assigned(active_consumer: Any, partitions: list[Any]) -> None:
+            committed = active_consumer.committed(partitions, timeout=10)
+            committed_by_partition = {item.partition: item.offset for item in committed}
+            for partition in partitions:
+                low, high = active_consumer.get_watermark_offsets(partition, timeout=10)
+                target_offsets[partition.partition] = high
+                offset = committed_by_partition.get(partition.partition, -1)
+                progress_offsets[partition.partition] = offset if offset >= 0 else low
+            active_consumer.assign(partitions)
+            self._mark_caught_up(topic, target_offsets, progress_offsets)
+
+        consumer.subscribe([topic], on_assign=assigned)
+        with self._running_lock:
+            self._running_topics.add(topic)
         try:
             while not self._stop.is_set():
-                message = consumer.poll(1.0)
-                if message is None:
+                messages = consumer.consume(num_messages=batch_size, timeout=1.0)
+                if not messages:
                     continue
-                error = message.error()
-                if error is not None:
-                    if error.code() == KafkaError._PARTITION_EOF:
+                decisions: list[GoldRecord] = []
+                admissions: list[LicenseAdmissionDecision] = []
+                invalid = 0
+                handled: list[Any] = []
+                for message in messages:
+                    error = message.error()
+                    if error is not None:
+                        if error.code() == KafkaError._PARTITION_EOF:
+                            continue
+                        raise RuntimeError(str(error))
+                    handled.append(message)
+                    payload = message.value()
+                    if payload is None:
                         continue
-                    raise RuntimeError(str(error))
-                payload = message.value()
-                if payload is None:
-                    consumer.commit(message=message, asynchronous=False)
-                    continue
-                try:
-                    decision = (
-                        GoldRecord.model_validate_json(payload)
-                        if message.topic() == self.decisions_topic
-                        else None
+                    try:
+                        if kind == "decision":
+                            decisions.append(GoldRecord.model_validate_json(payload))
+                        else:
+                            admissions.append(LicenseAdmissionDecision.model_validate_json(payload))
+                    except ValueError:
+                        invalid += 1
+                self.apply_decisions(connection, decisions)
+                self.apply_admissions(connection, admissions)
+                if handled:
+                    consumer.commit(asynchronous=False)
+                    for message in handled:
+                        partition = message.partition()
+                        progress_offsets[partition] = max(
+                            progress_offsets.get(partition, 0), message.offset() + 1
+                        )
+                    self._mark_caught_up(topic, target_offsets, progress_offsets)
+                if invalid:
+                    _LOG.warning(
+                        "serving_index_skipped_invalid_records",
+                        extra={"topic": topic, "count": invalid},
                     )
-                    admission = (
-                        LicenseAdmissionDecision.model_validate_json(payload)
-                        if message.topic() == self.admissions_topic
-                        else None
-                    )
-                except ValueError:
-                    _LOG.exception(
-                        "serving_index_invalid_record",
-                        extra={"topic": message.topic(), "partition": message.partition()},
-                    )
-                    consumer.commit(message=message, asynchronous=False)
-                    continue
-                if decision is not None:
-                    self.apply_decision(connection, decision)
-                elif admission is not None:
-                    self.apply_admission(connection, admission)
-                consumer.commit(message=message, asynchronous=False)
         except Exception:
-            _LOG.exception("serving_index_consumer_failed")
+            _LOG.exception("serving_index_consumer_failed", extra={"topic": topic})
         finally:
-            self._running.clear()
+            with self._running_lock:
+                self._running_topics.discard(topic)
             consumer.close()
             connection.close()
+
+    def _mark_caught_up(
+        self,
+        topic: str,
+        target_offsets: dict[int, int],
+        progress_offsets: dict[int, int],
+    ) -> None:
+        if target_offsets and all(
+            progress_offsets.get(partition, -1) >= high
+            for partition, high in target_offsets.items()
+        ):
+            self._caught_up[topic].set()
 
     @staticmethod
     def _columns(connection: Any, table: str) -> list[str]:

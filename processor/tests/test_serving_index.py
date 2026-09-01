@@ -70,6 +70,27 @@ def test_index_upserts_current_rows_and_drives_cursor_queries(tmp_path) -> None:
     connection.close()
 
 
+def test_index_batches_decisions_and_keeps_smallest_trace_for_iceberg_parity(
+    tmp_path,
+) -> None:
+    path = tmp_path / "serving.duckdb"
+    index = ServingIndex(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    connection = duckdb.connect(str(path))
+    first = _gold(1).model_copy(update={"trace_id": "f" * 32, "text": "later"})
+    chosen = _gold(1).model_copy(update={"trace_id": "0" * 32, "text": "chosen"})
+
+    index.apply_decisions(connection, [_gold(0), first, chosen, _gold(2)])
+
+    selected = connection.execute(
+        "SELECT text, trace_id FROM serving_decisions WHERE doc_id = ?", [chosen.doc_id]
+    ).fetchone()
+    assert index.counts()["decisions"] == 3
+    assert selected == ("chosen", "0" * 32)
+    connection.close()
+
+
 def test_index_keeps_pre_body_quarantine_in_same_monitoring_view(tmp_path) -> None:
     path = tmp_path / "serving.duckdb"
     index = ServingIndex(
@@ -82,5 +103,25 @@ def test_index_keeps_pre_body_quarantine_in_same_monitoring_view(tmp_path) -> No
 
     assert overview["durable_decisions"] == 1
     assert overview["rejected_by_reason"] == {"license_not_permitted": 1}
+    assert index.counts()["license_admissions"] == 1
+    connection.close()
+
+
+def test_index_batches_admissions_by_durable_decision_id(tmp_path) -> None:
+    path = tmp_path / "serving.duckdb"
+    index = ServingIndex(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    connection = duckdb.connect(str(path))
+    admission = _admission()
+    updated = admission.model_copy(update={"reason": "updated audit reason"})
+
+    index.apply_admissions(connection, [admission, updated])
+
+    row = connection.execute(
+        "SELECT reason FROM serving_license_admissions WHERE decision_id = ?",
+        [admission.decision_id],
+    ).fetchone()
+    assert row == ("updated audit reason",)
     assert index.counts()["license_admissions"] == 1
     connection.close()

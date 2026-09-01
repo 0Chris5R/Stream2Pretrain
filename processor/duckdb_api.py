@@ -1605,8 +1605,8 @@ async def serve(
         return web.Response(text="ok\n", content_type="text/plain")
 
     async def ready(_: web.Request) -> web.Response:
-        if serving_index is not None and not serving_index.running:
-            return web.Response(text="serving index unavailable\n", status=503)
+        if serving_index is not None and not serving_index.ready:
+            return web.Response(text="serving index catching up\n", status=503)
         return web.Response(text="ok\n", content_type="text/plain")
 
     async def as_of(request: web.Request) -> web.Response:
