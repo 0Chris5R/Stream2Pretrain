@@ -168,3 +168,17 @@ def test_index_batches_admissions_by_durable_decision_id(tmp_path) -> None:
     assert row == ("updated audit reason",)
     assert index.counts()["license_admissions"] == 1
     connection.close()
+
+
+def test_index_bootstrap_copies_authoritative_rows_into_local_shape() -> None:
+    connection = duckdb.connect(":memory:")
+    connection.execute("CREATE TABLE source_rows (doc_id VARCHAR, segment_scores_json VARCHAR)")
+    connection.execute("INSERT INTO source_rows VALUES ('doc-1', '[{\"score\":4}]')")
+    connection.execute("CREATE TABLE target_rows (doc_id VARCHAR, segment_scores_json VARCHAR)")
+
+    ServingIndex._copy_relation(connection, source="source_rows", target="target_rows")
+
+    assert connection.execute("SELECT * FROM target_rows").fetchall() == [
+        ("doc-1", '[{"score":4}]')
+    ]
+    connection.close()

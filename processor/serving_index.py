@@ -23,7 +23,7 @@ from schemas.license_admission import LicenseAdmissionDecision
 _LOG = logging.getLogger("s2p.serving-index")
 _DECISION_TABLE = "_serving_decision_records"
 _ADMISSION_TABLE = "_serving_license_admission_records"
-_INDEX_SCHEMA_REVISION = "serving-index-v2"
+_INDEX_SCHEMA_REVISION = "serving-index-v3"
 
 
 def _decision_values(record: GoldRecord) -> dict[str, Any]:
@@ -244,8 +244,12 @@ class ServingIndex:
 
         from processor.duckdb_api import (
             _configure_runtime_limits,
+            _configure_s3,
             _create_empty_gold_relation,
             _create_empty_license_relation,
+            _load_extensions,
+            _register_iceberg_relation,
+            _register_license_relation,
         )
 
         path = Path(self.database_path)
@@ -261,21 +265,18 @@ class ServingIndex:
             schema_row = connection.execute(
                 "SELECT value FROM _serving_metadata WHERE key = 'schema_revision'"
             ).fetchone()
-            if schema_row is None or str(schema_row[0]) != _INDEX_SCHEMA_REVISION:
+            rebuild = schema_row is None or str(schema_row[0]) != _INDEX_SCHEMA_REVISION
+            if rebuild:
                 # This database is a derived Kafka projection, never the
-                # authority. Rebuild once when its physical schema changes and
-                # rotate the consumer identity so the complete topics replay
-                # into the empty projection instead of resuming old offsets.
+                # authority. Rebuild once from authoritative Iceberg when its
+                # physical schema changes, then rotate the consumer identity so
+                # retained topic deltas replay over that complete baseline.
                 connection.execute("DROP VIEW IF EXISTS serving_gold")
                 connection.execute("DROP VIEW IF EXISTS serving_decisions")
                 connection.execute("DROP VIEW IF EXISTS serving_license_admissions")
                 connection.execute(f"DROP TABLE IF EXISTS {_DECISION_TABLE}")
                 connection.execute(f"DROP TABLE IF EXISTS {_ADMISSION_TABLE}")
                 connection.execute("DELETE FROM _serving_metadata")
-                connection.execute(
-                    "INSERT INTO _serving_metadata VALUES ('schema_revision', ?), ('instance_id', ?)",
-                    [_INDEX_SCHEMA_REVISION, uuid.uuid4().hex],
-                )
             connection.execute(
                 f"CREATE TABLE IF NOT EXISTS {_DECISION_TABLE} AS SELECT * FROM _serving_gold_shape"
             )
@@ -283,6 +284,39 @@ class ServingIndex:
                 f"CREATE TABLE IF NOT EXISTS {_ADMISSION_TABLE} AS "
                 "SELECT * FROM _serving_admission_shape"
             )
+            if rebuild:
+                _load_extensions(connection)
+                _configure_s3(connection)
+                _register_iceberg_relation(
+                    connection,
+                    "_serving_history_decisions",
+                    os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions"),
+                )
+                _register_license_relation(connection, "_serving_history_admissions")
+                connection.execute("BEGIN TRANSACTION")
+                try:
+                    self._copy_relation(
+                        connection,
+                        source="_serving_history_decisions",
+                        target=_DECISION_TABLE,
+                    )
+                    self._copy_relation(
+                        connection,
+                        source="_serving_history_admissions",
+                        target=_ADMISSION_TABLE,
+                    )
+                    connection.execute(
+                        "INSERT INTO _serving_metadata VALUES "
+                        "('schema_revision', ?), ('instance_id', ?)",
+                        [_INDEX_SCHEMA_REVISION, uuid.uuid4().hex],
+                    )
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+                finally:
+                    connection.execute("DROP VIEW IF EXISTS _serving_history_decisions")
+                    connection.execute("DROP VIEW IF EXISTS _serving_history_admissions")
             connection.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS serving_decision_key ON {_DECISION_TABLE} "
                 "(doc_id, scoring_version, classifier_revision, policy_revision)"
@@ -316,6 +350,30 @@ class ServingIndex:
             )
         finally:
             connection.close()
+
+    @staticmethod
+    def _copy_relation(connection: Any, *, source: str, target: str) -> None:
+        """Copy one authoritative relation into its local serving shape."""
+        target_columns = [
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info('{target}')").fetchall()
+        ]
+        source_columns = {
+            str(row[0]) for row in connection.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
+        }
+        projections: list[str] = []
+        for column in target_columns:
+            if column in source_columns:
+                projections.append(f'"{column}"')
+            elif column == "segment_scores_json" and "segment_scores" in source_columns:
+                projections.append('CAST(TO_JSON("segment_scores") AS VARCHAR)')
+            else:
+                raise RuntimeError(
+                    f"authoritative {source} is missing serving-index column {column}"
+                )
+        names = ", ".join(f'"{column}"' for column in target_columns)
+        connection.execute(
+            f"INSERT INTO {target} ({names}) SELECT {', '.join(projections)} FROM {source}"
+        )
 
     def _consumer_group(self, connection: Any) -> str:
         instance = str(

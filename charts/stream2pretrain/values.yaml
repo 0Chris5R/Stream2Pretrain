@@ -430,7 +430,7 @@ processor:
     catalogRefreshSeconds: 30
     # DuckDB otherwise assumes most host memory is available and Kubernetes
     # kills the API during whole-table sorts. Spill bounded scans to emptyDir.
-    memoryLimit: 512MB
+    memoryLimit: 4GB
     threads: 1
     maxTempDirectorySize: 3GB
     tempStorageSizeLimit: 4Gi
@@ -442,8 +442,8 @@ processor:
       size: 10Gi
       batchSize: 250
     resources:
-      requests: {cpu: 100m, memory: 512Mi}
-      limits: {cpu: 1, memory: 1Gi}
+      requests: {cpu: 100m, memory: 2Gi}
+      limits: {cpu: 1, memory: 6Gi}
   foundry:
     enabled: true
     image: stream2pretrain/processor-foundry
