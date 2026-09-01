@@ -58,6 +58,8 @@ spec:
               value: "1"
             - name: S2P_SERVING_INDEX_DATABASE
               value: /var/lib/s2p-serving/serving.duckdb
+            - name: S2P_SERVING_INDEX_BATCH_SIZE
+              value: {{ .Values.processor.duckdbApi.servingIndex.batchSize | quote }}
             - name: HOME
               value: /tmp
           livenessProbe:

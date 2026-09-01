@@ -321,11 +321,12 @@
             "servingIndex": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["existingClaim", "storageClass", "size"],
+              "required": ["existingClaim", "storageClass", "size", "batchSize"],
               "properties": {
                 "existingClaim": {"type": "string"},
                 "storageClass": {"type": "string"},
-                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"}
+                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
+                "batchSize": {"type": "integer", "minimum": 1, "maximum": 5000}
               }
             }
           }

@@ -16,11 +16,16 @@ on:
           - diagnose
           - audit-ui
           - label-pretrain
+          - check-pretrain
           - repair-monitoring
           - validate-sources
           - validate-foundry
           - inspect-storage
           - recover-storage
+      batch_ids:
+        description: Comma-separated OpenAI Batch IDs for check-pretrain
+        required: false
+        type: string
 
 concurrency:
   group: stream2pretrain-production
@@ -944,6 +949,7 @@ jobs:
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      PRETRAIN_BATCH_IDS: ${{ inputs.batch_ids }}
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
       CORE_CHANGED: ${{ needs.changes.outputs.core }}
       SOURCES_CHANGED: ${{ needs.changes.outputs.sources }}
@@ -1236,6 +1242,18 @@ jobs:
             jq '{model,prompt_revision,evaluation_date,requests,source_counts,source_tokens,batches}' \
               "$batch_dir/submitted.json"
             echo "::endgroup::"
+            exit 0
+          fi
+
+          if [[ "$DEPLOY_MODE" == "check-pretrain" ]]; then
+            : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
+            : "${PRETRAIN_BATCH_IDS:?Missing batch_ids workflow input}"
+            status_args=()
+            IFS=',' read -r -a batch_ids <<< "$PRETRAIN_BATCH_IDS"
+            for batch_id in "${batch_ids[@]}"; do
+              status_args+=(--batch-id "$batch_id")
+            done
+            python scripts/pretrain_judge_batch.py status "${status_args[@]}"
             exit 0
           fi
 

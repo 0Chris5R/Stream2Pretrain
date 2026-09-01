@@ -1286,6 +1286,7 @@ def _configure_runtime_limits(conn: DuckDBConnection) -> None:
     os.makedirs(settings["temp_directory"], exist_ok=True)
     for key, value in settings.items():
         conn.execute(f"SET {key}={_sql_string(value)}")
+    conn.execute("SET preserve_insertion_order=false")
 
 
 def _register_gold_relation(conn: DuckDBConnection, relation: str) -> None:
@@ -1604,6 +1605,11 @@ async def serve(
     async def probe(_: web.Request) -> web.Response:
         return web.Response(text="ok\n", content_type="text/plain")
 
+    async def alive(_: web.Request) -> web.Response:
+        if serving_index is not None and not serving_index.running:
+            return web.Response(text="serving index consumer unavailable\n", status=503)
+        return web.Response(text="ok\n", content_type="text/plain")
+
     async def ready(_: web.Request) -> web.Response:
         if serving_index is not None and not serving_index.ready:
             return web.Response(text="serving index catching up\n", status=503)
@@ -1824,7 +1830,7 @@ async def serve(
             return web.json_response({"detail": str(exc)}, status=503)
 
     app = web.Application()
-    app.router.add_get("/healthz", ready if serving_index is not None else probe)
+    app.router.add_get("/healthz", alive if serving_index is not None else probe)
     app.router.add_get("/readyz", ready)
     app.router.add_get("/as-of", as_of)
     app.router.add_get("/quality-histogram", quality)

@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.pretrain_judge_batch import build_request, parse_sections, prepare, response_schema
+from scripts import pretrain_judge_batch
+from scripts.pretrain_judge_batch import (
+    batch_status,
+    build_request,
+    parse_sections,
+    prepare,
+    response_schema,
+)
 
 ROOT = Path(__file__).parents[1]
 
@@ -101,3 +108,24 @@ def test_exporter_uses_exact_processed_full_text_pool_without_route_filtering() 
     assert "risk_tier = 1" not in source
     assert "ARRAY_LENGTH(reject_reasons) = 0" not in source
     assert "PERMISSIVE_TRAINING_LICENSES" not in source
+
+
+def test_batch_status_returns_only_safe_progress_fields(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pretrain_judge_batch,
+        "_api_request",
+        lambda request: {
+            "id": "batch_test",
+            "status": "in_progress",
+            "request_counts": {"total": 10, "completed": 4, "failed": 0},
+            "created_at": 1,
+            "in_progress_at": 2,
+            "expires_at": 3,
+            "metadata": {"secret": "not returned"},
+        },
+    )
+
+    result = batch_status(["batch_test"], api_key="secret")
+
+    assert result["batches"][0]["request_counts"]["completed"] == 4
+    assert "metadata" not in result["batches"][0]

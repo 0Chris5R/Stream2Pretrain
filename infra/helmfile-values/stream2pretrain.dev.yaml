@@ -96,13 +96,12 @@ processor:
       limits: {cpu: 2, memory: 4Gi}
   duckdbApi:
     replicas: 1
-    # The live Iceberg dedup/window scan peaks above the previous 1 GiB Pod
-    # ceiling even with DuckDB spilling enabled. Keep half the Pod available
-    # for the Python runtime, Iceberg metadata, and S3 buffers.
-    memoryLimit: 1GB
+    # The retained index includes inspectable text and segment audit scores.
+    # Its measured bootstrap crossed 1 GB, so retain process/runtime margin.
+    memoryLimit: 1500MB
     resources:
-      requests: {cpu: 100m, memory: 768Mi}
-      limits: {cpu: 1, memory: 2Gi}
+      requests: {cpu: 100m, memory: 1Gi}
+      limits: {cpu: 1, memory: 3Gi}
   # Single-writer foundry on the measured control-plane image cache.
   foundry:
     enabled: true

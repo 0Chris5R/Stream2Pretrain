@@ -92,6 +92,7 @@ class Section:
 
 def _section_type(title: str, *, source: str) -> str:
     value = title.casefold()
+    candidates: Sequence[tuple[str, Sequence[str]]]
     if source == "arxiv-html-fetcher":
         candidates = (
             ("abstract", ("abstract",)),
@@ -369,7 +370,10 @@ def _api_request(request: urllib.request.Request, *, attempts: int = 6) -> dict[
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
-                return json.load(response)
+                payload = json.load(response)
+                if not isinstance(payload, dict):
+                    raise RuntimeError("OpenAI API returned a non-object response")
+                return payload
         except urllib.error.HTTPError as exc:
             body = exc.read().decode(errors="replace")
             if exc.code not in {408, 409, 429, 500, 502, 503, 504} or attempt + 1 == attempts:
@@ -428,6 +432,32 @@ def create_batch(*, input_file_id: str, api_key: str, batch_index: int) -> dict[
     return _api_request(request)
 
 
+def batch_status(batch_ids: Sequence[str], *, api_key: str) -> dict[str, Any]:
+    batches: list[dict[str, Any]] = []
+    for batch_id in batch_ids:
+        request = urllib.request.Request(
+            f"https://api.openai.com/v1/batches/{batch_id}",
+            headers=_auth_headers(api_key),
+            method="GET",
+        )
+        batch = _api_request(request)
+        batches.append(
+            {
+                "batch_id": batch["id"],
+                "status": batch["status"],
+                "request_counts": batch.get("request_counts"),
+                "created_at": batch.get("created_at"),
+                "in_progress_at": batch.get("in_progress_at"),
+                "completed_at": batch.get("completed_at"),
+                "expires_at": batch.get("expires_at"),
+                "output_file_id": batch.get("output_file_id"),
+                "error_file_id": batch.get("error_file_id"),
+                "errors": batch.get("errors"),
+            }
+        )
+    return {"batches": batches}
+
+
 def submit(input_dir: Path, output_path: Path, *, api_key: str) -> dict[str, Any]:
     manifest = json.loads((input_dir / "manifest.json").read_text())
     submitted: list[dict[str, Any]] = []
@@ -461,6 +491,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     submit_parser = subparsers.add_parser("submit")
     submit_parser.add_argument("--input-dir", type=Path, required=True)
     submit_parser.add_argument("--output", type=Path, required=True)
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("--batch-id", action="append", required=True)
     return parser.parse_args(argv)
 
 
@@ -472,7 +504,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required")
-        result = submit(args.input_dir, args.output, api_key=api_key)
+        if args.command == "submit":
+            result = submit(args.input_dir, args.output, api_key=api_key)
+        else:
+            result = batch_status(args.batch_id, api_key=api_key)
     print(json.dumps(result, indent=2))
 
 
