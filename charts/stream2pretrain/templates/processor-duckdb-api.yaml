@@ -55,7 +55,7 @@ spec:
             - name: S2P_DUCKDB_MAX_TEMP_DIRECTORY_SIZE
               value: {{ .Values.processor.duckdbApi.maxTempDirectorySize | quote }}
             - name: S2P_SERVING_INDEX_ENABLED
-              value: "true"
+              value: "1"
             - name: S2P_SERVING_INDEX_DATABASE
               value: /var/lib/s2p-serving/serving.duckdb
             - name: HOME
