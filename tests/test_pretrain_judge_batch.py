@@ -123,7 +123,12 @@ def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None
     assert 'select(.name != "serving-index")' in workflow
     assert 'limits: {cpu: "1", memory: "6Gi"}' in workflow
     assert '--for=create "pod"' in workflow
-    assert 'kubectl -n stream2pretrain exec -i "$pod" -- env' in workflow
+    assert '"stream2pretrain.io/egress-class": "foundry-providers"' in workflow
+    assert "nohup /tmp/run-pretrain-export.sh" in workflow
+    assert "nohup /tmp/run-pretrain-prepare.sh" in workflow
+    assert "nohup /tmp/run-pretrain-submit.sh" in workflow
+    assert "wait_remote_step" in workflow
+    assert 'cat /tmp/pretrain-judge/submitted.json > "$batch_dir/submitted.json"' in workflow
     assert '"$workload" == deployment/stream2pretrain-duckdb' in workflow
     assert "workload_timeout=600" in workflow
 

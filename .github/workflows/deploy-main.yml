@@ -1235,7 +1235,10 @@ jobs:
                         metadata: {
                           labels: (
                             .spec.template.metadata.labels
-                            + {"app.kubernetes.io/component": "pretrain-judge-export"}
+                            + {
+                                "app.kubernetes.io/component": "pretrain-judge-export",
+                                "stream2pretrain.io/egress-class": "foundry-providers"
+                              }
                           )
                         },
                         spec: (
@@ -1282,23 +1285,56 @@ jobs:
               -l "job-name=$export_job" \
               -o jsonpath='{.items[0].metadata.name}')"
             [[ -n "$pod" ]]
-            # Keep the large corpus export inside the Pod first. Streaming the
-            # roughly full-corpus JSONL directly over the Kubernetes exec
-            # websocket can outlive the proxy connection and lose the entire
-            # transfer. Only the small script travels inbound; the completed
-            # file then travels outbound compressed with pipefail preserving
-            # either-side failures.
-            kubectl -n stream2pretrain exec -i "$pod" -- env \
+            wait_remote_step() {
+              local step_name="$1"
+              local exit_path="$2"
+              local log_path="$3"
+              local deadline=$((SECONDS + 1800))
+              while ! kubectl -n stream2pretrain exec "$pod" -- \
+                test -f "$exit_path"; do
+                if (( SECONDS >= deadline )); then
+                  echo "$step_name did not finish within 1800 seconds." >&2
+                  kubectl -n stream2pretrain exec "$pod" -- \
+                    sh -c "tail -n 100 '$log_path'" || true
+                  return 1
+                fi
+                sleep 10
+              done
+              kubectl -n stream2pretrain exec "$pod" -- \
+                sh -c "tail -n 100 '$log_path'" || true
+              local remote_status
+              remote_status="$(kubectl -n stream2pretrain exec "$pod" -- cat "$exit_path")"
+              if [[ "$remote_status" != "0" ]]; then
+                echo "$step_name failed with status $remote_status." >&2
+                return 1
+              fi
+            }
+            # Keep the large corpus export, Batch JSONL preparation, and file
+            # upload inside the Pod. Even a compressed full-corpus transfer can
+            # outlive the Kubernetes exec proxy. Only small scripts and the
+            # final manifest cross that connection.
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              sh -c 'cat > /tmp/export_pretrain_judge_pool.py' \
+              < scripts/export_pretrain_judge_pool.py
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              sh -c 'cat > /tmp/run-pretrain-export.sh && chmod 700 /tmp/run-pretrain-export.sh' <<'SH'
+          #!/bin/sh
+          python /tmp/export_pretrain_judge_pool.py \
+            > /tmp/pretrain-pool.jsonl 2> /tmp/pretrain-export.log
+          status=$?
+          printf '%s\n' "$status" > /tmp/pretrain-export.exit
+          exit "$status"
+          SH
+            kubectl -n stream2pretrain exec "$pod" -- env \
               S2P_JUDGE_ARXIV_LIMIT=3000 \
               S2P_JUDGE_HF_LIMIT=5000 \
-              sh -c 'python - > /tmp/pretrain-pool.jsonl' \
-              < scripts/export_pretrain_judge_pool.py
-            kubectl -n stream2pretrain exec "$pod" -- \
-              python -c 'import gzip, shutil, sys; source = open("/tmp/pretrain-pool.jsonl", "rb"); target = gzip.GzipFile(fileobj=sys.stdout.buffer, mode="wb", compresslevel=1); shutil.copyfileobj(source, target); target.close(); source.close()' \
-              | gzip -dc > "$pool"
-            cleanup_pretrain_export
-            trap - EXIT
-            python - "$pool" <<'PY'
+              sh -c 'nohup /tmp/run-pretrain-export.sh >/tmp/pretrain-export-launch.log 2>&1 </dev/null &'
+            wait_remote_step \
+              "pretraining pool export" \
+              /tmp/pretrain-export.exit \
+              /tmp/pretrain-export.log
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              python - /tmp/pretrain-pool.jsonl <<'PY'
           import collections
           import json
           import pathlib
@@ -1320,15 +1356,64 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::Prepare and submit section-aware GPT-5.6 Luna batches"
-            python scripts/pretrain_judge_batch.py prepare \
-              --input "$pool" \
-              --output-dir "$batch_dir" \
-              --evaluation-date "$(date -u +%F)"
-            python scripts/pretrain_judge_batch.py submit \
-              --input-dir "$batch_dir" \
-              --output "$batch_dir/submitted.json"
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              sh -c 'cat > /tmp/pretrain_judge_batch.py' \
+              < scripts/pretrain_judge_batch.py
+            evaluation_date="$(date -u +%F)"
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              sh -c 'cat > /tmp/run-pretrain-prepare.sh && chmod 700 /tmp/run-pretrain-prepare.sh' <<SH
+          #!/bin/sh
+          python /tmp/pretrain_judge_batch.py prepare \
+            --input /tmp/pretrain-pool.jsonl \
+            --output-dir /tmp/pretrain-judge \
+            --evaluation-date "$evaluation_date" \
+            > /tmp/pretrain-prepare.log 2>&1
+          status=\$?
+          printf '%s\n' "\$status" > /tmp/pretrain-prepare.exit
+          exit "\$status"
+          SH
+            kubectl -n stream2pretrain exec "$pod" -- \
+              sh -c 'nohup /tmp/run-pretrain-prepare.sh >/tmp/pretrain-prepare-launch.log 2>&1 </dev/null &'
+            wait_remote_step \
+              "OpenAI Batch JSONL preparation" \
+              /tmp/pretrain-prepare.exit \
+              /tmp/pretrain-prepare.log
+            kubectl -n stream2pretrain exec -i "$pod" -- \
+              sh -c 'cat > /tmp/run-pretrain-submit.sh && chmod 700 /tmp/run-pretrain-submit.sh' <<'SH'
+          #!/bin/sh
+          python /tmp/pretrain_judge_batch.py submit \
+            --input-dir /tmp/pretrain-judge \
+            --output /tmp/pretrain-judge/submitted.json \
+            > /tmp/pretrain-submit.log 2>&1
+          status=$?
+          printf '%s\n' "$status" > /tmp/pretrain-submit.exit
+          exit "$status"
+          SH
+            {
+              printf '%s\n' "$OPENAI_API_KEY"
+              printf '%s\n' "$OPENAI_PROJECT_ID"
+              printf '%s\n' "${OPENAI_ORG_ID:-}"
+            } | kubectl -n stream2pretrain exec -i "$pod" -- sh -c '
+              IFS= read -r OPENAI_API_KEY
+              IFS= read -r OPENAI_PROJECT_ID
+              IFS= read -r OPENAI_ORG_ID
+              export OPENAI_API_KEY OPENAI_PROJECT_ID OPENAI_ORG_ID
+              nohup /tmp/run-pretrain-submit.sh \
+                >/tmp/pretrain-submit-launch.log 2>&1 </dev/null &
+            '
+            wait_remote_step \
+              "OpenAI Batch submission" \
+              /tmp/pretrain-submit.exit \
+              /tmp/pretrain-submit.log
+            mkdir -p "$batch_dir"
+            kubectl -n stream2pretrain exec "$pod" -- \
+              cat /tmp/pretrain-judge/manifest.json > "$batch_dir/manifest.json"
+            kubectl -n stream2pretrain exec "$pod" -- \
+              cat /tmp/pretrain-judge/submitted.json > "$batch_dir/submitted.json"
             jq '{model,prompt_revision,evaluation_date,requests,source_counts,source_tokens,batches}' \
               "$batch_dir/submitted.json"
+            cleanup_pretrain_export
+            trap - EXIT
             echo "::endgroup::"
             exit 0
           fi
