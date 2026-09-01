@@ -949,8 +949,6 @@ jobs:
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_PROJECT_ID: ${{ secrets.OPENAI_PROJECT_ID }}
-      OPENAI_ORG_ID: ${{ secrets.OPENAI_ORG_ID }}
       PRETRAIN_BATCH_IDS: ${{ inputs.batch_ids }}
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
       CORE_CHANGED: ${{ needs.changes.outputs.core }}
@@ -1202,7 +1200,6 @@ jobs:
           if [[ "$DEPLOY_MODE" == "label-pretrain" ]]; then
             echo "::group::Export exact processed full-text classifier pool"
             : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
-            : "${OPENAI_PROJECT_ID:?Missing OPENAI_PROJECT_ID Actions secret}"
             pool="$RUNNER_TEMP/pretrain-pool.jsonl"
             batch_dir="$RUNNER_TEMP/pretrain-judge"
             export_job="pretrain-judge-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -1381,7 +1378,17 @@ jobs:
             kubectl -n stream2pretrain exec -i "$pod" -- \
               sh -c 'cat > /tmp/run-pretrain-submit.sh && chmod 700 /tmp/run-pretrain-submit.sh' <<'SH'
           #!/bin/sh
-          python /tmp/pretrain_judge_batch.py submit \
+          python -m pip install --disable-pip-version-check --no-cache-dir \
+            --target /tmp/openai-sdk openai==3.6.0 \
+            > /tmp/openai-sdk-install.log 2>&1
+          install_status=$?
+          if [ "$install_status" -ne 0 ]; then
+            cat /tmp/openai-sdk-install.log >&2
+            printf '%s\n' "$install_status" > /tmp/pretrain-submit.exit
+            exit "$install_status"
+          fi
+          PYTHONPATH="/tmp/openai-sdk${PYTHONPATH:+:$PYTHONPATH}" \
+            python /tmp/pretrain_judge_batch.py submit \
             --input-dir /tmp/pretrain-judge \
             --output /tmp/pretrain-judge/submitted.json \
             > /tmp/pretrain-submit.log 2>&1
@@ -1391,13 +1398,9 @@ jobs:
           SH
             {
               printf '%s\n' "$OPENAI_API_KEY"
-              printf '%s\n' "$OPENAI_PROJECT_ID"
-              printf '%s\n' "${OPENAI_ORG_ID:-}"
             } | kubectl -n stream2pretrain exec -i "$pod" -- sh -c '
               IFS= read -r OPENAI_API_KEY
-              IFS= read -r OPENAI_PROJECT_ID
-              IFS= read -r OPENAI_ORG_ID
-              export OPENAI_API_KEY OPENAI_PROJECT_ID OPENAI_ORG_ID
+              export OPENAI_API_KEY
               nohup /tmp/run-pretrain-submit.sh \
                 >/tmp/pretrain-submit-launch.log 2>&1 </dev/null &
             '
@@ -1420,14 +1423,16 @@ jobs:
 
           if [[ "$DEPLOY_MODE" == "check-pretrain" ]]; then
             : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY Actions secret}"
-            : "${OPENAI_PROJECT_ID:?Missing OPENAI_PROJECT_ID Actions secret}"
             : "${PRETRAIN_BATCH_IDS:?Missing batch_ids workflow input}"
+            python -m pip install --disable-pip-version-check --no-cache-dir \
+              --target "$RUNNER_TEMP/openai-sdk" openai==3.6.0 >/dev/null
             status_args=()
             IFS=',' read -r -a batch_ids <<< "$PRETRAIN_BATCH_IDS"
             for batch_id in "${batch_ids[@]}"; do
               status_args+=(--batch-id "$batch_id")
             done
-            python scripts/pretrain_judge_batch.py status "${status_args[@]}"
+            PYTHONPATH="$RUNNER_TEMP/openai-sdk${PYTHONPATH:+:$PYTHONPATH}" \
+              python scripts/pretrain_judge_batch.py status "${status_args[@]}"
             exit 0
           fi
 

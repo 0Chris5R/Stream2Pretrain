@@ -5,14 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import mimetypes
 import os
 import re
 import sys
-import time
-import urllib.error
-import urllib.request
-import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -366,128 +361,33 @@ def prepare(input_path: Path, output_dir: Path, *, evaluation_date: str) -> dict
     return manifest
 
 
-def _api_request(request: urllib.request.Request, *, attempts: int = 6) -> dict[str, Any]:
-    for attempt in range(attempts):
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                payload = json.load(response)
-                if not isinstance(payload, dict):
-                    raise RuntimeError("OpenAI API returned a non-object response")
-                return payload
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode(errors="replace")
-            if exc.code not in {408, 409, 429, 500, 502, 503, 504} or attempt + 1 == attempts:
-                raise RuntimeError(f"OpenAI API returned {exc.code}: {body[:1000]}") from exc
-        except urllib.error.URLError as exc:
-            if attempt + 1 == attempts:
-                raise RuntimeError(f"OpenAI API unavailable: {exc.reason}") from exc
-        time.sleep(min(2**attempt, 30))
-    raise AssertionError("unreachable")
+def _client(api_key: str) -> Any:
+    # Keep the project-scoped key as the sole source of authentication scope.
+    # The official SDK owns multipart encoding, retries, and request transport.
+    from openai import OpenAI
 
-
-def _auth_headers(api_key: str) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {api_key}"}
-    project_id = os.environ.get("OPENAI_PROJECT_ID", "").strip()
-    organization_id = os.environ.get("OPENAI_ORG_ID", "").strip()
-    if project_id:
-        headers["OpenAI-Project"] = project_id
-    if organization_id:
-        headers["OpenAI-Organization"] = organization_id
-    return headers
-
-
-def upload_file(path: Path, *, api_key: str) -> dict[str, Any]:
-    boundary = f"----s2p-{uuid.uuid4().hex}"
-    mime = mimetypes.guess_type(path.name)[0] or "application/jsonl"
-    prefix = (
-        f'--{boundary}\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nbatch\r\n'
-        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
-        f"Content-Type: {mime}\r\n\r\n"
-    ).encode()
-    suffix = f"\r\n--{boundary}--\r\n".encode()
-    body = prefix + path.read_bytes() + suffix
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/files",
-        data=body,
-        headers={
-            **_auth_headers(api_key),
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        method="POST",
-    )
-    return _api_request(request)
-
-
-def retrieve_file(file_id: str, *, api_key: str) -> dict[str, Any]:
-    request = urllib.request.Request(
-        f"https://api.openai.com/v1/files/{file_id}",
-        headers=_auth_headers(api_key),
-        method="GET",
-    )
-    return _api_request(request)
-
-
-def wait_for_file(
-    file_id: str,
-    *,
-    api_key: str,
-    timeout_seconds: float = 900,
-    poll_seconds: float = 2,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        file = retrieve_file(file_id, api_key=api_key)
-        status = str(file.get("status") or "")
-        if status == "processed":
-            return file
-        if status in {"error", "failed", "cancelled"}:
-            raise RuntimeError(f"OpenAI input file {file_id} entered status {status}")
-        time.sleep(poll_seconds)
-    raise TimeoutError(f"OpenAI input file {file_id} was not processed within the deadline")
-
-
-def create_batch(*, input_file_id: str, api_key: str, batch_index: int) -> dict[str, Any]:
-    body = {
-        "input_file_id": input_file_id,
-        "endpoint": ENDPOINT,
-        "completion_window": "24h",
-        "metadata": {
-            "project": "stream2pretrain",
-            "purpose": "classifier-labels",
-            "prompt_revision": PROMPT_REVISION,
-            "batch_index": str(batch_index),
-        },
-    }
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/batches",
-        data=json.dumps(body).encode(),
-        headers={**_auth_headers(api_key), "Content-Type": "application/json"},
-        method="POST",
-    )
-    return _api_request(request)
+    return OpenAI(api_key=api_key)
 
 
 def batch_status(batch_ids: Sequence[str], *, api_key: str) -> dict[str, Any]:
+    client = _client(api_key)
     batches: list[dict[str, Any]] = []
     for batch_id in batch_ids:
-        request = urllib.request.Request(
-            f"https://api.openai.com/v1/batches/{batch_id}",
-            headers=_auth_headers(api_key),
-            method="GET",
-        )
-        batch = _api_request(request)
+        batch = client.batches.retrieve(batch_id)
         batches.append(
             {
-                "batch_id": batch["id"],
-                "status": batch["status"],
-                "request_counts": batch.get("request_counts"),
-                "created_at": batch.get("created_at"),
-                "in_progress_at": batch.get("in_progress_at"),
-                "completed_at": batch.get("completed_at"),
-                "expires_at": batch.get("expires_at"),
-                "output_file_id": batch.get("output_file_id"),
-                "error_file_id": batch.get("error_file_id"),
-                "errors": batch.get("errors"),
+                "batch_id": batch.id,
+                "status": batch.status,
+                "request_counts": batch.request_counts.model_dump()
+                if batch.request_counts
+                else None,
+                "created_at": batch.created_at,
+                "in_progress_at": batch.in_progress_at,
+                "completed_at": batch.completed_at,
+                "expires_at": batch.expires_at,
+                "output_file_id": batch.output_file_id,
+                "error_file_id": batch.error_file_id,
+                "errors": batch.errors.model_dump() if batch.errors else None,
             }
         )
     return {"batches": batches}
@@ -495,23 +395,30 @@ def batch_status(batch_ids: Sequence[str], *, api_key: str) -> dict[str, Any]:
 
 def submit(input_dir: Path, output_path: Path, *, api_key: str) -> dict[str, Any]:
     manifest = json.loads((input_dir / "manifest.json").read_text())
+    client = _client(api_key)
     submitted: list[dict[str, Any]] = []
     for index, item in enumerate(manifest["files"], start=1):
         path = input_dir / item["path"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
             raise ValueError(f"batch file changed after preparation: {path}")
-        uploaded = upload_file(path, api_key=api_key)
-        input_file_id = str(uploaded["id"])
-        wait_for_file(input_file_id, api_key=api_key)
-        batch = create_batch(
-            input_file_id=input_file_id,
-            api_key=api_key,
-            batch_index=index,
+        with path.open("rb") as file:
+            uploaded = client.files.create(file=file, purpose="batch")
+        batch = client.batches.create(
+            input_file_id=uploaded.id,
+            endpoint=ENDPOINT,
+            completion_window="24h",
+            metadata={
+                "project": "stream2pretrain",
+                "purpose": "classifier-labels",
+                "prompt_revision": PROMPT_REVISION,
+                "batch_index": str(index),
+            },
         )
+        input_file_id = uploaded.id
         submitted.append(
             {
-                "batch_id": batch["id"],
-                "status": batch["status"],
+                "batch_id": batch.id,
+                "status": batch.status,
                 "input_file_id": input_file_id,
                 "requests": item["requests"],
                 "sha256": item["sha256"],

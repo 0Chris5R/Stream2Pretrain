@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from scripts import pretrain_judge_batch
 from scripts.pretrain_judge_batch import (
-    _auth_headers,
     batch_status,
     build_request,
     parse_sections,
     prepare,
     response_schema,
-    wait_for_file,
+    submit,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -114,9 +114,9 @@ def test_exporter_uses_exact_processed_full_text_pool_without_route_filtering() 
 
 def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None:
     workflow = (ROOT / ".github/workflows/deploy-main.yml").read_text()
-    assert "OPENAI_PROJECT_ID: ${{ secrets.OPENAI_PROJECT_ID }}" in workflow
-    assert "OPENAI_ORG_ID: ${{ secrets.OPENAI_ORG_ID }}" in workflow
-    assert '"${OPENAI_PROJECT_ID:?Missing OPENAI_PROJECT_ID Actions secret}"' in workflow
+    assert "openai==3.6.0" in workflow
+    assert "OPENAI_PROJECT_ID" not in workflow
+    assert "OPENAI_ORG_ID" not in workflow
     assert 'export_job="pretrain-judge-export-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' in workflow
     assert '"app.kubernetes.io/component": "pretrain-judge-export"' in workflow
     assert '.name != "S2P_SERVING_INDEX_ENABLED"' in workflow
@@ -134,18 +134,26 @@ def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None
 
 
 def test_batch_status_returns_only_safe_progress_fields(monkeypatch) -> None:
+    class Payload:
+        def model_dump(self) -> dict[str, object]:
+            return {"total": 10, "completed": 4, "failed": 0}
+
+    batch = SimpleNamespace(
+        id="batch_test",
+        status="in_progress",
+        request_counts=Payload(),
+        created_at=1,
+        in_progress_at=2,
+        completed_at=None,
+        expires_at=3,
+        output_file_id=None,
+        error_file_id=None,
+        errors=None,
+    )
     monkeypatch.setattr(
         pretrain_judge_batch,
-        "_api_request",
-        lambda request: {
-            "id": "batch_test",
-            "status": "in_progress",
-            "request_counts": {"total": 10, "completed": 4, "failed": 0},
-            "created_at": 1,
-            "in_progress_at": 2,
-            "expires_at": 3,
-            "metadata": {"secret": "not returned"},
-        },
+        "_client",
+        lambda api_key: SimpleNamespace(batches=SimpleNamespace(retrieve=lambda batch_id: batch)),
     )
 
     result = batch_status(["batch_test"], api_key="secret")
@@ -154,25 +162,32 @@ def test_batch_status_returns_only_safe_progress_fields(monkeypatch) -> None:
     assert "metadata" not in result["batches"][0]
 
 
-def test_wait_for_file_requires_processed_status(monkeypatch) -> None:
-    statuses = iter([{"status": "uploaded"}, {"status": "processed", "id": "file_test"}])
+def test_submit_uses_official_file_and_batch_clients(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "pool.jsonl"
+    input_path.write_text(json.dumps(_row(source="hf-models")) + "\n")
+    batch_dir = tmp_path / "batch"
+    prepare(input_path, batch_dir, evaluation_date="2026-09-01")
+    calls: list[tuple[str, object]] = []
+
+    class Files:
+        def create(self, *, file: object, purpose: str) -> SimpleNamespace:
+            calls.append(("file", purpose))
+            assert file is not None
+            return SimpleNamespace(id="file_test")
+
+    class Batches:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(("batch", kwargs))
+            return SimpleNamespace(id="batch_test", status="validating")
+
     monkeypatch.setattr(
         pretrain_judge_batch,
-        "retrieve_file",
-        lambda file_id, api_key: next(statuses),
+        "_client",
+        lambda api_key: SimpleNamespace(files=Files(), batches=Batches()),
     )
+    result = submit(batch_dir, tmp_path / "submitted.json", api_key="secret")
 
-    result = wait_for_file("file_test", api_key="secret", poll_seconds=0)
-
-    assert result["status"] == "processed"
-
-
-def test_auth_headers_keep_file_and_batch_requests_in_one_project(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj_stream2pretrain")
-    monkeypatch.setenv("OPENAI_ORG_ID", "org_course")
-
-    assert _auth_headers("secret") == {
-        "Authorization": "Bearer secret",
-        "OpenAI-Project": "proj_stream2pretrain",
-        "OpenAI-Organization": "org_course",
-    }
+    assert calls[0] == ("file", "batch")
+    assert calls[1][1]["input_file_id"] == "file_test"
+    assert calls[1][1]["endpoint"] == "/v1/responses"
+    assert result["batches"][0]["batch_id"] == "batch_test"
