@@ -87,6 +87,7 @@ def test_prepare_writes_reproducible_manifest_and_requests(tmp_path: Path) -> No
 
 def test_exporter_uses_exact_processed_full_text_pool_without_route_filtering() -> None:
     source = (ROOT / "scripts/export_pretrain_judge_pool.py").read_text()
+    assert "LENGTH(TRIM(text)) > 0" in source
     assert "LENGTH(TRIM(decision.text)) > 0" in source
     assert "PARTITION BY doc_id" in source
     assert "WHERE revision_rank = 1" in source

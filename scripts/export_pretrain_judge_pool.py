@@ -63,6 +63,7 @@ def _selected_keys(
         ) AS revision_rank
       FROM decisions
       WHERE source_feed IN ({quoted_sources})
+        AND LENGTH(TRIM(text)) > 0
     )
     SELECT
       doc_id, scoring_version, classifier_revision, policy_revision, trace_id
