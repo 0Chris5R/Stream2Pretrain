@@ -118,6 +118,7 @@ def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None
     assert '.name != "S2P_SERVING_INDEX_ENABLED"' in workflow
     assert 'select(.name != "serving-index")' in workflow
     assert 'limits: {cpu: "1", memory: "6Gi"}' in workflow
+    assert '--for=create "pod"' in workflow
     assert 'kubectl -n stream2pretrain exec -i "$pod" -- env' in workflow
     assert '"$workload" == deployment/stream2pretrain-duckdb' in workflow
     assert "workload_timeout=600" in workflow

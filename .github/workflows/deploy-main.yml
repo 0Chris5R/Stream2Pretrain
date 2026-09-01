@@ -1270,6 +1270,9 @@ jobs:
                   }
                 ' | kubectl apply -f -
             kubectl -n stream2pretrain wait \
+              --for=create "pod" \
+              -l "job-name=$export_job" --timeout=60s
+            kubectl -n stream2pretrain wait \
               --for=condition=Ready "pod" \
               -l "job-name=$export_job" --timeout=180s
             pod="$(kubectl -n stream2pretrain get pod \
