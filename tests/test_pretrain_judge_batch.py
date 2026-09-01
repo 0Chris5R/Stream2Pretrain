@@ -10,6 +10,7 @@ from scripts.pretrain_judge_batch import (
     parse_sections,
     prepare,
     response_schema,
+    wait_for_file,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -129,3 +130,16 @@ def test_batch_status_returns_only_safe_progress_fields(monkeypatch) -> None:
 
     assert result["batches"][0]["request_counts"]["completed"] == 4
     assert "metadata" not in result["batches"][0]
+
+
+def test_wait_for_file_requires_processed_status(monkeypatch) -> None:
+    statuses = iter([{"status": "uploaded"}, {"status": "processed", "id": "file_test"}])
+    monkeypatch.setattr(
+        pretrain_judge_batch,
+        "retrieve_file",
+        lambda file_id, api_key: next(statuses),
+    )
+
+    result = wait_for_file("file_test", api_key="secret", poll_seconds=0)
+
+    assert result["status"] == "processed"

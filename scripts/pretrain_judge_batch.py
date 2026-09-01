@@ -411,6 +411,34 @@ def upload_file(path: Path, *, api_key: str) -> dict[str, Any]:
     return _api_request(request)
 
 
+def retrieve_file(file_id: str, *, api_key: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"https://api.openai.com/v1/files/{file_id}",
+        headers=_auth_headers(api_key),
+        method="GET",
+    )
+    return _api_request(request)
+
+
+def wait_for_file(
+    file_id: str,
+    *,
+    api_key: str,
+    timeout_seconds: float = 900,
+    poll_seconds: float = 2,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        file = retrieve_file(file_id, api_key=api_key)
+        status = str(file.get("status") or "")
+        if status == "processed":
+            return file
+        if status in {"error", "failed", "cancelled"}:
+            raise RuntimeError(f"OpenAI input file {file_id} entered status {status}")
+        time.sleep(poll_seconds)
+    raise TimeoutError(f"OpenAI input file {file_id} was not processed within the deadline")
+
+
 def create_batch(*, input_file_id: str, api_key: str, batch_index: int) -> dict[str, Any]:
     body = {
         "input_file_id": input_file_id,
@@ -466,12 +494,18 @@ def submit(input_dir: Path, output_path: Path, *, api_key: str) -> dict[str, Any
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
             raise ValueError(f"batch file changed after preparation: {path}")
         uploaded = upload_file(path, api_key=api_key)
-        batch = create_batch(input_file_id=str(uploaded["id"]), api_key=api_key, batch_index=index)
+        input_file_id = str(uploaded["id"])
+        wait_for_file(input_file_id, api_key=api_key)
+        batch = create_batch(
+            input_file_id=input_file_id,
+            api_key=api_key,
+            batch_index=index,
+        )
         submitted.append(
             {
                 "batch_id": batch["id"],
                 "status": batch["status"],
-                "input_file_id": uploaded["id"],
+                "input_file_id": input_file_id,
                 "requests": item["requests"],
                 "sha256": item["sha256"],
             }
