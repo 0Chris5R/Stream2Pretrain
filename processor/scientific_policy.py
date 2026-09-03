@@ -82,8 +82,6 @@ def aggregate_segment_scores(scores: list[SegmentScore]) -> tuple[float, float, 
         for score in scores
         if score.decision == "included" and score.edu_score is not None
     ]
-    if not quality_measured:
-        return 0.0, 0.0, "tail"
     weights = [max(1, min(score.word_count, 512)) for score, _ in quality_measured]
     total = sum(weights)
     edu = (
@@ -92,11 +90,15 @@ def aggregate_segment_scores(scores: list[SegmentScore]) -> tuple[float, float, 
             for (_, edu_score), weight in zip(quality_measured, weights, strict=True)
         )
         / total
+        if total
+        else 0.0
     )
     measured = [
         (score.perplexity, score.perplexity_bucket, max(1, min(score.word_count, 512)))
-        for score, _ in quality_measured
-        if score.perplexity is not None and score.perplexity_bucket is not None
+        for score in scores
+        if score.decision == "included"
+        and score.perplexity is not None
+        and score.perplexity_bucket is not None
     ]
     if not measured:
         return edu, 0.0, "middle"
@@ -114,7 +116,9 @@ def aggregate_segment_scores(scores: list[SegmentScore]) -> tuple[float, float, 
     return edu, median_perplexity, median_bucket
 
 
-def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificScores:
+def scientific_scores(
+    silver: SilverRecord, *, edu_score: float, quality_applicable: bool = True
+) -> ScientificScores:
     roles = {segment.role for segment in silver.segments}
     has_abstract = "abstract" in roles
     has_methods = "methods" in roles
@@ -151,7 +155,7 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
         + 0.12 * float(silver.table_count > 0)
         + 0.08 * float(silver.figure_count > 0)
         + 0.10 * (structural / 5.0)
-        + 0.10 * (edu_score / 5.0)
+        + (0.10 * (edu_score / 5.0) if quality_applicable else 0.0)
     )
     reasoning = max(0.0, min(1.0, reasoning))
 
@@ -164,7 +168,9 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
     )
 
 
-def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificScores:
+def source_scores(
+    silver: SilverRecord, *, quality_score: float, quality_applicable: bool = True
+) -> ScientificScores:
     """Dispatch structural/evidence signals without applying paper assumptions universally."""
     source_policy = resolve_source_policy(
         source_feed=silver.source_feed,
@@ -172,7 +178,9 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         extraction_pipeline=silver.extraction_pipeline,
     )
     if source_policy.family == "scientific_paper":
-        return scientific_scores(silver, edu_score=quality_score)
+        return scientific_scores(
+            silver, edu_score=quality_score, quality_applicable=quality_applicable
+        )
     word_count = len((silver.model_text or silver.text).split())
     completeness = min(
         1.0,
@@ -189,7 +197,10 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
             0.0,
             ["discovery_metadata"],
         )
-    reasoning = min(0.45, 0.10 + 0.15 * (quality_score / 5.0) + 0.20 * completeness)
+    reasoning = min(
+        0.45,
+        0.10 + (0.15 * (quality_score / 5.0) if quality_applicable else 0.0) + 0.20 * completeness,
+    )
     content_tag = {
         "hf_model_card": "hf_model_documentation",
         "hf_dataset_card": "hf_dataset_documentation",
@@ -213,14 +224,16 @@ def composite_quality_score(
     language_applicable: bool = True,
     web_heuristics_applicable: bool = True,
     perplexity_applicable: bool = True,
+    quality_applicable: bool = True,
 ) -> float:
     """Explainable 0..5 convenience score built only from applicable signals."""
     typicality = {"head": 1.0, "middle": 0.72, "tail": 0.25}.get(perplexity_bucket, 0.0)
     heuristic = (float(gopher_pass) + float(c4_pass)) / 2
     weighted = [
-        (0.35, edu_score / 5.0),
         (0.25, structural_quality_score / 5.0),
     ]
+    if quality_applicable:
+        weighted.append((0.35, edu_score / 5.0))
     if language_applicable:
         weighted.append((0.15, lang_score))
     if web_heuristics_applicable:

@@ -716,14 +716,15 @@ def _candidate_ranking_score(record: GoldRecord) -> float:
         sum(count > 0 for count in (record.equation_count, record.table_count, record.figure_count))
         / 3.0
     )
-    signals = (
+    signals = [
         record.quality_score / 5.0,
-        record.edu_score / 5.0,
         record.structural_quality_score / 5.0,
         record.extraction_completeness,
         record.reasoning_score,
         evidence_richness,
-    )
+    ]
+    if not record.quality_diagnostics or record.quality_diagnostics.get("mode") != "diagnostic":
+        signals.append(record.edu_score / 5.0)
     return sum(signals) / len(signals)
 
 

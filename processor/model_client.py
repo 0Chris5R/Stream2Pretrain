@@ -376,6 +376,16 @@ class CuratorModelClient:
                     QualityScore(
                         edu_score=float(item["edu_score"]),
                         revision=str(item["revision"]),
+                        confidence=(
+                            float(item["confidence"])
+                            if item.get("confidence") is not None
+                            else None
+                        ),
+                        score_class=item.get("score_class"),
+                        probabilities=tuple(item.get("probabilities", ())),
+                        tokens=int(item.get("tokens", 0)),
+                        chunks=int(item.get("chunks", 0)),
+                        model_revision=item.get("model_revision"),
                     )
                 )
         except (KeyError, TypeError, ValueError) as exc:

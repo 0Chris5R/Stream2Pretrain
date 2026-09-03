@@ -22,6 +22,7 @@ COPY processor/__init__.py      \
 COPY processor/operators/__init__.py     \
      processor/operators/kenlm_score.py  \
      processor/operators/quality.py      \
+     processor/operators/source_classifiers.py \
      processor/operators/shadow_models.py /app/processor/operators/
 
 # Each immutable profile base validates its exact native/model dependencies.

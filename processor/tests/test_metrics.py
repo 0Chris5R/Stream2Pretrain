@@ -33,7 +33,7 @@ def test_processor_metrics_render_dashboard_contract() -> None:
     assert 's2p_documents_emitted_total{namespace="stream2pretrain",stage="curate"} 1.0' in body
     assert 's2p_documents_emitted_total{namespace="stream2pretrain",stage="iceberg"} 2.0' in body
     assert "s2p_quality_score_bucket" in body
-    assert "s2p_finepdfs_edu_score_bucket" in body
+    assert "s2p_source_quality_score_bucket" in body
     assert (
         's2p_processor_routed_total{namespace="stream2pretrain",route="reasoning_candidate"} 1.0'
         in body

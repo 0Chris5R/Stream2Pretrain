@@ -11,6 +11,17 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 
 ## Decision log
 
+### 2026-09-03 - Source classifier diagnostic pilot
+
+- `docs/SOURCE_CLASSIFIER_PILOT.md` supersedes the older FinePDFs-only quality
+  choice for the current cloud path. Deploy the independently trained arXiv
+  and HF ModernBERT quality heads from the downloaded Kaggle results.
+- Score every retained section with the training input contract and retain
+  score/confidence/provenance. Learned scores remain diagnostic, including
+  exclusion from route decisions and post-training ranking, until approved.
+- The owner approved GitHub for public model transfer. Do not include labels,
+  source corpus, optimizer checkpoints, or credentials in release artifacts.
+
 ### 2026-08-23 - Pipeline remediation contract locked
 
 - `docs/PIPELINE_REMEDIATION_CONTRACT.md` is the binding source of truth for
@@ -67,8 +78,8 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Do not silently reduce, omit, proxy, or relabel its requirements because an
   implementation is expensive. Scope changes require an explicit team decision
   recorded in that file.
-- FinePDFs Edu v2 is the sole learned document-quality model for arXiv and
-  Hugging Face cards. Deterministic rejection runs before inference.
+- Source-specific ModernBERT quality heads are diagnostic in the current pilot.
+  Deterministic rejection runs before inference.
 - The normal UI must be concise and self-explanatory. Detailed limitations and
   implementation exposition live in documentation or collapsed audit views,
   not as repeated page prose.
@@ -88,7 +99,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Table format: **Apache Iceberg V3** + **Polaris** REST catalog (Iceberg picked over Delta for vendor-neutrality and row lineage).
 - HTML extraction: **Resiliparse** (DCLM-Baseline default, faster than Trafilatura).
 - MinHash: **Rensa** (Rust). Near-dup index: **LSHBloom** (band-partitioned Bloom).
-- Quality classifier: **FinePDFs Edu v2** on CPU.
+- Quality classifier: **source-specific ModernBERT** on CPU, diagnostic pilot.
 - UI: **Next.js 14 App Router + shadcn/ui + TanStack Query**.
 - Lakehouse query: **DuckDB + iceberg extension**.
 - Submit API: **FastAPI** (in v0.1.0 only; removed in v0.2.0 - see decision log).

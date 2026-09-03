@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,12 +19,12 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
 from processor import common
 from processor.operators.kenlm_score import KenLMScorer
-from processor.operators.quality import QualityClassifier
 from processor.operators.shadow_models import CsoShadowClassifier, TransformerShadowScorer
+from processor.operators.source_classifiers import SourceQualityClassifier
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
-ModelProfile = Literal["finepdfs", "quality", "kenlm", "shadow", "all"]
-MODEL_PROFILES: frozenset[str] = frozenset({"finepdfs", "quality", "kenlm", "shadow", "all"})
+ModelProfile = Literal["quality", "kenlm", "shadow", "all"]
+MODEL_PROFILES: frozenset[str] = frozenset({"quality", "kenlm", "shadow", "all"})
 _Result = TypeVar("_Result")
 
 MODEL_REQUESTS = Counter(
@@ -67,18 +68,13 @@ class CuratorModelRuntime:
     def __init__(self, models_dir: str | Path, *, profile: ModelProfile = "all") -> None:
         root = Path(models_dir)
         self.profile = profile
-        self.finepdfs: QualityClassifier | None = None
+        self.quality: SourceQualityClassifier | None = None
         self.kenlm: KenLMScorer | None = None
         self.meta_rater: TransformerShadowScorer | None = None
         self.finemath: TransformerShadowScorer | None = None
         self.cso: CsoShadowClassifier | None = None
-        if profile in {"finepdfs", "quality", "all"}:
-            self.finepdfs = QualityClassifier(
-                root / "finepdfs-edu-v2",
-                revision=os.environ.get("S2P_FINEPDFS_EDU_REVISION"),
-                model_family="finepdfs-edu-v2",
-                allow_fallback=False,
-            )
+        if profile in {"quality", "all"}:
+            self.quality = SourceQualityClassifier(root)
         if profile in {"kenlm", "all"}:
             self.kenlm = KenLMScorer(
                 root / "kenlm" / "en.arpa.bin",
@@ -104,7 +100,7 @@ class CuratorModelRuntime:
             )
             self.cso = CsoShadowClassifier()
         self.locks = {
-            "finepdfs-edu-v2": threading.Lock(),
+            "source-pretrain-quality": threading.Lock(),
             "kenlm": threading.Lock(),
             "meta-rater-reasoning": threading.Lock(),
             "finemath": threading.Lock(),
@@ -115,10 +111,10 @@ class CuratorModelRuntime:
     def metadata(self) -> dict[str, Any]:
         metadata: dict[str, Any] = {"ready": True, "profile": self.profile}
         quality: dict[str, dict[str, str]] = {}
-        if self.finepdfs is not None:
-            quality["finepdfs-edu-v2"] = {
-                "backend": self.finepdfs.backend,
-                "revision": self.finepdfs.revision,
+        if self.quality is not None:
+            quality["source-pretrain-quality"] = {
+                "backend": self.quality.backend,
+                "revision": self.quality.revision,
             }
         if quality:
             metadata["quality"] = quality
@@ -136,7 +132,7 @@ class CuratorModelRuntime:
         return metadata
 
     def quality_many(self, family: str, texts: Sequence[str]) -> list[dict[str, Any]]:
-        classifiers = {"finepdfs-edu-v2": self.finepdfs}
+        classifiers = {"source-pretrain-quality": self.quality}
         classifier = classifiers.get(family)
         if classifier is None:
             raise ValueError("unsupported model_family")
@@ -148,11 +144,7 @@ class CuratorModelRuntime:
             item_count=len(texts),
             lock=self.locks[family],
             callback=lambda: [
-                {
-                    "edu_score": result.edu_score,
-                    "revision": result.revision,
-                }
-                for result in (classifier.score(text) for text in texts)
+                asdict(result) for result in (classifier.score(text) for text in texts)
             ],
         )
 

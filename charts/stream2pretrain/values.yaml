@@ -292,7 +292,7 @@ processor:
     scoringVersion: pretrain-content-v3
     # Bytewax exposes the Kafka connector's bounded runtime batch directly to
     # the curator. Twelve one-segment documents produce six two-item requests,
-    # filling the measured six-Pod FinePDFs lane while final decisions and LSH
+    # filling the measured six-Pod source-specific ModernBERT lane while final decisions and LSH
     # observations remain serial.
     sourceBatchSize: 12
     replicas: 1
@@ -333,20 +333,20 @@ processor:
     # This avoids a monolithic multi-GB image/process and lets Kubernetes
     # schedule or scale the resources each backend actually consumes.
     profiles:
-      # FinePDFs is the sole learned document-quality model.
-      finepdfs:
-        runtimeProfile: finepdfs
+      # Two independent source-specific heads, diagnostic only.
+      quality:
+        runtimeProfile: quality
         image: stream2pretrain/processor-quality-model
         autoscaling:
           minReplicas: 2
           # The measured three-Pod ceiling processed only about half of the
-          # live normalized arrival rate. FinePDFs is stateless, so let KEDA
+          # live normalized arrival rate. source-specific ModernBERT is stateless, so let KEDA
           # use the remaining cluster capacity without changing any score or
           # curation gate.
           maxReplicas: 6
         resources:
-          requests: {cpu: 1, memory: 1Gi}
-          limits: {cpu: 2, memory: 3Gi}
+          requests: {cpu: 1, memory: 2Gi}
+          limits: {cpu: 2, memory: 6Gi}
       kenlm:
         runtimeProfile: kenlm
         image: stream2pretrain/processor-kenlm-model

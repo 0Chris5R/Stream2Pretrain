@@ -47,7 +47,7 @@ class _Cso:
 @pytest.mark.parametrize(
     ("profile", "expected_keys"),
     [
-        ("finepdfs", {"ready", "profile", "quality"}),
+        ("quality", {"ready", "profile", "quality"}),
         ("quality", {"ready", "profile", "quality"}),
         ("kenlm", {"ready", "profile", "kenlm"}),
         ("shadow", {"ready", "profile", "shadow"}),
@@ -60,7 +60,7 @@ def test_runtime_loads_only_its_selected_model_family(
     profile: model_service.ModelProfile,
     expected_keys: set[str],
 ) -> None:
-    monkeypatch.setattr(model_service, "QualityClassifier", _Quality)
+    monkeypatch.setattr(model_service, "SourceQualityClassifier", _Quality)
     monkeypatch.setattr(model_service, "KenLMScorer", _KenLM)
     monkeypatch.setattr(model_service, "TransformerShadowScorer", _ShadowScalar)
     monkeypatch.setattr(model_service, "CsoShadowClassifier", _Cso)
@@ -68,7 +68,7 @@ def test_runtime_loads_only_its_selected_model_family(
     runtime = model_service.CuratorModelRuntime(tmp_path, profile=profile)
 
     assert set(runtime.metadata()) == expected_keys
-    assert (runtime.finepdfs is not None) is (profile in {"finepdfs", "quality", "all"})
+    assert (runtime.quality is not None) is (profile in {"quality", "all"})
     assert (runtime.kenlm is not None) is (profile in {"kenlm", "all"})
     assert (runtime.meta_rater is not None) is (profile in {"shadow", "all"})
     assert (runtime.finemath is not None) is (profile in {"shadow", "all"})
@@ -94,20 +94,20 @@ def test_quality_batch_matches_ordered_one_by_one_outputs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(model_service, "QualityClassifier", _Quality)
-    runtime = model_service.CuratorModelRuntime(tmp_path, profile="finepdfs")
+    monkeypatch.setattr(model_service, "SourceQualityClassifier", _Quality)
+    runtime = model_service.CuratorModelRuntime(tmp_path, profile="quality")
 
-    batch = runtime.quality_many("finepdfs-edu-v2", ["a", "three", "twelve chars"])
+    batch = runtime.quality_many("source-pretrain-quality", ["a", "three", "twelve chars"])
     singletons = [
-        runtime.quality_many("finepdfs-edu-v2", [text])[0]
+        runtime.quality_many("source-pretrain-quality", [text])[0]
         for text in ["a", "three", "twelve chars"]
     ]
 
     assert batch == singletons
     assert [item["revision"] for item in batch] == [
-        runtime.finepdfs.revision,
-        runtime.finepdfs.revision,
-        runtime.finepdfs.revision,
+        runtime.quality.revision,
+        runtime.quality.revision,
+        runtime.quality.revision,
     ]
 
 
@@ -115,9 +115,9 @@ def test_quality_batch_is_bounded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(model_service, "QualityClassifier", _Quality)
+    monkeypatch.setattr(model_service, "SourceQualityClassifier", _Quality)
     monkeypatch.setenv("S2P_MODEL_SERVICE_MAX_BATCH_ITEMS", "2")
-    runtime = model_service.CuratorModelRuntime(tmp_path, profile="finepdfs")
+    runtime = model_service.CuratorModelRuntime(tmp_path, profile="quality")
 
     with pytest.raises(ValueError, match="between 1 and 2"):
-        runtime.quality_many("finepdfs-edu-v2", ["one", "two", "three"])
+        runtime.quality_many("source-pretrain-quality", ["one", "two", "three"])

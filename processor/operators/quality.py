@@ -28,6 +28,12 @@ class QualityScore:
 
     edu_score: float
     revision: str
+    confidence: float | None = None
+    score_class: int | None = None
+    probabilities: tuple[float, ...] = ()
+    tokens: int = 0
+    chunks: int = 0
+    model_revision: str | None = None
 
 
 class QualityClassifier:

@@ -133,7 +133,7 @@ def test_label_workflow_isolates_historical_export_from_live_dashboard() -> None
     assert "generate_presigned_url" in workflow
     assert "port-forward service/minio 19000:9000" in workflow
     assert "--continue-at -" in workflow
-    assert 'name: pretrain-judge-jsonl-${{ github.run_id }}' in workflow
+    assert "name: pretrain-judge-jsonl-${{ github.run_id }}" in workflow
     assert "No OpenAI request" in workflow
     assert '"$workload" == deployment/stream2pretrain-duckdb' in workflow
     assert "workload_timeout=600" in workflow

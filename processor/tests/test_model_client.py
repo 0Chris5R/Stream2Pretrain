@@ -21,7 +21,7 @@ def _metadata() -> dict[str, object]:
     return {
         "ready": True,
         "quality": {
-            "finepdfs-edu-v2": {
+            "source-pretrain-quality": {
                 "backend": "transformers-cpu",
                 "revision": "finepdfs@pinned",
             },
@@ -63,7 +63,7 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
     transport = httpx.MockTransport(handler)
     http_client = httpx.Client(base_url="http://models", transport=transport)
     client = CuratorModelClient("http://models", client=http_client)
-    finepdfs = RemoteQualityClassifier(client, "finepdfs-edu-v2")
+    finepdfs = RemoteQualityClassifier(client, "source-pretrain-quality")
     kenlm = RemoteKenLMScorer(client)
 
     assert finepdfs.score("paper").edu_score == 4.25
@@ -105,7 +105,7 @@ def test_quality_batch_requires_one_result_per_input() -> None:
         client=httpx.Client(base_url="http://models", transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(ModelServiceError, match="invalid quality batch"):
-        client.quality_many("finepdfs-edu-v2", ["one", "two"])
+        client.quality_many("source-pretrain-quality", ["one", "two"])
     client.close()
 
 
@@ -129,7 +129,7 @@ def test_oversize_combined_batch_preserves_the_singleton_path(monkeypatch) -> No
         client=httpx.Client(base_url="http://models", transport=httpx.MockTransport(handler)),
     )
 
-    results = client.quality_many("finepdfs-edu-v2", ["left", "right"])
+    results = client.quality_many("source-pretrain-quality", ["left", "right"])
 
     assert len(results) == 2
     assert requests == [["left"], ["right"]]
@@ -162,7 +162,7 @@ def test_six_concurrent_calls_lease_six_distinct_ready_endpoints() -> None:
         return httpx.Client(base_url=endpoint, transport=httpx.MockTransport(handler))
 
     base_client = httpx.Client(
-        base_url="http://finepdfs:8094",
+        base_url="http://quality:8094",
         transport=httpx.MockTransport(
             lambda request: (
                 httpx.Response(200, json=_metadata())
@@ -172,7 +172,7 @@ def test_six_concurrent_calls_lease_six_distinct_ready_endpoints() -> None:
         ),
     )
     client = CuratorModelClient(
-        "http://finepdfs:8094",
+        "http://quality:8094",
         client=base_client,
         profile="finepdfs",
         endpoint_resolver=lambda: endpoints,
@@ -182,7 +182,7 @@ def test_six_concurrent_calls_lease_six_distinct_ready_endpoints() -> None:
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = list(
             pool.map(
-                lambda index: client.quality("finepdfs-edu-v2", f"paper-{index}"),
+                lambda index: client.quality("source-pretrain-quality", f"paper-{index}"),
                 range(6),
             )
         )
@@ -221,7 +221,7 @@ def test_endpoint_churn_retries_same_payload_on_replacement_backend() -> None:
         return httpx.Client(base_url=endpoint, transport=httpx.MockTransport(handler))
 
     base_client = httpx.Client(
-        base_url="http://finepdfs:8094",
+        base_url="http://quality:8094",
         transport=httpx.MockTransport(
             lambda request: (
                 httpx.Response(200, json=_metadata())
@@ -231,14 +231,14 @@ def test_endpoint_churn_retries_same_payload_on_replacement_backend() -> None:
         ),
     )
     client = CuratorModelClient(
-        "http://finepdfs:8094",
+        "http://quality:8094",
         client=base_client,
         profile="finepdfs",
         endpoint_resolver=resolver,
         endpoint_client_factory=endpoint_factory,
     )
 
-    result = client.quality("finepdfs-edu-v2", "same paper")
+    result = client.quality("source-pretrain-quality", "same paper")
 
     assert result.edu_score == 4.5
     assert [backend for backend, _body in posted] == ["old", "new"]
@@ -261,7 +261,7 @@ def test_initial_partial_availability_uses_only_revision_matching_endpoint() -> 
                 if backend == "drifted":
                     quality = metadata["quality"]
                     assert isinstance(quality, dict)
-                    finepdfs = quality["finepdfs-edu-v2"]
+                    finepdfs = quality["source-pretrain-quality"]
                     assert isinstance(finepdfs, dict)
                     finepdfs["revision"] = "finepdfs@wrong"
                 return httpx.Response(200, json=metadata)
@@ -275,7 +275,7 @@ def test_initial_partial_availability_uses_only_revision_matching_endpoint() -> 
         return httpx.Client(base_url=endpoint, transport=httpx.MockTransport(handler))
 
     base_client = httpx.Client(
-        base_url="http://finepdfs:8094",
+        base_url="http://quality:8094",
         transport=httpx.MockTransport(
             lambda request: (
                 httpx.Response(200, json=_metadata())
@@ -285,7 +285,7 @@ def test_initial_partial_availability_uses_only_revision_matching_endpoint() -> 
         ),
     )
     client = CuratorModelClient(
-        "http://finepdfs:8094",
+        "http://quality:8094",
         client=base_client,
         profile="finepdfs",
         endpoint_resolver=lambda: [
@@ -296,7 +296,7 @@ def test_initial_partial_availability_uses_only_revision_matching_endpoint() -> 
         endpoint_client_factory=endpoint_factory,
     )
 
-    result = client.quality("finepdfs-edu-v2", "paper")
+    result = client.quality("source-pretrain-quality", "paper")
 
     assert result.revision == "finepdfs@pinned"
     assert inference_backends == ["ready"]

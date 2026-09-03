@@ -70,6 +70,63 @@ def test_index_upserts_current_rows_and_drives_cursor_queries(tmp_path) -> None:
     connection.close()
 
 
+def test_diagnostic_scores_survive_index_and_document_api(tmp_path) -> None:
+    path = tmp_path / "diagnostics.duckdb"
+    index = ServingIndex(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    connection = duckdb.connect(str(path))
+    gold = _gold(1).model_copy(
+        update={
+            "quality_diagnostics": {
+                "mode": "diagnostic",
+                "score": 3.25,
+                "confidence": 0.8,
+                "sections": [{"section_id": "section-1", "score": 3.25}],
+            }
+        }
+    )
+    index.apply_decision(connection, gold)
+    result = index.query_service().document(gold.doc_id)
+    assert result["quality_diagnostics"]["score"] == 3.25
+    assert result["quality_diagnostics"]["sections"][0]["text"] == "Complete training projection."
+    connection.close()
+
+
+def test_diagnostic_column_migrates_without_rebuilding_or_rotating_offsets(tmp_path) -> None:
+    path = tmp_path / "old-index.duckdb"
+    kwargs = dict(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    index = ServingIndex(**kwargs)
+    connection = duckdb.connect(str(path))
+    index.apply_decision(connection, _gold(1))
+    before = connection.execute(
+        "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"
+    ).fetchone()
+    connection.execute("DROP VIEW serving_gold")
+    connection.execute("DROP VIEW serving_decisions")
+    connection.execute("DROP INDEX serving_decision_key")
+    connection.execute("ALTER TABLE _serving_decision_records DROP COLUMN quality_diagnostics_json")
+    connection.execute(
+        "CREATE UNIQUE INDEX serving_decision_key ON _serving_decision_records (doc_id, scoring_version, classifier_revision, policy_revision)"
+    )
+    connection.close()
+    restarted = ServingIndex(**kwargs)
+    assert restarted.counts()["decisions"] == 1
+    connection = duckdb.connect(str(path))
+    assert (
+        before
+        == connection.execute(
+            "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"
+        ).fetchone()
+    )
+    assert connection.execute(
+        "SELECT quality_diagnostics_json FROM _serving_decision_records"
+    ).fetchone() == (None,)
+    connection.close()
+
+
 def test_index_batches_decisions_and_keeps_smallest_trace_for_iceberg_parity(
     tmp_path,
 ) -> None:

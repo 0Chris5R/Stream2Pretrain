@@ -524,7 +524,13 @@ class IcebergWriter:
             if not _is_missing_catalog_table(exc):
                 raise
         else:
-            _ensure_optional_columns(table, (("training_usage", StringType()),))
+            _ensure_optional_columns(
+                table,
+                (
+                    ("training_usage", StringType()),
+                    ("quality_diagnostics_json", StringType()),
+                ),
+            )
             return table
         # Bring up an empty namespace if it does not yet exist.
         with suppress(Exception):
@@ -647,6 +653,7 @@ class IcebergWriter:
             NestedField(82, "gopher_alpha_word_ratio", DoubleType(), required=True),
             NestedField(91, "classifier_backend", StringType(), required=True),
             NestedField(92, "training_usage", StringType(), required=False),
+            NestedField(93, "quality_diagnostics_json", StringType(), required=False),
         )
         partition_spec = PartitionSpec(
             PartitionField(source_id=3, field_id=1000, transform=IdentityTransform(), name="lang"),
@@ -687,6 +694,10 @@ class IcebergWriter:
             "reject_reasons": [list(r.reject_reasons) for r in rows],
             "scoring_version": [r.scoring_version for r in rows],
             "classifier_revision": [r.classifier_revision for r in rows],
+            "quality_diagnostics_json": [
+                orjson.dumps(r.quality_diagnostics).decode() if r.quality_diagnostics else None
+                for r in rows
+            ],
             "policy_revision": [r.policy_revision for r in rows],
             "snapshot_id": [r.snapshot_id for r in rows],
             "trace_id": [r.trace_id for r in rows],
@@ -771,6 +782,7 @@ class IcebergWriter:
                 pa.field("reject_reasons", pa.list_(pa.string()), nullable=True),
                 pa.field("scoring_version", pa.string(), nullable=False),
                 pa.field("classifier_revision", pa.string(), nullable=False),
+                pa.field("quality_diagnostics_json", pa.string(), nullable=True),
                 pa.field("policy_revision", pa.string(), nullable=False),
                 pa.field("snapshot_id", pa.int64(), nullable=True),
                 pa.field("trace_id", pa.string(), nullable=False),

@@ -47,7 +47,7 @@ spec:
               import urllib.request
 
               urls = [
-                  "http://{{ printf "%s-processor-model-service-finepdfs" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
+                  "http://{{ printf "%s-processor-model-service-quality" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
                   "http://{{ printf "%s-processor-model-service-kenlm" (include "stream2pretrain.fullname" .) }}:{{ .Values.processor.modelService.port }}/readyz",
               ]
               deadline = time.monotonic() + 900
@@ -121,10 +121,10 @@ spec:
             - name: S2P_MODELS_DIR
               value: {{ ternary "/models" "/opt/models" $externalModels | quote }}
             {{- if and .Values.processor.modelService.enabled (not $externalModels) }}
-            - name: S2P_FINEPDFS_MODEL_SERVICE_URL
-              value: {{ printf "http://%s-processor-model-service-finepdfs:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
-            - name: S2P_FINEPDFS_MODEL_SERVICE_DISCOVERY_HOST
-              value: {{ printf "%s-processor-model-service-finepdfs-headless" (include "stream2pretrain.fullname" .) | trunc 63 | trimSuffix "-" | quote }}
+            - name: S2P_QUALITY_MODEL_SERVICE_URL
+              value: {{ printf "http://%s-processor-model-service-quality:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
+            - name: S2P_QUALITY_MODEL_SERVICE_DISCOVERY_HOST
+              value: {{ printf "%s-processor-model-service-quality-headless" (include "stream2pretrain.fullname" .) | trunc 63 | trimSuffix "-" | quote }}
             - name: S2P_KENLM_MODEL_SERVICE_URL
               value: {{ printf "http://%s-processor-model-service-kenlm:%d" (include "stream2pretrain.fullname" .) (int .Values.processor.modelService.port) | quote }}
             - name: S2P_KENLM_MODEL_SERVICE_DISCOVERY_HOST
@@ -134,8 +134,6 @@ spec:
               value: {{ ternary "1" "0" .Values.processor.curate.requireRealModels | quote }}
             - name: S2P_SCORING_VERSION
               value: {{ .Values.processor.curate.scoringVersion | quote }}
-            - name: S2P_FINEPDFS_EDU_REVISION
-              value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.curate.doclingEnabled | quote }}
             - name: S2P_USE_PRESIDIO

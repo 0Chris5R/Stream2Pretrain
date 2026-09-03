@@ -332,7 +332,9 @@ function DocumentTable({
 function DocumentPanel({ document }: { document: DocumentDetail }) {
   if (document.admission_only) return <AdmissionOnlyPanel document={document} />;
   const artifact = document.scientific_artifact;
-  const classifier = document.classifier_revision.includes('finepdfs')
+  const classifier = document.quality_diagnostics
+    ? (document.source_feed === 'arxiv-html-fetcher' ? 'arXiv quality' : 'HF quality')
+    : document.classifier_revision.includes('finepdfs')
     ? 'FinePDFs Edu v2'
     : document.classifier_revision.startsWith('not-run:')
       ? 'Not run'
@@ -347,6 +349,7 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
               <div className="mb-2 flex flex-wrap gap-2">
                 <RouteBadge route={document.route} />
                 <Badge variant="outline">{document.source_format.toUpperCase()}</Badge>
+                {document.quality_diagnostics ? <Badge variant="outline">Diagnostic scoring</Badge> : null}
               </div>
               <h2 className="text-xl font-semibold leading-tight">
                 {artifact?.title ?? document.title}
@@ -365,6 +368,9 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
             <Score label="Composite" value={document.quality_score.toFixed(2)} />
             <Score label="Reasoning evidence" value={percent(document.reasoning_score)} />
           </div>
+          {document.quality_diagnostics?.confidence != null ? (
+            <div className="text-sm">Model confidence {percent(document.quality_diagnostics.confidence)}</div>
+          ) : null}
           <div className="flex flex-wrap gap-1.5">
             {document.content_tags.map((tag) => (
               <Badge key={tag} variant="secondary">
@@ -382,7 +388,7 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
             <TabsTrigger value="assets">Assets</TabsTrigger>
           </TabsList>
           <TabsContent value="sections" className="mt-4">
-            <SectionView document={document} />
+            {document.quality_diagnostics ? <ClassifierSections document={document} /> : <SectionView document={document} />}
           </TabsContent>
           <TabsContent value="projection" className="mt-4">
             <ProjectionView document={document} />
@@ -401,6 +407,26 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
       </CardContent>
     </Card>
   );
+}
+
+function ClassifierSections({ document }: { document: CuratedDocumentDetail }) {
+  return <div className="space-y-2">
+    {document.quality_diagnostics?.sections.map((section) => (
+      <details key={section.section_id} className="rounded-lg border">
+        <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5">
+          <span className="min-w-0 font-medium">{section.title}</span>
+          <span className="flex shrink-0 gap-2">
+            <Badge variant="outline">{section.score.toFixed(2)} / 5</Badge>
+            {section.confidence != null ? <Badge variant="secondary">{percent(section.confidence)}</Badge> : null}
+          </span>
+        </summary>
+        <div className="space-y-3 border-t px-3 py-3 text-sm">
+          <div className="text-muted-foreground">{humanize(section.section_type)} · {formatInt(section.tokens)} tokens · {section.chunks} chunks</div>
+          <p className="whitespace-pre-wrap leading-relaxed">{section.text}</p>
+        </div>
+      </details>
+    ))}
+  </div>;
 }
 
 function AdmissionOnlyPanel({

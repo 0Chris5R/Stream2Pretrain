@@ -23,7 +23,7 @@ SourceFamily = Literal[
     "discovery_metadata",
 ]
 QualityProfile = Literal[
-    "finepdfs_edu_v2",
+    "source_modernbert",
     "not_applicable",
 ]
 KenlmMode = Literal["gate", "diagnostic", "off"]
@@ -44,52 +44,52 @@ class SourceProcessingPolicy:
 
 
 SCIENTIFIC_PAPER = SourceProcessingPolicy(
-    policy_id="scientific-finepdfs-v2",
+    policy_id="scientific-source-modernbert-diagnostic",
     family="scientific_paper",
     extraction_profile="scientific-structured",
-    quality_profile="finepdfs_edu_v2",
+    quality_profile="source_modernbert",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=False,
     # The English Wikipedia KenLM is out of domain for equations and dense
-    # research prose. Scientific quality is decided by FinePDFs and structure.
+    # research prose. Scientific quality is decided by source-specific ModernBERT and structure.
     kenlm_mode="off",
 )
 WEB_PROSE = SourceProcessingPolicy(
-    policy_id="web-finepdfs-v2",
+    policy_id="web-source-modernbert-diagnostic",
     family="web_prose",
     extraction_profile="resiliparse-main-content",
-    quality_profile="finepdfs_edu_v2",
+    quality_profile="source_modernbert",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=True,
     kenlm_mode="gate",
 )
 TECHNICAL_DOCUMENTATION = SourceProcessingPolicy(
-    policy_id="technical-docs-finepdfs-v2",
+    policy_id="technical-docs-source-modernbert-diagnostic",
     family="web_prose",
     extraction_profile="markdown-prose",
-    quality_profile="finepdfs_edu_v2",
+    quality_profile="source_modernbert",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=False,
     kenlm_mode="off",
 )
 HF_MODEL_CARD = SourceProcessingPolicy(
-    policy_id="hf-model-card-finepdfs-v2",
+    policy_id="hf-model-card-source-modernbert-diagnostic",
     family="hf_model_card",
     extraction_profile="hf-card-markdown-prose",
-    quality_profile="finepdfs_edu_v2",
+    quality_profile="source_modernbert",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=False,
     kenlm_mode="off",
 )
 HF_DATASET_CARD = SourceProcessingPolicy(
-    policy_id="hf-dataset-card-finepdfs-v2",
+    policy_id="hf-dataset-card-source-modernbert-diagnostic",
     family="hf_dataset_card",
     extraction_profile="hf-card-markdown-prose",
-    quality_profile="finepdfs_edu_v2",
+    quality_profile="source_modernbert",
     training_text=True,
     language_gate=True,
     web_heuristic_gate=False,
@@ -134,7 +134,7 @@ def resolve_source_policy(
     if "hf-dataset-card" in pipeline or feed == "hf-datasets":
         return HF_DATASET_CARD
     # The synthetic cluster canary is technical documentation, not randomly
-    # crawled web prose. It exercises the same FinePDFs service through the
+    # crawled web prose. It exercises the same source-specific ModernBERT service through the
     # documentation policy, where the score remains an audit signal.
     if feed == "cluster-smoke":
         return TECHNICAL_DOCUMENTATION

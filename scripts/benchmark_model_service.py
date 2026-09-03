@@ -91,7 +91,7 @@ def main() -> None:
                 f"{endpoint}/v1/quality",
                 payload={
                     "model_family": args.model_family,
-                    "text": f"Direct classifier endpoint probe for {endpoint}.",
+                    "text": f"[SOURCE=arxiv] [SECTION_TYPE=methods] [SECTION_TITLE=Methods]\nDirect classifier endpoint probe for {endpoint}.",
                 },
             )
             if str(result.get("revision", "")) != expected_revision:
@@ -116,7 +116,7 @@ def main() -> None:
             f"{base_url}/v1/quality",
             payload={
                 "model_family": args.model_family,
-                "text": f"Scientific classifier distribution probe {index}.",
+                "text": f"[SOURCE={'arxiv' if index % 2 == 0 else 'hf'}] [SECTION_TYPE=methods] [SECTION_TITLE=Methods]\nScientific classifier distribution probe {index}.",
             },
         )
         if str(result.get("revision", "")) != expected_revision:
@@ -160,8 +160,8 @@ def main() -> None:
         )
 
     texts = [
-        "A controlled scientific explanation with one result.",
-        "A reproducible implementation documents its evaluation protocol.",
+        "[SOURCE=arxiv] [SECTION_TYPE=results] [SECTION_TITLE=Results]\nA controlled scientific explanation with one result.",
+        "[SOURCE=hf] [SECTION_TYPE=evaluation] [SECTION_TITLE=Evaluation]\nA reproducible implementation documents its evaluation protocol.",
     ]
     batch, batch_backend = _request(
         opener,

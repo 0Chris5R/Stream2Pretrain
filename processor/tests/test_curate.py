@@ -65,7 +65,7 @@ class _SplitModelClient:
             self.metadata = {
                 "ready": True,
                 "quality": {
-                    "finepdfs-edu-v2": {
+                    "source-pretrain-quality": {
                         "backend": "transformers-cpu",
                         "revision": "finepdfs@pinned",
                     },
@@ -370,7 +370,7 @@ def test_document_micro_batch_fills_finepdfs_without_skipping_eligible_segments(
     monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "12")
     state = build_state(cfg)
     finepdfs = _BatchQualityScorer()
-    state.finepdfs_quality = finepdfs
+    state.source_quality = finepdfs
     state.kenlm = _BatchKenLM()
     documents = []
     expected_texts = []
@@ -408,12 +408,15 @@ def test_document_micro_batch_fills_finepdfs_without_skipping_eligible_segments(
         assert all(outcome.error is None for outcome in outcomes)
         assert sorted(len(batch) for batch in finepdfs.batches) == [2] * 6
         assert sorted(text for batch in finepdfs.batches for text in batch) == sorted(
-            expected_texts
+            [
+                f"[SOURCE=hf] [SECTION_TYPE=summary] [SECTION_TITLE=Model description]\n{text}"
+                for text in expected_texts
+            ]
         )
         for outcome in outcomes:
             assert outcome.value is not None
             gold = common.gold_loads(outcome.value[0])
-            assert gold.segment_scores[0].finepdfs_edu_score == 5.0
+            assert gold.quality_diagnostics["sections"][0]["score"] == 5.0
     finally:
         state.close()
 
@@ -425,7 +428,7 @@ def test_hf_card_deterministic_reject_skips_finepdfs_inference(
     monkeypatch.setenv("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2")
     state = build_state(cfg)
     finepdfs = _BatchQualityScorer()
-    state.finepdfs_quality = finepdfs
+    state.source_quality = finepdfs
     rejected_text = "This is a model card. More information needed. " * 20
     rejected = _silver(rejected_text).model_copy(
         update={
@@ -462,7 +465,7 @@ def test_known_near_duplicate_skips_finepdfs_before_durable_rejection(
 ) -> None:
     state = build_state(cfg)
     finepdfs = _BatchQualityScorer()
-    state.finepdfs_quality = finepdfs
+    state.source_quality = finepdfs
     first = _silver(long_english_text, doc_id="sha256:" + "a" * 64)
     duplicate = _silver(long_english_text, doc_id="sha256:" + "b" * 64)
     try:
@@ -504,7 +507,7 @@ def test_independent_model_services_are_all_required_and_closed(
 ) -> None:
     monkeypatch.delenv("S2P_MODEL_SERVICE_URL", raising=False)
     monkeypatch.delenv("S2P_QUALITY_MODEL_SERVICE_URL", raising=False)
-    monkeypatch.setenv("S2P_FINEPDFS_MODEL_SERVICE_URL", "http://finepdfs")
+    monkeypatch.setenv("S2P_QUALITY_MODEL_SERVICE_URL", "http://quality")
     monkeypatch.setenv("S2P_KENLM_MODEL_SERVICE_URL", "http://kenlm")
     monkeypatch.setattr("processor.curate.CuratorModelClient", _SplitModelClient)
     _SplitModelClient.closed.clear()
@@ -513,7 +516,7 @@ def test_independent_model_services_are_all_required_and_closed(
     assert len(state.model_clients) == 2
     state.close()
     assert set(_SplitModelClient.closed) == {
-        "http://finepdfs",
+        "http://quality",
         "http://kenlm",
     }
 
@@ -547,7 +550,7 @@ def test_cluster_smoke_observes_but_does_not_gate_on_finepdfs_score(
 ) -> None:
     state = build_state(cfg)
     try:
-        state.finepdfs_quality = _LowQualityScorer()
+        state.source_quality = _LowQualityScorer()
         silver = _silver(long_english_text).model_copy(
             update={
                 "source_feed": "cluster-smoke",
@@ -558,7 +561,7 @@ def test_cluster_smoke_observes_but_does_not_gate_on_finepdfs_score(
 
         gold = curate_one(state, silver)
 
-        assert gold.segment_scores[0].finepdfs_edu_score == 1.0
+        assert gold.quality_diagnostics["score"] == 1.0
         assert "low_quality_score" not in gold.reject_reasons
         assert is_trainable_gold(gold)
     finally:

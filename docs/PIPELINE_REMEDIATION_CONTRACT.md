@@ -79,8 +79,10 @@ Distinct policies are required for the active content families:
 - scientific papers;
 - model and dataset cards.
 
-FinePDFs Edu v2 is the sole learned quality model for eligible papers and
-Hugging Face card prose. Code and structured metadata never enter that model.
+The 2026-09-03 source-specific ModernBERT pilot replaces FinePDFs for eligible
+papers and Hugging Face card prose, as specified in `SOURCE_CLASSIFIER_PILOT.md`.
+Learned scores are diagnostic until approved. Code and discovery metadata do
+not enter these models.
 Every profile retains the shared privacy,
 deduplication, provenance, and audit contracts where those
 operations are meaningful.

@@ -38,6 +38,8 @@ def _decision_values(record: GoldRecord) -> dict[str, Any]:
             for score in scores
         ]
     ).decode("utf-8")
+    diagnostics = row.pop("quality_diagnostics", None)
+    row["quality_diagnostics_json"] = orjson.dumps(diagnostics).decode() if diagnostics else None
     return row
 
 
@@ -317,6 +319,26 @@ class ServingIndex:
                 finally:
                     connection.execute("DROP VIEW IF EXISTS _serving_history_decisions")
                     connection.execute("DROP VIEW IF EXISTS _serving_history_admissions")
+            # Add only the new nullable column. DuckDB requires dependent
+            # indexes/views to be detached during ALTER; the transaction keeps
+            # rows and the Kafka instance identity intact even if it fails.
+            if "quality_diagnostics_json" not in self._columns(connection, _DECISION_TABLE):
+                connection.execute("BEGIN TRANSACTION")
+                try:
+                    connection.execute("DROP VIEW IF EXISTS serving_gold")
+                    connection.execute("DROP VIEW IF EXISTS serving_decisions")
+                    connection.execute("DROP INDEX IF EXISTS serving_decision_key")
+                    connection.execute(
+                        f"ALTER TABLE {_DECISION_TABLE} ADD COLUMN quality_diagnostics_json VARCHAR"
+                    )
+                    connection.execute(
+                        f"CREATE UNIQUE INDEX serving_decision_key ON {_DECISION_TABLE} "
+                        "(doc_id, scoring_version, classifier_revision, policy_revision)"
+                    )
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
             connection.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS serving_decision_key ON {_DECISION_TABLE} "
                 "(doc_id, scoring_version, classifier_revision, policy_revision)"
@@ -366,6 +388,8 @@ class ServingIndex:
                 projections.append(f'"{column}"')
             elif column == "segment_scores_json" and "segment_scores" in source_columns:
                 projections.append('CAST(TO_JSON("segment_scores") AS VARCHAR)')
+            elif column == "quality_diagnostics_json":
+                projections.append("CAST(NULL AS VARCHAR)")
             else:
                 raise RuntimeError(
                     f"authoritative {source} is missing serving-index column {column}"

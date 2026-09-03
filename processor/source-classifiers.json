@@ -1,0 +1,21 @@
+{
+  "version": "source-modernbert-2026-09-03",
+  "models": {
+    "arxiv-pretrain-quality": {
+      "url": "https://github.com/0Chris5R/Stream2Pretrain/releases/download/source-classifiers-2026-09-03/arxiv-pretrain-quality.tar",
+      "archive_sha256": "8c5613d22eea051627b2668a3be42fc4292789d7654c5a87fcd360f06a0caf96",
+      "weights_sha256": "3b57c108cde77a0ba94641b6a3578d7ae2ba80445f4ffd2f7c0b8674c9ad5a5e",
+      "revision": "arxiv-pretrain-quality@sha256:3b57c108cde77a0ba94641b6a3578d7ae2ba80445f4ffd2f7c0b8674c9ad5a5e",
+      "base_model": "answerdotai/ModernBERT-base",
+      "base_revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8"
+    },
+    "hf-pretrain-quality": {
+      "url": "https://github.com/0Chris5R/Stream2Pretrain/releases/download/source-classifiers-2026-09-03/hf-pretrain-quality.tar",
+      "archive_sha256": "605b516dc36a7d39e1774f9a32a9f13bbb8aa0542eb8984a6defad821606f2ae",
+      "weights_sha256": "a52f0fc2fb9025356a858b35c44009613d2cb19a6baf63404f6ca842ea1df802",
+      "revision": "hf-pretrain-quality@sha256:a52f0fc2fb9025356a858b35c44009613d2cb19a6baf63404f6ca842ea1df802",
+      "base_model": "answerdotai/ModernBERT-base",
+      "base_revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8"
+    }
+  }
+}

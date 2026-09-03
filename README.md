@@ -118,12 +118,12 @@ The fetcher turns raw bytes into normalized document records. It extracts readab
 Quality is source-aware:
 
 - Scientific HTML, PDF, LaTeX, and eligible Hugging Face card prose use the
-  FinePDFs Edu v2 profile.
+  source-specific ModernBERT quality profile, initially diagnostic only.
 - Hugging Face cards use a Markdown prose projection and deterministic card
   gate before any learned-model inference.
 - RSS, OAI, and Hub-list envelopes are internal discovery messages and never become training text or UI corpus rows.
 
-The DHBW chart fails closed on missing models. FinePDFs and KenLM
+The DHBW chart fails closed on missing models. Source-quality classifiers and KenLM
 run from pinned immutable images behind independently scalable stateless
 inference services; Presidio, MinHash, and tokenization stay with the
 lightweight stateful curator. Every row records its classifier revision and

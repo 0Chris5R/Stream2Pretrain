@@ -73,8 +73,6 @@ spec:
               value: {{ $root.Values.processor.modelService.port | quote }}
             - name: S2P_MODEL_SERVICE_MAX_BATCH_ITEMS
               value: {{ $root.Values.processor.modelService.maxBatchItems | int | quote }}
-            - name: S2P_FINEPDFS_EDU_REVISION
-              value: "finepdfs-edu-v2@90ddef285f67230389057c14b2f6bbfeb70d40ea"
           startupProbe:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 10

@@ -1,0 +1,18 @@
+# Reuse only the pinned Python environment, never the previous model layers.
+# This keeps every unrelated fetcher/KenLM base unchanged for this rollout.
+FROM ghcr.io/0chris5r/stream2pretrain/processor-base-quality@sha256:da48498ee5a29370e2a6cd790c9e8b57bdd62d80fcaf415de2815072543a8483 AS dependencies
+FROM python:3.11-slim AS runtime-base
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app \
+    PATH="/src/.venv/bin:${PATH}" S2P_MODELS_DIR=/opt/models \
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+RUN groupadd --system --gid 65532 nonroot \
+ && useradd --system --uid 65532 --gid 65532 --home /home/nonroot --create-home nonroot \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=dependencies /src/.venv /src/.venv
+COPY processor/source-classifiers.json /opt/models/source-classifiers.json
+COPY scripts/download_source_classifiers.py /tmp/download_source_classifiers.py
+RUN python /tmp/download_source_classifiers.py /opt/models/source-classifiers.json /opt/models \
+ && rm /tmp/download_source_classifiers.py
+WORKDIR /app

@@ -115,9 +115,11 @@ class GoldRecord(BaseModel):
         ...,
         ge=0.0,
         le=5.0,
-        description=(
-            "FinePDFs Edu v2 educational-quality output for every trainable source family."
-        ),
+        description=("Source-specific learned pretraining quality, 0-5; diagnostic during pilot."),
+    )
+    quality_diagnostics: dict[str, object] | None = Field(
+        default=None,
+        description="Exact section scores, confidence, model digest and diagnostic-only mode.",
     )
     structural_quality_score: float = Field(default=0.0, ge=0.0, le=5.0)
     extraction_completeness: float = Field(default=0.0, ge=0.0, le=1.0)

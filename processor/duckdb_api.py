@@ -1169,6 +1169,7 @@ class DuckDBQueryService:
           structural_quality_score, extraction_completeness, reasoning_score,
           route, eligible_routes, route_reasons, content_tags,
           segment_scores_json, projection_version, source_word_count,
+          json_extract_string(to_json(latest_decisions), '$.quality_diagnostics_json') AS quality_diagnostics_json,
           training_word_count, included_section_count, excluded_section_count,
           excluded_sections, metadata_pii_flags, removed_body_pii_flags,
           pii_action, pii_scanner_revision, lang_detector_revision,
@@ -1269,6 +1270,20 @@ class DuckDBQueryService:
             row["segment_scores"] = parsed_scores if isinstance(parsed_scores, list) else []
         except Exception:
             row["segment_scores"] = []
+        try:
+            diagnostics = orjson.loads(row.pop("quality_diagnostics_json", None) or "null")
+            row["quality_diagnostics"] = diagnostics
+            if isinstance(diagnostics, dict):
+                from processor.operators.classifier_input import parse_sections
+
+                _, sections = parse_sections(str(row["text"]), source=str(row["source_feed"]))
+                by_id = {section.section_id: section for section in sections}
+                for score in diagnostics.get("sections", []):
+                    section = by_id.get(score["section_id"])
+                    if section is not None:
+                        score["text"] = section.text
+        except (ValueError, TypeError, KeyError):
+            row["quality_diagnostics"] = None
         uri = row.get("scientific_artifact_s3_uri")
         row["scientific_artifact"] = (
             self._artifact_store.read_json(str(uri))
@@ -1600,6 +1615,7 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           , CAST([] AS VARCHAR[]) AS route_reasons
           , CAST([] AS VARCHAR[]) AS content_tags
           , CAST('[]' AS VARCHAR) AS segment_scores_json
+          , CAST(NULL AS VARCHAR) AS quality_diagnostics_json
           , CAST('document-v1' AS VARCHAR) AS projection_version
           , CAST(0 AS INTEGER) AS source_word_count
           , CAST(0 AS INTEGER) AS training_word_count

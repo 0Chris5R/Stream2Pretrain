@@ -45,6 +45,7 @@ from processor.model_client import (
     headless_endpoint_resolver,
 )
 from processor.operators.c4 import C4Filter
+from processor.operators.classifier_input import model_input, parse_sections
 from processor.operators.gopher import GopherFilter
 from processor.operators.hf_card_quality import assess_hf_card, is_hf_placeholder_section
 from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
@@ -53,6 +54,7 @@ from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiSanitization, PiiScanner
 from processor.operators.quality import QualityClassifier, QualityScore
 from processor.operators.scientific_document_quality import is_publication_template
+from processor.operators.source_classifiers import SourceQualityClassifier
 from processor.operators.source_quality import (
     MetadataDiscoveryPolicy,
 )
@@ -116,7 +118,7 @@ class CurateState:
     kenlm: PerplexityScorer
     minhasher: MinHasher
     lsh: LSHBloomIndex
-    finepdfs_quality: QualityScorer
+    source_quality: QualityScorer
     metadata_discovery: MetadataDiscoveryPolicy
     pii: PiiSanitizer
     tokenizer: Tokenizer
@@ -228,34 +230,26 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     require_real_models = os.environ.get("S2P_REQUIRE_REAL_MODELS") == "1"
     model_service_url = os.environ.get("S2P_MODEL_SERVICE_URL", "").strip()
     quality_service_url = os.environ.get("S2P_QUALITY_MODEL_SERVICE_URL", "").strip()
-    finepdfs_service_url = os.environ.get("S2P_FINEPDFS_MODEL_SERVICE_URL", "").strip()
     kenlm_service_url = os.environ.get("S2P_KENLM_MODEL_SERVICE_URL", "").strip()
-    finepdfs_discovery_host = os.environ.get(
-        "S2P_FINEPDFS_MODEL_SERVICE_DISCOVERY_HOST", ""
-    ).strip()
+    quality_discovery_host = os.environ.get("S2P_QUALITY_MODEL_SERVICE_DISCOVERY_HOST", "").strip()
     kenlm_discovery_host = os.environ.get("S2P_KENLM_MODEL_SERVICE_DISCOVERY_HOST", "").strip()
     kenlm_path = os.path.join(models, "kenlm", "en.arpa.bin")
     kenlm_sentencepiece_path = os.path.join(models, "kenlm", "en.sp.model")
-    finepdfs_quality_dir = os.path.join(models, "finepdfs-edu-v2")
     model_clients: tuple[CuratorModelClient, ...] = ()
     kenlm: PerplexityScorer
-    finepdfs_quality: QualityScorer
+    source_quality: QualityScorer
     if model_service_url:
         model_client = CuratorModelClient(model_service_url)
         kenlm = RemoteKenLMScorer(model_client)
-        finepdfs_quality = RemoteQualityClassifier(model_client, "finepdfs-edu-v2")
+        source_quality = RemoteQualityClassifier(model_client, "source-pretrain-quality")
         model_clients = (model_client,)
     elif any(
         (
             quality_service_url,
-            finepdfs_service_url,
             kenlm_service_url,
         )
     ):
-        # A combined quality URL remains a local option. Production supplies
-        # a dedicated FinePDFs service and a dedicated KenLM service.
-        resolved_finepdfs_url = finepdfs_service_url or quality_service_url
-        if not all((resolved_finepdfs_url, kenlm_service_url)):
+        if not all((quality_service_url, kenlm_service_url)):
             raise RuntimeError("all split curator model service URLs are required")
 
         def split_model_client(url: str, profile: str, discovery_host: str) -> CuratorModelClient:
@@ -267,10 +261,10 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
                 endpoint_resolver=headless_endpoint_resolver(url, discovery_host),
             )
 
-        finepdfs_client = split_model_client(
-            resolved_finepdfs_url,
-            "finepdfs",
-            finepdfs_discovery_host,
+        quality_client = split_model_client(
+            quality_service_url,
+            "quality",
+            quality_discovery_host,
         )
         kenlm_client = split_model_client(
             kenlm_service_url,
@@ -278,19 +272,19 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             kenlm_discovery_host,
         )
         kenlm = RemoteKenLMScorer(kenlm_client)
-        finepdfs_quality = RemoteQualityClassifier(finepdfs_client, "finepdfs-edu-v2")
-        model_clients = tuple(dict.fromkeys((finepdfs_client, kenlm_client)))
+        source_quality = RemoteQualityClassifier(quality_client, "source-pretrain-quality")
+        model_clients = tuple(dict.fromkeys((quality_client, kenlm_client)))
     else:
         kenlm = KenLMScorer(
             kenlm_path if os.path.isfile(kenlm_path) else None,
             kenlm_sentencepiece_path if os.path.isfile(kenlm_sentencepiece_path) else None,
             allow_fallback=not require_real_models,
         )
-        finepdfs_quality = QualityClassifier(
-            finepdfs_quality_dir if os.path.isdir(finepdfs_quality_dir) else None,
-            revision=os.environ.get("S2P_FINEPDFS_EDU_REVISION"),
-            model_family="finepdfs-edu-v2",
-            allow_fallback=not require_real_models,
+        source_quality = (
+            SourceQualityClassifier(models)
+            if require_real_models
+            or os.path.isfile(os.path.join(models, "source-classifiers.json"))
+            else QualityClassifier(None)
         )
     pii = PiiScanner(allow_fallback=not require_real_models)
     scoring_version = os.environ.get(SCORING_VERSION_ENV, CONTENT_POLICY_GENERATION)
@@ -310,7 +304,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         kenlm=kenlm,
         minhasher=minhasher,
         lsh=lsh,
-        finepdfs_quality=finepdfs_quality,
+        source_quality=source_quality,
         metadata_discovery=MetadataDiscoveryPolicy(),
         pii=pii,
         tokenizer=Tokenizer(allow_fallback=not require_real_models),
@@ -327,7 +321,7 @@ def _decision_cache_key(state: CurateState, payload: bytes) -> str:
         (
             state.policy_revision,
             state.scoring_version,
-            state.finepdfs_quality.revision,
+            state.source_quality.revision,
             state.metadata_discovery.revision,
             state.kenlm.scorer,
             state.pii.revision,
@@ -555,6 +549,52 @@ def _score_perplexity_texts(
     return {text: scorer.score(text) for text in _unique_texts(texts)}
 
 
+def _source_quality_report(
+    scorer: QualityScorer,
+    silver: SilverRecord,
+    text: str,
+) -> dict[str, object]:
+    """Preserve the training/evaluation aggregation, including overflow weighting."""
+    _, sections = parse_sections(text, source=silver.source_feed)
+    inputs = [model_input(section, source=silver.source_feed) for section in sections]
+    results = _score_quality_texts(scorer, inputs)
+    rows: list[dict[str, Any]] = []
+    for section, value in zip(sections, inputs, strict=True):
+        result = results[value]
+        rows.append(
+            {
+                "section_id": section.section_id,
+                "title": section.title,
+                "section_type": section.section_type,
+                "text_sha256": hashlib.sha256(section.text.encode()).hexdigest(),
+                "score": result.edu_score,
+                "confidence": result.confidence,
+                "class": result.score_class,
+                "probabilities": list(result.probabilities),
+                "tokens": result.tokens or max(1, len(section.text.split())),
+                "chunks": result.chunks,
+                "model_revision": result.model_revision or result.revision,
+            }
+        )
+    total = sum(row["tokens"] for row in rows)
+    score = sum(row["score"] * row["tokens"] for row in rows) / total if total else 0.0
+    confidence = (
+        sum(row["confidence"] * row["tokens"] for row in rows) / total
+        if rows and all(row["confidence"] is not None for row in rows)
+        else None
+    )
+    return {
+        "mode": "diagnostic",
+        "score": score,
+        "confidence": confidence,
+        "class": max(0, min(5, round(score))),
+        "aggregation": "token_weighted_mean",
+        "input_contract": "stream2pretrain-section-labels-v1",
+        "model_revision": rows[0]["model_revision"] if rows else scorer.revision,
+        "sections": rows,
+    }
+
+
 def _prefetched_curate_state(
     state: CurateState,
     silvers: Sequence[SilverRecord],
@@ -568,7 +608,7 @@ def _prefetched_curate_state(
     as :func:`curate_one` finalizes ordered LSH mutations.
     """
     pii = _MemoizedPiiSanitizer(state.pii)
-    finepdfs_texts: list[str] = []
+    quality_texts: list[str] = []
     kenlm_texts: list[str] = []
     quality_skips: set[str] = set()
     for silver in silvers:
@@ -599,28 +639,31 @@ def _prefetched_curate_state(
         if hard_rejected or near_duplicate:
             quality_skips.add(silver.doc_id)
         else:
-            finepdfs_texts.extend(segment.text for segment in safe_segments)
+            _, sections = parse_sections(training_text, source=silver.source_feed)
+            quality_texts.extend(
+                model_input(section, source=silver.source_feed) for section in sections
+            )
         for safe_segment in safe_segments:
             if policy.kenlm_mode != "off":
                 kenlm_texts.append(safe_segment.text)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        finepdfs_future = executor.submit(
+        quality_future = executor.submit(
             _score_quality_texts,
-            state.finepdfs_quality,
-            finepdfs_texts,
+            state.source_quality,
+            quality_texts,
         )
         kenlm_future = executor.submit(
             _score_perplexity_texts,
             state.kenlm,
             kenlm_texts,
         )
-        finepdfs_scores = finepdfs_future.result()
+        quality_scores = quality_future.result()
         kenlm_scores = kenlm_future.result()
 
     return replace(
         state,
-        finepdfs_quality=_PrefetchedQualityScorer(state.finepdfs_quality, finepdfs_scores),
+        source_quality=_PrefetchedQualityScorer(state.source_quality, quality_scores),
         kenlm=_PrefetchedPerplexityScorer(state.kenlm, kenlm_scores),
         pii=pii,
         prefetched_quality_skips=frozenset(quality_skips),
@@ -661,7 +704,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         safe_segments=safe_segments,
     )
     quality_scorer = (
-        state.finepdfs_quality
+        state.source_quality
         if source_policy.training_text
         and not hard_rejected_before_quality
         and silver.doc_id not in state.prefetched_quality_skips
@@ -669,7 +712,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     )
     model_signals = _score_segment_models(
         safe_segments,
-        quality=quality_scorer,
+        quality=None,
         kenlm=state.kenlm,
         use_kenlm=source_policy.kenlm_mode != "off",
     )
@@ -749,6 +792,11 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     blocking_artifact_pii.extend(structured_audit_pii_flags)
     runtime_excluded.extend(structured_exclusions)
     text = _training_projection(silver, kept_segments, structured_text=structured_text)
+    # Score exactly the retained pretraining projection, including its
+    # structured surrogates, with the same section parser as the label set.
+    quality_diagnostics = (
+        _source_quality_report(quality_scorer, silver, text) if quality_scorer is not None else None
+    )
     reject: list[RejectReason] = []
     minimum_words = 50
     if is_metadata:
@@ -788,6 +836,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         reject.append("c4_nopunc_filter")
 
     edu_score, perplexity, perplexity_bucket = aggregate_segment_scores(segment_scores)
+    edu_score = float(quality_diagnostics["score"]) if quality_diagnostics else 0.0
     measured_buckets = [
         score.perplexity_bucket
         for score in segment_scores
@@ -808,7 +857,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             "included_section_count": len(kept_segments),
         }
     )
-    structure = source_scores(retained_view, quality_score=edu_score)
+    structure = source_scores(retained_view, quality_score=edu_score, quality_applicable=False)
     hf_assessment = (
         assess_hf_card(
             kind="model" if source_policy.family == "hf_model_card" else "dataset",
@@ -829,6 +878,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         language_applicable=source_policy.language_gate,
         web_heuristics_applicable=source_policy.web_heuristic_gate,
         perplexity_applicable=source_policy.kenlm_mode != "off",
+        quality_applicable=False,
     )
     if hf_assessment is not None and not hf_assessment.accepted:
         reject.append("hf_card_quality_filter")
@@ -936,6 +986,7 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         tokens=token_count.tokens,
         quality_score=quality_score,
         edu_score=edu_score,
+        quality_diagnostics=quality_diagnostics,
         structural_quality_score=structure.structural_quality_score,
         extraction_completeness=structure.extraction_completeness,
         reasoning_score=structure.reasoning_score,
@@ -995,12 +1046,12 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         reject_reasons=reject,
         scoring_version=state.scoring_version,
         classifier_revision=(
-            state.finepdfs_quality.revision
-            if quality_scorer is not None
+            str(quality_diagnostics["model_revision"])
+            if quality_diagnostics is not None
             else "not-run:deterministic-reject"
         ),
         classifier_backend=(
-            state.finepdfs_quality.backend
+            state.source_quality.backend
             if quality_scorer is not None
             else "not-run:deterministic-reject"
         ),
