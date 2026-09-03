@@ -320,14 +320,14 @@ class ServingIndex:
                     connection.execute("DROP VIEW IF EXISTS _serving_history_decisions")
                     connection.execute("DROP VIEW IF EXISTS _serving_history_admissions")
             # Add only the new nullable column. DuckDB requires dependent
-            # indexes/views to be detached during ALTER; the transaction keeps
-            # rows and the Kafka instance identity intact even if it fails.
+            # indexes/views to be detached before the ALTER transaction.
+            # Rows and Kafka instance identity are never rebuilt or reset.
             if "quality_diagnostics_json" not in self._columns(connection, _DECISION_TABLE):
+                connection.execute("DROP VIEW IF EXISTS serving_gold")
+                connection.execute("DROP VIEW IF EXISTS serving_decisions")
+                connection.execute("DROP INDEX IF EXISTS serving_decision_key")
                 connection.execute("BEGIN TRANSACTION")
                 try:
-                    connection.execute("DROP VIEW IF EXISTS serving_gold")
-                    connection.execute("DROP VIEW IF EXISTS serving_decisions")
-                    connection.execute("DROP INDEX IF EXISTS serving_decision_key")
                     connection.execute(
                         f"ALTER TABLE {_DECISION_TABLE} ADD COLUMN quality_diagnostics_json VARCHAR"
                     )
