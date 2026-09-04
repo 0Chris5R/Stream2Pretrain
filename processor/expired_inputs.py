@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from pathlib import Path
 
 
 class ExpiredInputIndex:
     def __init__(self, path: str) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")

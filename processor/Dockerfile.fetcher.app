@@ -12,6 +12,7 @@ COPY ingest/common                                      /app/ingest/common
 COPY processor/__init__.py                              /app/processor/__init__.py
 COPY processor/common.py                                /app/processor/common.py
 COPY processor/fetcher.py                               /app/processor/fetcher.py
+COPY processor/expired_inputs.py                        /app/processor/expired_inputs.py
 COPY processor/metrics.py                               /app/processor/metrics.py
 COPY processor/pdf_worker.py                            /app/processor/pdf_worker.py
 COPY processor/operators/__init__.py                    /app/processor/operators/__init__.py
