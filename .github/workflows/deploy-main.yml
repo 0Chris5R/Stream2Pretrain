@@ -1215,6 +1215,16 @@ jobs:
           fi
           finish_phase "CoreDNS availability preflight"
 
+          if [[ "$DEPLOY_MODE" == "diagnose" && "${{ inputs.verify_classifiers }}" == "true" ]]; then
+            model="stream2pretrain-processor-model-service-quality"
+            kubectl -n stream2pretrain exec -i \
+              statefulset/stream2pretrain-processor-curate -c curate -- \
+              python - --live-recovery-check --expected-backends 2 \
+                --base-url "http://${model}:8094" \
+                --headless-host "${model}-headless" \
+                --model-family source-pretrain-quality < scripts/benchmark_model_service.py
+          fi
+
           if [[ "$DEPLOY_MODE" == "label-pretrain" ]]; then
             echo "::group::Export exact processed full-text classifier pool"
             pool="$RUNNER_TEMP/pretrain-pool.jsonl"
@@ -3483,6 +3493,7 @@ jobs:
                   --headless-host "${model}-headless" \
                   --model-family "$family" \
                   --expected-backends "$expected_backends" \
+                  --live-recovery-check \
                   < scripts/benchmark_model_service.py
             done
           else

@@ -4,13 +4,62 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import urllib.parse
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from processor.model_client import resolved_endpoint_urls
+from processor.model_client import _new_http_client, _post_json, resolved_endpoint_urls
+
+
+def verify_live_protocol(base_url: str, headless_host: str, family: str) -> dict[str, Any]:
+    """One leased request per Pod, using the production asynchronous protocol.
+
+    A rollout check must not flood the live inference lock with the historical
+    ClusterIP distribution stress test. Check both source heads and exact batch
+    parity on each direct backend instead.
+    """
+    parsed = urllib.parse.urlsplit(base_url)
+    endpoints = resolved_endpoint_urls(
+        headless_host, scheme=parsed.scheme, port=parsed.port or 8094
+    )
+    texts = [
+        "[SOURCE=arxiv] [SECTION_TYPE=methods] [SECTION_TITLE=Methods]\n"
+        "We derive an estimator and evaluate its convergence under controlled experiments.",
+        "[SOURCE=hf] [SECTION_TYPE=evaluation] [SECTION_TITLE=Evaluation]\n"
+        "This model card documents evaluation datasets, reproduction commands and limitations.",
+    ]
+
+    def check(endpoint: str) -> dict[str, Any]:
+        with _new_http_client(endpoint, 180) as client:
+            metadata = client.get("/v1/metadata")
+            metadata.raise_for_status()
+            expected = metadata.json()["quality"][family]["revision"]
+            batch, backend = _post_json(
+                client, "/v1/quality:batch", {"model_family": family, "texts": texts}
+            )
+            singles = [
+                _post_json(client, "/v1/quality", {"model_family": family, "text": text})[0]
+                for text in texts
+            ]
+            if batch.get("results") != singles:
+                raise RuntimeError(f"batch parity failed on {backend}")
+            if not all(
+                value["revision"] == expected
+                and math.isfinite(value["edu_score"])
+                and 0 <= value["edu_score"] <= 5
+                for value in singles
+            ):
+                raise RuntimeError(f"invalid scores or revision on {backend}")
+            return {"backend": backend, "revision": expected, "both_heads_and_batch_parity": True}
+
+    with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+        results = list(pool.map(check, endpoints))
+    if len({r["backend"] for r in results}) != len(endpoints):
+        raise RuntimeError("direct Pod verification returned duplicate backend identities")
+    return {"protocol": "asynchronous-production", "backends": results}
 
 
 def _request(
@@ -48,7 +97,15 @@ def main() -> None:
     parser.add_argument("--headless-host")
     parser.add_argument("--distribution-requests", type=int, default=60)
     parser.add_argument("--concurrency", type=int, default=12)
+    parser.add_argument("--live-recovery-check", action="store_true")
     args = parser.parse_args()
+    if args.live_recovery_check:
+        if not args.headless_host:
+            raise SystemExit("--headless-host is required for the live protocol check")
+        print(
+            json.dumps(verify_live_protocol(args.base_url, args.headless_host, args.model_family))
+        )
+        return
     if (
         args.expected_backends < 1
         or args.distribution_requests < args.expected_backends
