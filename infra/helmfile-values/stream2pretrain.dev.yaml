@@ -54,9 +54,7 @@ processor:
     tag: "0.2.0-1f4cf19"
     requireRealModels: true
     doclingEnabled: true
-    # RESTORED AFTER CAPACITY RESIZE (2026-08-25): the checkpoint-pinned master
-    # now has 32 GiB RAM. Run the complete Docling/Tesseract/TableFormer path
-    # and retain an explicit 8 GiB ceiling while peak RSS is measured in cloud.
+    # Full CPU PDF extraction has an explicit memory ceiling.
     pdfProcessingEnabled: true
     resources:
       requests: {cpu: 200m, memory: 2Gi}
@@ -68,9 +66,7 @@ processor:
     doclingEnabled: false
     usePresidio: true
     resources:
-      # The live decision cache reached about 1.8 GiB and the previous 2 GiB
-      # limit OOM-killed this Pod. The 32 GiB checkpoint node can safely retain
-      # a 2 GiB request and 6 GiB ceiling without reducing classifier replicas.
+      # Reserve state/cache headroom independently of inference services.
       requests: {cpu: 500m, memory: 2Gi}
       limits: {cpu: 2, memory: 6Gi}
     modelBundle:
@@ -82,8 +78,7 @@ processor:
       quality:
         autoscaling:
           minReplicas: 2
-          # Measured 2026-09-04: four fit; replicas five and six remain
-          # Pending on CPU/memory reservations. No classifier coverage change.
+          # Ceiling fits the current three-node reservation budget.
           maxReplicas: 4
     autoscaling:
       enabled: true
@@ -93,10 +88,7 @@ processor:
       maxReplicas: 3
   iceberg:
     replicas: 1
-    # Measured 2026-08-31: the 1 GiB writer limit OOM-killed PyIceberg while
-    # reopening the retained decision and licence frontiers. The 32 GiB
-    # checkpoint node has room for the real recovery peak; no batches, rows,
-    # or quality fields are dropped to control memory.
+    # Recovery holds Arrow buffers and both Iceberg frontiers in memory.
     resources:
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: 2, memory: 4Gi}

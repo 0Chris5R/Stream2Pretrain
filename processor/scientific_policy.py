@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from processor.source_policy import resolve_source_policy
 from schemas.gold import CorpusRoute, SegmentScore
-from schemas.silver import SilverRecord, SilverSegment
+from schemas.silver import SilverRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,51 +28,6 @@ class RouteDecision:
     route: CorpusRoute
     eligible_routes: list[CorpusRoute]
     reasons: list[str]
-
-
-def representative_segments(
-    segments: list[SilverSegment], *, limit: int = 8
-) -> list[SilverSegment]:
-    """Select a bounded, deterministic, role-stratified inference sample.
-
-    One representative is reserved for each scientific role family before
-    spare capacity is filled by the longest remaining sections. This prevents
-    repeated methods/results subsections from excluding the rest of a paper.
-    """
-    if limit <= 0:
-        return []
-    if len(segments) <= limit:
-        return list(segments)
-
-    role_families = (
-        ("abstract",),
-        ("introduction", "background"),
-        ("methods",),
-        ("results", "discussion"),
-        ("conclusion", "limitations"),
-        ("other", "appendix"),
-    )
-    indexed = list(enumerate(segments))
-    chosen_indexes: set[int] = set()
-    for family in role_families:
-        candidates = [
-            pair for pair in indexed if pair[1].role in family and pair[0] not in chosen_indexes
-        ]
-        if not candidates:
-            continue
-        index, _ = min(candidates, key=lambda pair: (-pair[1].word_count, pair[0]))
-        chosen_indexes.add(index)
-        if len(chosen_indexes) == limit:
-            break
-
-    if len(chosen_indexes) < limit:
-        remaining = sorted(
-            (pair for pair in indexed if pair[0] not in chosen_indexes),
-            key=lambda pair: (-pair[1].word_count, pair[0]),
-        )
-        chosen_indexes.update(index for index, _ in remaining[: limit - len(chosen_indexes)])
-
-    return [segments[index] for index in sorted(chosen_indexes)]
 
 
 def aggregate_segment_scores(scores: list[SegmentScore]) -> tuple[float, float, str]:
@@ -284,7 +239,7 @@ def posttrain_candidate_eligible(silver: SilverRecord) -> bool:
     The current Foundry contract is deliberately paper-specific. Its durable
     input must name a successfully persisted ``ScientificDocument`` and expose
     at least one stable retained section. Web prose, cards, reviews, code, and
-    legacy scientific rows without that artifact remain valid pretraining
+    scientific rows without that artifact remain valid pretraining
     material, but cannot be mislabeled as runnable paper environments.
     """
     policy = resolve_source_policy(

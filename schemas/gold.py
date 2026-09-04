@@ -6,11 +6,9 @@ all the way into the Iceberg ``gold`` table and be queryable by DuckDB. The
 on commit and may be ``None`` while the record is still in-flight on the
 ``docs.curated`` Redpanda topic.
 
-v0.2.0 propagates ``source_format``, ``extraction_pipeline``, ``spdx_license``,
-``spdx_license_source`` from the Silver record. The ``license`` and
-``license_source`` columns from v0.1 stay for backwards compatibility, but
-new writers SHOULD populate ``spdx_license`` (the canonical OSI-validated id)
-and let the legacy fields mirror it on commit.
+Source format, extraction provenance and item-level licence evidence propagate
+from Silver. The canonical ``spdx_license`` identifier and its provenance
+remain available alongside the route's resolved ``license`` field.
 """
 
 from __future__ import annotations
@@ -102,7 +100,7 @@ class GoldRecord(BaseModel):
     doc_id: DocId
     text: str
     lang: str = Field(..., min_length=2, max_length=8)
-    tokens: int = Field(..., ge=0, description="GPT-2-tokenizer token count.")
+    tokens: int = Field(..., ge=0, description="Token count from tokenizer_revision.")
 
     # Quality signals.
     quality_score: float = Field(
@@ -115,7 +113,7 @@ class GoldRecord(BaseModel):
         ...,
         ge=0.0,
         le=5.0,
-        description=("Source-specific learned pretraining quality, 0-5; diagnostic during pilot."),
+        description="Source-specific learned pretraining quality, 0-5.",
     )
     quality_diagnostics: dict[str, object] | None = Field(
         default=None,
@@ -208,7 +206,7 @@ class GoldRecord(BaseModel):
         description="SourceFeed CRD name propagated from Bronze/Silver.",
     )
 
-    # v0.2.0 classifier columns. Mirrored forward from Silver so a single
+    # Source provenance. Mirrored forward from Silver so a single
     # ``SELECT * FROM gold`` carries the full provenance chain without joins.
     source_format: SourceFormat = Field(
         default="html",
@@ -224,9 +222,8 @@ class GoldRecord(BaseModel):
         default=None,
         max_length=128,
         description=(
-            "OSI-list verified SPDX id; the canonical license column for "
-            "Apache-2.0-release filtering. Mirrors ``license`` for v0.1 "
-            "writers; new writers populate this directly."
+            "Canonical item-level licence identifier used for purpose-aware routing. "
+            "May be an SPDX id or a documented source-terms identifier."
         ),
     )
     spdx_license_source: SpdxLicenseSource = Field(

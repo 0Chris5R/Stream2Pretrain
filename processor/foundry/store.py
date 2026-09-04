@@ -916,11 +916,8 @@ class FoundryStore:
                 if existing is not None and str(existing["cutoff_at"]) == cutoff_at.isoformat():
                     self._conn.commit()
                     return dict(existing)
-                # A changed configured boundary on the same UTC date replaces
-                # the old snapshot once. This is needed when moving the
-                # production schedule without waiting an extra day. The run's
-                # stable date key is retained, while its candidate membership
-                # is rebuilt against the new immutable cutoff.
+                # A changed boundary rebuilds membership against its immutable
+                # cutoff while retaining the run's stable UTC date key.
                 if existing is not None:
                     self._conn.execute(
                         "DELETE FROM daily_run_candidates WHERE run_date=?", (day_text,)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stream2Pretrain - apply the Phase-1 SourceFeed CRDs into the active kube context.
+# Stream2Pretrain - apply the SourceFeed CRDs into the active kube context.
 #
 # This converts the dev YAML catalogue (ingest/feeds.dev.yaml) into proper
 # SourceFeed CRD instances and applies them with `kubectl`. The shape mirrors
@@ -32,7 +32,7 @@ if [[ ! -f "${CRD_FILE}" ]]; then
   exit 1
 fi
 
-# The controller-supported Phase-1 set, expressed as inline manifests so the
+# The controller-supported set, expressed as inline manifests so the
 # script has no Python dependency. This script installs only sources handled by
 # the generic arXiv RSS and OAI-PMH discovery templates. Discovery CRDs are
 # internal scheduling lanes and are not exposed as corpus sources.
@@ -124,7 +124,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-echo "applying Phase-1 SourceFeed catalogue to namespace=${NAMESPACE}"
+echo "applying SourceFeed catalogue to namespace=${NAMESPACE}"
 echo "${MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 
 echo

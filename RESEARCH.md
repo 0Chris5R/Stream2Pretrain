@@ -25,11 +25,9 @@ artifacts. Explicitly incompatible rights quarantine before body fetch.
 ## Curation research choices
 
 Scientific papers use structure-preserving extraction, section removal,
-FinePDFs Edu v2, language identification, segment-level PII handling, KenLM as
-an audit signal, exact and MinHash near-duplicate detection, and explicit
+independent ModernBERT quality and suitability heads, language identification, segment-level PII handling, source-aware perplexity applicability, exact and MinHash near-duplicate detection, and explicit
 reasoning/readiness features. Hugging Face cards use a source-specific Markdown
-projection and structural quality policy because paper and general-web
-classifiers are not calibrated admission gates for model cards.
+projection, deterministic card gate and an independent trained HF quality head.
 
 The exact running implementation, thresholds, regular expressions, and model
 prompts are documented in `docs/PIPELINE_IMPLEMENTATION_REFERENCE.md`.

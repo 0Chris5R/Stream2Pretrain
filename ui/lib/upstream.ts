@@ -32,7 +32,7 @@ export const UPSTREAM = {
 /**
  * Map upstream errors to a sanitised JSON detail. Never echo URLs or
  * resolved hostnames - leaks the in-cluster topology to anonymous
- * browsers (see /api/throughput/sse).
+ * browser-facing API routes.
  */
 export function upstreamError(reason: string): { detail: string } {
   if (/^[a-z0-9_]+$/i.test(reason)) return { detail: reason };

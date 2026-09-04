@@ -44,7 +44,7 @@ class SourceProcessingPolicy:
 
 
 SCIENTIFIC_PAPER = SourceProcessingPolicy(
-    policy_id="scientific-source-modernbert-diagnostic",
+    policy_id="scientific-source-modernbert",
     family="scientific_paper",
     extraction_profile="scientific-structured",
     quality_profile="source_modernbert",
@@ -56,7 +56,7 @@ SCIENTIFIC_PAPER = SourceProcessingPolicy(
     kenlm_mode="off",
 )
 WEB_PROSE = SourceProcessingPolicy(
-    policy_id="web-source-modernbert-diagnostic",
+    policy_id="web-source-modernbert",
     family="web_prose",
     extraction_profile="resiliparse-main-content",
     quality_profile="source_modernbert",
@@ -66,7 +66,7 @@ WEB_PROSE = SourceProcessingPolicy(
     kenlm_mode="gate",
 )
 TECHNICAL_DOCUMENTATION = SourceProcessingPolicy(
-    policy_id="technical-docs-source-modernbert-diagnostic",
+    policy_id="technical-docs-source-modernbert",
     family="web_prose",
     extraction_profile="markdown-prose",
     quality_profile="source_modernbert",
@@ -76,7 +76,7 @@ TECHNICAL_DOCUMENTATION = SourceProcessingPolicy(
     kenlm_mode="off",
 )
 HF_MODEL_CARD = SourceProcessingPolicy(
-    policy_id="hf-model-card-source-modernbert-diagnostic",
+    policy_id="hf-model-card-source-modernbert",
     family="hf_model_card",
     extraction_profile="hf-card-markdown-prose",
     quality_profile="source_modernbert",
@@ -86,7 +86,7 @@ HF_MODEL_CARD = SourceProcessingPolicy(
     kenlm_mode="off",
 )
 HF_DATASET_CARD = SourceProcessingPolicy(
-    policy_id="hf-dataset-card-source-modernbert-diagnostic",
+    policy_id="hf-dataset-card-source-modernbert",
     family="hf_dataset_card",
     extraction_profile="hf-card-markdown-prose",
     quality_profile="source_modernbert",
@@ -106,13 +106,7 @@ DISCOVERY_METADATA = SourceProcessingPolicy(
     kenlm_mode="off",
 )
 
-_SCIENTIFIC_MARKERS = (
-    "arxiv",
-    "pes2o",
-    "redpajama-arxiv",
-    "s2orc",
-    "acl-ocl",
-)
+_SCIENTIFIC_MARKERS = ("arxiv",)
 
 
 def resolve_source_policy(
@@ -120,7 +114,7 @@ def resolve_source_policy(
 ) -> SourceProcessingPolicy:
     """Resolve a stable policy from record provenance.
 
-    Explicit wire formats win over names so legacy metadata cannot inherit the
+    Explicit wire formats win over names so discovery metadata cannot inherit the
     paper classifier.
     """
     feed = source_feed.lower()
@@ -135,7 +129,7 @@ def resolve_source_policy(
         return HF_DATASET_CARD
     # The synthetic cluster canary is technical documentation, not randomly
     # crawled web prose. It exercises the same source-specific ModernBERT service through the
-    # documentation policy, where the score remains an audit signal.
+    # documentation policy, using the same quality inference protocol.
     if feed == "cluster-smoke":
         return TECHNICAL_DOCUMENTATION
 

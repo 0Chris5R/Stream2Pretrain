@@ -6,9 +6,8 @@ and application releases. MinIO is an explicit external prerequisite because
 the existing cluster already has a stateful MinIO deployment and its replacement
 topology has not been measured.
 
-Only the `dev` environment is deployable. The former production overlays were
-removed because their replica counts, retention periods, and volume sizes were
-not based on target-cluster measurements.
+The supported Helmfile environment is `dev`, parameterized for the DHBW
+cluster. Other chart overrides require their own measured infrastructure.
 
 CoreDNS availability is bootstrap-owned by `infra/ansible/deploy.yaml`. It
 applies `infra/kubernetes/coredns-ha-patch.yaml` and
@@ -25,9 +24,7 @@ application releases perform a cheap replica/PDB presence check.
   delete PVCs or run a forced Helm upgrade.
 - OpenStack state, plans, credentials, generated inventory, and kubeconfig are
   ignored by Git.
-- The live application release cannot be adopted in one Helm upgrade because
-  it contains mixed immutable selector schemes. See
-  [`../docs/infrastructure-reimplementation.md`](../docs/infrastructure-reimplementation.md).
+- Normal application upgrades preserve selectors, recovery identities and PVCs.
 
 ## Layout
 
@@ -37,7 +34,6 @@ infra/
   ansible/            pinned k3s role and playbook
   dns/                opt-in RFC2136 certificate configuration
   helmfile-values/    measured DHBW `dev` overrides
-  k3s-install/        legacy manual bootstrap, not used by the supported path
 ```
 
 The release graph and exact chart versions are in `../helmfile.yaml` and
@@ -61,10 +57,8 @@ The release graph and exact chart versions are in `../helmfile.yaml` and
 - A reachable MinIO service named `minio` in namespace `minio`, the application
   buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-posttrain`,
   and externally managed credentials.
-- Application images with identical digests available on every eligible node.
-  The current cluster has them only on the control-plane node, so the DHBW
-  override temporarily schedules application pods there with `pullPolicy:
-  Never`.
+- Application images published to a registry reachable from every eligible
+  node, with digest pins and a pull Secret if the registry is private.
 
 Required externally managed objects for enabled components:
 
@@ -74,7 +68,6 @@ Required externally managed objects for enabled components:
 | `polaris` | Secret `polaris-minio` | `accessKey`, `secretKey` |
 | `stream2pretrain` | Secret `stream2pretrain-minio` | `accessKey`, `secretKey` |
 | `stream2pretrain` | Secret `stream2pretrain-polaris` | `credential`, `scope` |
-| `stream2pretrain` | Secret `stream2pretrain-github` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-hf` | `token` |
 | `stream2pretrain` | Secret `stream2pretrain-foundry-signing` | `ed25519.key`, `ed25519.crt`; deployment creates it once unless pre-provisioned |
 | `stream2pretrain` | Secret `stream2pretrain-foundry-providers` (foundry only) | `HETZNER_INFERENCE_API_KEY`, `controlToken` |
@@ -116,8 +109,7 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 ./scripts/setup_dhbw_demo.sh topics
 ./scripts/setup_dhbw_demo.sh application
 
-# Safe existing-cluster edge migration. This avoids the full application
-# upgrade and applies only cert-manager, Traefik, ExternalDNS, and UI ingress.
+# Apply only cert-manager, Traefik, ExternalDNS and UI ingress.
 ./scripts/setup_dhbw_demo.sh edge
 
 # Read-only cluster health summary
@@ -127,8 +119,8 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 `platform` installs cert-manager, Traefik, ExternalDNS,
 kube-prometheus-stack, KEDA, Gatekeeper, and Redpanda. `catalog` installs the
 official Apache Polaris 1.7.0 chart. `topics` idempotently creates the
-configured one-partition, one-replica topics
-matching the measured live cluster. `application` installs the local
+configured topics. The release reconciles four document-topic partitions
+in the DHBW profile, with single-broker replication. `application` installs the local
 Stream2Pretrain chart. Loki, Tempo, and
 Alloy are excluded until their MinIO credentials, retention, storage, and
 resource requirements are measured.
@@ -150,26 +142,6 @@ by editing its PVC, and it is not a valid target for a PVC autoresizer. See
 [`../docs/storage-scaling.md`](../docs/storage-scaling.md) for the data-owner
 map, safe maintenance boundary, and the external S3 or expandable-CSI migration
 plan.
-
-## Existing cluster migration
-
-Do not run the `application` stage against the current release yet. Four
-stateless workloads use an older selector scheme, and the curator StatefulSet
-also differs in immutable fields. Kubernetes correctly rejects a full upgrade.
-Do not bypass that rejection with `helm upgrade --force` because recreating the
-StatefulSet can disturb its checkpoint PVC relationship.
-
-The safe migration is:
-
-1. Distribute the same application image digests to all nodes or publish them
-   to a reachable registry.
-2. Recreate the four stateless workloads during an approved maintenance window.
-3. Plan the curator StatefulSet and PVC migration separately.
-4. Run a server-side dry-run of the rendered release.
-5. Apply the clean chart and verify one controlled record before enabling KEDA.
-
-Until that migration, only targeted, reversible patches should be applied to
-the live application workloads.
 
 ## DNS and TLS
 
@@ -216,5 +188,4 @@ deleting any PVC.
 - MinIO production topology and storage throughput
 - Polaris relational database sizing and recovery behavior
 - Loki and Tempo retention, storage, and CPU/memory requirements
-- Seed-loader volume size on the target datasets
 - KEDA thresholds and maximum replicas

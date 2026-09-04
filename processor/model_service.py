@@ -20,12 +20,11 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from processor import common
 from processor.model_jobs import InferenceJobs
 from processor.operators.kenlm_score import KenLMScorer
-from processor.operators.shadow_models import CsoShadowClassifier, TransformerShadowScorer
 from processor.operators.source_classifiers import SourceQualityClassifier
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
-ModelProfile = Literal["quality", "kenlm", "shadow", "all"]
-MODEL_PROFILES: frozenset[str] = frozenset({"quality", "kenlm", "shadow", "all"})
+ModelProfile = Literal["quality", "kenlm", "all"]
+MODEL_PROFILES: frozenset[str] = frozenset({"quality", "kenlm", "all"})
 _Result = TypeVar("_Result")
 
 MODEL_REQUESTS = Counter(
@@ -71,9 +70,6 @@ class CuratorModelRuntime:
         self.profile = profile
         self.quality: SourceQualityClassifier | None = None
         self.kenlm: KenLMScorer | None = None
-        self.meta_rater: TransformerShadowScorer | None = None
-        self.finemath: TransformerShadowScorer | None = None
-        self.cso: CsoShadowClassifier | None = None
         if profile in {"quality", "all"}:
             self.quality = SourceQualityClassifier(root)
         if profile in {"kenlm", "all"}:
@@ -82,30 +78,9 @@ class CuratorModelRuntime:
                 root / "kenlm" / "en.sp.model",
                 allow_fallback=False,
             )
-        if profile in {"shadow", "all"}:
-            self.meta_rater = TransformerShadowScorer(
-                root / "meta-rater-reasoning",
-                family="meta-rater-reasoning",
-                revision="opendatalab/meta-rater-reasoning-rating@0072a9a83971eb4af6d689dfc64f8f203c45b398",
-                max_length=4096,
-                max_chunks=_positive_int_env("S2P_META_RATER_MAX_CHUNKS", 16),
-                stride=256,
-            )
-            self.finemath = TransformerShadowScorer(
-                root / "finemath-classifier",
-                family="finemath",
-                revision="HuggingFaceTB/finemath-classifier@bd0b0e330750ccaafb16c47066f875b3fcb707c3",
-                max_length=512,
-                max_chunks=_positive_int_env("S2P_FINEMATH_MAX_CHUNKS", 64),
-                stride=64,
-            )
-            self.cso = CsoShadowClassifier()
         self.locks = {
             "source-pretrain-quality": threading.Lock(),
             "kenlm": threading.Lock(),
-            "meta-rater-reasoning": threading.Lock(),
-            "finemath": threading.Lock(),
-            "cso-topics": threading.Lock(),
         }
         self.max_batch_items = _positive_int_env("S2P_MODEL_SERVICE_MAX_BATCH_ITEMS", 8)
 
@@ -125,12 +100,6 @@ class CuratorModelRuntime:
             metadata["kenlm"] = {
                 "backend": "kenlm-sentencepiece",
                 "scorer": self.kenlm.scorer,
-            }
-        if self.meta_rater is not None and self.finemath is not None and self.cso is not None:
-            metadata["shadow"] = {
-                "meta_rater": self.meta_rater.revision,
-                "finemath": self.finemath.revision,
-                "cso": self.cso.revision,
             }
         return metadata
 
@@ -170,25 +139,6 @@ class CuratorModelRuntime:
             lock=self.locks["kenlm"],
             callback=lambda: self.kenlm.score(text),
         )
-
-    def shadow_scores(self, text: str) -> dict[str, Any]:
-        """Run all public shadow classifiers without changing curation routes."""
-        if self.meta_rater is None or self.finemath is None or self.cso is None:
-            raise ValueError("shadow classifiers are unavailable in this model profile")
-        results: dict[str, Any] = {}
-        for family, classifier in (
-            ("meta-rater-reasoning", self.meta_rater),
-            ("finemath", self.finemath),
-            ("cso-topics", self.cso),
-        ):
-            results[family] = self._run_locked(
-                operation="shadow",
-                model_family=family,
-                item_count=1,
-                lock=self.locks[family],
-                callback=lambda classifier=classifier: classifier.score(text),
-            )
-        return results
 
     def _run_locked(
         self,
@@ -331,9 +281,6 @@ class _Handler(BaseHTTPRequestHandler):
                         "scorer": perplexity_result.scorer,
                     },
                 )
-                return
-            if self.path == "/v1/shadow":
-                self._write(HTTPStatus.OK, {"classifiers": self.runtime.shadow_scores(text)})
                 return
             self._write(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except (BrokenPipeError, ConnectionResetError):

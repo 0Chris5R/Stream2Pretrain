@@ -1,153 +1,95 @@
-# stream2pretrain Helm chart
+# Stream2Pretrain Helm chart
 
-The single Helm chart that deploys every Stream2Pretrain component on a
-Kubernetes cluster: ingest CronJobs/Deployments, the stateful Kafka curator,
-the iceberg-writer Deployment, the DuckDB query API, the post-training foundry
-StatefulSet/API, the Next.js UI, the kopf mixture-controller plus its read-only
-SourceFeed monitoring API,
-the SourceFeed and MixtureRecipe CRDs, KEDA
-ScaledObjects, NetworkPolicies, ServiceMonitors, the Stream2Pretrain Grafana
-dashboard, and OPA Gatekeeper constraints.
+The chart owns the source pollers, Bytewax processors, classifier services,
+Iceberg writer, DuckDB API, Foundry, UI and mixture controller. It also supplies
+SourceFeed and MixtureRecipe CRDs, KEDA configuration, persistence, metrics,
+alerts, network policies and Gatekeeper constraints.
 
-The three stateful core Bytewax executions are deliberately constrained to one
-coordinated replica and retained recovery PVCs. Kafka-lag KEDA is also absent
-from the arXiv HTML worker because its shared `raw.fetched` consume-and-publish
-loop makes topic lag an invalid autoscaling signal.
+Platform dependencies are installed through [the root Helmfile](../../helmfile.yaml).
+The measured DHBW overlay is
+[stream2pretrain.dev.yaml](../../infra/helmfile-values/stream2pretrain.dev.yaml).
+The production values enable security controls but require measured capacity
+overrides; they are not a second validated deployment.
 
-The platform-layer dependencies (Redpanda, MinIO, Polaris, KEDA controllers,
-OPA Gatekeeper, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
-cert-manager) are NOT included here - install them via `infra/helmfile.yaml`.
+## Images
 
-## Image building is out of scope for this chart
+CI builds immutable application images and reuses unchanged dependency/model
+layers. Image tags and per-component digests are chart values.
 
-The chart references images by `<registry>/<repo>:<tag>` where tag falls back
-to `.Chart.AppVersion`. Producing those images is a CI job. Expected refs:
+| Image suffix | Workload |
+|---|---|
+| ingest-rss | arXiv RSS discovery |
+| ingest-oaipmh | arXiv OAI-PMH discovery |
+| ingest-hf | Model and dataset README polling |
+| ingest-arxiv-html | Full-paper acquisition |
+| processor | Curator, Iceberg writer, DuckDB and mixture controller |
+| processor-fetcher-model | Extraction, PDF, OCR and figure processing |
+| processor-quality-model | Four custom ModernBERT classifiers |
+| processor-kenlm-model | Generic web-prose perplexity service |
+| processor-foundry | SFT/RL worker and API |
+| ui | Next.js cockpit |
 
-- `<registry>/stream2pretrain/ingest-rss:<tag>`
-- `<registry>/stream2pretrain/ingest-oaipmh:<tag>`
-- `<registry>/stream2pretrain/ingest-hf:<tag>`
-- `<registry>/stream2pretrain/processor-fetcher:<tag>`
-- `<registry>/stream2pretrain/processor-curate:<tag>`
-- `<registry>/stream2pretrain/processor-iceberg-writer:<tag>`
-- `<registry>/stream2pretrain/processor-duckdb-api:<tag>`
-- `<registry>/stream2pretrain/mixture-controller:<tag>`
-- `<registry>/stream2pretrain/processor-foundry:<tag>`
-- `<registry>/stream2pretrain/ui:<tag>`
+The [deployment workflow](../../.github/workflows/deploy-main.yml) supplies the
+registry, immutable image identities and workload-specific overrides.
 
-Override the registry via `--set image.registry=ghcr.io/myorg`.
+## Installation
 
-## Install
-
-```sh
-helm install stream2pretrain ./charts/stream2pretrain \
-    --namespace stream2pretrain --create-namespace \
-    -f charts/stream2pretrain/values-dev.yaml
-```
-
-For production:
+Create the platform dependencies and Secrets before installing the application.
+Use the [repository deployment guide](../../README.md#9-deployment-guide) for the
+complete bootstrap order.
 
 ```sh
-helm install stream2pretrain ./charts/stream2pretrain \
-    --namespace stream2pretrain --create-namespace \
-    -f charts/stream2pretrain/values-prod.yaml \
-    --set ui.ingress.host=stream2pretrain.example.com
+helm upgrade --install stream2pretrain ./charts/stream2pretrain \
+  --namespace stream2pretrain --create-namespace \
+  -f charts/stream2pretrain/values-dev.yaml \
+  -f infra/helmfile-values/stream2pretrain.dev.yaml
 ```
 
-## Required secrets
+Supply built image references for a manual install. The CI workflow does this
+automatically.
 
-The chart references the following Secrets but does not create them. Provide
-via `sealed-secrets` or External Secrets Operator before `helm install`:
+## Secrets
 
-| Secret                                              | Keys                              | Used by                       |
-|-----------------------------------------------------|-----------------------------------|-------------------------------|
-| `stream2pretrain-minio` (`.Values.minio.credentialsSecret`)      | `accessKey`, `secretKey`          | every component               |
-| `stream2pretrain-hf` (`.Values.sources.huggingface.models.tokenSecret`) | `token` (HF user token)           | ingest-hf                     |
-| `stream2pretrain-foundry-signing` (`.Values.processor.foundry.signingKeySecret`) | `ed25519.key` (PEM), `ed25519.crt` | Persistent Foundry artifact signer, created once by deployment bootstrap unless pre-provisioned |
-| `stream2pretrain-keda-redpanda` (`.Values.keda.triggerAuthSecret`) | `sasl`, `tls`, `username`, `password` | KEDA Kafka trigger            |
-| `stream2pretrain-foundry-providers` (`.Values.processor.foundry.providerSecret`, when enabled) | `HETZNER_INFERENCE_API_KEY`, `controlToken` | foundry worker, API, and UI manual trigger |
+| Secret | Keys | Consumer |
+|---|---|---|
+| stream2pretrain-minio | accessKey, secretKey | Object-store clients |
+| stream2pretrain-polaris | clientId, clientSecret | Catalog clients |
+| stream2pretrain-hf | token | HF poller |
+| stream2pretrain-foundry-providers | HETZNER_INFERENCE_API_KEY, controlToken | Foundry worker/API and authenticated artifact audits |
+| stream2pretrain-foundry-signing | ed25519.key, ed25519.crt | Artifact signer; deployment creates it once if absent |
+| stream2pretrain-keda-redpanda | sasl, tls, username, password | KEDA only when broker authentication is enabled |
 
-## CRDs
+Secret names and key names are configurable. Never commit credential values.
 
-The chart ships two CRDs under `crds/`:
+## State and scaling
 
-- `SourceFeed.stream2pretrain.io/v1alpha1`
-- `MixtureRecipe.stream2pretrain.io/v1alpha1`
+The core Bytewax flows use coordinated executions with retained recovery PVCs.
+Broker lag is not their checkpoint authority. Stateless inference replicas and
+independent pollers have separate scaling controls. The arXiv acquisition
+worker consumes and publishes on the shared raw topic, so that topic's lag is
+not a valid autoscaling signal for this worker.
 
-OpenAPI v3 schemas mirror `schemas/sourcefeed.py`. Helm installs CRDs from
-`crds/` exactly once on first install; upgrades require explicit `kubectl
-apply -f charts/stream2pretrain/crds/`.
+SourceFeed and MixtureRecipe schemas live under `crds/`. Helm installs them
+on first installation. Apply changed CRD schemas explicitly before an upgrade.
+Gatekeeper can enforce per-item licensing and configured polling bounds.
 
-## OPA Gatekeeper
+## Observability
 
-When `gatekeeper.enabled=true`, the chart installs a ConstraintTemplate +
-Constraint that:
+ServiceMonitors and the Grafana dashboard expose stage throughput, classifier
+scores and latency, workload availability, persistence latency, queue depth and
+Foundry provider/validation activity. The dashboard JSON is packaged from
+`dashboards/stream2pretrain.json`.
 
-- Requires `per-record` licensing. A source-level default never grants rights
-  to every item in a feed; each content adapter must resolve and persist its
-  own evidence before any body request.
-- Rejects SourceFeeds with `pollIntervalSeconds` outside
-  `[gatekeeper.minPollIntervalSeconds, gatekeeper.maxPollIntervalSeconds]`.
-- Rejects SourceFeeds whose licensing mode is not `per-record`.
-
-## Grafana dashboard
-
-`dashboards/stream2pretrain.json` is a ready-made dashboard with:
-
-- Throughput per stage (`s2p_documents_emitted_total`)
-- Topic lag and KEDA replica counts
-- FinePDFs Edu v2 quality-score histogram
-- Iceberg flush latency p95
-- SourceFeed poll outcomes
-- Foundry SFT/RL acceptance, provider usage and latency, validation gates,
-  mutation kill rate, quota remaining, and queue depth
-
-The chart wraps it in a ConfigMap with the `grafana_dashboard: "1"` label so
-the kube-prometheus-stack Grafana sidecar auto-loads it.
-
-## Lint
+## Deterministic validation
 
 ```sh
 helm lint charts/stream2pretrain
 helm lint charts/stream2pretrain -f charts/stream2pretrain/values-dev.yaml
 helm lint charts/stream2pretrain -f charts/stream2pretrain/values-prod.yaml
-helm template charts/stream2pretrain -f charts/stream2pretrain/values-dev.yaml | \
-    kubectl apply --dry-run=client -f -
+helm template stream2pretrain charts/stream2pretrain \
+  -f charts/stream2pretrain/values-dev.yaml \
+  -f infra/helmfile-values/stream2pretrain.dev.yaml
 ```
 
-## Layout
-
-```
-charts/stream2pretrain/
-  Chart.yaml
-  values.yaml                 -- canonical defaults
-  values-dev.yaml             -- local k3s + single broker overrides
-  values-prod.yaml            -- DHBWCloud / 3-broker overrides
-  values.schema.json          -- JSON Schema validation
-  crds/
-    sourcefeed.yaml
-    mixturerecipe.yaml
-  dashboards/
-    stream2pretrain.json      -- Grafana dashboard JSON (loaded via ConfigMap)
-  templates/
-    _helpers.tpl
-    NOTES.txt
-    serviceaccounts.yaml      -- SA + Role + RoleBinding
-    configmap-feeds.yaml      -- per-source JSON config bundles
-    secret-tokens.yaml        -- references only; populate externally
-    networkpolicies.yaml      -- default-deny + per-egress-class allow
-    ingest-*.yaml             -- one file per ingest component
-    processor-*.yaml          -- fetcher / curate / iceberg-writer / foundry
-    foundry-oracle-rbac.yaml  -- bounded Job permissions + oracle deny-all network policy
-    mixturecontroller.yaml
-    ui.yaml                   -- Deployment + Service
-    ui-ingress.yaml           -- standard Kubernetes Ingress
-    scaledobjects.yaml        -- KEDA ScaledObject + TriggerAuthentication
-    servicemonitors.yaml
-    grafana-dashboards.yaml   -- ConfigMap embedding dashboards/*.json
-    gatekeeper-constraints.yaml
-```
-
-The Grafana dashboard JSON lives under `dashboards/` rather than
-`templates/grafana-dashboards/` to keep Helm from trying to render it as a
-manifest. The wrapper template `grafana-dashboards.yaml` reads it via
-`.Files.Get`.
+Rendering does not connect to Kubernetes. Runtime smoke validation uses the
+isolated lane described in the repository deployment guide.

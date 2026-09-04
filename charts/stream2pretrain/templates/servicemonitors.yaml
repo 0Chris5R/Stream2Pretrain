@@ -1,9 +1,6 @@
 {{- if .Values.observability.serviceMonitor.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
 {{- $components := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "mixture-controller" "foundry" }}
-{{- if .Values.processor.shadowClassifier.enabled }}
-{{- $components = append $components "processor-shadow-classifier" }}
-{{- end }}
 {{- range $component := $components }}
 ---
 apiVersion: monitoring.coreos.com/v1

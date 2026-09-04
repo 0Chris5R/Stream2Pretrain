@@ -425,9 +425,7 @@ def normalize(
     excluded_sections: list[str] = []
     if bronze.source_format == "metadata":
         text, title = _structured_payload_text(raw_html)
-        # Discovery envelopes are retained in Bronze only and normally bypass
-        # normalize. Keeping an empty model projection here makes direct replay
-        # and legacy calls fail closed as well.
+        # Discovery envelopes have no trainable body, including direct replay.
         model_text = ""
         source_metadata_text = text[:32768]
         extracted_with = bronze.extraction_pipeline
@@ -637,8 +635,7 @@ def process_bronze_payload(
     # Skip before the MinIO read, extraction, OCR, language, and MinHash stages.
     if bronze.source_format == "metadata":
         return None
-    # Defence in depth for legacy producers and replayed topics. This check is
-    # intentionally before the MinIO GET, extraction, OCR, and model pipeline.
+    # Enforce the purpose boundary before MinIO GET, extraction, OCR and models.
     pretrain_allowed = is_training_permitted(
         bronze.spdx_license, source_format=bronze.source_format
     )

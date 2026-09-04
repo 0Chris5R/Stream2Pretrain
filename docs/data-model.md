@@ -1,154 +1,100 @@
-# Stream2Pretrain - Data Model (the data passport)
+# Data model
 
-The current data plane retains raw Bronze objects and structured scientific
-artifacts in MinIO, transports typed records over Redpanda, and appends every
-curation outcome to an Iceberg decision table. Only accepted outcomes are also
-appended to Gold. The wire shape is enforced by the Pydantic models in
-`schemas/`.
+Pydantic models in [schemas](../schemas) define the event contracts.
+[Generated JSON schemas](../schemas/json_schema) are deterministic serialization
+contracts. Iceberg columns and Arrow conversion are defined in
+[the writer](../processor/iceberg_writer.py).
 
-## Tier overview
+## Storage and event layers
 
-| Tier | Purpose | On-disk format | Retention | Source of truth |
-|---|---|---|---|---|
-| Bronze | Raw fetched bytes + metadata pointer | gzipped HTML on MinIO + `BronzeRecord` JSON on `raw.fetched` | 30 days (prod) | `schemas/bronze.py` |
-| Silver | Normalised + tagged but pre-quality-filter | `docs.normalized` in Redpanda; structured artifacts in `s2p-silver` | topic retention / aligned with source | `schemas/silver.py` |
-| Scientific artifact | Structured sections, tables, equations, figures, citations, OCR and extractor provenance | JSON and figure assets in MinIO | aligned with source | `schemas/scientific.py` |
-| Decisions | Every accepted or rejected scored outcome plus its full signal vector | Parquet in Iceberg | indefinite | `schemas/gold.py` |
-| Gold | Curated, mixture-ready training shard | Parquet in Iceberg | indefinite | `schemas/gold.py` |
-
-## Bronze tier
-
-Field-by-field (matches `BronzeRecord`):
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `doc_id` | `sha256:<64 hex>` | yes | sha256 of the canonical URL |
-| `url` | `HttpUrl` | yes | canonicalised before hashing (lower host, sorted query, drop fragment) |
-| `fetched_at` | UTC datetime | yes | wall-clock at the fetcher |
-| `http_status` | int 100-599 | yes | upstream status |
-| `http_last_modified` | UTC datetime | no | from `Last-Modified` response header |
-| `content_type` | string | yes | MIME-only, no charset |
-| `raw_html_s3_uri` | `s3://...` | yes | pointer to gzipped bytes in MinIO |
-| `source_feed` | string (1-128) | yes | SourceFeed CRD name |
-| `trace_id` | 32-char hex | yes | W3C trace-id |
-| `etag` | string | no | for conditional GET |
-| `bytes_size` | int >=0 | no | uncompressed payload size |
-
-Bronze partitioning uses
-`s3://bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.<html|pdf>.gz`.
-This Hive-style layout makes per-source pruning cheap when bisecting.
-
-## Silver tier
-
-Adds extracted text, language, heuristic tags, and the validity interval.
-Required fields above bronze:
-
-| Field | Type | Notes |
+| Layer | Contents | Retention |
 |---|---|---|
-| `title` | string \| null | extracted by Resiliparse |
-| `text` | string | clean text post-extraction |
-| `lang` | ISO code | from fastText lid.176 |
-| `lang_score` | float 0..1 | confidence |
-| `extracted_with` | string | e.g. `resiliparse-0.14` |
-| `tags.gopher_pass` | bool | FineWeb/Gopher signal; a gate only for ordinary web prose |
-| `tags.c4_nopunc_pass` | bool | FineWeb punctuation signal; a gate only for ordinary web prose |
-| `tags.perplexity` | float | KenLM perplexity for ordinary web prose; consult scorer applicability |
-| `tags.perplexity_bucket` | enum | `head` / `middle` / `tail` for an applicable KenLM result |
-| `minhash_sig` | bytes (112 perms) | Rensa MinHash |
-| `near_dup_cluster_id` | string \| null | populated by LSHBloom |
-| `valid_from` | UTC datetime | populated by enricher (see precedence below) |
-| `valid_to` | UTC datetime \| null | usually null - retraction or supersession sets it |
-| `valid_from_source` | enum | precedence trail (see below) |
-| `trace_id` | 32-char hex | inherited from bronze |
+| Bronze | Compressed source bytes in MinIO; typed pointers on `raw.fetched` | One-day source audit window |
+| Silver | Normalized text, retained sections, heuristic signals and scientific evidence on `docs.normalized` | Kafka retention; transient MinIO extraction assets have one-day retention |
+| Decisions | All curation outcomes in `gold.curation_decisions` | Durable |
+| Gold | Trainable records in `gold.curated`; retained scientific evidence for Foundry candidates | Durable |
+| Post-training | Queue evidence, generated tasks, trajectories, verifier packages and artifact audits | Durable |
 
-### Validity-interval precedence
+The per-item pre-fetch licence decision is a separate internal event contract,
+folded into the same corpus route view by serving. Discovery events are not
+corpus records. Explicit incompatible rights produce a quarantine record
+without fetching the source body.
 
-When multiple signals disagree, the enricher resolves in this order:
+[Storage ownership](storage-scaling.md) defines physical cleanup boundaries.
+Neither the pretraining corpus nor its decision history has a one-day expiry.
 
-1. `license_effective_date` (manual override on the SourceFeed)
-2. `retraction_date` (from arXiv withdrawals, journal retractions)
-3. `schema.org/datePublished` in the page HTML
-4. `http_last_modified`
-5. Wayback Machine first-seen timestamp
-6. `fetched_at` (last resort; logged as `valid_from_source = "fetched_at"`)
+## Identity and provenance
 
-The chosen signal name is recorded in `valid_from_source` so a downstream
-auditor can reconstruct the decision.
+`doc_id` identifies a source revision with a SHA-256 digest. Canonical URL
+identity is sufficient for immutable papers; HF cards bind the exact README
+blob, so weight-only commits do not create new card content.
 
-Silver partitioning: `PARTITION BY lang, bucket(16, doc_id)`.
+Bronze carries source, URL, HTTP status, content type, fetch time, object URI,
+source format, extraction pipeline, item licence and licence provenance.
+`training_usage` preserves the purpose boundary: both uses, derived
+post-training only, or quarantine.
 
-## Gold tier - the data passport
+Silver adds normalized text, title, language/confidence, full retained sections,
+MinHash signatures, structured scientific evidence and validity intervals.
+Each section has a stable ID, title, role and text. Scientific artifacts retain
+tables, equations, figures/captions, citations, OCR and extraction provenance.
 
-This is the canonical training-shard row. Every field is intended to survive
-into the Iceberg `gold` table and be queryable by DuckDB.
+## Gold fields
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `doc_id` | `sha256:<64 hex>` | yes | inherited |
-| `text` | string | yes | post-PII-scrubbed |
-| `lang` | ISO code | yes | |
-| `tokens` | int >=0 | yes | GPT-2-tokenizer token count |
-| `edu_score` | float 0..5 | yes | FinePDFs Edu v2 score, or zero when the model is not applicable or skipped after a deterministic rejection |
-| `quality_score` | float 0..5 | yes | Explainable composite of source quality, source-appropriate structure, language, and only applicable heuristic/KenLM signals |
-| `lang_score` | float 0..1 | yes | language-confidence signal |
-| `gopher_pass` | bool | yes | Gopher heuristic outcome |
-| `c4_*` | bool/float | yes | individual C4 outcomes and punctuation fraction |
-| `perplexity`, `perplexity_bucket`, `perplexity_scorer` | float/enum/string | yes | KenLM signal and exact scorer provenance; `perplexity_scorer=not-applicable` for non-web profiles and excludes typicality from the composite |
-| `near_duplicate`, `near_dup_cluster_id` | bool/string \| null | yes/no | stateful deduplication outcome |
-| `minhash_backend`, `minhash_num_perms`, `lsh_backend` | string/int/string | yes | deduplication implementation provenance |
-| `license` | SPDX or `unknown` | yes | |
-| `license_source` | enum | yes | `html_meta`, `robots_txt`, `sitemap`, `license_file`, `manual`, `unknown` |
-| `risk_tier` | 1 / 2 / 3 | yes | MixtureVitae convention |
-| `pii_flags` | list[enum] | no | `email`, `phone`, `ssn`, `credit_card`, `ipv4`, `ipv6`, `passport` |
-| `valid_from` | UTC datetime | yes | inherited |
-| `valid_to` | UTC datetime \| null | no | |
-| `reject_reasons` | list[enum] | no | Includes language, web heuristics, duplicate, source quality, PII/secret, licence, validity, incomplete extraction, and `metadata_only` blockers |
-| `scoring_version` | string | yes | recipe version |
-| `classifier_revision` | string | yes | Pinned FinePDFs revision, or `not-run:deterministic-reject` |
-| `policy_revision` | `git:<sha>` | yes | git commit of the policy bundle |
-| `snapshot_id` | int \| null | no | populated by Iceberg commit |
-| `_row_id` | int \| null | no | reserved; null in the current Iceberg V2 writer |
-| `trace_id` | 32-char hex | yes | inherited |
-| `scientific_artifact_s3_uri` | S3 URI \| null | no | canonical structured-document artifact |
-| `figure_count`, `table_count`, `equation_count`, `citation_count` | int | yes | extraction completeness counters |
-| `extraction_warnings` | list[string] | no | explicit degraded-extraction evidence |
+| Field group | Meaning |
+|---|---|
+| `text`, `tokens`, `tokenizer_revision` | Training projection and reproducible token count; current runtime uses cl100k_base |
+| `edu_score`, `quality_diagnostics` | Source-specific quality output, four-head section diagnostics, probabilities, confidence and model provenance |
+| `quality_score`, `structural_quality_score`, `extraction_completeness` | Composite score and its structural inputs |
+| `segment_scores`, inclusion/exclusion counts | Section decisions and extraction coverage |
+| `route`, `eligible_routes`, `reject_reasons`, `route_reasons` | Purpose-specific outcome and reasons |
+| `content_tags`, `reasoning_score` | Content annotations and heuristic task suitability |
+| `lang*`, `gopher_*`, `c4_*`, `perplexity*` | Language and source-applicable heuristic signals |
+| `pii_*`, `metadata_pii_flags`, `removed_body_pii_flags` | Privacy findings, redaction and scanner provenance |
+| `near_duplicate`, cluster and backend fields | Durable near-duplicate decision and implementation |
+| `license*`, `spdx_license*`, `training_usage` | Exact licence identifier, provenance and allowed purpose |
+| `scoring_version`, `classifier_revision`, `policy_revision` | Reproducible processing identity |
+| `valid_from`, `valid_to` | Half-open validity interval |
+| `scientific_artifact_s3_uri`, figure/table/equation counts | Retained structured evidence |
+| `snapshot_id`, `_row_id`, `trace_id` | Storage and tracing identity; row lineage is reserved and null in the V2 writer |
 
-Gold partitioning: `PARTITION BY lang, risk_tier, month(valid_from)`. The
-`month(valid_from)` partition makes `as_of(timestamp)` pruning cheap.
+[Scoring and routing](SCORING_AND_ROUTING.md) defines score formulas and gates.
+A skipped model is not a measured zero-quality prediction: inspect backend and
+diagnostic status as well as its numeric wire field.
 
-### Risk-tier convention (MixtureVitae / Common Pile)
+## Validity
 
-| Tier | Meaning | Example trigger |
-|---|---|---|
-| 1 | trainable under current policy | allowlisted content licence and no PII flag |
-| 2 | caution | heuristic uncertainty or a rejected code licence |
-| 3 | drop | hard fail: explicit dirty signal, dropped before mixture |
+The generic enricher chooses the first available value from HTTP
+Last-Modified, schema.org publication date, sitemap lastmod, optional archive
+lookup, licence-effective date and finally fetch time. Source adapters can
+supply stronger publication metadata. The selected origin is retained on
+Silver. A supplied valid retraction date closes the interval; no date means an
+open upper bound. This is a temporal data model, not an automatic retraction
+monitor for every publisher.
 
-Every row is published to `curation.decisions` and committed to
-`gold.curation_decisions`, including the full signal vector, risk tier, PII
-flags, and rejection reasons. Only tier 1 rows with empty `reject_reasons` and
-empty `pii_flags` are
-also published to `docs.curated` and committed to `gold.curated`. The two
-Iceberg appends are not a distributed transaction; current delivery is
-at-least-once and replay behavior remains a runtime measurement.
+The as-of predicate is
+`valid_from <= timestamp AND (valid_to IS NULL OR valid_to > timestamp)`.
 
-The admission policy records a purpose-aware decision before body retrieval.
-Missing rights may enter Bronze only as `posttrain_transform_only` and never
-enter a verbatim pretraining export. Explicit incompatible rights stop before
-body retrieval; the query layer folds those records into the same corpus route
-ledger using `license_not_permitted`. The internal pre-fetch table is not a
-second product ledger. Discovery metadata produces no licence or document row.
+## Persistence and serving
 
-## Iceberg branch and tag conventions
+Both Gold tables partition by language, risk tier and month of `valid_from`.
+Silver is an event and extraction layer, not an additional Iceberg table.
 
-- `main`: production curated stream.
-- `shadow-<recipe>`: shadow A/B comparison branch per `MixtureRecipe` CRD.
+Every curation outcome goes to the decisions topic and table. Gold additionally
+requires risk tier 1, a trainable route, no reject reasons and no unresolved PII
+flags. Verbatim exports independently enforce pretraining licence eligibility.
 
-## Read-side conveniences
+The writer appends decisions and curated rows separately. Delivery is
+at-least-once, with deterministic replay keys and latest-per-document serving,
+not a distributed exactly-once transaction.
 
-DuckDB views:
+[The serving index](../processor/serving_index.py) persists latest document
+state and aggregate deltas. [DuckDB API](../processor/duckdb_api.py) serves
+paginated documents, full-corpus totals, as-of queries and dataset exports.
+Policy revision is audit metadata, not an implicit filter on corpus totals.
 
-- `gold_as_of(ts)` -> rows where `valid_from <= ts AND (valid_to IS NULL OR valid_to > ts)`.
-- `gold_clean` -> defensive alias for the Gold table contract:
-  `WHERE risk_tier = 1 AND cardinality(pii_flags) = 0 AND cardinality(reject_reasons) = 0`.
-The exact SQL lives in `ui/lib/duckdb-client.ts`.
+## Mixture branches
+
+The mixture controller keeps a `main` corpus view and recipe-specific shadow
+branches. The comparison interface is retained; proxy-LM training remains the
+N3 scaffold described in [novelty](novelty.md).

@@ -469,7 +469,7 @@ class CuratorModelClient:
 
 
 class RemoteQualityClassifier:
-    """QualityClassifier-compatible facade backed by the model service."""
+    """Source-quality scorer facade backed by the model service."""
 
     def __init__(self, client: CuratorModelClient, model_family: str) -> None:
         self._client = client

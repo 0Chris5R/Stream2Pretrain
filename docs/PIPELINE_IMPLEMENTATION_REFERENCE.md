@@ -174,25 +174,25 @@ projection where appropriate.
 
 ### 3.1 Quality models
 
-- Eligible scientific and Hugging Face card sections:
-  `HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn` revision
-  `90ddef285f67230389057c14b2f6bbfeb70d40ea`.
-- Strict profiles require real CPU model artifacts. ONNX Runtime is preferred;
-  Safetensors/Transformers CPU is the second path. The heuristic proxy is test
-  and non-faithful-development only.
+Four independent ModernBERT-base heads are checksum-pinned in
+`processor/source-classifiers.json`. CPU FP32 inference uses Transformers
+4.57.6, Safetensors and SDPA. Strict profiles require the real artifacts.
 
-Token counts use tiktoken `cl100k_base`; strict mode rejects a missing or failed
-tiktoken backend. SentencePiece and whitespace counts exist only as visibly
-named development fallbacks.
+Input is `[SOURCE=arxiv|hf] [SECTION_TYPE=...] [SECTION_TITLE=...]`,
+newline, full sanitized section text. All 8,192-token windows with 512-token
+overlap are scored. Window logits are averaged before softmax. With six bins,
+score is `sum(i*p[i])`, class is the rounded score, and confidence is
+`1-entropy(p)/log(6)`.
 
-FinePDFs uses a 2,048-token maximum. For long section text it scores the first
-10,000 characters and the last 10,000 characters after tokenizer truncation to
-2,046 content tokens, then takes the maximum regression score. FineWeb uses a
-512-token maximum. Every retained section is scored; document `edu_score` is
-the word-weighted mean with weight `max(1, min(section_word_count, 512))`.
-FineWeb score 3 is a hard gate only for ordinary web prose. For papers and HF
-cards both learned scores are recorded but the source-specific structure policy
-decides admission.
+Document quality is the token-weighted section mean, with encoded lengths minus
+overlap as weights. arXiv gates at 3.0 and HF at 3.5. Only quality-passing arXiv
+papers run `arxiv-math-reasoning` and `arxiv-posttrain-suitability` on every
+retained section. Mean suitability ranks candidates. Maxima and high sections
+only supply optional task-designer hints, never section-only generator input.
+See [Classifiers](CLASSIFIERS.md) for the full contract.
+
+Corpus token counts use tiktoken `cl100k_base`. Strict mode rejects a missing
+or failed tokenizer.
 
 ### 3.2 Language and web-only heuristics
 
@@ -317,7 +317,7 @@ Iceberg table.
 ## 4. Post-training cohort and outputs
 
 The Foundry consumes only scientific `posttrain_candidate` rows and snapshots
-the exact structured JSON with the queue entry. At the configured 14:00 UTC
+the exact structured JSON with the queue entry. At the configured 08:30 UTC
 boundary it removes queued entries older than 24 hours, freezes every queued
 candidate in the preceding 24-hour interval, and sorts by:
 
@@ -328,8 +328,9 @@ candidate in the preceding 24-hour interval, and sorts by:
 5. `doc_id` ascending.
 
 There is currently no candidate-count cap and no API-cost/context-size term.
-Ranking score equally averages quality/5, edu/5, structure/5, completeness,
-reasoning, and the fraction of equation/table/figure kinds present. Arrivals
+Ranking score is the learned token-weighted mean post-training suitability
+normalized by five. Records without active learned diagnostics use the
+structural fallback in `processor/foundry/worker.py`. Arrivals
 after the cutoff wait for the next boundary. Each accepted SFT or RL paper
 family receives an idempotent pool ordinal; ordinal multiples of five are the
 held-out post-training benchmark split, independently within SFT and RL.
@@ -492,6 +493,17 @@ PAPER_BUNDLE:
 EVIDENCE_GRAPH:
 {canonical_json(graph).decode()}
 ```
+
+The task-designer user message includes `classifier_section_hints` from
+PaperBundle metadata. The exact optional sentences are:
+
+```text
+Sections {titles} seem especially relevant.
+Sections {titles} seem mathematically suited to potentially creating a derivation or reasoning task.
+```
+
+Each selects up to three section titles with score >=4 from the appropriate
+head. No hint changes the PaperBundle or appears in other model-role inputs.
 
 ### 5.5 Answerability critic
 

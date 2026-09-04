@@ -1,82 +1,38 @@
-# Contributing to Stream2Pretrain
+# Contributing
 
-Thanks for taking the time to contribute. This document covers what you
-need to know to work on the project.
+Use `uv` for Python, Node 20+ with npm for the UI, and Helm 3 plus Helmfile
+for deployment configuration. See [README.md](README.md) for the architecture
+and [the operations guide](docs/operations.md) for cloud commands.
 
-## Code of conduct
-
-This project adheres to the [Contributor Covenant](./CODE_OF_CONDUCT.md).
-Participation in any community space implies acceptance of those terms.
-
-## Toolchain
-
-- Python: managed via [`uv`](https://docs.astral.sh/uv/). Do **not** use a
-  bare `pip` against the workspace.
-- Helm 3.14+ and `helmfile` for chart work.
-- `kubectl`, `rpk`, and `mc` for cluster operations (see
-  `docs/operations.md`).
-- Node 20+ and `pnpm` for the UI (`ui/`).
-
-A first-time bootstrap looks like:
+## Deterministic checks
 
 ```bash
-uv sync --all-extras
-make seed-topics
-make dev-up
+uv sync --all-packages --all-groups
+uv run pytest schemas ingest processor tests --ignore=tests/integration
+uv run ruff check schemas ingest processor tests scripts
+uv run ruff format --check schemas ingest processor tests scripts
+uv run python scripts/security_scan.py
+helm lint charts/stream2pretrain
+cd ui
+npm ci
+npm run typecheck -- --incremental false
+npm run lint
 ```
 
-## Repository layout
+Integration tests in `tests/integration/` require an explicitly started container
+stack. They are separate from unit checks. [The local guide](local/README.md)
+describes the Podman profile; do not start it as a side effect of linting.
 
-See `RESEARCH.md` section 8 and the README "Repo layout" section.
+## Changes
 
-## Style
+- Keep changes focused and cover behavioral contracts with tests.
+- Use direct comments explaining invariants and decisions, not repair history.
+- Update the relevant guide when a runtime contract changes.
+- Keep credentials, model checkpoints, corpus exports and local state out of Git.
+- Review rendered Helm manifests before applying them to an explicit context.
+- Mark unmeasured capacity or quality claims `needs-measurement`.
+- Follow [the code of conduct](CODE_OF_CONDUCT.md).
 
-- No emojis, no em dashes (use hyphens or colons).
-- All Python uses `ruff` formatting and `mypy --strict`. Run `make fmt`
-  before committing.
-- All shell scripts use `set -euo pipefail` at the top and quote variables.
-- Never invent numerical values: mark unmeasured numbers `needs-measurement`.
-- Helm templates must pass `helm lint` (run `make helm-lint`).
-
-## Tests
-
-Component-local unit tests live next to their components
-(`ingest/<component>/tests`, `processor/tests`, etc.). Cross-component
-integration tests live in `tests/integration/`. Run the full suite with:
-
-```bash
-uv run pytest
-```
-
-Integration tests skip cleanly when Docker or the dev stack is unavailable.
-
-## Branches and PRs
-
-- Branch from `main`. Use a short topical prefix: `feat/`, `fix/`, `chore/`,
-  `docs/`.
-- One logical change per PR. Bundle scope-creep into follow-up PRs.
-- PR description must answer: what changed, why, what tests cover it, any
-  `needs-measurement` items added or resolved.
-
-## Commit messages
-
-Conventional Commits style:
-
-```
-feat(ingest): add Atom poller for github releases
-fix(processor): drop docs whose minhash signature is empty
-chore(charts): bump kube-prometheus-stack to v62
-docs(architecture): clarify validity-interval precedence
-```
-
-## Releasing
-
-Releases are tagged from `main`. Bump `pyproject.toml` and the chart's
-`Chart.yaml`, update `CHANGELOG.md`, then tag `v<major>.<minor>.<patch>`.
-
-## Getting help
-
-Open a discussion on GitHub. For security-sensitive reports (a credential
-in a log line, an exploit in the operator surface), email the maintainers
-listed in the repository metadata privately rather than opening a public
-issue.
+Simple descriptive commit messages are sufficient. Releases use immutable
+image digests and checksum-pinned model artifacts, with versions declared in
+`pyproject.toml` and `charts/stream2pretrain/Chart.yaml`.

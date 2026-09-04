@@ -22,10 +22,8 @@ export const SourceFeedRateLimitSchema = z.object({
 
 /**
  * Protocol enum mirrors `schemas/sourcefeed.py::SourceFeedProtocol` and the
- * generated `schemas/json_schema/source_feed_spec.schema.json`. The wire
- * uses kebab-case (`oai-pmh`, `rest-json`); the legacy underscore variants
- * (`oai_pmh`, `rest_json`) are NOT accepted by the Gatekeeper admission
- * policy. Keep in sync.
+ * generated `schemas/json_schema/source_feed_spec.schema.json`.
+ * Gatekeeper admits the exact kebab-case wire values.
  */
 export const SourceFeedProtocols = ['rss', 'atom', 'oai-pmh', 'rest-json', 'manual'] as const;
 
@@ -92,9 +90,7 @@ export const RuntimeProfileSchema = z.object({
 export type RuntimeProfile = z.infer<typeof RuntimeProfileSchema>;
 
 export const MixtureSourceWeightSchema = z.object({
-  // Field name mirrors Pydantic `MixtureSourceWeight.source_feed`. The
-  // SourceFeed REST API has `extra='forbid'` so the legacy `source` key is
-  // rejected on the wire. Always send `source_feed`.
+  // Field name mirrors Pydantic `MixtureSourceWeight.source_feed`.
   source_feed: z.string(),
   weight: z.number().gt(0).max(1),
 });
@@ -878,10 +874,6 @@ export const FoundryActivitySchema = z.object({
   ),
 });
 
-export const FoundryManualRunResponseSchema = z.object({
-  run: FoundryDashboardSchema.shape.manual_runs.element,
-  created: z.boolean(),
-});
 
 export const FoundryArtifactAuditResponseSchema = z.object({
   audit: ArtifactAuditSchema,

@@ -3,15 +3,12 @@
 End-to-end source-aware curation. The worker:
 
 1. Consumes :class:`SilverRecord` payloads from ``docs.normalized``.
-2. Runs the Gopher heuristic gate.
-3. Runs the C4 nopunc / curly-brace / lorem-ipsum gate.
-4. Re-scores perplexity (KenLM) and re-buckets - the fetcher emitted
-   stub values; curation owns the real signals.
-5. Recomputes the MinHash signature (cheap, ~us/doc) and tests the
-   :class:`LSHBloomIndex` near-dup index.
-6. Scores every eligible training-text source with FinePDFs Edu v2 after
-   deterministic rejection checks, and uses a discovery-only metadata policy.
-7. Runs the PII regex pack plus Presidio.
+2. Applies source-specific extraction, language and privacy checks.
+3. Tests exact hashes and the durable :class:`LSHBloomIndex` near-dup index.
+4. Scores all retained sections with the appropriate ModernBERT quality head.
+5. Applies whole-document quality thresholds.
+6. Scores both arXiv auxiliary heads only after source quality passes.
+7. Applies web heuristics and KenLM only where the source policy enables them.
 8. Emits a trainable :class:`GoldRecord` on ``docs.curated``.
 
 Every scored outcome is published to ``curation.decisions`` for durable
@@ -59,7 +56,7 @@ from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
 from processor.operators.lshbloom import LSHBloomIndex
 from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiSanitization, PiiScanner
-from processor.operators.quality import QualityClassifier, QualityScore
+from processor.operators.quality import DevelopmentQualityScorer, QualityScore
 from processor.operators.scientific_document_quality import is_publication_template
 from processor.operators.source_classifiers import (
     SourcePosttrainClassifier,
@@ -336,7 +333,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             SourceQualityClassifier(models)
             if require_real_models
             or os.path.isfile(os.path.join(models, "source-classifiers.json"))
-            else QualityClassifier(None)
+            else DevelopmentQualityScorer()
         )
         if isinstance(source_quality, SourceQualityClassifier):
             posttrain_quality = SourcePosttrainClassifier(source_quality)
@@ -416,7 +413,7 @@ def _score_segment_models(
     kenlm: PerplexityScorer,
     use_kenlm: bool,
 ) -> dict[str, _SegmentModelSignals]:
-    """Run FinePDFs and optional KenLM batches without changing segment order."""
+    """Run source-quality and optional KenLM batches without changing segment order."""
     concurrency = max(1, int(os.environ.get("S2P_CURATOR_CLASSIFIER_CONCURRENCY", "1")))
     quality_family_concurrency = concurrency
     batch_size = int(os.environ.get("S2P_CURATOR_CLASSIFIER_BATCH_SIZE", "2"))
@@ -734,7 +731,7 @@ def _prefetched_curate_state(
     Existing deterministic rejection predicates run before model inference.
     Rejected documents still receive a complete durable decision, but their
     SegmentScore model fields stay null. Eligible documents fill all ready
-    stateless FinePDFs Pods with bounded requests and replay the exact results
+    stateless quality Pods with bounded requests and replay the exact results
     as :func:`curate_one` finalizes ordered LSH mutations.
     """
     pii = _MemoizedPiiSanitizer(state.pii)
@@ -890,7 +887,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
             exclusion_reasons.append("placeholder boilerplate isolated to this section")
             removed_for_c4 = True
         edu_score: float | None = None
-        finepdfs_edu_score: float | None = None
         quality_classifier_revision: str | None = None
         segment_perplexity: float | None = None
         segment_bucket: str | None = None
@@ -899,7 +895,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         perplexity_result = signals.perplexity
         if quality_result is not None:
             edu_score = quality_result.edu_score
-            finepdfs_edu_score = quality_result.edu_score
             quality_classifier_revision = quality_result.revision
         segment_perplexity = perplexity_result.perplexity if perplexity_result is not None else None
         segment_bucket = perplexity_result.bucket if perplexity_result is not None else None
@@ -912,7 +907,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
                 role=segment.role,
                 word_count=safe_segment.word_count,
                 edu_score=edu_score,
-                finepdfs_edu_score=finepdfs_edu_score,
                 quality_classifier_revision=quality_classifier_revision,
                 perplexity=segment_perplexity,
                 perplexity_bucket=segment_bucket,  # type: ignore[arg-type]
@@ -1296,7 +1290,7 @@ def _risk_from_reject(reject: Sequence[RejectReason], pii_flags: Sequence[PiiFla
 
 
 def _license_reject_reason(silver: SilverRecord) -> RejectReason | None:
-    """Apply the purpose-aware licence policy to legacy and replay rows."""
+    """Apply the purpose-aware licence policy at the curation boundary."""
     if silver.training_usage == "posttrain_transform_only" and is_posttrain_transform_permitted(
         silver.spdx_license
     ):
@@ -1647,7 +1641,7 @@ def build_dataflow(
         # ``flat_map_batch`` receives runtime batches from the Kafka source.
         # Chunk again here so a future partition-count change cannot inflate
         # the model/input memory bound beyond twelve one-segment documents:
-        # six two-item RPCs for the measured six-Pod FinePDFs lane.
+        # independent RPCs across the available quality replicas.
         for offset in range(0, len(messages), document_batch_size):
             batch = messages[offset : offset + document_batch_size]
             valid: list[tuple[object, bytes, SilverRecord]] = []
@@ -1724,15 +1718,11 @@ def build_dataflow(
 
     @operator  # type: ignore[untyped-decorator]
     def _curate_run(step_id: str, up: Any) -> Any:
-        # ``map(\"curate_run\", ...)`` previously expanded to this exact
-        # recovery-visible core step ID. Keep that topology while replacing
-        # only the stateless mapper callback with its batch-aware equivalent.
+        # Recovery snapshots bind this exact operator hierarchy and step ID.
         return op.flat_map_batch("flat_map_batch", up, _batch_step)
 
     mapped: Any = _curate_run("curate_run", inp)
-    # Retain the former stateless filter step and its core step IDs. The batch
-    # callback now omits record-local failures itself, so every emitted tuple
-    # satisfies the predicate.
+    # This identity boundary is part of the durable recovery topology.
     filtered: Any = op.filter("curate_drop_none", mapped, lambda _pair: True)
     decisions: Any = op.map("curate_decision_message", filtered, lambda pair: pair[0])
     decision_sink = KafkaSink(

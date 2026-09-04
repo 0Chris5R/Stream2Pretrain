@@ -28,30 +28,12 @@ class _KenLM:
         return
 
 
-class _ShadowScalar:
-    def __init__(self, *_args: object, family: str, revision: str, **_kwargs: object) -> None:
-        self.family = family
-        self.revision = revision
-
-    def score(self, text: str) -> dict[str, object]:
-        return {"model_family": self.family, "score": float(len(text))}
-
-
-class _Cso:
-    revision = "cso-test"
-
-    def score(self, text: str) -> dict[str, object]:
-        return {"model_family": "cso-topics", "topics": [text]}
-
-
 @pytest.mark.parametrize(
     ("profile", "expected_keys"),
     [
         ("quality", {"ready", "profile", "quality", "classifier_protocol"}),
-        ("quality", {"ready", "profile", "quality", "classifier_protocol"}),
         ("kenlm", {"ready", "profile", "kenlm"}),
-        ("shadow", {"ready", "profile", "shadow"}),
-        ("all", {"ready", "profile", "quality", "kenlm", "shadow", "classifier_protocol"}),
+        ("all", {"ready", "profile", "quality", "kenlm", "classifier_protocol"}),
     ],
 )
 def test_runtime_loads_only_its_selected_model_family(
@@ -62,32 +44,12 @@ def test_runtime_loads_only_its_selected_model_family(
 ) -> None:
     monkeypatch.setattr(model_service, "SourceQualityClassifier", _Quality)
     monkeypatch.setattr(model_service, "KenLMScorer", _KenLM)
-    monkeypatch.setattr(model_service, "TransformerShadowScorer", _ShadowScalar)
-    monkeypatch.setattr(model_service, "CsoShadowClassifier", _Cso)
 
     runtime = model_service.CuratorModelRuntime(tmp_path, profile=profile)
 
     assert set(runtime.metadata()) == expected_keys
     assert (runtime.quality is not None) is (profile in {"quality", "all"})
     assert (runtime.kenlm is not None) is (profile in {"kenlm", "all"})
-    assert (runtime.meta_rater is not None) is (profile in {"shadow", "all"})
-    assert (runtime.finemath is not None) is (profile in {"shadow", "all"})
-    assert (runtime.cso is not None) is (profile in {"shadow", "all"})
-
-
-def test_shadow_runtime_returns_all_public_results(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setattr(model_service, "TransformerShadowScorer", _ShadowScalar)
-    monkeypatch.setattr(model_service, "CsoShadowClassifier", _Cso)
-    runtime = model_service.CuratorModelRuntime(tmp_path, profile="shadow")
-
-    assert set(runtime.shadow_scores("paper body")) == {
-        "meta-rater-reasoning",
-        "finemath",
-        "cso-topics",
-    }
 
 
 def test_quality_batch_matches_ordered_one_by_one_outputs(

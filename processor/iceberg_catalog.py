@@ -36,10 +36,8 @@ def iceberg_maintenance_properties() -> dict[str, str]:
         DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
     )
     return {
-        # Immediate PyIceberg cleanup used to race the hourly maintenance job
-        # and made transient MinIO DNS failures part of every hot append.
-        # Retention remains identical; the maintenance CronJob is now the only
-        # component that physically removes obsolete metadata JSON files.
+        # The maintenance CronJob owns physical metadata deletion. Keep MinIO
+        # cleanup requests off the hot append path.
         "write.metadata.delete-after-commit.enabled": "false",
         "write.metadata.previous-versions-max": str(metadata_versions),
         "history.expire.max-snapshot-age-ms": str(retention_hours * 60 * 60 * 1000),

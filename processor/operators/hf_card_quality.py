@@ -3,7 +3,7 @@
 The gate follows the sections recommended by Hugging Face's official model-
 and dataset-card documentation. It does not treat YAML metadata, repository
 popularity, or a model licence as evidence that README prose is useful.
-FinePDFs Edu v2 is evaluated only after this cheaper deterministic gate passes.
+source-specific ModernBERT is evaluated only after this cheaper deterministic gate passes.
 """
 
 from __future__ import annotations

@@ -1,68 +1,24 @@
 # Scientific Paper to SFT and RL Environment Foundry
 
-Status: implemented, local live-provider pilot in progress
-Contract date: 2026-08-19
-Scope owner: project team
+The Foundry converts curated scientific papers into grounded SFT trajectories
+and standalone verifier-backed RL environments. It generates data, not model
+weights. Its upstream input is an eligible Gold record and durable scientific
+evidence, not a second source fetch or extraction pipeline.
 
-This document is the binding implementation and operations contract for the
-post-training foundry added to Stream2Pretrain. It translates curated,
-licence-cleared scientific papers into grounded SFT trajectories and standalone
-RL-verifiable environments. It does not train a model. The project keeps the
-Stream2Pretrain name until a live pilot proves the complete
-path. A rename to Stream2Train is a later explicit decision.
+## 1. Integration contract
 
-## 1. Approved adaptations to the original architecture
-
-The supplied architecture assumed no knowledge of the existing repository. The
-implementation preserves its functional requirements with these explicit
-adaptations:
-
-1. Hetzner Experiments Inference is the only model provider. Every
-   model-authored construction, solving, criticism, verifier, repair, and
-   adversarial role uses the exact `Qwen3.8-27B` route.
-2. `Qwen3.8-27B` has an exact Apache-2.0 model record. Authenticated `/models`
-   discovery is authoritative. A missing configured route prevents startup.
-   Returned route mismatches fail the call, while catalogue changes are
-   recorded for inspection without creating a separate approval workflow.
-3. The architecture's paper loader is an adapter over the existing
-   `GoldRecord` plus `ScientificDocument`. It does not add a second extractor or
-   duplicate curation. Existing stable sections, equations, tables, figures,
-   OCR decisions, quality signals, PII decisions, and
-   source provenance become an immutable `PaperBundle`.
-4. The former `reasoning_candidate` route is now `posttrain_candidate`.
-   Historical snapshots remain readable only through an explicit legacy flag.
-   The foundry consumes the new route by default.
-5. At the configured UTC boundary, post-training ranks and freezes every candidate
-   received during the preceding 24 hours. There is no daily paper cap. New arrivals
-   wait for the next boundary. Work
-   stops only when the cohort is exhausted, provider capacity is unavailable,
-   or the next boundary replaces it. Old work never accumulates into a backlog
-   that can starve fresh research.
-6. Redpanda, Bytewax, MinIO, Iceberg, Polaris, Prometheus, Grafana, and the
-   existing Next.js UI remain the control and data plane. A second workflow
-   engine and W&B are unnecessary for the required semantics.
-7. Prime Intellect Verifiers export uses its current v1 `Taskset`, `TaskData`,
-   reward, and `Toolset` interfaces. The generated environment is pinned to
-   `verifiers==0.3.1`. NeMo Gym remains a later export target, as in the
-   supplied plan.
-8. Official repositories, datasets, and checkpoints are optional inputs. They
-   run only when an audited manifest supplies a permissive licence, immutable
-   content hashes, and a digest-pinned oracle image. Paper-only tasks remain the
-   default.
-9. Local replay uses recorded real provider outputs. It is a deterministic
-   regression mode, never a source of production artifacts.
-10. Provider qualification benchmarks, availability heartbeats, threshold
-    gates, and provider approval records are intentionally absent. They do not
-    improve this once-daily student pipeline enough to justify their cost.
-11. Human review applies to generated SFT/RL artifacts, not providers. Each
-    approve or reject action records the reviewer, optional reason, and time as
-    an append-only audit record. It never rewrites the generated artifact.
-12. Copy-ratio, shared-word, and minimum-answer-length limits are not part of
-    construction, validation, diagnostics, or logging. Grounding is determined
-    from structured evidence and deterministic task/verifier checks.
-
-These are integration choices, not reduced task, validation, provenance, or
-security requirements.
+- All model-authored roles use Hetzner Experiments Inference and exact
+  `Qwen3.8-27B`, with authenticated catalogue discovery and returned-model logs.
+- The existing Gold record and scientific artifact form an immutable PaperBundle.
+- The daily scheduler freezes all candidates received in the preceding 24 hours
+  and processes them in rank order, without a fixed daily paper cap.
+- The task designer receives the complete existing paper input. High
+  classifier section scores add optional hints, not context replacement.
+- Validation decisions apply to individual SFT trajectories and RL environments.
+  A named human audit is a separate append-only record.
+- Generated Prime Intellect packages use `verifiers==0.3.1` interfaces.
+- Official-artifact oracles are optional, isolated and disabled in the current
+  deployment. Recorded-provider replay is an explicit deterministic test mode.
 
 ## 2. End-to-end data flow
 
@@ -113,13 +69,10 @@ At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC` and
 cohort, including an empty cohort. It first drops unprocessed entries at or
 before the prior 24-hour boundary, then freezes all queued candidates received
 after that boundary and no later than the current boundary. Papers are ranked
-by an equal-weight combination of normalized composite quality, education
-quality, scientific structure, extraction completeness, reasoning suitability,
-and the presence of equation, table, and figure evidence. Context length and
-predicted API cost are deliberately excluded. Ties use reasoning, composite
-quality, recency, and document ID. The current auditable formula is explicitly
-a bootstrap policy and will be superseded by a trained artifact-yield ranker
-once reviewed accepted and rejected artifacts provide enough labels.
+by token-weighted mean `arxiv-posttrain-suitability` score divided by five.
+Ties use reasoning, composite quality, recency and document ID. API cost and
+context length are not ranking inputs. The structural fallback for records
+without an active learned score is defined in `processor/foundry/worker.py`.
 
 The production schedule is 08:30 UTC, corresponding to 10:30 Europe/Berlin
 while daylight-saving time is active. The deployment is anchored by
@@ -140,14 +93,9 @@ rechecks independently of source arrivals. Its 60-second poll interval and the
 Candidate admission reads and validates the exact structured scientific JSON
 referenced by Gold, then snapshots those bytes beside the Gold payload in the
 durable queue. Provider work therefore does not depend on later MinIO reads of
-an artifact that was already acknowledged at admission. Queue rows written by
-older versions are migrated lazily from their recorded URI. If such an old URI
-is permanently missing, malformed, identity-mismatched, or lacks a retained
-scientific body, the worker writes a replay-safe terminal `REJECTED` preflight
-job containing the document ID and safe bucket/key audit fields, advances the
-run counter, and continues with the next ranked paper. It never fabricates a
-scientific artifact from the flat Gold text. Transient object-store failures
-remain retryable and do not discard the candidate.
+an artifact that was already acknowledged at admission. Unavailable source evidence prevents candidate generation; transient object-store
+failures remain retryable. Missing historical evidence does not become a
+fabricated content-quality rejection or a reconstructed paper from flat text.
 
 Every accepted paper-family package is assigned independently within its SFT
 or RL pool. Four consecutive paper packages go to `train` and the fifth goes
@@ -160,37 +108,6 @@ full-feed pretraining policy, its source paper may still be present in the
 pretraining corpus, so it is a post-training holdout rather than a guaranteed
 pretraining-unseen benchmark. Pretraining itself does not assign a benchmark
 route or split.
-
-### 3.1 Measured arXiv licence policy
-
-On 2026-08-19, a deduplicated observation of the official `cs.AI`, `cs.CL`,
-`cs.LG`, and `cs.CV` RSS feeds found 629 unique announced arXiv papers, of
-which 385 were new submissions or cross-lists. Their `dc:rights` distribution
-was:
-
-| Licence | Papers |
-| --- | ---: |
-| arXiv non-exclusive distribution licence | 276 |
-| CC BY 4.0 | 274 |
-| CC BY-SA 4.0 | 7 |
-| CC0 1.0 | 5 |
-| CC BY-NC-ND 4.0 | 33 |
-| CC BY-NC-SA 4.0 | 34 |
-
-The strict commercial-derivative allowlist (`CC BY`, `CC BY-SA`, and `CC0`)
-retained 286 of 629 announcements (45.47 percent) and 169 of 385 new or
-cross-listed papers (43.90 percent). It would therefore remove 54.53 percent
-of the full observed feed, not almost all of it.
-
-The deployment policy records an immutable decision before body retrieval.
-Only the 286 permissively licensed announcements in this observed sample would
-enter verbatim pretraining. Reviewed arXiv non-exclusive and CC BY-NC/NC-SA
-items may be fetched only for derived post-training generation. Missing,
-explicit incompatible and no-derivatives records remain quarantined and never
-reach extraction or classifiers. This is an engineering policy and provenance
-control, not a legal conclusion. Sources:
-`https://info.arxiv.org/help/license/index.html` and
-`https://info.arxiv.org/help/api/tou.html`.
 
 The current defaults propose six task specifications and retain at most three
 accepted tasks per paper. They are scheduling configuration, not claims about
@@ -399,10 +316,9 @@ solver trajectory rather than pinning the paper or daily queue.
 For `scientific-reasoning-v2`, the authoritative `VerifierSpec` is compiled
 locally from the reviewed `TaskSpec` hidden targets. Qwen3.8 performs an
 audit-only critique and cannot add qualifications, targets, predicate types, or
-schema fields. This removes the observed failure mode in which a generated
-verifier invented requirements that the task never specified. Legacy v1 tasks
-retain their original bounded model-rubric path solely for deterministic
-inspection and regression. Predicate types cover required nodes, evidence
+schema fields. The verifier can only enforce requirements in the reviewed task.
+The v1 package reader retains its bounded model-rubric contract for inspection
+of persisted artifacts. Predicate types cover required nodes, evidence
 membership and coverage, exact equations, numeric tolerances, required
 qualifications, contradiction flags, report-manifest consistency, and tool
 budget. The standalone verifier is copied into every package and imports
@@ -445,14 +361,8 @@ sibling. An RL environment is accepted when at least one independently
 grounded reference trajectory passes every gate; only those passing references
 enter its package.
 
-The 2026-08-30 content audit establishes policy `posttrain-policy-v4`, prompt
-`paper-foundry-prompts-v4`, TaskSpec schema `task-spec-v2`, and content policy
-`scientific-reasoning-v2` as a clean regeneration boundary. Older
-SFT trajectories exposed construction targets in their solver prompt, and the
-older accepted derivation environment checked identifiers rather than the
-mathematics. Those artifacts are audit evidence only and must not enter a
-training export. V2 package keys and manifests carry the content-policy
-revision so legacy and regenerated output cannot be silently merged.
+Task, prompt, verifier and policy revisions are retained in every package so
+outputs from different configurations remain distinguishable.
 
 ## 11. Official-artifact oracles
 
@@ -591,7 +501,7 @@ store is designed and measured. Provider work is naturally expensive and is
 serialized against shared quotas. Horizontal generation can later shard by paper family only
 after idempotency and quota ownership move to a shared transactional backend.
 The current CPU and memory requests and the 5 GiB control PVC are
-`needs-measurement` for the first cloud pilot.
+`needs-measurement` for sustained cloud operation.
 
 Required externally managed Secrets are:
 

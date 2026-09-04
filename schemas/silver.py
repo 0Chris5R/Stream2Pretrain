@@ -5,10 +5,8 @@ heuristic taggers (Gopher / C4), and MinHash signature compute. Near-dup
 cluster membership is filled in by the LSHBloom operator downstream and may
 be ``None`` for the first occurrence in a band.
 
-v0.2.0 propagates ``source_format``, ``extraction_pipeline``, ``spdx_license``,
-and ``spdx_license_source`` from the Bronze record so the silver consumer no
-longer has to join back to bronze to know which extractor produced the text
-or which license the source attached.
+Source format, extraction provenance and item-level licence evidence propagate
+from Bronze, so consumers can interpret the record without fetching raw bytes.
 """
 
 from __future__ import annotations
@@ -144,7 +142,7 @@ class SilverRecord(BaseModel):
         description="SourceFeed CRD name propagated from Bronze.",
     )
 
-    # v0.2.0 classifier columns (mirrored from Bronze; kept on Silver so
+    # Source provenance (mirrored from Bronze; kept on Silver so
     # downstream Iceberg writers do not need to re-join with the bronze topic).
     source_format: SourceFormat = Field(
         default="html",
@@ -163,7 +161,7 @@ class SilverRecord(BaseModel):
     spdx_license: str | None = Field(
         default=None,
         max_length=128,
-        description="OSI-list verified SPDX id, or None if not attached.",
+        description="Item-level licence identifier, or None if not attached.",
     )
     spdx_license_source: SpdxLicenseSource = Field(
         default="unknown",

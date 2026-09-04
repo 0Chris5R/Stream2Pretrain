@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from processor.scientific_policy import (
     composite_quality_score,
-    representative_segments,
     route_document,
 )
 from processor.tests.test_curate import _silver
@@ -19,45 +18,6 @@ def _segment(segment_id: str, role: str, words: int) -> SilverSegment:
         text="word " * words,
         word_count=words,
     )
-
-
-def test_representative_segments_reserve_role_families() -> None:
-    segments = [
-        _segment("abstract", "abstract", 80),
-        _segment("intro", "introduction", 400),
-        *[_segment(f"method-{index}", "methods", 1_000 - index) for index in range(5)],
-        *[_segment(f"result-{index}", "results", 900 - index) for index in range(5)],
-        _segment("conclusion", "conclusion", 120),
-        _segment("appendix", "appendix", 700),
-    ]
-
-    sampled = representative_segments(segments, limit=6)
-
-    assert {segment.role for segment in sampled} == {
-        "abstract",
-        "introduction",
-        "methods",
-        "results",
-        "conclusion",
-        "appendix",
-    }
-
-
-def test_representative_segments_fill_spare_capacity_by_information() -> None:
-    segments = [
-        _segment("abstract", "abstract", 80),
-        _segment("method-short", "methods", 100),
-        _segment("method-long", "methods", 600),
-        _segment("result", "results", 300),
-    ]
-
-    sampled = representative_segments(segments, limit=3)
-
-    assert [segment.segment_id for segment in sampled] == ["abstract", "method-long", "result"]
-
-
-def test_representative_segments_zero_limit_is_empty() -> None:
-    assert representative_segments([_segment("abstract", "abstract", 10)], limit=0) == []
 
 
 def test_evidence_rich_paper_is_pretrain_and_posttrain_eligible() -> None:

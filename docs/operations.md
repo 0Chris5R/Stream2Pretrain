@@ -1,7 +1,7 @@
 # Stream2Pretrain - Operations Runbook
 
 Routine procedures for the curator on a k3s cluster. The dev-stack equivalent
-(docker compose) is documented in the README's Quickstart section. This file
+(docker compose) is documented in the [local guide](../local/README.md). This file
 assumes you can `kubectl` against the cluster as a user with chart-admin
 privileges in the `stream2pretrain` namespace.
 
@@ -27,17 +27,16 @@ OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh cluster
 # 1.5 Seed sources and verify.
 NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
 ./scripts/setup_dhbw_demo.sh verify
-kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
+kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:80
 ```
 
 The chart-owned RSS and OAI-PMH CronJobs are suspended templates.
 The SourceFeed controller creates the only active CronJob for each CRD. Do not
 unsuspend a template job: doing so would duplicate the per-source schedules.
 
-This sequence is for a clean install. Do not apply the application tier to the
-current legacy release until the immutable-selector and curator StatefulSet
-migration in `docs/infrastructure-reimplementation.md` is approved. Loki,
-Tempo, and Alloy are not in the measured baseline.
+This sequence provisions a new installation. Existing deployments apply only
+the changed ownership tier. Loki, Tempo and Alloy are not enabled in the DHBW
+profile.
 
 ## 2. Scale the processor
 
@@ -58,14 +57,11 @@ durable append latency and restart replay on the cluster.
 Ordinary Kafka-lag KEDA must not independently scale either core execution:
 broker commits are not the authoritative Bytewax progress boundary. A core
 rescale is a coordinated stop, worker-count change, and restart using the
-pre-created recovery partitions. FinePDFs, FineWeb, and KenLM remain
-stateless `processor-model-service-*` deployments with demand-based KEDA
-scaling and cross-node spreading. FinePDFs and FineWeb use independent
-Services, runtimes, and bounded curator executor pools so their CPU work runs
-and scales concurrently. The curator sends bounded batches over fresh
-in-cluster connections so Kubernetes distributes them across ready backends;
-the batch endpoint invokes the same pinned classifier once per input and
-preserves exact one-by-one order, score, and revision.
+pre-created recovery partitions. ModernBERT quality and KenLM services are
+stateless deployments with separate resource budgets and demand-based scaling.
+The four quality heads share each quality Pod's bounded CPU budget. The
+curator leases asynchronous requests to ready replicas and preserves input
+order and exact model provenance.
 Their deployment strategy is `Recreate`: the DHBW nodes cannot hold two
 generations of the multi-GiB model images at once. The release workflow removes
 an HPA and scales its service to one Pod only when that service's immutable

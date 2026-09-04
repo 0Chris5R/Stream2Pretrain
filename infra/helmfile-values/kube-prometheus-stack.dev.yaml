@@ -25,8 +25,7 @@ grafana:
   # kube-prometheus-stack default password. Retrieve it with the documented
   # command when an operator needs to log in.
   adminPassword: ""
-  # This development cluster runs one Grafana replica. Recreate avoids an
-  # unavailable legacy ReplicaSet blocking a corrected Secret configuration.
+  # The single Grafana replica owns one consistent Secret configuration.
   deploymentStrategy:
     type: Recreate
   defaultDashboardsTimezone: utc

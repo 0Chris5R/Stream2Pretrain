@@ -17,8 +17,3 @@ class MetadataDiscoveryPolicy:
     def score(self, text: str) -> QualityScore:
         del text
         return QualityScore(edu_score=0.0, revision=self.revision)
-
-
-# Read compatibility for older imports. New code uses the explicit discovery
-# name so the policy is never presented as a metadata quality classifier.
-MetadataQualityPolicy = MetadataDiscoveryPolicy

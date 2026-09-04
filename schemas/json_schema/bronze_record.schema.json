@@ -112,7 +112,7 @@
         }
       ],
       "default": null,
-      "description": "OSI-list verified SPDX id (e.g. 'Apache-2.0'); None when no machine-readable license was attached to the source.",
+      "description": "Item-level licence identifier (e.g. 'Apache-2.0'); None when no machine-readable license was attached to the source.",
       "title": "Spdx License"
     },
     "spdx_license_source": {

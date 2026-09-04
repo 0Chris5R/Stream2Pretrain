@@ -254,8 +254,6 @@ def test_release_images_are_deployed_by_content_digest() -> None:
     assert "    wait: false" in application_release
     assert "    waitForJobs: false" in application_release
     assert ') >"$log" 2>&1 &' in helm_release
-    assert "select(.metadata.deletionTimestamp == null)" in workflow
-    assert '"pod/$fetcher_ready_pod" -c fetcher' in workflow
 
 
 def test_fetcher_uses_matching_official_cpu_vision_wheels() -> None:
@@ -281,19 +279,10 @@ def test_cpu_pdf_fallback_does_not_load_the_codeformula_vlm() -> None:
     assert "options.do_formula_enrichment = False" in scientific
 
 
-def test_scaled_zero_curator_cutover_uses_a_non_processing_pvc_helper() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
-    start = workflow.index("# Advance the broker bridge to any legacy curator recovery progress")
-    end = workflow.index("# Migrate the existing partition set before expanding it")
-    cutover = workflow[start:end]
-
-    assert 'curator_claim="checkpoint-stream2pretrain-processor-curate-0"' in cutover
-    assert '"app.kubernetes.io/component": "processor-curate-cutover"' in cutover
-    assert "| del(.initContainers)" in cutover
-    assert '| .command = ["sh", "-ec"]' in cutover
-    assert "persistentVolumeClaim: {claimName: $claim}" in cutover
-    assert "python - < scripts/migrate_fetcher_offsets.py" in cutover
-    assert 'delete "pod/$curator_migration_pod" --wait=true' in cutover
+def test_release_preserves_stream_offsets() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text()
+    assert "rpk group seek" not in workflow
+    assert "S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh" in workflow
 
 
 def test_curator_canary_keeps_limits_but_uses_a_measured_scheduler_request() -> None:
@@ -321,18 +310,10 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
         "inputs: .dockerignore schemas processor/Dockerfile.model-service.app "
         "processor/__init__.py processor/common.py processor/model_service.py processor/model_jobs.py "
         "processor/operators/__init__.py "
-        "processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py "
-        "processor/operators/shadow_models.py"
+        "processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py"
     )
-    assert workflow.count(model_input) == 3
+    assert workflow.count(model_input) == 2
     assert "inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml" not in workflow
-
-
-def test_shadow_image_keeps_nltk_data_out_of_the_build_users_home() -> None:
-    dockerfile = (ROOT / "processor" / "Dockerfile.model-service.app").read_text(encoding="utf-8")
-
-    assert "NLTK_DATA=/opt/models/nltk_data" in dockerfile
-    assert "nltk.download('stopwords', download_dir='/opt/models/nltk_data'" in dockerfile
 
 
 def test_foundry_has_an_independent_application_image() -> None:

@@ -149,9 +149,7 @@ spec:
             - name: S2P_CURATOR_MAX_EXTRACTION_RETRIES
               value: "2"
             - name: S2P_CURATOR_CLASSIFIER_CONCURRENCY
-              # Twelve independent requests let the sole FinePDFs family
-              # expose enough demand for its six-Pod KEDA
-              # ceiling while preserving exact result ordering.
+              # Bounded requests share complete paper inference across replicas.
               value: "12"
             - name: S2P_CURATOR_CLASSIFIER_BATCH_SIZE
               value: {{ .Values.processor.curate.classifierBatchSize | int | quote }}

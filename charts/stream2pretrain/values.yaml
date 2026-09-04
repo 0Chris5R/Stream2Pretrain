@@ -150,7 +150,7 @@ sources:
       kind: cronjob
       schedule: "27 */2 * * *"
       licenseDefault: per-record
-    # Native arXiv full-paper-HTML fetcher (v0.2.0). Subscribes to arXiv
+    # Native arXiv full-paper-HTML fetcher. Subscribes to arXiv
     # discovery envelopes on ``raw.fetched`` and walks every fresh id through
     # ``arxiv.org/html/<id>`` (with ``ar5iv.labs.arxiv.org`` as fallback).
     htmlFetcher:
@@ -202,7 +202,7 @@ ingest:
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 512Mi}
-  # arXiv full-paper-HTML fetcher (v0.2.0). Long-running Deployment that
+  # arXiv full-paper-HTML fetcher. Long-running Deployment that
   # subscribes to raw.fetched for arXiv ids and fetches the rendered
   # HTML body (with ar5iv as fallback). Toggle via
   # ``sources.arxiv.htmlFetcher.enabled``.
@@ -337,10 +337,7 @@ processor:
         image: stream2pretrain/processor-quality-model
         autoscaling:
           minReplicas: 2
-          # The measured three-Pod ceiling processed only about half of the
-          # live normalized arrival rate. source-specific ModernBERT is stateless, so let KEDA
-          # use the remaining cluster capacity without changing any score or
-          # curation gate.
+          # Override with the measured reservation ceiling for the cluster.
           maxReplicas: 6
         resources:
           requests: {cpu: 1, memory: 2Gi}
@@ -354,18 +351,6 @@ processor:
         resources:
           requests: {cpu: 500m, memory: 1Gi}
           limits: {cpu: 2, memory: 3Gi}
-      # Experimental only: these public models write independent shadow
-      # scores and never change pretraining or post-training admission.
-      shadow:
-        enabled: false
-        runtimeProfile: shadow
-        image: stream2pretrain/processor-shadow-model
-        autoscaling:
-          minReplicas: 1
-          maxReplicas: 1
-        resources:
-          requests: {cpu: 100m, memory: 2Gi}
-          limits: {cpu: 1, memory: 5Gi}
     autoscaling:
       enabled: true
       minReplicas: 1
@@ -373,27 +358,12 @@ processor:
       pollingIntervalSeconds: 15
       cooldownPeriodSeconds: 300
       prometheusServerAddress: http://kps-prometheus.monitoring.svc.cluster.local:9090
-  shadowClassifier:
-    enabled: false
-    image: stream2pretrain/processor
-    replicas: 1
-    modelTimeoutSeconds: 900
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 1Gi}
-    checkpoint:
-      storageClass: ""
-      size: 1Gi
-      recoveryPartitions: 1
-      snapshotSeconds: 1
   iceberg:
     image: stream2pretrain/processor-iceberg-writer
     sourceBatchSize: 1
     replicas: 1
     resources:
-      # PyIceberg must hold table metadata, Arrow buffers, and both durable
-      # input frontiers while draining after a restart. The previous 1 GiB
-      # ceiling was measured OOM-killing the writer during recovery.
+      # Reserve memory for table metadata, Arrow buffers and input recovery.
       requests: {cpu: 200m, memory: 1Gi}
       limits: {cpu: 2, memory: 4Gi}
     flushIntervalSeconds: 60
@@ -485,10 +455,7 @@ mixtureController:
   reconcileIntervalSeconds: 30
 
 # -----------------------------------------------------------------------------
-# Seed loader (one-shot Bytewax Job; v0.2.0)
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# UI (Next.js 14)
+# UI (Next.js 16)
 # -----------------------------------------------------------------------------
 ui:
   image: stream2pretrain/ui

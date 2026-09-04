@@ -2,7 +2,7 @@
 
 Stream2Pretrain is a Kubernetes-native pipeline that turns continuous AI research sources into an auditable training-data corpus. It separates permissive pretraining data from grey-area and unlicensed inputs that may only ground derived post-training artifacts, applies source-aware quality rules, stores every decision in an Iceberg lakehouse, and serves the results through a monitoring cockpit.
 
-This README is the sole report for the DHBW Cloud Computing and Big Data examination. It is written in English because the code, APIs, field names, and cited technical sources use English. Keeping one language also makes the links between the report and implementation easier to follow.
+This README is the report for the DHBW Cloud Computing and Big Data examination.
 
 ## 1. Use Case and Motivation
 
@@ -18,7 +18,8 @@ The deployed content adapters cover:
 Internal discovery envelopes do not appear as sources, documents, acceptances,
 or quarantines.
 
-The DHBW verification profile runs the same content paths with bounded resources. The screenshots show durable corpus records and a controlled smoke source.
+The DHBW profile runs these content paths on CPU workers. Cloud validation uses
+an isolated synthetic record that cannot enter the production corpus.
 
 This is a Big Data problem because the input is continuous, heterogeneous, and unbounded. The current course prototype is intentionally small. Its architecture separates the event log, object storage, processing state, table catalog, and query service so the same data path can grow without replacing the processing model.
 
@@ -34,7 +35,10 @@ The relevant Big Data characteristics are:
 | Veracity | Near duplicates, personal data, extraction failures, missing licenses, and low-quality pages must remain visible as explicit decisions. |
 | Value | Accepted records become a queryable training export. Rejected records remain useful for auditing and policy improvement. |
 
-The live verification produced measurable evidence rather than a throughput estimate. A controlled document reached `docs.curated` in 6.416 seconds. The dashboard and serving screenshots show the durable corpus state at their capture times. Production throughput and capacity remain unmeasured.
+The bounded cloud check on 4 September 2026 returned 17,786 unique durable
+decisions and 6,754 training-export documents across all policy generations.
+These are corpus totals, not daily throughput. A sustained fresh-input
+measurement is still required to establish catch-up capacity.
 
 ## 3. Architecture Decision
 
@@ -44,7 +48,7 @@ Stream2Pretrain uses a Kappa architecture. Live records enter one streaming path
 flowchart LR
     sources["AI research sources"] --> ingest["Ingest pollers"]
     ingest --> licence["Pre-fetch licence gate"]
-    licence --> decisions["Corpus route ledger"]
+    licence --> admission["Redpanda license.admissions"]
     licence --> bronze["MinIO Bronze"]
     licence --> raw["Redpanda raw.fetched"]
     raw --> fetcher["Bytewax fetcher with durable recovery"]
@@ -52,11 +56,16 @@ flowchart LR
     normalized --> curate["Bytewax stateful curator"]
     curate --> decisions["Redpanda curation.decisions"]
     curate --> clean["Redpanda docs.curated"]
+    admission --> writer
+    clean --> writer
     decisions --> writer["Iceberg writer"]
     writer --> lakehouse["MinIO and Iceberg V2"]
     lakehouse --> catalog["Polaris catalog"]
     catalog --> query["DuckDB API"]
     query --> ui["Next.js cockpit"]
+    clean --> foundry["Daily paper SFT/RL Foundry"]
+    foundry --> packages["Signed artifacts and human review"]
+    packages --> ui
 ```
 
 The project makes four justified deviations from a conventional lecture stack:
@@ -106,7 +115,7 @@ The repository is organized by responsibility:
 - [`infra/`](infra) contains OpenStack, k3s, Helmfile, and platform configuration.
 - [`scripts/`](scripts) contains deployment, bootstrap, smoke, and benchmark tools.
 - [`docs/continuous-deployment.md`](docs/continuous-deployment.md) documents the main-branch image build, VPN, and application deployment workflow.
-- [`docs/SOURCE_LICENSE_ADMISSION_MATRIX.md`](docs/SOURCE_LICENSE_ADMISSION_MATRIX.md) records the item-level licence resolver and pre-fetch boundary for every live and preload source.
+- [`docs/SOURCE_LICENSE_ADMISSION_MATRIX.md`](docs/SOURCE_LICENSE_ADMISSION_MATRIX.md) records the item-level licence resolver and pre-fetch boundary for every live source.
 - [`docs/SOURCE_PROCESSING_POLICY.md`](docs/SOURCE_PROCESSING_POLICY.md) records the discovery-versus-content boundary, extraction path, exact classifier revision, non-applicable signals, and Gold reachability for every source.
 
 ## 5. Processing Logic
@@ -115,17 +124,27 @@ The repository is organized by responsibility:
 
 The fetcher turns raw bytes into normalized document records. It extracts readable text, headings, citations, figures, tables, and equations when the source provides them. The curator then creates segment scores and a final route.
 
-Quality is source-aware:
+We trained four independent ModernBERT-base classifiers on LLM-labeled paper
+and card sections, with train/test separation by document. They run on CPU,
+score every retained section on a 0-5 scale, and retain confidence and model
+provenance for inspection.
 
-- Scientific HTML, PDF, LaTeX, and eligible Hugging Face card prose use the
-  source-specific ModernBERT quality models. Token-weighted section means gate
-  arXiv at 3.0 and HF cards at 3.5 on a 0-5 scale.
-- Hugging Face cards use a Markdown prose projection and deterministic card
-  gate before any learned-model inference.
-- Quality-passing arXiv papers also receive independent mathematical-reasoning
-  and post-training-suitability scores. Mean suitability ranks the daily queue;
-  high-scoring sections add optional prompt hints without replacing paper input.
-- RSS, OAI, and Hub-list envelopes are internal discovery messages and never become training text or UI corpus rows.
+| Custom classifier | Purpose | Pipeline use | Held-out section correlation / MAE |
+|---|---|---|---|
+| arXiv pretraining quality | Usefulness of scientific text | Token-weighted document mean >=3.0 | 0.711 / 0.417 |
+| HF pretraining quality | Usefulness of model and dataset documentation | Token-weighted document mean >=3.5 | 0.913 / 0.311 |
+| arXiv mathematical reasoning | Mathematical and derivation-rich content | Highlights promising sections for task generation | 0.875 / 0.553 |
+| arXiv post-training suitability | Potential for grounded SFT/RL tasks | Mean ranks the daily queue; high sections guide generation | 0.824 / 0.497 |
+
+Correlation is Spearman against the LLM judge, not a downstream training gain.
+The held-out split contains 301 papers and 500 cards. Aggregate results and
+the training procedure are in [the classifier guide](docs/CLASSIFIERS.md).
+
+Cheap source-specific cleanup and deterministic rejection run first. Both
+auxiliary arXiv heads run only after quality passes. Section hints do not
+replace the paper supplied to the generator. RSS, OAI and Hub-list envelopes
+are discovery only. See [the classifier guide](docs/CLASSIFIERS.md) for exact
+input, aggregation and evaluation details.
 
 The DHBW chart fails closed on missing models. Source-quality classifiers and KenLM
 run from pinned immutable images behind independently scalable stateless
@@ -187,14 +206,23 @@ The storage model separates evidence from serving data:
 | Normalized stream | Redpanda | Extracted text and scientific structure for curation. |
 | Decision table | Iceberg V2 with Parquet | Every accepted and rejected policy outcome. |
 | Curated table | Iceberg V2 with Parquet | Only trainable records. |
+
 The Iceberg tables partition by language, risk tier, and month of `valid_from`. These fields support the dominant filters while avoiding a partition per document. The schema stores text, quality scores, route reasons, license provenance, PII flags, validity intervals, and exact policy revisions.
 
 Iceberg is appropriate because files alone do not provide reliable snapshot identity, schema evolution, or catalog discovery. Polaris provides the catalog boundary. DuckDB reads the exact metadata file selected by Polaris rather than guessing the latest object.
 
 The full field list is documented in [`docs/data-model.md`](docs/data-model.md).
-The byte-level ownership, August 2026 storage incident, and production scaling
-contract are documented in
-[`docs/storage-scaling.md`](docs/storage-scaling.md).
+Source bodies and transient extraction assets have a one-day audit window;
+training text, decisions and post-training packages are not age-expired.
+Eligible paper evidence is persisted in Gold before candidate publication and
+cached in the Foundry queue. [Storage ownership](docs/storage-scaling.md)
+defines retention and maintenance safety.
+
+DuckDB maintains a persistent serving index. It bootstraps from Iceberg once,
+then applies idempotent transactional deltas and caches corpus aggregates.
+Document lists use server-side pagination. Requests do not scan full history.
+Static totals use the latest durable decision per document across all policies;
+Prometheus activity charts count processing events, which can include replay.
 
 ## 7. User-facing UI
 
@@ -256,8 +284,9 @@ Use `uv` for every Python command.
 
 ```bash
 uv sync --all-packages --all-groups
-uv run pytest
+uv run pytest schemas ingest processor tests --ignore=tests/integration
 uv run ruff check schemas ingest processor tests scripts
+uv run python scripts/security_scan.py
 ./scripts/setup_dhbw_demo.sh validate
 ```
 
@@ -274,9 +303,9 @@ export KUBECONFIG=$PWD/infra/kubeconfig-stream2pretrain.yaml
 ./scripts/setup_dhbw_demo.sh topics
 ```
 
-For the existing cluster, run `./scripts/setup_dhbw_demo.sh edge` instead of
-reapplying the complete platform tier. It changes only the public edge and
-avoids the unsafe full application upgrade.
+For an existing cluster, apply only the changed ownership tier. The
+[deployment workflow](docs/continuous-deployment.md) reuses unchanged images
+and pinned model layers and deploys only changed application workloads.
 
 Create the required Secrets without committing their values. Then install the application:
 
@@ -309,27 +338,32 @@ kubectl -n stream2pretrain port-forward service/stream2pretrain-ui 3000:80
 
 Open `http://127.0.0.1:3000/dashboard` after the port forward starts.
 
+For a local equivalent, use [the Podman profile](local/README.md).
+It replaces the cloud catalog with a local Iceberg catalog, not the classifiers
+or extraction stages. Local runtime and integration tests are opt-in.
+
 ## 10. Key Code Sections
 
-- [`ingest/common/bronze_pipeline.py#L42`](ingest/common/bronze_pipeline.py#L42) fetches a source, stores immutable Bronze bytes, and publishes the Bronze event.
-- [`processor/fetcher.py#L290`](processor/fetcher.py#L290) converts a Bronze payload into a normalized record.
-- [`processor/curate.py#L178`](processor/curate.py#L178) selects the scientific, card, or web quality path and applies the curation policy.
-- [`processor/iceberg_writer.py#L204`](processor/iceberg_writer.py#L204) separates audit decisions and accepted rows before commit.
-- [`processor/iceberg_writer.py#L547`](processor/iceberg_writer.py#L547) defines the Iceberg partition specification and format version.
+- [`ingest/common/bronze_pipeline.py`](ingest/common/bronze_pipeline.py) stores immutable Bronze bytes and publishes the admitted content event.
+- [`processor/fetcher.py`](processor/fetcher.py) converts Bronze payloads into source-specific normalized records.
+- [`processor/curate.py`](processor/curate.py) applies deterministic checks, learned scoring and routing.
+- [`processor/operators/source_classifiers.py`](processor/operators/source_classifiers.py) implements the four section classifiers.
+- [`processor/iceberg_writer.py`](processor/iceberg_writer.py) defines schemas and partitions and commits audit decisions and eligible rows.
 - [`processor/foundry/`](processor/foundry) contains the experimental resumable paper-to-SFT/RL pipeline, validation gates, and deterministic packaging.
 - [`docs/PIPELINE_IMPLEMENTATION_REFERENCE.md`](docs/PIPELINE_IMPLEMENTATION_REFERENCE.md) records every active projection, classifier, regular expression, routing rule, model prompt template, and deterministic SFT/RL check.
-- [`processor/duckdb_api.py#L686`](processor/duckdb_api.py#L686) resolves the exact Polaris metadata version and registers the DuckDB view.
-- [`ui/app/api/dashboard/route.ts#L68`](ui/app/api/dashboard/route.ts#L68) combines durable DuckDB results for the UI API.
-- [`ui/app/dashboard/page.tsx#L24`](ui/app/dashboard/page.tsx#L24) refreshes and renders the live dashboard.
-- [`charts/stream2pretrain/templates/processor-curate.yaml#L1`](charts/stream2pretrain/templates/processor-curate.yaml#L1) maps the stateful curator, configuration, Secrets, and checkpoint storage to Kubernetes.
-- [`helmfile.yaml#L27`](helmfile.yaml#L27) defines the ordered platform, catalog, and application release graph.
-- [`scripts/cluster_smoke.py#L54`](scripts/cluster_smoke.py#L54) injects one controlled document and verifies its identity through the live topics.
+- [`processor/serving_index.py`](processor/serving_index.py) maintains transactional serving rows and cached aggregates.
+- [`processor/duckdb_api.py`](processor/duckdb_api.py) exposes catalog-backed query and export endpoints.
+- [`ui/app/api/dashboard/route.ts`](ui/app/api/dashboard/route.ts) combines durable totals and activity metrics.
+- [`ui/app/dashboard/page.tsx`](ui/app/dashboard/page.tsx) renders the monitoring dashboard.
+- [`charts/stream2pretrain/templates/processor-curate.yaml`](charts/stream2pretrain/templates/processor-curate.yaml) declares curator resources and recovery storage.
+- [`helmfile.yaml`](helmfile.yaml) orders the platform, catalog and application releases.
+- [`scripts/cluster_smoke.py`](scripts/cluster_smoke.py) verifies an isolated end-to-end record without contaminating production topics.
 
 ## 11. Screenshots and Evidence
 
 ### Live UI
 
-The dashboard is backed by the live DuckDB and Prometheus APIs. Counts can increase between screenshots because the pollers continue to run.
+The 4 September 2026 capture uses the live DuckDB and Prometheus APIs. Counts can change between captures as new decisions replace earlier outcomes.
 
 ![Live Stream2Pretrain dashboard](docs/screenshots/ui-dashboard.png)
 
@@ -345,21 +379,22 @@ The serving API returned the exact controlled document from the Iceberg-backed q
 
 ![Serving API output for the controlled document](docs/screenshots/serving-output.png)
 
-### Historical measured pipeline output
+### Pipeline output
 
-This capture predates the route-name migration from `broad_pretraining` to
-`pretrain`; current curation emits only the new route.
-
-The controlled smoke run returned:
+The 4 September cloud check observed this real arXiv candidate after active
+classification. Its complete structured evidence was persisted in Gold and
+cached at Foundry admission:
 
 ```json
 {
-  "curated_seen": true,
-  "decision_route": "broad_pretraining",
-  "doc_id": "sha256:0105da1cbc659dbb5730dde54b09fb8ff71cd18e3285ec7ca8e58b9f69c5a5d1",
-  "elapsed_seconds": 6.416,
-  "reject_reasons": [],
-  "risk_tier": 1
+  "doc_id": "sha256:1e5fdf860cba19d72f49655a3f91f3ecb28a04372caa5f7bfc0fbf9220aa7a93",
+  "source": "arxiv-html-fetcher",
+  "score": 3.482891290309436,
+  "cutoff": 3.0,
+  "sections": 27,
+  "route": "posttrain_candidate",
+  "eligible_routes": ["pretrain", "posttrain_candidate"],
+  "reject_reasons": []
 }
 ```
 
@@ -376,7 +411,7 @@ This is a course prototype, not a production training-data service.
 
 Known limits are:
 
-- Strict classifier replicas are stateless and CPU-autoscaled, but the measured three-node DHBW profile can host at most two replicas while preserving one node for the stateful curator. Larger throughput requires additional worker nodes.
+- The three-node DHBW profile bounds quality inference at two to four stateless replicas. The 4 September check showed four ready replicas and no core Pod restarts. This demonstrates availability, not sustained intake capacity.
 - CI publishes immutable images to GHCR and provides the cluster pull secret when required. Cross-node fetcher scheduling still depends on worker egress and registry availability.
 - Core Bytewax fetcher and curator scaling requires a coordinated restart;
   standard Kafka-lag KEDA is intentionally disabled for them. Iceberg remains
@@ -384,20 +419,27 @@ Known limits are:
 - Polaris uses an in-memory catalog backend in the dev profile. MinIO data is persistent, but production catalog recovery needs a relational backend.
 - Ingress, DNS, and TLS use Traefik, ExternalDNS with RFC2136, and the shared wildcard certificate. NetworkPolicy, Gatekeeper enforcement, Tempo, and Loki remain disabled in the measured profile.
 - Production throughput, safe partition counts, and maximum corpus size are `needs-measurement`.
-- Live post-training acceptance yield, provider usage, and foundry cloud resources are `needs-measurement`. The worker requires the Hetzner credential and `Qwen3.8-27B` to be visible through authenticated discovery.
+- Post-training has produced accepted SFT and RL artifacts, but generation can still fail. In the latest bounded check, a solver response failed JSON parsing and two papers remained queued. Acceptance yield and sustained provider-limited throughput require a longer measurement.
 - License detection is a curation heuristic. It is not legal advice or a compliance guarantee.
 
 The next practical work is to add worker capacity, enable a persistent Polaris
 backend, and measure processor scale under controlled backlog.
 
-### Team contribution
+### Mixture comparison
 
-The Git history contains two contributors and nine commits before the final submission pass.
+N3 retains two `MixtureRecipe` CRDs, branch materialization, the mixture
+controller and the comparison page. The proxy-LM interface is a scaffold:
+continuous GPU training and perplexity-gated promotion are not demonstrated.
+A downstream experiment can train the same small Pythia-class model on rolling
+mixtures and compare held-out per-domain loss using a time-limited GPU budget.
+
+### Team contribution
 
 - Chris led use-case research, source acquisition, schemas, processing logic, classifier routing, Iceberg integration, and the UI.
 - Julian led OpenStack and k3s deployment, Helmfile and cluster configuration, operational fixes, cluster validation, and deployment policy.
-- The final cluster smoke test, evidence capture, limitation review, and README alignment were completed as an integration pass across both work areas.
+- Cluster validation, evidence capture and report alignment integrate both work areas.
 
-The commit history preserves these stages instead of presenting the project as one unexplained final upload.
+The submission includes source, manifests and embedded evidence. Running the
+system requires external infrastructure and credentials; grading does not.
 
 License: [Apache-2.0](LICENSE).

@@ -5,11 +5,8 @@
 ARG PYTHON_VERSION=3.11
 ARG S2P_MODEL_PROFILE=none
 ARG S2P_INSTALL_EXTRA=runtime
-ARG FINEPDFS_EDU_V2_REVISION=90ddef285f67230389057c14b2f6bbfeb70d40ea
 ARG KENLM_REVISION=3fbe35c83b1a39f420a345b7c96a186c8030d834
 ARG FIGURE_CLASSIFIER_REVISION=f859dfbff5c9916cd996942d4b0db7fa25808220
-ARG META_RATER_REVISION=0072a9a83971eb4af6d689dfc64f8f203c45b398
-ARG FINEMATH_REVISION=bd0b0e330750ccaafb16c47066f875b3fcb707c3
 
 # ---------------------------------------------------------------------------
 # Stage 1: builder
@@ -59,23 +56,13 @@ RUN uv sync \
         --no-dev \
         --no-install-workspace
 
-# CSO 4.0.1's wheel pins an obsolete requests release even though its API use
-# is compatible with the secured workspace version. Install only that wheel;
-# the shadow-service extra above pins every imported runtime dependency.
-RUN if [ "${S2P_INSTALL_EXTRA}" = "shadow-service" ]; then \
-      uv pip install --python /src/.venv/bin/python --no-deps cso-classifier==4.0.1; \
-    fi
-
 # ---------------------------------------------------------------------------
 # Stage 2: immutable runtime dependency and model base
 # ---------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS runtime-base
 ARG S2P_MODEL_PROFILE
-ARG FINEPDFS_EDU_V2_REVISION
 ARG KENLM_REVISION
 ARG FIGURE_CLASSIFIER_REVISION
-ARG META_RATER_REVISION
-ARG FINEMATH_REVISION
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -106,17 +93,16 @@ COPY --from=builder /src/.venv                         /src/.venv
 
 WORKDIR /opt/models
 
-# Official FinePDFs Edu v2 scientific-quality checkpoint.
+# The same checksum-pinned classifier bundle serves cloud and local builds.
+COPY processor/source-classifiers.json /tmp/source-classifiers.json
+COPY scripts/download_source_classifiers.py /tmp/download_source_classifiers.py
 RUN case "${S2P_MODEL_PROFILE}" in quality|all) \
-      python -c "from huggingface_hub import snapshot_download; \
-        snapshot_download(repo_id='HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn', \
-          revision='${FINEPDFS_EDU_V2_REVISION}', \
-          local_dir='/opt/models/finepdfs-edu-v2', \
-          allow_patterns=['*.json', '*.txt', '*.safetensors'])"; \
-      rm -rf /opt/models/finepdfs-edu-v2/.cache /root/.cache/huggingface ;; \
-    none|kenlm|fetcher|shadow) mkdir -p /opt/models/finepdfs-edu-v2 ;; \
+      cp /tmp/source-classifiers.json /opt/models/source-classifiers.json; \
+      python /tmp/download_source_classifiers.py /opt/models/source-classifiers.json /opt/models ;; \
+    none|kenlm|fetcher) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
-    esac
+    esac \
+ && rm /tmp/source-classifiers.json /tmp/download_source_classifiers.py
 
 # Small CPU ONNX router for 26 document-figure categories.
 RUN case "${S2P_MODEL_PROFILE}" in fetcher|all) \
@@ -126,7 +112,7 @@ RUN case "${S2P_MODEL_PROFILE}" in fetcher|all) \
           local_dir='/opt/models/figure-classifier', \
           allow_patterns=['model.onnx', '*.json'])"; \
       rm -rf /opt/models/figure-classifier/.cache /root/.cache/huggingface ;; \
-    none|quality|kenlm|shadow) mkdir -p /opt/models/figure-classifier ;; \
+    none|quality|kenlm) mkdir -p /opt/models/figure-classifier ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -143,7 +129,7 @@ RUN mkdir -p /opt/models/kenlm \
         shutil.rmtree('/opt/models/kenlm/.cache', ignore_errors=True); \
         shutil.rmtree('/opt/models/kenlm/wikipedia', ignore_errors=True)"; \
       rm -rf /root/.cache/huggingface /opt/models/kenlm/.cache ;; \
-    none|quality|fetcher|shadow) ;; \
+    none|quality|fetcher) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -153,7 +139,7 @@ RUN mkdir -p /opt/models/tiktoken \
  && case "${S2P_MODEL_PROFILE}" in none|fetcher|all) \
       TIKTOKEN_CACHE_DIR=/opt/models/tiktoken \
         python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" ;; \
-    quality|kenlm|shadow) ;; \
+    quality|kenlm) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
@@ -164,39 +150,12 @@ RUN mkdir -p /opt/models/docling \
         docling-tools models download layout tableformer code_formula \
           --output-dir /opt/models/docling; \
       rm -rf /tmp/huggingface ;; \
-    none|quality|kenlm|shadow) ;; \
-    *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
-    esac
-
-# Public non-gating shadow models. The two scalar models are pinned Hugging
-# Face snapshots. CSO is pinned to package 4.0.1 and ontology 3.5; its 72 MB
-# cached semantic map is the documented v2 artifact used by fast mode.
-RUN case "${S2P_MODEL_PROFILE}" in shadow|all) \
-      python -c "from huggingface_hub import snapshot_download; \
-        snapshot_download(repo_id='opendatalab/meta-rater-reasoning-rating', \
-          revision='${META_RATER_REVISION}', \
-          local_dir='/opt/models/meta-rater-reasoning', \
-          allow_patterns=['*.json', '*.txt', '*.safetensors']); \
-        snapshot_download(repo_id='HuggingFaceTB/finemath-classifier', \
-          revision='${FINEMATH_REVISION}', \
-          local_dir='/opt/models/finemath-classifier', \
-          allow_patterns=['*.json', '*.txt', '*.model', '*.safetensors'])"; \
-      python -c "from cso_classifier import Config, Ontology; \
-        from cso_classifier.misc import download_file, download_language_model; \
-        cfg=Config(); \
-        assert download_file('https://cso.kmi.open.ac.uk/download/version-3.5/cso_v3.5.csv', cfg.get_cso_path()); \
-        cfg.set_cso_version('3.5'); \
-        Ontology(load_ontology=False, silent=True).setup(); \
-        assert download_file('https://cso.kmi.open.ac.uk/download/resources/token-to-cso-combined.v2.json', cfg.get_cached_model()); \
-        download_language_model(notification=False)"; \
-      rm -rf /root/.cache/huggingface /opt/models/meta-rater-reasoning/.cache /opt/models/finemath-classifier/.cache ;; \
-    none|quality|kenlm|fetcher) mkdir -p /opt/models/meta-rater-reasoning /opt/models/finemath-classifier ;; \
+    none|quality|kenlm) ;; \
     *) echo "Unsupported S2P_MODEL_PROFILE=${S2P_MODEL_PROFILE}" >&2; exit 2 ;; \
     esac
 
 RUN python -c "import json; json.dump({ \
       'profile': '${S2P_MODEL_PROFILE}', \
-      'finepdfs_edu_v2': '${FINEPDFS_EDU_V2_REVISION}', \
       'kenlm': '${KENLM_REVISION}', \
       'figure_classifier': '${FIGURE_CLASSIFIER_REVISION}'}, \
       open('/opt/models/revisions.json', 'w'), sort_keys=True)"
@@ -208,8 +167,7 @@ RUN python -c "import json; json.dump({ \
 RUN case "${S2P_MODEL_PROFILE}" in \
       none) find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q . ;; \
       quality) \
-        test -s /opt/models/finepdfs-edu-v2/model.safetensors; \
-        test -s /opt/models/finepdfs-edu-v2/tokenizer.json ;; \
+        test -s /opt/models/source-classifiers.json ;; \
       kenlm) \
         test -s /opt/models/kenlm/en.arpa.bin; \
         test -s /opt/models/kenlm/en.sp.model ;; \
@@ -218,12 +176,8 @@ RUN case "${S2P_MODEL_PROFILE}" in \
         find /opt/models/docling -type f -size +0c -print -quit | grep -q .; \
         find /opt/models/tiktoken -type f -size +0c -print -quit | grep -q .; \
         python -c "import torch, torchvision; from docling.document_converter import DocumentConverter; from transformers import AutoProcessor; assert hasattr(torch.ops.torchvision, 'nms'); assert DocumentConverter and AutoProcessor" ;; \
-      shadow) \
-        test -s /opt/models/meta-rater-reasoning/model.safetensors; \
-        test -s /opt/models/finemath-classifier/model.safetensors; \
-        python -c "from cso_classifier import CSOClassifier; result=CSOClassifier(delete_outliers=False, fast_classification=True, silent=True).run('distributed machine learning systems'); assert result.get('union')" ;; \
       all) \
-        test -s /opt/models/finepdfs-edu-v2/model.safetensors; \
+        test -s /opt/models/source-classifiers.json; \
         test -s /opt/models/kenlm/en.arpa.bin; \
         test -s /opt/models/figure-classifier/model.onnx; \
         find /opt/models/docling -type f -size +0c -print -quit | grep -q . ;; \
@@ -255,7 +209,6 @@ RUN for command in \
       s2p-fetcher \
       s2p-curate \
       s2p-curator-model-service \
-      s2p-shadow-classifier \
       s2p-iceberg-writer \
       s2p-iceberg-maintenance \
       s2p-object-lifecycle \
@@ -272,7 +225,7 @@ RUN for command in \
 # Import every module reached by a container command while the image is still
 # being built. This catches omitted workspace source or runtime dependencies
 # before Helm can roll a healthy Pod onto a broken image.
-RUN python -c "from processor.curate import main as curate; from processor.model_service import main as model_service; from processor.shadow_classifier import main as shadow; from processor.duckdb_api import main as duckdb; from processor.fetcher import main as fetcher; from processor.iceberg_maintenance import main as maintenance; from processor.object_lifecycle import main as object_lifecycle; from processor.iceberg_writer import main as writer; from processor.local_sources_api import main as sources; from processor.mixture_controller.controller import main as mixture; from processor.foundry.api import main as foundry_api; from processor.foundry.export_replay import main as replay; from processor.foundry.oracle_build import main as oracle; from processor.foundry.worker import main as foundry; assert all(callable(value) for value in (curate, model_service, shadow, duckdb, fetcher, maintenance, object_lifecycle, writer, sources, mixture, foundry_api, replay, oracle, foundry))"
+RUN python -c "from processor.curate import main as curate; from processor.model_service import main as model_service; from processor.duckdb_api import main as duckdb; from processor.fetcher import main as fetcher; from processor.iceberg_maintenance import main as maintenance; from processor.object_lifecycle import main as object_lifecycle; from processor.iceberg_writer import main as writer; from processor.local_sources_api import main as sources; from processor.mixture_controller.controller import main as mixture; from processor.foundry.api import main as foundry_api; from processor.foundry.export_replay import main as replay; from processor.foundry.oracle_build import main as oracle; from processor.foundry.worker import main as foundry; assert all(callable(value) for value in (curate, model_service, duckdb, fetcher, maintenance, object_lifecycle, writer, sources, mixture, foundry_api, replay, oracle, foundry))"
 
 WORKDIR /app
 USER nonroot

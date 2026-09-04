@@ -541,8 +541,8 @@ function SectionView({ document }: { document: CuratedDocumentDetail }) {
                 <span className="ml-2 text-xs text-muted-foreground">{humanize(section.role)}</span>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {score?.finepdfs_edu_score != null ? (
-                  <Badge variant="outline">FinePDFs {score.finepdfs_edu_score.toFixed(2)}</Badge>
+                {score?.edu_score != null ? (
+                  <Badge variant="outline">Quality {score.edu_score.toFixed(2)}</Badge>
                 ) : null}
                 <Badge variant={section.include_in_training ? 'success' : 'destructive'}>
                   {section.include_in_training ? 'kept' : 'removed'}

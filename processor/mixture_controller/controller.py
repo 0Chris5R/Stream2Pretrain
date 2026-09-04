@@ -646,7 +646,9 @@ def _sourcefeed_status(
     }.get(phase, "idle")
     is_arxiv = "arxiv" in spec.name.lower() or "arxiv.org" in str(spec.endpoint).lower()
     quality_policy = (
-        "FinePDFs Edu v2 on scheduled full text" if is_arxiv else "FinePDFs Edu v2 on page body"
+        "source-specific ModernBERT on scheduled full text"
+        if is_arxiv
+        else "source-specific ModernBERT on page body"
     )
     license_resolver = (
         "arXiv item rights" if is_arxiv else "RSS item or page-level licence metadata"
@@ -682,7 +684,7 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "kind": "deployment",
         "protocol": "rest-json",
         "endpoint": "https://arxiv.org/html",
-        "quality": "FinePDFs Edu v2 on structured full text",
+        "quality": "source-specific ModernBERT on structured full text",
         "license": "arXiv item rights before full-text fetch",
         "stages": ["discover", "license", "fetch", "extract", "classify", "route"],
     },
@@ -692,7 +694,7 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "kind": "deployment",
         "protocol": "rest-json",
         "endpoint": "https://huggingface.co/api/models",
-        "quality": "FinePDFs Edu v2 audit on versioned model cards",
+        "quality": "HF ModernBERT quality on versioned model cards",
         "license": "Versioned public Hub repository terms for README prose",
         "stages": ["discover", "license", "fetch", "classify", "route"],
     },
@@ -702,7 +704,7 @@ _BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "kind": "deployment",
         "protocol": "rest-json",
         "endpoint": "https://huggingface.co/api/datasets",
-        "quality": "FinePDFs Edu v2 audit on versioned dataset cards",
+        "quality": "HF ModernBERT quality on versioned dataset cards",
         "license": "Versioned public Hub repository terms for README prose",
         "stages": ["discover", "license", "fetch", "classify", "route"],
     },

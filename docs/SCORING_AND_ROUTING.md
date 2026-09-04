@@ -19,7 +19,7 @@ Scientific sources are not scored as one flattened paper.
 3. PII checks run on every retained section. C4 section isolation runs only on
    ordinary web prose.
 4. Existing deterministic rejection checks run before model inference.
-   FinePDFs Edu v2 then runs on every retained section of eligible papers and
+   The source-specific ModernBERT quality head then runs on every retained section of eligible papers and
    Hugging Face cards. KenLM runs only where its source policy enables it.
 5. The final model text is rebuilt from sections that survived section-level
    safety checks.
@@ -31,33 +31,27 @@ Scientific sources are not scored as one flattened paper.
 
 ## 2. Section coverage
 
-Every retained section is scored. Earlier pilots used a role-stratified sample,
-but the deployed policy no longer makes a document decision from only part of
-the exportable training projection. `segment_scores_json` retains the exact
-source-quality results and applicability metadata for each section.
+Every retained section is scored in full. `quality_diagnostics_json` retains
+section-level predictions, input identities, model digests and aggregation.
+The complete contract is in [Classifiers](CLASSIFIERS.md).
 
 ## 3. Model signals
 
-### 3.1 Scientific quality
+### 3.1 Learned quality and suitability
 
-Scientific HTML, PDF, and LaTeX records use
-`HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn` at revision
-`90ddef285f67230389057c14b2f6bbfeb70d40ea` as the primary 0 to 5 regression
-score. The implementation follows the model card's 10,000-character and
-2,046-token top/bottom chunk rule and takes the maximum chunk score.
+Independent arXiv and HF ModernBERT-base quality models score every retained
+section. Overlength sections use all 8,192-token windows with 512-token
+overlap. Window logits are averaged before softmax; six ordinal probabilities
+produce a continuous 0-5 score and entropy-based confidence.
 
-Hugging Face cards remove front matter, fenced code, HTML comments, asset-only
-sections, templates, mirrors, and other deterministic slop before FinePDFs
-scoring. FinePDFs remains a continuous audit and ranking signal for cards until
-a reviewed same-source calibration establishes a safe threshold. Discovery
-metadata has no educational classifier and cannot reach Gold.
+The document quality is the token-weighted mean of its retained sections.
+arXiv requires >=3.0; HF requires >=3.5. Confidence is not an admission gate.
+A failed quality gate prevents arXiv auxiliary inference and Foundry admission.
 
-The document educational score is the word-weighted mean of measured, retained
-sections. Each section weight is `max(1, min(word_count, 512))`.
-
-No threshold taken from either model card is treated as scientifically valid
-for scientific papers, cards, code, or reviews until a source-specific labelled
-validation set is reviewed.
+Quality-passing arXiv papers receive mathematical-reasoning and post-training
+suitability scores on every retained section. Mean suitability ranks the daily
+queue. High-scoring section titles can add optional task-designer hints;
+the paper input remains intact. Maxima do not gate admission.
 
 ### 3.2 KenLM typicality
 
@@ -94,7 +88,7 @@ retains privacy, licence, exact/near-duplicate, and validity checks.
   against the durable anchor signature. State is retained across worker
   restarts and namespaced by scoring generation.
 Strict laptop and Kubernetes profiles set `S2P_REQUIRE_REAL_MODELS=1` and fail
-startup if FinePDFs, KenLM/SentencePiece, Presidio, Rensa,
+startup if ModernBERT, KenLM/SentencePiece, Presidio, Rensa,
 Plyvel, or the required tokenizer artifacts cannot load.
 
 ## 4. Deterministic evidence scores
@@ -139,12 +133,11 @@ post-training evaluation split.
 
 ### 4.5 Non-scientific structure
 
-Web and code do not receive paper-anatomy credit. Their completeness is a
-bounded combination of title presence, usable length up to 500 words, clean
-extraction, and non-empty content. Code reasoning evidence uses visible
-functions, classes, tests, and code-quality results; its content tags are
-`systems_implementation` and `methods_procedures`. Web reasoning evidence is a
-  low-weight completeness/quality baseline.
+HF cards do not receive paper-anatomy credit. Their completeness is
+`0.15*has_title + 0.55*min(1, words/500) + 0.20*clean_extraction +
+0.10*nonempty_text`, clipped to 1. Structure is five times completeness.
+Their content tags identify model or dataset documentation and the
+deterministic card assessment.
 
 ## 5. Composite quality, 0 to 5
 
@@ -156,7 +149,7 @@ renormalized to sum to one before multiplication by 5.
 `heuristic_pass_rate` is the mean of Gopher pass and C4 pass. Typicality maps
 head to 1.0, middle to 0.72, and tail to 0.25. Non-applicable signals contribute
 neither a value nor weight. This composite supports sorting and dashboards. It
-is never displayed as FinePDFs or KenLM.
+is never presented as an individual model output.
 
 ## 6. Blocking rules and route precedence
 
@@ -172,9 +165,10 @@ Blocking reasons are applied before corpus-use routes:
 
 Current curation emits only the route values listed above.
 
-FinePDFs has no transferable hard threshold for both papers and cards. Its
-score contributes to ranking and the composite, while source-specific
-deterministic blockers make admission decisions.
+Source quality additionally gates arXiv at 3.0 and HF at 3.5. Licence handling
+then removes verbatim pretraining eligibility from transform-only records.
+Candidate publication requires durable scientific evidence; missing evidence
+cannot turn a valid permissive pretraining projection into post-training data.
 
 ## 7. Content taxonomy
 
@@ -191,51 +185,16 @@ All tags are currently deterministic and multi-label:
 - `visual_evidence`: at least one figure;
 - `general_scientific`: fallback when no other tag fires.
 
-The UI shows every tag and allows multi-tag filtering. A trained tagger may
-replace this baseline only after a held-out comparison.
+The dataset UI shows nonzero tags from the actual corpus and uses a single
+content-tag filter. A trained topic tagger is separate future work, not one of
+the four scalar classifiers.
 
-## 8. Historical measured scientific pilot
+## 8. Evaluation
 
-The earlier local replay used FinePDFs Edu v2 over ten role-stratified,
-retained sections per paper and recorded KenLM for comparison. These are
-historical measured outputs, not the current source policy or expected human
-labels:
+Review held-out sections and documents across each source's quality range.
+Report MAE, weighted kappa, rank correlation, threshold precision/recall,
+and confusion matrices. Evaluate OCR character/word error and numerical
+exact match separately from text usefulness. Split and bootstrap by document.
 
-| Paper | FinePDFs v2 | Structure | Composite | KenLM perplexity | Route |
-|---|---:|---:|---:|---:|---|
-| HTML papers on arXiv | 2.960 | 3.755 | 3.804 | 372.2 | reasoning candidate |
-| The FineWeb Datasets | 4.385 | 5.000 | 4.595 | 437.8 | reasoning candidate |
-| Dolma | 3.873 | 5.000 | 4.398 | 649.4 | reasoning candidate |
-
-The values show that FinePDFs v2 produces a useful scientific-quality spread.
-All values describe the clean
-training projection rather than authors, acknowledgements, or references.
-The current policy scores every retained scientific section and disables
-KenLM for scientific text, so a new cloud validation report must not compare
-its resulting composite directly with this historical table.
-
-The pinned v1/v2 comparison in
-`validation/finepdfs-v1-v2-pilot.json` ran both checkpoints on the same 30
-role-stratified sections. V1 averaged 0.816 (median 0.741); v2 averaged 3.646
-(median 3.965), with v2 higher on all 30. This supports v2 as the working
-scientific rubric. It does not establish classifier accuracy because those 30
-sections do not yet have reviewed usefulness labels.
-
-## 9. Calibration and change control
-
-The checked-in validation manifest covers 30 to 60 papers across theory,
-empirical work, surveys, short notes, datasets, specialized prose, native HTML,
-clean/scanned/malformed PDF, tables, figures, equations, and references.
-Reviewed labels are recorded by paper and section.
-
-Report:
-
-- MAE and rank correlation for model and composite scores;
-- precision, recall, and confusion matrices for routes;
-- OCR character error rate, word error rate, and numeric exact match;
-- score distributions by source format and content category;
-- FinePDFs v2 distributions on independently reviewed paper and card samples.
-
-Any threshold or weight change requires a new scoring version, the evaluation
-report, and a policy revision. Unknown deployment capacity or performance is
-recorded as `needs-measurement`, never guessed.
+Threshold or weight changes require a policy/scoring revision. Runtime
+throughput, memory and daily storage claims need deployed measurements.

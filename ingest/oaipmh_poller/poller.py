@@ -47,8 +47,7 @@ async def poll_feed(
     max_pages: int | None = None,
 ) -> int:
     """Run one OAI-PMH pass. Returns number of bronze records emitted."""
-    # The epoch suffix intentionally abandons the old historical cursor. OAI
-    # is a current-frontier no-gap discovery path, not a backfill source.
+    # OAI tracks the current discovery frontier in a versioned cursor namespace.
     state_key = f"{feed.name}:live-v1"
     feed_state = state_store.get(state_key)
     window_from = str(feed_state.get("window_from") or feed_state.get("until") or _today_iso())

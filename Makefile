@@ -31,17 +31,8 @@ typecheck: ## Run mypy across the workspace.
 	uv run mypy $(PY_DIRS)
 
 .PHONY: test
-test: ## Run the pytest suite.
-	uv run pytest
-
-.PHONY: build
-build: ## Build all component container images via docker buildx bake.
-	@if [ -f docker-bake.hcl ]; then \
-		docker buildx bake --file docker-bake.hcl ; \
-	else \
-		echo "docker-bake.hcl not present yet; build per-component Dockerfiles instead" ; \
-		exit 1 ; \
-	fi
+test: ## Run deterministic tests without starting containers.
+	uv run pytest schemas ingest processor tests --ignore=tests/integration
 
 .PHONY: dev-up
 dev-up: ## Start the local dev stack (Redpanda + MinIO) via docker compose.
@@ -113,8 +104,8 @@ helm-template: ## Render Helm templates locally for inspection.
 	helm template stream2pretrain $(HELM_CHART) --debug
 
 .PHONY: k3s-up
-k3s-up: ## Provision the k3s cluster (calls infra/k3s-install.sh).
-	bash infra/k3s-install.sh
+k3s-up: ## Provision the reviewed OpenStack and k3s configuration.
+	bash scripts/setup_dhbw_demo.sh cluster
 
 .PHONY: deploy
 deploy: ## Apply the helmfile against the active kube context.
@@ -125,5 +116,5 @@ port-forward: ## Forward common service ports to localhost (Redpanda console, Mi
 	@echo "Forwarding redpanda-console:8080, minio-console:9001, ui:3000 (Ctrl-C to stop)"
 	kubectl port-forward svc/redpanda-console 8080:8080 & \
 	kubectl port-forward svc/minio-console 9001:9001 & \
-	kubectl port-forward svc/stream2pretrain-ui 3000:3000 & \
+	kubectl port-forward svc/stream2pretrain-ui 3000:80 & \
 	wait

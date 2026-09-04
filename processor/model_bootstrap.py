@@ -11,15 +11,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
 MODELS_DIR = Path(os.environ.get("S2P_MODELS_DIR", "/opt/models"))
 REVISIONS = {
-    "finepdfs_edu_v2": os.environ.get(
-        "FINEPDFS_EDU_V2_REVISION", "90ddef285f67230389057c14b2f6bbfeb70d40ea"
-    ),
     "kenlm": os.environ.get("KENLM_REVISION", "3fbe35c83b1a39f420a345b7c96a186c8030d834"),
     "figure_classifier": os.environ.get(
         "FIGURE_CLASSIFIER_REVISION", "f859dfbff5c9916cd996942d4b0db7fa25808220"
@@ -88,12 +86,14 @@ def _bootstrap_tiktoken() -> None:
 
 def _validate() -> None:
     required = {
-        "FinePDFs Edu v2 weights": MODELS_DIR / "finepdfs-edu-v2" / "model.safetensors",
-        "FinePDFs Edu v2 tokenizer": MODELS_DIR / "finepdfs-edu-v2" / "tokenizer.json",
         "figure ONNX model": MODELS_DIR / "figure-classifier" / "model.onnx",
         "KenLM binary": MODELS_DIR / "kenlm" / "en.arpa.bin",
         "KenLM tokenizer": MODELS_DIR / "kenlm" / "en.sp.model",
     }
+    manifest = json.loads((MODELS_DIR / "source-classifiers.json").read_text())
+    for task in manifest["models"]:
+        required[f"{task} weights"] = MODELS_DIR / task / "model.safetensors"
+        required[f"{task} tokenizer"] = MODELS_DIR / task / "tokenizer.json"
     missing = [
         label for label, path in required.items() if not path.is_file() or path.stat().st_size == 0
     ]
@@ -108,13 +108,17 @@ def _validate() -> None:
 
 def main() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    print("Downloading pinned FinePDFs Edu v2 classifier", flush=True)
-    _snapshot(
-        repo_id="HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn",
-        revision=REVISIONS["finepdfs_edu_v2"],
-        destination=MODELS_DIR / "finepdfs-edu-v2",
-        patterns=["*.json", "*.txt", "*.safetensors"],
+    manifest = Path(__file__).with_name("source-classifiers.json")
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "scripts/download_source_classifiers.py"),
+            str(manifest),
+            str(MODELS_DIR),
+        ],
+        check=True,
     )
+    shutil.copyfile(manifest, MODELS_DIR / manifest.name)
     print("Downloading pinned document-figure ONNX classifier", flush=True)
     _snapshot(
         repo_id="docling-project/DocumentFigureClassifier-v2.5",

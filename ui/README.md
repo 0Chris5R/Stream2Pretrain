@@ -1,12 +1,14 @@
 # Stream2Pretrain UI
 
-The Next.js curation UI contains six workspaces:
+The Next.js curation UI contains seven workspaces:
 
 - `/dashboard`: live corpus, route, source, acceptance, and score state;
 - `/documents`: paginated curation browser with filters, section decisions,
   projection, figures, tables, OCR audit, and advanced provenance;
 - `/sources`: read-only source topology, health, throughput, and licence outcomes;
 - `/datasets`: point/range selection with JSONL or Parquet export and manifest;
+- `/as-of`: validity-interval corpus selection;
+- `/post-training`: generation activity, artifact inspection and human audit;
 - `/mixture`: the explicitly future N3 two-branch experiment.
 
 The product design and upstream inspirations are recorded in

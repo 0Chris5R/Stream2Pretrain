@@ -59,31 +59,22 @@ base64 < deploy-kubeconfig.yaml | tr -d '\n'
 
 Do not commit VPN profiles, kubeconfig files, registry tokens, or private keys.
 
-## First deployment
+## Deployment and diagnostics
 
-The existing DHBW cluster still needs its documented one-time Helm migration
-before this workflow can own the application release. The live release mixes
-immutable selector schemes, and the curator StatefulSet has immutable fields
-that differ from the chart. The workflow deliberately does not use
-`helm upgrade --force`.
+Provision platform, catalog, topics and credentials using the README first.
+Normal application releases reuse immutable images and apply the declarative
+Helm chart. Unchanged resources and model artifacts are not rebuilt.
+Stateful progress remains on its retained PVC; deployment never resets source
+offsets as a routine action.
 
-Complete the migration during an approved maintenance window:
+The workflow updates the application tier. Terraform, edge networking,
+Redpanda and catalog infrastructure have separate ownership.
 
-1. Publish the application images or distribute identical image digests to all
-   eligible nodes.
-2. Recreate the affected stateless workloads with the clean chart selectors.
-3. Plan the curator StatefulSet and checkpoint PVC migration separately.
-4. Run a server-side dry-run and apply the chart.
-5. Verify one controlled record through the pipeline and confirm all workloads
-   are Ready.
-
-After that migration, subsequent pushes to `main` use normal idempotent
-Helmfile upgrades. An unchanged resource remains unchanged. A changed image
-tag causes only the relevant workload to roll out.
-
-The workflow updates the application release only. It does not reapply
-Terraform, Ansible, Redpanda, Polaris, or the edge platform on every code
-push. Those layers have separate ownership and maintenance procedures.
+Manual modes support deployment, a compact read-only pipeline check, detailed
+diagnostics, UI audit, source/Foundry validation and storage inspection.
+`capture-evidence` records matched resource, counter and object-size snapshots.
+Validation modes that inject a controlled record are explicit operator tests,
+not passive monitoring.
 
 ## Cisco compatibility note
 

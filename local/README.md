@@ -7,7 +7,7 @@ Next.js cockpit used by the deployable application.
 ## Start
 
 ```bash
-podman compose -f compose.local.yml up -d --build
+make local-up
 ```
 
 The UI is available at `http://localhost:3100`. The profile uses project-scoped
@@ -27,10 +27,12 @@ scheduled source ingest
   -> DuckDB and read-only monitoring UI
 ```
 
-arXiv uses full scientific extraction and FinePDFs Edu v2. Hugging Face uses
-exact-revision README projection and its dedicated card-structure policy.
-FinePDFs Edu v2 values on cards are audit-only. KenLM and
-web heuristics are not applied to papers or cards.
+arXiv uses full scientific extraction and the four-model source-classifier
+bundle. The arXiv quality mean gates at 3.0, HF at 3.5; both arXiv auxiliary
+heads run after quality passes. Hugging Face uses exact-revision README
+projection and its dedicated card-structure gate. KenLM and web heuristics are
+not applied to papers or cards. Model bootstrap downloads the checksum-pinned
+release archives into the model volume.
 
 ## Bounded fixtures
 

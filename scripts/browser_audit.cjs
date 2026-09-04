@@ -160,12 +160,46 @@ async function main() {
     }
   }
 
+  // Keep full content inspection evidence in the short-lived audit artifact,
+  // not console logs or the source repository. This issues GET requests only.
+  const content = { documents: [], artifacts: [], errors: [] };
+  async function readJson(route) {
+    const response = await context.request.get(`${baseUrl}${route}`, { timeout: 60_000 });
+    if (!response.ok()) throw new Error(`${route}: HTTP ${response.status()}`);
+    return response.json();
+  }
+  for (const source of ["arxiv-html-fetcher", "hf-models", "hf-datasets"]) {
+    for (const route of ["pretrain", "posttrain_candidate", "quarantine"]) {
+      if (source !== "arxiv-html-fetcher" && route === "posttrain_candidate") continue;
+      try {
+        const query = new URLSearchParams({ source, route, page_size: "3", sort: "newest" });
+        const listing = await readJson(`/api/documents?${query}`);
+        for (const row of listing.items || []) {
+          content.documents.push(await readJson(`/api/documents/${encodeURIComponent(row.doc_id)}`));
+        }
+      } catch (error) { content.errors.push(String(error)); }
+    }
+  }
+  try {
+    const listing = await readJson("/api/foundry/artifacts?limit=500");
+    const counts = new Map();
+    for (const artifact of listing.items || []) {
+      const key = `${artifact.kind}:${artifact.status}`;
+      if ((counts.get(key) || 0) >= 3) continue;
+      counts.set(key, (counts.get(key) || 0) + 1);
+      try {
+        content.artifacts.push(await readJson(`/api/foundry/artifacts/${encodeURIComponent(artifact.artifact_id)}/inspect`));
+      } catch (error) { content.errors.push(String(error)); }
+    }
+  } catch (error) { content.errors.push(String(error)); }
+  fs.writeFileSync(path.join(outputDir, "content-inspection.json"), JSON.stringify(content, null, 2));
   await browser.close();
   const report = {
     auditedAt: new Date().toISOString(),
     baseUrl,
     routes: results,
     apiProbes: probes,
+    contentInspection: { documents: content.documents.length, artifacts: content.artifacts.length, errors: content.errors },
   };
   fs.writeFileSync(path.join(outputDir, "report.json"), JSON.stringify(report, null, 2));
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

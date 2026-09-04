@@ -1,8 +1,8 @@
 # Hugging Face card quality audit
 
-Status: implemented policy. Two bounded live content samples have been
-inspected; a labelled learned-model calibration still remains
-`needs-measurement`.
+This guide records the content patterns used by the deterministic card gate
+and supplies a rubric for future categorical annotations. The current learned
+usefulness score is the independent HF ModernBERT head.
 
 ## What the card source contributes
 
@@ -64,68 +64,23 @@ The deterministic gate follows the official Hugging Face card structure:
   when it establishes independent artifact-format and runtime evidence.
 
 This gate runs before learned inference. Every retained section receives the
-FinePDFs Edu v2 score. Its model card still
-describes a school-focused web rubric and warns about specialized higher
-education, so it is audit-only for cards. FinePDFs Edu v2 was trained on PDF
-samples and explicitly documents out-of-domain limitations, so it is retained
-only as a labelled comparison for cards. Neither classifier gates card
-admission and a higher-looking out-of-domain FinePDFs score must not replace the
-FineWeb score.
+HF ModernBERT score; the token-weighted document mean must be at least 3.5.
+Quality labels are scalar usefulness judgments, separate from the categorical
+rubric above.
 
-## Bounded live sample, 2026-08-27
+## Evaluation
 
-The audit replayed the exact README revisions in the most recent 100 deployed
-licence-admission records. On the final audit pass 87 revisions remained
-reachable: 54 dataset cards and 33 model cards. The revised deterministic
-projection retained 21 dataset cards and 15 model cards, and removed 81
-unfilled template sections.
-The sample exposed four concrete errors that are now covered by regression
-tests: multi-line HTML comments leaking asset URLs, duplicated first headings,
-quantization-mirror and generated-trainer shells passing as documentation, and
-a substantive trainer report being rejected because other sections still held
-placeholders. The sample is operational evidence, not an estimate of classifier
-precision or recall.
+Review model and dataset cards separately across the predicted score range.
+Inspect compact technical cards, dense reports, mirrors, generated templates,
+marketing, wrong-type cards and mixed useful/template sections. Measure false
+admission and false rejection, not just average scores.
 
-## Bounded deployed-corpus sample, 2026-08-30
-
-The audit inspected 100 durable accepted model-card projections, 100 durable
-accepted dataset-card projections, 100 model-card rejections, 100 dataset-card
-rejections, and 20 accepted arXiv projections. It found generated script cards,
-trainer shells, minimal checkpoint inventories, placeholder paper-title cards,
-and repeated lightly edited repository cards among the historical acceptances.
-It also found useful compact and legacy cards rejected because they did not use
-the expected heading vocabulary. The revised deterministic policy retained 94
-of the 100 previously accepted model cards and 92 of the 100 previously accepted
-dataset cards. The removed sample rows were the observed generated scripts,
-trainer/quantization shells, minimal inventories, access-only or generic cards,
-and placeholder-title cards.
-The revised policy also accepts the audited compact measured card and the four
-useful no-template-heading rejection examples. These are bounded observed
-sample counts, not population precision or recall estimates.
-
-The arXiv sample contained 19 substantive scientific papers and one published
-IEEEtran starter file. A narrow literal template detector removes that starter
-without imposing a minimum paper length or requiring conventional headings.
-Equations, tables, figures, and captions remain in the scientific projection.
-
-The `pretrain-content-v3` scoring generation is the FinePDF-only clean-output boundary.
-Normal documents, aggregates, as-of views, and dataset exports expose only that
-generation. Historical rows remain durable audit history but do not masquerade
-as current clean output. Deployment must replay eligible live input through the
-new generation before expecting current exports to repopulate.
-
-## Classifier follow-up
-
-The next classifier step is a small card-specific model trained on manually
-audited live cards using the listed labels. Sampling must be stratified by
-model versus dataset card and by deterministic outcome. The evaluation report
-must record precision and recall per class, CPU latency, peak RSS, and the exact
-FinePDFs model revision. All values
-remain `needs-measurement` until the deployed evaluation is complete.
+The current usefulness classifier is already source-specific. A categorical
+tagger using the rubric above would be a separate optional model. Provider
+errors and extraction defects must not become negative usefulness labels.
 
 Primary references:
 
 - <https://huggingface.co/docs/hub/model-cards>
 - <https://huggingface.co/docs/hub/model-card-annotated>
 - <https://huggingface.co/docs/hub/datasets-cards>
-- <https://huggingface.co/HuggingFaceFW/finepdfs_edu_classifier_v2_eng_Latn>

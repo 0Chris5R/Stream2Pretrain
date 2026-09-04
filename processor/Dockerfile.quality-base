@@ -1,5 +1,4 @@
-# Reuse only the pinned Python environment, never the previous model layers.
-# This keeps every unrelated fetcher/KenLM base unchanged for this rollout.
+# Reuse the pinned Python environment separately from the classifier artifacts.
 FROM ghcr.io/0chris5r/stream2pretrain/processor-base-quality@sha256:da48498ee5a29370e2a6cd790c9e8b57bdd62d80fcaf415de2815072543a8483 AS dependencies
 FROM python:3.11-slim AS runtime-base
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app \

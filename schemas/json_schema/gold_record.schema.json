@@ -210,7 +210,7 @@
       "type": "string"
     },
     "edu_score": {
-      "description": "FinePDFs Edu v2 educational-quality output for every trainable source family.",
+      "description": "Source-specific learned pretraining quality, 0-5.",
       "maximum": 5.0,
       "minimum": 0.0,
       "title": "Edu Score",
@@ -488,6 +488,20 @@
       "title": "Projection Version",
       "type": "string"
     },
+    "quality_diagnostics": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Exact section scores, confidence, model digest and diagnostic-only mode.",
+      "title": "Quality Diagnostics"
+    },
     "quality_score": {
       "description": "Explainable composite corpus-quality score; not a model output.",
       "maximum": 5.0,
@@ -651,7 +665,7 @@
         }
       ],
       "default": null,
-      "description": "OSI-list verified SPDX id; the canonical license column for Apache-2.0-release filtering. Mirrors ``license`` for v0.1 writers; new writers populate this directly.",
+      "description": "Canonical item-level licence identifier used for purpose-aware routing. May be an SPDX id or a documented source-terms identifier.",
       "title": "Spdx License"
     },
     "spdx_license_source": {
@@ -697,7 +711,7 @@
       "type": "string"
     },
     "tokens": {
-      "description": "GPT-2-tokenizer token count.",
+      "description": "Token count from tokenizer_revision.",
       "minimum": 0,
       "title": "Tokens",
       "type": "integer"

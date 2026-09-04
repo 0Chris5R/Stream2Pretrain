@@ -246,6 +246,20 @@
       "description": "Structured sections/tables/equations/figures JSON artifact.",
       "title": "Scientific Artifact S3 Uri"
     },
+    "scientific_evidence_gzip": {
+      "anyOf": [
+        {
+          "format": "base64url",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Lossless extracted scientific JSON for durable Kafka handoff, not images.",
+      "title": "Scientific Evidence Gzip"
+    },
     "segments": {
       "items": {
         "$ref": "#/$defs/SilverSegment"
@@ -337,7 +351,7 @@
         }
       ],
       "default": null,
-      "description": "OSI-list verified SPDX id, or None if not attached.",
+      "description": "Item-level licence identifier, or None if not attached.",
       "title": "Spdx License"
     },
     "spdx_license_source": {
