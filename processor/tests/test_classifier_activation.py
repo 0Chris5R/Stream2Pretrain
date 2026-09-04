@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from processor.curate import _prefetched_curate_state, _source_quality_report, build_state
+from processor.curate import (
+    _prefetched_curate_state,
+    _source_quality_report,
+    build_state,
+    curate_one,
+)
 from processor.foundry.paper_adapter import classifier_section_hints
 from processor.foundry.store import FoundryStore
 from processor.foundry.worker import _candidate_ranking_score
@@ -105,6 +110,19 @@ def test_mean_ranks_and_max_only_creates_hint():
     hints = classifier_section_hints(doc)
     assert '"Derivation"' in hints and "especially relevant" in hints
     assert "potentially creating a derivation" in hints
+
+
+def test_composite_metric_is_not_overwritten_by_source_classifier(cfg, long_english_text):
+    state = build_state(cfg)
+    state.source_quality = Scorer(0.25)
+    silver = _silver(long_english_text).model_copy(update={"source_feed": "arxiv-html-fetcher"})
+    try:
+        result = curate_one(state, silver)
+        assert result.edu_score == 0.25
+        assert result.quality_score != result.edu_score
+        assert "low_quality_score" in result.reject_reasons
+    finally:
+        state.close()
 
 
 def test_queue_reset_is_once_preserves_processing_and_replay_memory(tmp_path):

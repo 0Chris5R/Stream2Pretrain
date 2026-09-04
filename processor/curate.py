@@ -1034,8 +1034,6 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         perplexity_applicable=source_policy.kenlm_mode != "off",
         quality_applicable=False,
     )
-    if quality_diagnostics is not None:
-        quality_score = edu_score
     if hf_assessment is not None and not hf_assessment.accepted:
         reject.append("hf_card_quality_filter")
     if source_policy.language_gate and (silver.lang != "en" or silver.lang_score < 0.5):
