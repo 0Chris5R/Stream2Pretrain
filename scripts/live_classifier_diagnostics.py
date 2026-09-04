@@ -67,13 +67,13 @@ def main() -> None:
         counts[source] += 1
         if sum(item["source_feed"] == source for item in selected) < 3:
             selected.append(
-                {
+                {"title": str(row.get("text", "")).splitlines()[0][:200] if row.get("text") else ""}
+                | {
                     key: row.get(key)
                     for key in (
                         "doc_id",
                         "source_feed",
                         "valid_from",
-                        "text",
                         "route",
                         "eligible_routes",
                         "reject_reasons",
