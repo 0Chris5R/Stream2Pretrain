@@ -317,7 +317,7 @@ def test_model_service_content_hash_ignores_unrelated_processor_code() -> None:
 
     model_input = (
         "inputs: .dockerignore schemas processor/Dockerfile.model-service.app "
-        "processor/__init__.py processor/common.py processor/model_service.py "
+        "processor/__init__.py processor/common.py processor/model_service.py processor/model_jobs.py "
         "processor/operators/__init__.py "
         "processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py "
         "processor/operators/shadow_models.py"
