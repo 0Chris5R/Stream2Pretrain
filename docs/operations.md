@@ -96,11 +96,16 @@ advance production progress or mutate production state. Any deterministic
 canary-only failure is separated under the state bucket's
 `canary-processing-failures/` prefix instead of the production Gold ledger.
 
-Pretraining consumes its queue in order and has no 24-hour unfinished-work
-cutoff. The one-day Bronze/Silver retention is an audit-asset lifetime, not a
-pretraining scheduler. Only the Foundry freezes and expires daily cohorts.
-Dropping pending pretraining records would require a separate explicit intake
-policy; it bounds queue age by reducing coverage, not by increasing capacity.
+Normalization and curation each stop unfinished work once the original content
+intake timestamp is 24 hours old. The check runs before expensive processing,
+after a long normalization, before classifier retry, and before durable curation
+output. An extraction retry preserves the original timestamp and never receives
+a new window. Missing legacy timestamps also expire closed. These skips emit
+`s2p_processor_work_expired_total` by stage, source and reason; they are neither
+quality rejections nor unique-document counts. Completed decisions, Gold data
+and post-training artifacts do not age out. The one-day Bronze/Silver retention
+remains a separate audit-asset lifetime. The Foundry independently freezes and
+expires daily cohorts.
 
 When a core or source contract changes, `scripts/reconcile_topic_partitions.sh`
 also reconciles

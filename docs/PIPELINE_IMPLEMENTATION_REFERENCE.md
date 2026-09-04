@@ -180,6 +180,16 @@ type.
 
 ## 3. Curation and deterministic checks
 
+Before raw-object retrieval, normalization checks the Bronze `fetched_at`
+content-intake time against a 86,400-second rolling limit. It checks again after
+extraction before publishing Silver. Curation applies the same limit to
+`source_fetched_at` before cache access, before retrying unavailable classifiers,
+and after batched inference before materializing a decision. Missing legacy
+timestamps expire closed. Extraction retries copy the original timestamp.
+Expired work publishes no Silver, decision, Gold or retry record and is counted
+separately by stage, source and `age_exceeded` or `missing_intake_timestamp`.
+Publication dates and document validity intervals do not define this cutoff.
+
 All checks run on retained, section-level text, then on the rebuilt export
 projection where appropriate.
 

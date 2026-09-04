@@ -12,6 +12,9 @@ def test_processor_metrics_render_dashboard_contract() -> None:
     metrics.record_dropped(reasons=["license_excluded"], quality_score=0.75, edu_score=1.0)
     metrics.record_route(route="reasoning_candidate")
     metrics.record_failure(stage="normalize", reason="payload_too_large")
+    metrics.record_work_expired(
+        stage="curate", source_feed="arxiv-html-fetcher", reason="age_exceeded"
+    )
     metrics.record_pdf_processing(outcome="success", seconds=203.95)
     metrics.record_pdf_worker_restart(reason="timeout")
     metrics.record_iceberg_flush(rows=2, decisions=3, seconds=0.12)
@@ -41,6 +44,10 @@ def test_processor_metrics_render_dashboard_contract() -> None:
     assert "s2p_iceberg_flush_seconds_bucket" in body
     assert (
         's2p_processor_failures_total{namespace="stream2pretrain",reason="payload_too_large",stage="normalize"} 1.0'
+        in body
+    )
+    assert (
+        's2p_processor_work_expired_total{namespace="stream2pretrain",reason="age_exceeded",source="arxiv-html-fetcher",stage="curate"} 1.0'
         in body
     )
     assert (

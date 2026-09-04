@@ -193,6 +193,11 @@ operations guide.
 
 Corpus curation is a per-document stateful transformation, so it does not invent an event-time aggregation window. Prometheus supplies operational windows of five minutes, one hour, and twenty-four hours for the UI.
 
+Unfinished pretraining work has a separate rolling 24-hour intake window.
+Normalization and curation skip older queue records before further expensive
+work; retries retain their original intake time. The expiry counter is separate
+from quality rejection and does not remove completed corpus data.
+
 Late documents are not discarded because their arrival time is newer than their publication time. Each record carries `valid_from` and optional `valid_to`. Iceberg queries reconstruct the corpus as of a selected timestamp. A replay therefore changes processing time without falsifying source time.
 
 The source and writer use at-least-once replay. Idempotent document identifiers and decision keys provide deterministic table results. The project does not claim exactly-once delivery.
@@ -431,7 +436,10 @@ Known limits are:
 - Polaris uses an in-memory catalog backend in the dev profile. MinIO data is persistent, but production catalog recovery needs a relational backend.
 - Ingress, DNS, and TLS use Traefik, ExternalDNS with RFC2136, and the shared wildcard certificate. NetworkPolicy, Gatekeeper enforcement, Tempo, and Loki remain disabled in the measured profile.
 - The measured curation rate trails normalized input. Sustainable fresh-input throughput, safe partition counts and maximum corpus size remain `needs-measurement`.
-- Content filters are imperfect. The spot-check found retained PDF author metadata, numerical PII false positives and older admissions below today's quality cutoffs. Existing corpus rows are not silently relabeled when a policy changes.
+- Content filters are imperfect. Current PDF processing excludes pre-Abstract
+  author blocks at extraction and curation boundaries; historical stored rows
+  are not rewritten. The spot-check also found numerical PII false positives
+  and older admissions below today's quality cutoffs.
 - Post-training has produced accepted SFT and RL artifacts, but automated acceptance still needs human review. The spot-check found an incomplete accepted SFT answer and simple historical RL tasks. This remains an experimental side feature, not a demonstrated frontier-training corpus.
 - License detection is a curation heuristic. It is not legal advice or a compliance guarantee.
 

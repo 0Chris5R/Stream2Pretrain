@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 import pytest
@@ -27,6 +27,7 @@ from processor.curate import (
 )
 from processor.operators.kenlm_score import PerplexityResult
 from processor.operators.quality import QualityScore
+from processor.work_cutoff import WorkCutoff
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
 
@@ -784,6 +785,27 @@ def test_scientific_curation_excludes_pre_abstract_segments(
         assert long_english_text.strip() in gold.text
         assert not any(score.segment_id == "author" for score in gold.segment_scores)
         assert any("Ada Researcher: front matter" in value for value in gold.excluded_sections)
+    finally:
+        state.close()
+
+
+def test_expired_silver_skips_decision_and_classifier_work(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    now = datetime(2026, 9, 4, tzinfo=UTC)
+    try:
+        silver = _silver(long_english_text).model_copy(
+            update={"source_fetched_at": now - timedelta(days=2)}
+        )
+        [outcome] = process_silver_decision_payloads(
+            state,
+            [common.silver_dumps(silver)],
+            work_cutoff=WorkCutoff(clock=lambda: now),
+        )
+        assert outcome.expired
+        assert outcome.value is None
+        assert outcome.error is None
     finally:
         state.close()
 

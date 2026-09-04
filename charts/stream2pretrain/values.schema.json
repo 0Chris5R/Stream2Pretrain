@@ -232,8 +232,9 @@
     },
     "processor": {
       "type": "object",
-      "required": ["fetcher", "curate", "iceberg", "duckdbApi"],
+      "required": ["maxWorkAgeSeconds", "fetcher", "curate", "iceberg", "duckdbApi"],
       "properties": {
+        "maxWorkAgeSeconds": {"type": "integer", "minimum": 1},
         "fetcher": {
           "type": "object",
           "required": ["replicas", "sourceBatchSize", "pdfProcessingEnabled", "checkpoint", "canary"],

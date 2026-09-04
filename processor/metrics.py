@@ -66,6 +66,12 @@ class ProcessorMetrics:
             ["namespace", "stage", "reason"],
             registry=self.registry,
         )
+        self._work_expired = Counter(
+            "s2p_processor_work_expired_total",
+            "Unfinished queue records skipped by intake age, not quality rejections or unique documents.",
+            ["namespace", "stage", "source", "reason"],
+            registry=self.registry,
+        )
         self._processor_routed = Counter(
             "s2p_processor_routed_total",
             "Documents assigned to each final corpus route.",
@@ -149,6 +155,10 @@ class ProcessorMetrics:
     def record_failure(self, *, stage: str, reason: str) -> None:
         with self._lock:
             self._processor_failures.labels(self._namespace, stage, reason).inc()
+
+    def record_work_expired(self, *, stage: str, source_feed: str, reason: str) -> None:
+        with self._lock:
+            self._work_expired.labels(self._namespace, stage, source_feed, reason).inc()
 
     def record_pdf_processing(self, *, outcome: str, seconds: float) -> None:
         with self._lock:

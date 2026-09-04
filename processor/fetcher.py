@@ -51,6 +51,7 @@ from processor.probes import start_probe_server
 from processor.scientific import ScientificProcessingResult, ScientificProcessor
 from processor.scientific_handoff import ScientificHandoff, evidence_capsule
 from processor.source_policy import resolve_source_policy
+from processor.work_cutoff import WorkCutoff
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 
@@ -628,6 +629,7 @@ def process_bronze_payload(
     payload: bytes,
     *,
     metrics: ProcessorMetrics | None = None,
+    work_cutoff: WorkCutoff | None = None,
 ) -> SilverRecord | None:
     """Deserialize a Kafka payload, run the pipeline, return the silver row."""
     bronze = common.bronze_loads(payload)
@@ -644,6 +646,10 @@ def process_bronze_payload(
         and is_posttrain_transform_permitted(bronze.spdx_license)
     )
     if not pretrain_allowed and not transform_allowed:
+        return None
+    if work_cutoff is not None and work_cutoff.expired(
+        bronze.fetched_at, stage="normalize", source_feed=bronze.source_feed, metrics=metrics
+    ):
         return None
     if metrics is not None:
         metrics.record_received(source_feed=bronze.source_feed)
@@ -677,6 +683,10 @@ def process_bronze_payload(
             # source skip rather than a normalization defect.
             return None
         raise ValueError(f"extraction produced no trainable body for {bronze.doc_id}")
+    if work_cutoff is not None and work_cutoff.expired(
+        bronze.fetched_at, stage="normalize", source_feed=bronze.source_feed, metrics=metrics
+    ):
+        return None
     if silver is not None and metrics is not None:
         metrics.record_normalized(source_feed=silver.source_feed)
     return silver
@@ -708,6 +718,7 @@ def build_dataflow(
         cfg,
         with_wayback=os.environ.get("S2P_WAYBACK_LOOKUP_ENABLED", "0") == "1",
     )
+    work_cutoff = WorkCutoff.from_env()
     failure_writer = common.DurableProcessingFailureWriter.from_config(cfg)
     expired_inputs = ExpiredInputIndex(os.path.join(cfg.state_dir, "expired-raw.sqlite3"))
     flow_name = os.environ.get("S2P_BYTEWAX_FLOW_NAME", FETCHER_FLOW_NAME).strip()
@@ -739,7 +750,9 @@ def build_dataflow(
                 raw_uri = bronze.raw_html_s3_uri
                 if expired_inputs.contains(raw_uri):
                     return None
-                silver = process_bronze_payload(state, payload, metrics=PROCESSOR_METRICS)
+                silver = process_bronze_payload(
+                    state, payload, metrics=PROCESSOR_METRICS, work_cutoff=work_cutoff
+                )
                 if silver is None:
                     return None
                 encoded = common.silver_dumps(silver)

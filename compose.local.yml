@@ -26,6 +26,7 @@ x-processor-environment: &processor-environment
   # pilot is 1,103,458 bytes. Use the next binary ceiling for the pilot.
   S2P_KAFKA_MESSAGE_MAX_BYTES: "2097152"
   S2P_BYTEWAX_SNAPSHOT_SECONDS: "1"
+  S2P_PRETRAIN_MAX_WORK_AGE_SECONDS: "86400"
   MINIO_ENDPOINT: http://minio:9000
   MINIO_ACCESS_KEY: minioadmin
   MINIO_SECRET_KEY: minioadmin

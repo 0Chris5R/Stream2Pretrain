@@ -80,6 +80,7 @@ from processor.scientific_policy import (
 )
 from processor.source_policy import resolve_source_policy
 from processor.tokenize import Tokenizer
+from processor.work_cutoff import WorkCutoff
 from schemas.bronze import BronzeRecord
 from schemas.gold import GoldRecord, PiiFlag, RejectReason, RiskTier, SegmentScore
 from schemas.silver import SilverRecord, SilverSegment
@@ -166,6 +167,7 @@ class _PayloadDecision:
 
     value: tuple[bytes, bool] | None = None
     error: ValueError | None = None
+    expired: bool = False
 
 
 class _MemoizedPiiSanitizer:
@@ -1456,6 +1458,7 @@ def process_silver_decision_payloads(
     payloads: Sequence[bytes],
     *,
     metrics: ProcessorMetrics | None = None,
+    work_cutoff: WorkCutoff | None = None,
 ) -> list[_PayloadDecision]:
     """Score a bounded document batch while preserving serial state semantics.
 
@@ -1467,23 +1470,45 @@ def process_silver_decision_payloads(
     """
     results: list[_PayloadDecision | None] = [None] * len(payloads)
     pending: list[tuple[int, str, SilverRecord]] = []
+
+    def expired(silver: SilverRecord) -> bool:
+        return work_cutoff is not None and work_cutoff.expired(
+            silver.source_fetched_at,
+            stage="curate",
+            source_feed=silver.source_feed,
+            metrics=metrics,
+        )
+
     for index, payload in enumerate(payloads):
-        cache_key = _decision_cache_key(state, payload)
-        cached = state.decision_cache.get(cache_key)
-        if cached is not None:
-            results[index] = _PayloadDecision(value=cached)
-            continue
         try:
             silver = common.silver_loads(payload)
         except ValueError as exc:
             results[index] = _PayloadDecision(error=exc)
+            continue
+        if expired(silver):
+            results[index] = _PayloadDecision(expired=True)
+            continue
+        cache_key = _decision_cache_key(state, payload)
+        cached = state.decision_cache.get(cache_key)
+        if cached is not None:
+            results[index] = _PayloadDecision(value=cached)
             continue
         pending.append((index, cache_key, silver))
 
     if pending:
         try:
             retry = 0
+            scoring_state = state
             while True:
+                eligible: list[tuple[int, str, SilverRecord]] = []
+                for index, cache_key, silver in pending:
+                    if expired(silver):
+                        results[index] = _PayloadDecision(expired=True)
+                    else:
+                        eligible.append((index, cache_key, silver))
+                pending = eligible
+                if not pending:
+                    break
                 try:
                     scoring_state = _prefetched_curate_state(
                         state,
@@ -1507,6 +1532,9 @@ def process_silver_decision_payloads(
             scoring_state = state
 
         for index, cache_key, silver in pending:
+            if expired(silver):
+                results[index] = _PayloadDecision(expired=True)
+                continue
             # Another item earlier in this same runtime batch may carry the
             # identical payload. Match one-by-one behavior by observing the
             # decision cache again after each preceding ordered write.
@@ -1610,6 +1638,7 @@ def build_dataflow(
     ):
         raise RuntimeError("smoke curator outputs must not target production topics")
     state = build_state(cfg)
+    work_cutoff = WorkCutoff.from_env()
     failure_writer = common.DurableProcessingFailureWriter.from_config(cfg)
     flow = Dataflow(flow_name)
     payload_max_bytes = common.kafka_payload_max_bytes()
@@ -1678,6 +1707,7 @@ def build_dataflow(
                     state,
                     [payload for _, payload, _ in valid],
                     metrics=PROCESSOR_METRICS,
+                    work_cutoff=work_cutoff,
                 )
             except Exception as exc:
                 PROCESSOR_METRICS.record_failure(stage="curate", reason=type(exc).__name__)
@@ -1687,6 +1717,8 @@ def build_dataflow(
                 raise
 
             for (msg, _payload, silver), outcome in zip(valid, outcomes, strict=True):
+                if outcome.expired:
+                    continue
                 with tracer.start_as_current_span("curate.process") as span:
                     if outcome.error is not None:
                         span.record_exception(outcome.error)

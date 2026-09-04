@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from processor.operators.extract import ResiliparseExtractor
 from processor.operators.langid import LangIdentifier
 from processor.operators.minhash import MinHasher
 from processor.operators.validity import ValidityEnricher
+from processor.work_cutoff import WorkCutoff
 from schemas.bronze import BronzeRecord
 
 
@@ -67,6 +69,17 @@ def test_fetch_raw_bytes_decompresses_gzip(bronze_record: BronzeRecord) -> None:
     raw = fetch_raw_bytes(state, bronze_record)
     assert b"hello world" in raw
     assert s3.calls and s3.calls[0][0] == "bronze"
+
+
+def test_expired_bronze_is_skipped_before_object_fetch(bronze_record: BronzeRecord) -> None:
+    s3 = _FakeS3(b"must not be read")
+    now = datetime(2026, 9, 4, tzinfo=UTC)
+    bronze = bronze_record.model_copy(update={"fetched_at": now - timedelta(days=2)})
+    result = process_bronze_payload(
+        _state(s3), bronze.model_dump_json().encode(), work_cutoff=WorkCutoff(clock=lambda: now)
+    )
+    assert result is None
+    assert s3.calls == []
 
 
 def test_scientific_extraction_is_source_aware(bronze_record: BronzeRecord) -> None:

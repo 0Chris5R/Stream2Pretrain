@@ -232,6 +232,8 @@ ingest:
 # Processor components
 # -----------------------------------------------------------------------------
 processor:
+  # Bound unfinished normalization and curation work by original content-intake time.
+  maxWorkAgeSeconds: 86400
   fetcher:
     image: stream2pretrain/processor-fetcher-model
     # Expensive extraction must publish and checkpoint continuously instead of
