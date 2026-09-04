@@ -74,8 +74,8 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             echo "deploy=true" >> "$GITHUB_OUTPUT"
-            echo "python=false" >> "$GITHUB_OUTPUT"
-            echo "helm=false" >> "$GITHUB_OUTPUT"
+            echo "python=true" >> "$GITHUB_OUTPUT"
+            echo "helm=true" >> "$GITHUB_OUTPUT"
             echo "core=false" >> "$GITHUB_OUTPUT"
             echo "sources=false" >> "$GITHUB_OUTPUT"
             echo "monitoring=false" >> "$GITHUB_OUTPUT"
@@ -705,21 +705,21 @@ jobs:
             model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/model_jobs.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
           - image: processor-kenlm-model
             model_profile: kenlm
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/model_jobs.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.fetcher.app
-            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/pdf_worker.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/source_policy.py
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/pdf_worker.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/scientific_handoff.py processor/source_policy.py
           - image: processor-shadow-model
             model_profile: shadow
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/model_jobs.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py processor/operators/shadow_models.py
           - image: ui
             context: ui
             dockerfile: Dockerfile
@@ -2419,14 +2419,14 @@ jobs:
               source_rows.append(
                   {
                       "source": source,
-                      "last_24h": {
+                      "publication_date_last_24h_not_processing_throughput": {
                           "observed": int(observed.get("total", 0)),
                           "strict_training_exports": int(export.get("documents", 0)),
                           "routes": route_counts,
-                          "license": activity_by_source.get(str(source)),
                           "accepted_revisions": export.get("manifest", {}).get("revisions", {}),
                       },
                       "cumulative": cumulative.get(str(source), {"accepted": 0, "total": 0}),
+                      "ingestion_activity_last_24h": activity_by_source.get(str(source)),
                   }
               )
 

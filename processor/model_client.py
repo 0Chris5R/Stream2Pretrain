@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import threading
 import time
@@ -299,7 +300,20 @@ def _post_json(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
     try:
-        response = client.post(path, json=payload)
+        headers = {"Prefer": "respond-async"} if path.startswith("/v1/quality") else {}
+        response = client.post(path, json=payload, headers=headers)
+        while response.status_code == 202:
+            try:
+                job_id = response.json()["job_id"]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ModelServiceError("invalid pending quality job response") from exc
+            if not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{64}", job_id):
+                raise ModelServiceError("invalid quality job identifier")
+            # The Pod lease stays held. Long polls finish within 20 seconds;
+            # complete scientific sections have no artificial inference deadline.
+            response = client.get(f"/v1/quality-jobs/{job_id}")
+            if response.status_code == 404:
+                raise ModelServiceError("quality job was lost when its model Pod was replaced")
     except httpx.HTTPError as exc:
         raise ModelServiceError(f"curator model service request failed for {path}") from exc
     if response.status_code >= 500:

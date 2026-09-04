@@ -24,11 +24,15 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC
 from typing import Any, Protocol
+
+import boto3
+from prometheus_client import generate_latest
 
 from ingest.common.license_admission import (
     is_posttrain_transform_permitted,
@@ -40,6 +44,7 @@ from processor.decision_cache import DecisionCache
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.model_client import (
     CuratorModelClient,
+    ModelServiceError,
     RemoteKenLMScorer,
     RemoteQualityClassifier,
     headless_endpoint_resolver,
@@ -59,6 +64,8 @@ from processor.operators.source_quality import (
     MetadataDiscoveryPolicy,
 )
 from processor.probes import start_probe_server
+from processor.quality_cache import CachedQualityScorer
+from processor.scientific_handoff import ScientificHandoff
 from processor.scientific_policy import (
     RouteDecision,
     aggregate_segment_scores,
@@ -127,10 +134,14 @@ class CurateState:
     decision_cache: DecisionCache
     model_clients: tuple[CuratorModelClient, ...] = ()
     prefetched_quality_skips: frozenset[str] = frozenset()
+    quality_cache: CachedQualityScorer | None = None
+    scientific_handoff: ScientificHandoff | None = None
 
     def close(self) -> None:
         self.decision_cache.close()
         self.lsh.close()
+        if self.quality_cache is not None:
+            self.quality_cache.close()
         for model_client in self.model_clients:
             model_client.close()
 
@@ -298,13 +309,16 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     )
     if require_real_models and lsh.backend == "memory":
         raise RuntimeError("a durable LSHBloom backend is required")
+    quality_cache = CachedQualityScorer(
+        source_quality, os.path.join(cfg.state_dir, "quality-scores.sqlite3")
+    )
     return CurateState(
         gopher=GopherFilter(),
         c4=C4Filter(),
         kenlm=kenlm,
         minhasher=minhasher,
         lsh=lsh,
-        source_quality=source_quality,
+        source_quality=quality_cache,
         metadata_discovery=MetadataDiscoveryPolicy(),
         pii=pii,
         tokenizer=Tokenizer(allow_fallback=not require_real_models),
@@ -312,6 +326,19 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         scoring_version=scoring_version,
         decision_cache=DecisionCache(os.path.join(cfg.state_dir, "decision-cache.sqlite3")),
         model_clients=model_clients,
+        quality_cache=quality_cache,
+        scientific_handoff=ScientificHandoff(
+            boto3.client(
+                "s3",
+                endpoint_url=cfg.minio_endpoint,
+                aws_access_key_id=cfg.minio_access_key,
+                aws_secret_access_key=cfg.minio_secret_key,
+                region_name="us-east-1",
+            ),
+            cfg.gold_bucket,
+        )
+        if require_real_models
+        else None,
     )
 
 
@@ -1247,6 +1274,14 @@ def _materialize_uncached_decision(
 ) -> tuple[bytes, bool]:
     """Finalize one decision and mutate cache/dedup state in input order."""
     gold = curate_one(scoring_state, silver)
+    if is_trainable_gold(gold) and state.scientific_handoff is not None:
+        uri = state.scientific_handoff.preserve(
+            silver.doc_id,
+            silver.scientific_evidence_gzip,
+            silver.scientific_artifact_s3_uri,
+        )
+        if uri != gold.scientific_artifact_s3_uri:
+            gold = gold.model_copy(update={"scientific_artifact_s3_uri": uri})
     _record_decision_metrics(metrics, gold)
     decision = common.gold_dumps(gold)
     trainable = is_trainable_gold(gold)
@@ -1285,10 +1320,24 @@ def process_silver_decision_payloads(
 
     if pending:
         try:
-            scoring_state = _prefetched_curate_state(
-                state,
-                [silver for _, _, silver in pending],
-            )
+            retry = 0
+            while True:
+                try:
+                    scoring_state = _prefetched_curate_state(
+                        state,
+                        [silver for _, _, silver in pending],
+                    )
+                    break
+                except ModelServiceError as exc:
+                    retry += 1
+                    common.get_logger("s2p.curate").warning(
+                        "model temporarily unavailable; retaining input and completed scores",
+                        attempt=retry,
+                        error=str(exc),
+                    )
+                    if metrics is not None:
+                        metrics.record_failure(stage="curate", reason="model_service_retry")
+                    time.sleep(min(30, 2 * retry))
         except ValueError:
             # A record-local rejection from a shared batch request cannot be
             # attributed safely. Re-run each item through the unchanged
@@ -1564,7 +1613,9 @@ def main() -> None:
     runtime_status = common.BytewaxRuntimeStatus()
     flow = build_dataflow(cfg, runtime_status=runtime_status)
     start_probe_server(
-        metrics_provider=PROCESSOR_METRICS.render_prometheus,
+        # Model-client demand uses the default registry. Expose it alongside
+        # stage counters so KEDA actually sees requests waiting for a Pod.
+        metrics_provider=lambda: PROCESSOR_METRICS.render_prometheus() + generate_latest(),
         readiness_provider=runtime_status.is_ready,
     )
     recovery_name = os.environ.get("S2P_BYTEWAX_RECOVERY_NAME", CURATOR_RECOVERY_NAME).strip()

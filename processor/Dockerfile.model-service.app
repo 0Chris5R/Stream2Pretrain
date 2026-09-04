@@ -18,6 +18,7 @@ RUN if [ "${S2P_MODEL_SERVICE_PROFILE}" = "shadow" ]; then \
 COPY schemas                    /app/schemas
 COPY processor/__init__.py      \
      processor/common.py        \
+     processor/model_jobs.py     \
      processor/model_service.py /app/processor/
 COPY processor/operators/__init__.py     \
      processor/operators/kenlm_score.py  \

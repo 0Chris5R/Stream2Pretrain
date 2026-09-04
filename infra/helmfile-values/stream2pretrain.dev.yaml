@@ -78,12 +78,18 @@ processor:
   modelService:
     enabled: true
     replicas: 1
+    profiles:
+      quality:
+        autoscaling:
+          minReplicas: 2
+          # Measured 2026-09-04: four fit; replicas five and six remain
+          # Pending on CPU/memory reservations. No classifier coverage change.
+          maxReplicas: 4
     autoscaling:
       enabled: true
       minReplicas: 1
-      # Each stateless model family may use one replica per schedulable node.
-      # The stateful Bytewax curator remains a single recovery owner and sends
-      # bounded concurrent segment calls across these replicas.
+      # Profile-specific ceilings override this fallback. The curator remains
+      # a single checkpoint owner, leasing one request per ready model Pod.
       maxReplicas: 3
   iceberg:
     replicas: 1

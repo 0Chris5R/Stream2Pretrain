@@ -63,8 +63,8 @@ old FinePDFs checkpoint. Only the pinned Python environment is copied from
 the established dependency image. The unrelated fetcher and KenLM model bases
 remain unchanged. Pods never redownload weights at startup.
 
-Stateless quality replicas retain existing KEDA demand scaling, two baseline
-replicas and a maximum of six. Each requests 1 CPU and 2 GiB RAM with limits of
+Stateless quality replicas retain KEDA demand scaling, two baseline
+replicas and a cloud maximum of four. Each requests 1 CPU and 2 GiB RAM with limits of
 2 CPU and 6 GiB RAM to accommodate both heads and full-length sections. This is
 capacity configuration, not a measured memory claim. Actual peak RSS, latency
 and sustained throughput: needs-measurement on the deployed workload.
@@ -73,6 +73,42 @@ Acceptance checks: unit/schema/API tests; Helm and UI checks; CPU model startup;
 both source heads returning finite values; replica distribution and batch
 parity; fresh durable records with matching API and UI diagnostics. Quality
 review after a representative live interval remains a separate team decision.
+
+## 2026-09-04 runtime recovery
+
+Cloud diagnostics confirmed curator exit-code-1 failures after the fixed
+180-second quality HTTP deadline. These were not curator OOM kills. Four
+quality Pods fit the observed reservations; the fifth and sixth stayed Pending.
+The cloud ceiling is therefore four, not a reduction in sections or input length.
+
+- Quality jobs use bounded 20-second HTTP polling while full inference continues
+  on the same leased Pod. Exact requests are idempotent within a Pod. No scoring
+  timeout truncates a section. Legacy synchronous clients remain compatible.
+- Completed section scores are cached on the curator PVC by exact input hash and
+  model revision. The cache contains scores, not text, and retains at most about
+  100,000 entries. Transient model failures retry without advancing input or
+  terminating Bytewax. Model demand metrics are exposed to KEDA.
+- Foundry event/artifact appends are serialized across admission and generation
+  threads. Iceberg conflicts reload the snapshot and deduplicate stable IDs
+  before retrying. Failed writes retain the SQLite outbox.
+- Losslessly compressed scientific JSON travels with normalized records until
+  admission. Accepted structured evidence is persisted in Gold before its
+  decision is emitted. If the capsule exceeds Kafka's message budget, exact JSON
+  is externalized to Gold and the record carries its pointer instead. This rare
+  overflow path also preserves evidence for later-rejected documents; its size
+  is needs-measurement. No PDFs or image binaries are embedded or retained there.
+  Existing transient bodies and images keep their configured 24-hour lifecycle.
+  Already-expired historical evidence cannot be reconstructed; Foundry records
+  that explicit preflight outcome instead of inventing input.
+- Diagnostic document date windows are labeled as publication-date windows,
+  not processing throughput. Use stage counter increases for work in an hour,
+  and the durable all-corpus overview for unique corpus totals.
+
+The bundled release must pass remote regression checks, then receive a live
+one-hour comparison of restarts, committed decisions, ingestion, model load,
+and Foundry progress. Sustained post-fix throughput remains needs-measurement
+until that comparison. Model weights, scoring aggregation, and all admission
+gates are unchanged.
 
 Held-out document agreement with Luna labels from the downloaded run:
 

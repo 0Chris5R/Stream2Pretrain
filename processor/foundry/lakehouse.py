@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from contextlib import suppress
 from typing import Any
 
@@ -25,6 +27,7 @@ def _is_missing_catalog_table(exc: Exception) -> bool:
 class FoundryLakehouseSink:
     def __init__(self, *, batch_size: int = 50) -> None:
         self._catalog = load_runtime_catalog()
+        self._lock = threading.RLock()
         self._batch_size = batch_size
         self._events: list[FoundryEvent] = []
         self._artifacts: list[FoundryArtifactRecord] = []
@@ -34,6 +37,10 @@ class FoundryLakehouseSink:
         self._known_artifact_ids: set[str] | None = None
 
     def add_event(self, event: FoundryEvent) -> None:
+        with self._lock:
+            self._add_event(event)
+
+    def _add_event(self, event: FoundryEvent) -> None:
         if event.event_id in self._buffered_event_ids:
             return
         self._events.append(event)
@@ -42,6 +49,10 @@ class FoundryLakehouseSink:
             self.flush_events()
 
     def add_artifact(self, artifact: FoundryArtifactRecord) -> None:
+        with self._lock:
+            self._add_artifact(artifact)
+
+    def _add_artifact(self, artifact: FoundryArtifactRecord) -> None:
         if artifact.artifact_id in self._buffered_artifact_ids:
             return
         self._artifacts.append(artifact)
@@ -54,30 +65,73 @@ class FoundryLakehouseSink:
         self.flush_artifacts()
 
     def flush_events(self) -> None:
+        with self._lock:
+            self._flush_events()
+
+    def _flush_events(self) -> None:
         if not self._events:
             return
-        table = self._ensure_events_table()
-        self._known_event_ids = self._known_event_ids or _load_ids(table, "event_id")
-        pending = [value for value in self._events if value.event_id not in self._known_event_ids]
-        if pending:
-            table.append(_events_arrow(pending))
-            self._known_event_ids.update(value.event_id for value in pending)
+        self._known_event_ids = self._append_unique(
+            self._ensure_events_table,
+            self._events,
+            "event_id",
+            _events_arrow,
+            self._known_event_ids,
+        )
         self._events.clear()
         self._buffered_event_ids.clear()
 
     def flush_artifacts(self) -> None:
+        with self._lock:
+            self._flush_artifacts()
+
+    def _flush_artifacts(self) -> None:
         if not self._artifacts:
             return
-        table = self._ensure_artifacts_table()
-        self._known_artifact_ids = self._known_artifact_ids or _load_ids(table, "artifact_id")
-        pending = [
-            value for value in self._artifacts if value.artifact_id not in self._known_artifact_ids
-        ]
-        if pending:
-            table.append(_artifacts_arrow(pending))
-            self._known_artifact_ids.update(value.artifact_id for value in pending)
+        self._known_artifact_ids = self._append_unique(
+            self._ensure_artifacts_table,
+            self._artifacts,
+            "artifact_id",
+            _artifacts_arrow,
+            self._known_artifact_ids,
+        )
         self._artifacts.clear()
         self._buffered_artifact_ids.clear()
+
+    @staticmethod
+    def _append_unique(
+        load_table: Any,
+        values: list[Any],
+        id_column: str,
+        to_arrow: Any,
+        known: set[str] | None,
+    ) -> set[str]:
+        for attempt in range(8):
+            try:
+                table = load_table()
+                if known is None:
+                    known = _load_ids(table, id_column)
+                pending = [value for value in values if getattr(value, id_column) not in known]
+                if pending:
+                    table.append(to_arrow(pending))
+                    known.update(getattr(value, id_column) for value in pending)
+                return known
+            except Exception as exc:
+                # Maintenance and other writers can advance main between load
+                # and append. Refresh both snapshot and IDs, including when a
+                # commit succeeded but its acknowledgement was lost.
+                if (
+                    type(exc).__name__
+                    not in {
+                        "CommitFailedException",
+                        "CommitStateUnknownException",
+                    }
+                    or attempt == 7
+                ):
+                    raise
+                known = None
+                time.sleep(min(2, 0.1 * 2**attempt))
+        raise AssertionError("unreachable")
 
     def _ensure_events_table(self) -> Any:
         return self._ensure(

@@ -18,6 +18,7 @@ import orjson
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
 from processor import common
+from processor.model_jobs import InferenceJobs
 from processor.operators.kenlm_score import KenLMScorer
 from processor.operators.shadow_models import CsoShadowClassifier, TransformerShadowScorer
 from processor.operators.source_classifiers import SourceQualityClassifier
@@ -215,6 +216,7 @@ class CuratorModelRuntime:
 
 class CuratorModelServer(ThreadingHTTPServer):
     runtime: CuratorModelRuntime
+    jobs: InferenceJobs
 
 
 class IPv6CuratorModelServer(CuratorModelServer):
@@ -234,6 +236,24 @@ class _Handler(BaseHTTPRequestHandler):
         return self.server.runtime  # type: ignore[attr-defined,no-any-return]
 
     def do_GET(self) -> None:
+        if self.path.startswith("/v1/quality-jobs/"):
+            key = self.path.removeprefix("/v1/quality-jobs/")
+            try:
+                result = self.server.jobs.result(key)  # type: ignore[attr-defined]
+                self._write(
+                    HTTPStatus.ACCEPTED if result is None else HTTPStatus.OK,
+                    {"job_id": key} if result is None else result,
+                )
+            except KeyError:
+                self._write(HTTPStatus.NOT_FOUND, {"error": "job not present on this Pod"})
+            except ValueError as exc:
+                self._write(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception:
+                common.get_logger("s2p.model-service").exception("quality job failed")
+                self._write(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "inference failed"})
+            return
         if self.path in {"/healthz", "/readyz"}:
             self._write(HTTPStatus.OK, {"ready": True})
             return
@@ -263,6 +283,21 @@ class _Handler(BaseHTTPRequestHandler):
                     isinstance(text, str) for text in raw_texts
                 ):
                     raise ValueError("texts must be a list of strings")
+                if family != "source-pretrain-quality" or self.runtime.quality is None:
+                    raise ValueError("unsupported model_family")
+                if not raw_texts or len(raw_texts) > self.runtime.max_batch_items:
+                    raise ValueError("quality batch size is out of bounds")
+                if self.headers.get("Prefer") == "respond-async":
+                    singleton = self.path == "/v1/quality"
+
+                    def work() -> dict[str, Any]:
+                        results = self.runtime.quality_many(family, cast(list[str], raw_texts))
+                        return results[0] if singleton else {"results": results}
+
+                    identity = orjson.dumps([self.runtime.metadata(), self.path, payload])
+                    key = self.server.jobs.submit(identity, work)  # type: ignore[attr-defined]
+                    self._write(HTTPStatus.ACCEPTED, {"job_id": key})
+                    return
                 results = self.runtime.quality_many(family, cast(list[str], raw_texts))
                 if self.path == "/v1/quality":
                     self._write(HTTPStatus.OK, results[0])
@@ -287,6 +322,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._write(HTTPStatus.OK, {"classifiers": self.runtime.shadow_scores(text)})
                 return
             self._write(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except (ValueError, orjson.JSONDecodeError) as exc:
             self._write(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:
@@ -328,6 +365,7 @@ def serve(runtime: CuratorModelRuntime, *, host: str = "::", port: int = 8094) -
     server_class = IPv6CuratorModelServer if ":" in host else CuratorModelServer
     server = server_class((host, port), _Handler)
     server.runtime = runtime
+    server.jobs = InferenceJobs()
     server.serve_forever()
 
 

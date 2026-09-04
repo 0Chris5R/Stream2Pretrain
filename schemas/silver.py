@@ -190,6 +190,10 @@ class SilverRecord(BaseModel):
         pattern=r"^s3://[^/]+/.+",
         description="Structured sections/tables/equations/figures JSON artifact.",
     )
+    scientific_evidence_gzip: bytes | None = Field(
+        default=None,
+        description="Lossless extracted scientific JSON for durable Kafka handoff, not images.",
+    )
     figure_count: int = Field(default=0, ge=0)
     table_count: int = Field(default=0, ge=0)
     equation_count: int = Field(default=0, ge=0)

@@ -48,6 +48,7 @@ from processor.pdf_worker import (
 )
 from processor.probes import start_probe_server
 from processor.scientific import ScientificProcessingResult, ScientificProcessor
+from processor.scientific_handoff import ScientificHandoff, evidence_capsule
 from processor.source_policy import resolve_source_policy
 from schemas.bronze import BronzeRecord
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
@@ -612,6 +613,9 @@ def normalize(
         source_fetched_at=bronze.fetched_at,
         source_http_last_modified=bronze.http_last_modified,
         scientific_artifact_s3_uri=artifact_uri,
+        scientific_evidence_gzip=(
+            evidence_capsule(scientific_result.document) if scientific_result else None
+        ),
         figure_count=figure_count,
         table_count=table_count,
         equation_count=equation_count,
@@ -735,6 +739,22 @@ def build_dataflow(
                 if silver is None:
                     return None
                 encoded = common.silver_dumps(silver)
+                if len(encoded) > payload_max_bytes and silver.scientific_evidence_gzip:
+                    # Never reject an otherwise transportable paper because
+                    # evidence duplicated its payload. Keep the exact JSON in
+                    # durable storage and send only that pointer in this case.
+                    uri = ScientificHandoff(state.s3, cfg.gold_bucket).preserve(
+                        silver.doc_id,
+                        silver.scientific_evidence_gzip,
+                        silver.scientific_artifact_s3_uri,
+                    )
+                    silver = silver.model_copy(
+                        update={
+                            "scientific_artifact_s3_uri": uri,
+                            "scientific_evidence_gzip": None,
+                        }
+                    )
+                    encoded = common.silver_dumps(silver)
                 if len(encoded) > payload_max_bytes:
                     raise common.DeterministicProcessingError(
                         f"normalized payload for {silver.doc_id} is {len(encoded)} bytes; "
