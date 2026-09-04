@@ -39,7 +39,7 @@ Execution checklist:
 - [x] Serving index repair and deterministic regression coverage.
 - [x] Evidence retention and one-time stale queue reset.
 - [x] Expired-input/retry/publication checks.
-- [ ] Deterministic checks, cloud deployment and bounded live audit.
+- [x] Deterministic checks, cloud deployment and bounded live audit.
 
 Validation so far:
 
@@ -60,3 +60,26 @@ Validation so far:
 - `check-pipeline` is a short read-only Actions mode for current pod health,
   serving totals, processing counters, active classifier decisions and recent
   Foundry events. It does not launch model calls or mutate the queue.
+
+Final bounded check, 2026-09-04 13:31 UTC:
+
+- Application release `6ad3557` deployed successfully in run `33877530689`.
+  The deployment step took 189 seconds, excluding validation and image builds.
+- DuckDB, curator, fetcher, writer, Foundry and the four classifier replicas were
+  Ready with zero restarts in the post-rollout check. The subsequent compact
+  check also returned healthy serving and processing endpoints.
+- A real arXiv document scored 3.4829 across 27 retained sections, received both
+  reasoning heads, and entered both eligible routes. Its scientific evidence
+  was materialized under `s2p-gold/scientific-evidence/` and the Foundry queue
+  held its cached evidence. A real HF card at 2.9775 was quarantined at the 3.5
+  cutoff without either arXiv reasoning head.
+- New pretraining publication resumed. The cleared Foundry queue had one
+  preserved processing paper and one newly admitted paper, both with evidence.
+- The active solver's third turn was still streaming, with 28,995 response
+  characters and a fresh checkpoint at 13:31:18 UTC. Attempt 47 is the job's
+  call sequence, not 47 retries. No new completed SFT/RL artifact was claimed
+  during this bounded check; generation remains running.
+- Sustained throughput and catch-up capacity remain `needs-measurement`.
+  Historical expired-record handling and rollouts contaminate these short
+  windows, so neither readiness nor the sampled route counts establish that
+  the cluster can sustain the full daily intake.
