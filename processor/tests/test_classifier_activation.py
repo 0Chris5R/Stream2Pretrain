@@ -125,6 +125,44 @@ def test_composite_metric_is_not_overwritten_by_source_classifier(cfg, long_engl
         state.close()
 
 
+@pytest.mark.parametrize("permissive", [True, False])
+def test_expired_legacy_evidence_blocks_posttrain_not_permitted_pretrain(
+    monkeypatch, silver_record, permissive
+):
+    from types import SimpleNamespace
+
+    from processor import common, curate
+    from processor.scientific_handoff import ScientificEvidenceUnavailableError
+
+    def missing(*args):
+        raise ScientificEvidenceUnavailableError("structured evidence object is missing")
+
+    gold = _gold(1).model_copy(
+        update={
+            "route": "posttrain_candidate",
+            "eligible_routes": ["pretrain", "posttrain_candidate"]
+            if permissive
+            else ["posttrain_candidate"],
+            "scientific_artifact_s3_uri": "s3://silver/expired",
+        }
+    )
+    monkeypatch.setattr(curate, "curate_one", lambda *args: gold)
+    state = SimpleNamespace(
+        scientific_handoff=SimpleNamespace(preserve=missing),
+        decision_cache=SimpleNamespace(put=lambda *args, **kwargs: None),
+    )
+    payload, trainable = curate._materialize_uncached_decision(
+        state, state, silver=silver_record, cache_key="test", metrics=None
+    )
+    record = common.gold_loads(payload)
+    assert record.route == ("pretrain" if permissive else "quarantine")
+    assert "posttrain_candidate" not in record.eligible_routes
+    assert trainable is permissive
+    if permissive:
+        assert record.text == gold.text
+        assert record.scientific_artifact_s3_uri is None
+
+
 def test_queue_reset_is_once_preserves_processing_and_replay_memory(tmp_path):
     store = FoundryStore(str(tmp_path / "queue.sqlite"))
     for index in range(2):

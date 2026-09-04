@@ -1413,15 +1413,34 @@ def _materialize_uncached_decision(
             if uri != gold.scientific_artifact_s3_uri:
                 gold = gold.model_copy(update={"scientific_artifact_s3_uri": uri})
         except ScientificEvidenceUnavailableError as exc:
-            gold = gold.model_copy(
-                update={
-                    "route": "quarantine",
-                    "eligible_routes": ["quarantine"],
-                    "risk_tier": 3,
-                    "reject_reasons": [*gold.reject_reasons, "incomplete_scientific_extraction"],
-                    "route_reasons": [str(exc)],
-                }
-            )
+            if silver.scientific_evidence_gzip is None and "pretrain" in gold.eligible_routes:
+                # Legacy normalized records already contain the complete clean
+                # pretraining projection. Expired source evidence disqualifies
+                # Foundry, not that independently usable, licensed text.
+                gold = gold.model_copy(
+                    update={
+                        "route": "pretrain",
+                        "eligible_routes": ["pretrain"],
+                        "scientific_artifact_s3_uri": None,
+                        "route_reasons": [
+                            *gold.route_reasons,
+                            "post-training requires retained structured evidence",
+                        ],
+                    }
+                )
+            else:
+                gold = gold.model_copy(
+                    update={
+                        "route": "quarantine",
+                        "eligible_routes": ["quarantine"],
+                        "risk_tier": 3,
+                        "reject_reasons": [
+                            *gold.reject_reasons,
+                            "incomplete_scientific_extraction",
+                        ],
+                        "route_reasons": [str(exc)],
+                    }
+                )
     _record_decision_metrics(metrics, gold)
     decision = common.gold_dumps(gold)
     trainable = is_trainable_gold(gold)

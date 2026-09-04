@@ -14,6 +14,7 @@ on:
         options:
           - deploy
           - diagnose
+          - check-pipeline
           - audit-ui
           - label-pretrain
           - check-pretrain
@@ -1809,6 +1810,21 @@ jobs:
             done
             monitoring_diagnostics
             exit 1
+          fi
+
+          if [[ "$DEPLOY_MODE" == "check-pipeline" ]]; then
+            kubectl -n stream2pretrain get pods -o wide
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+              python - duckdb < scripts/check_pipeline_live.py
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-curate -c curate -- \
+              python - curator < scripts/check_pipeline_live.py
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-processor-fetcher -- \
+              python - fetcher < scripts/check_pipeline_live.py
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-curate -c curate -- \
+              python - < scripts/live_classifier_diagnostics.py
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-foundry -c api -- \
+              python - foundry < scripts/check_pipeline_live.py
+            exit 0
           fi
 
           if [[ "$DEPLOY_MODE" == "audit-ui" ]]; then
