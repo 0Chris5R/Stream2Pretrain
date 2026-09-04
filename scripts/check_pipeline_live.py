@@ -34,6 +34,13 @@ def main() -> None:
                                 "SELECT event_json FROM events ORDER BY occurred_at DESC LIMIT 12"
                             )
                         ],
+                        "stream_progress": [
+                            dict(row)
+                            for row in conn.execute(
+                                "SELECT job_id,call_key,attempt,LENGTH(partial_text) AS characters,updated_at "
+                                "FROM stream_checkpoints ORDER BY updated_at DESC LIMIT 3"
+                            )
+                        ],
                     }
                 )
             )
