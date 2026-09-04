@@ -129,6 +129,8 @@ def test_fetcher_image_has_an_isolated_application_and_dependency_profile() -> N
     assert "processor/iceberg_writer.py" not in fetcher_app
     assert "COPY processor/expired_inputs.py" in fetcher_app
     assert "processor/expired_inputs.py" in (ROOT / ".github/workflows/deploy-main.yml").read_text()
+    assert "COPY processor/work_cutoff.py" in fetcher_app
+    assert "processor/work_cutoff.py" in (ROOT / ".github/workflows/deploy-main.yml").read_text()
 
 
 def test_ingest_common_facade_does_not_eagerly_import_poller_dependencies() -> None:

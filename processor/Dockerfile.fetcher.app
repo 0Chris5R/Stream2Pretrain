@@ -24,6 +24,7 @@ COPY processor/probes.py                                /app/processor/probes.py
 COPY processor/scientific.py                             /app/processor/scientific.py
 COPY processor/scientific_handoff.py                     /app/processor/scientific_handoff.py
 COPY processor/source_policy.py                          /app/processor/source_policy.py
+COPY processor/work_cutoff.py                            /app/processor/work_cutoff.py
 COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entrypoint
 
 WORKDIR /app

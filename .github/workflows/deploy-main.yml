@@ -708,7 +708,7 @@ jobs:
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.fetcher.app
-            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/expired_inputs.py processor/metrics.py processor/pdf_worker.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/scientific_handoff.py processor/source_policy.py
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/expired_inputs.py processor/metrics.py processor/pdf_worker.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/scientific_handoff.py processor/source_policy.py processor/work_cutoff.py
           - image: ui
             context: ui
             dockerfile: Dockerfile
