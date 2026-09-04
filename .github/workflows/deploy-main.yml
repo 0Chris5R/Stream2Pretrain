@@ -2188,6 +2188,20 @@ jobs:
 
           if [[ "$DEPLOY_MODE" == "diagnose" ]]; then
             echo "::group::Read-only cluster diagnostics"
+            # Name application containers explicitly: --all-containers --previous
+            # can fail on an init container before returning the actual crash.
+            for target in \
+              stream2pretrain-processor-curate-0:curate \
+              stream2pretrain-foundry-0:worker; do
+              pod="${target%:*}"
+              container="${target##*:}"
+              echo "::group::Application crash: ${pod}/${container}"
+              kubectl -n stream2pretrain logs "$pod" -c "$container" \
+                --previous --timestamps --tail=400 || true
+              kubectl -n stream2pretrain logs "$pod" -c "$container" \
+                --timestamps --tail=400 || true
+              echo "::endgroup::"
+            done
             echo "::group::Helm release state"
             helm list --all --all-namespaces || true
             helm history stream2pretrain -n stream2pretrain || true
