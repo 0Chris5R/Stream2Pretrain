@@ -68,7 +68,9 @@ def test_production_leak_check_matches_exact_document() -> None:
     assert curated_consumer.closed
 
 
-def test_canary_captures_each_partition_before_worker_start(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_canary_captures_each_partition_before_worker_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict = {}
 
     class FrontierConsumer:
@@ -76,7 +78,9 @@ def test_canary_captures_each_partition_before_worker_start(monkeypatch: pytest.
             captured["config"] = config
 
         def list_topics(self, topic: str, **_kwargs: object) -> object:
-            return SimpleNamespace(topics={topic: SimpleNamespace(error=None, partitions={0: {}, 1: {}})})
+            return SimpleNamespace(
+                topics={topic: SimpleNamespace(error=None, partitions={0: {}, 1: {}})}
+            )
 
         def get_watermark_offsets(self, partition: object, **_kwargs: object) -> tuple[int, int]:
             return (0, {0: 137, 1: 19}[partition.partition])
@@ -96,14 +100,18 @@ def test_canary_captures_each_partition_before_worker_start(monkeypatch: pytest.
     monkeypatch.setenv("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized.smoke")
     monkeypatch.setattr(cluster_smoke, "Consumer", FrontierConsumer)
     assert prepare_curator_offsets("s2p-curate-smoke-123-2") == {"0": 137, "1": 19}
-    assert captured["assigned"] == captured["committed"] == [
-        ("docs.normalized.smoke", 0, 137), ("docs.normalized.smoke", 1, 19)
-    ]
+    assert (
+        captured["assigned"]
+        == captured["committed"]
+        == [("docs.normalized.smoke", 0, 137), ("docs.normalized.smoke", 1, 19)]
+    )
     assert captured["config"]["enable.auto.commit"] is False
     assert captured["closed"] is True
 
 
-def test_canary_frontiers_never_modify_production_group_or_topic(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_canary_frontiers_never_modify_production_group_or_topic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(ValueError, match="canary group"):
         prepare_curator_offsets("s2p-curate")
     monkeypatch.setenv("S2P_SMOKE_NORMALIZED_TOPIC", "docs.normalized")

@@ -94,19 +94,23 @@ def prepare_curator_offsets(group_id: str) -> dict[str, int]:
     topic = required_env("S2P_SMOKE_NORMALIZED_TOPIC")
     if not topic.endswith(".smoke") or topic == os.environ.get("S2P_NORMALIZED_TOPIC"):
         raise ValueError("the canary input must be an isolated smoke topic")
-    consumer = Consumer({
-        "bootstrap.servers": required_env("REDPANDA_BROKERS"),
-        "group.id": group_id,
-        "enable.auto.commit": False,
-    })
+    consumer = Consumer(
+        {
+            "bootstrap.servers": required_env("REDPANDA_BROKERS"),
+            "group.id": group_id,
+            "enable.auto.commit": False,
+        }
+    )
     try:
         metadata = consumer.list_topics(topic, timeout=10.0).topics.get(topic)
         if metadata is None or metadata.error is not None or not metadata.partitions:
             raise RuntimeError(f"cannot inspect canary input topic {topic}")
         offsets = [
-            TopicPartition(topic, partition, consumer.get_watermark_offsets(
-                TopicPartition(topic, partition), timeout=10.0
-            )[1])
+            TopicPartition(
+                topic,
+                partition,
+                consumer.get_watermark_offsets(TopicPartition(topic, partition), timeout=10.0)[1],
+            )
             for partition in sorted(metadata.partitions)
         ]
         consumer.assign(offsets)

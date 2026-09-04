@@ -99,19 +99,29 @@ def test_as_of_retains_policy_generations_and_half_open_intervals(tmp_path) -> N
         database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
     )
     connection = duckdb.connect(str(path))
-    first = _gold(0).model_copy(update={
-        "valid_from": datetime(2026, 8, 1),
-        "valid_to": datetime(2026, 9, 1),
-        "policy_revision": "p1", "tokens": 10,
-    })
-    second = first.model_copy(update={
-        "valid_from": datetime(2026, 9, 1),
-        "valid_to": None, "policy_revision": "p2", "tokens": 20,
-    })
+    first = _gold(0).model_copy(
+        update={
+            "valid_from": datetime(2026, 8, 1),
+            "valid_to": datetime(2026, 9, 1),
+            "policy_revision": "p1",
+            "tokens": 10,
+        }
+    )
+    second = first.model_copy(
+        update={
+            "valid_from": datetime(2026, 9, 1),
+            "valid_to": None,
+            "policy_revision": "p2",
+            "tokens": 20,
+        }
+    )
     index.apply_decisions(connection, [first, second])
-    index.apply_decision(connection, _gold(1, route="quarantine").model_copy(
-        update={"risk_tier": 3, "reject_reasons": ["low_quality_score"]}
-    ))
+    index.apply_decision(
+        connection,
+        _gold(1, route="quarantine").model_copy(
+            update={"risk_tier": 3, "reject_reasons": ["low_quality_score"]}
+        ),
+    )
     service = index.query_service()
     assert service.as_of("2026-07-31T23:59:59Z") == []
     assert service.as_of("2026-08-15T00:00:00Z") == [
