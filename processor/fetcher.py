@@ -36,6 +36,7 @@ from ingest.common.license_admission import (
     is_training_permitted,
 )
 from processor import common
+from processor.expired_inputs import ExpiredInputIndex
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.operators.extract import ResiliparseExtractor
 from processor.operators.langid import LangIdentifier
@@ -711,6 +712,7 @@ def build_dataflow(
         with_wayback=os.environ.get("S2P_WAYBACK_LOOKUP_ENABLED", "0") == "1",
     )
     failure_writer = common.DurableProcessingFailureWriter.from_config(cfg)
+    expired_inputs = ExpiredInputIndex(os.path.join(cfg.state_dir, "expired-raw.sqlite3"))
     flow_name = os.environ.get("S2P_BYTEWAX_FLOW_NAME", FETCHER_FLOW_NAME).strip()
     if not flow_name:
         raise RuntimeError("S2P_BYTEWAX_FLOW_NAME must not be empty")
@@ -734,7 +736,12 @@ def build_dataflow(
             PROCESSOR_METRICS.record_failure(stage="normalize", reason="kafka_tombstone")
             return None
         with tracer.start_as_current_span("fetcher.process") as span:
+            raw_uri: str | None = None
             try:
+                bronze = common.bronze_loads(payload)
+                raw_uri = bronze.raw_html_s3_uri
+                if expired_inputs.contains(raw_uri):
+                    return None
                 silver = process_bronze_payload(state, payload, metrics=PROCESSOR_METRICS)
                 if silver is None:
                     return None
@@ -764,6 +771,8 @@ def build_dataflow(
                 span.record_exception(exc)
                 reason = type(exc).__name__
                 failure_writer.record(stage="fetcher", message=msg, reason=reason)
+                if isinstance(exc, RawObjectMissing) and raw_uri is not None:
+                    expired_inputs.record(raw_uri)
                 PROCESSOR_METRICS.record_failure(stage="normalize", reason=reason)
                 return None
             except ClientError as exc:

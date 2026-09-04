@@ -2127,16 +2127,22 @@ def test_missing_legacy_artifact_is_audited_and_does_not_pin_manual_run(
     assert run["state"] == "completed"
     assert run["processed_count"] == 1
     assert store.queued_candidates() == 0
-    assert runtime.kafka.jobs[-1]["status"] == "posttrain_preflight_rejected"
-    assert runtime.kafka.jobs[-1]["scientific_artifact_bucket"] == "silver"
-    assert runtime.kafka.jobs[-1]["scientific_artifact_key"].endswith("/document.json")
-    rejected = store.jobs(state="REJECTED")
-    assert len(rejected) == 1
-    assert rejected[0]["reason"].startswith("scientific artifact object is missing")
+    assert runtime.kafka.jobs == []
+    assert store.jobs(state="REJECTED") == []
+    assert (
+        store._conn.execute("SELECT outcome FROM candidate_admissions")
+        .fetchone()[0]
+        .startswith("scientific artifact object is missing")
+    )
 
 
-def test_candidate_without_structured_uri_is_an_auditable_rejection(tmp_path: Path) -> None:
-    gold = _gold_candidate().model_copy(update={"scientific_artifact_s3_uri": None})
+def test_candidate_without_evidence_is_not_a_generated_quality_rejection(tmp_path: Path) -> None:
+    gold = _gold_candidate().model_copy(
+        update={
+            "scientific_artifact_s3_uri": None,
+            "quality_diagnostics": {"mode": "active", "passed": True},
+        }
+    )
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     published_jobs: list[dict[str, Any]] = []
     runtime = object.__new__(WorkerRuntime)
@@ -2156,13 +2162,13 @@ def test_candidate_without_structured_uri_is_an_auditable_rejection(tmp_path: Pa
 
     result = runtime.process(gold.model_dump_json().encode())
 
-    assert result["status"] == "posttrain_preflight_rejected"
-    assert result["state"] == "REJECTED"
-    assert result["rejection_reason"].startswith("scientific artifact URI is absent")
-    assert len(store.jobs(state="REJECTED")) == 1
-    assert len(published_jobs) == 1
-    assert published_jobs[0]["job_id"] == result["job_id"]
-    assert published_jobs[0]["status"] == "posttrain_preflight_rejected"
+    assert result["status"] == "evidence_unavailable"
+    assert result["reason"].startswith("scientific artifact URI is absent")
+    assert store.jobs(state="REJECTED") == []
+    assert published_jobs == []
+    assert (
+        runtime.process(gold.model_dump_json().encode())["status"] == "already_observed_candidate"
+    )
 
 
 def test_nonpaper_posttrain_pool_row_is_not_sent_to_paper_foundry(tmp_path: Path) -> None:

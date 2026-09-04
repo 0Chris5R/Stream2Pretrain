@@ -344,6 +344,7 @@ class CuratorModelClient:
         endpoint_client_factory: HttpClientFactory | None = None,
         startup_wait_seconds: float = 0.0,
         expected_quality_revision: str | None = None,
+        expected_classifier_protocol: str | None = None,
     ) -> None:
         self._client = client or _new_http_client(base_url, timeout_seconds)
         factory = endpoint_client_factory or (
@@ -353,6 +354,11 @@ class CuratorModelClient:
         while True:
             try:
                 self.metadata = _metadata(self._client)
+                if (
+                    expected_classifier_protocol is not None
+                    and self.metadata.get("classifier_protocol") != expected_classifier_protocol
+                ):
+                    raise ModelServiceError("waiting for the two-stage classifier protocol")
                 if expected_quality_revision is not None:
                     revision = (
                         self.metadata.get("quality", {})

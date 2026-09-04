@@ -176,7 +176,7 @@ def test_curator_uses_bounded_runtime_micro_batches_without_new_recovery_state()
     assert 'op.filter("curate_drop_none", mapped' in curate
     assert 'op.collect("curate_run"' not in curate
     assert "S2P_CURATOR_DOCUMENT_BATCH_SIZE" in template
-    assert "sourceBatchSize: 12" in values
+    assert "sourceBatchSize: 4" in values
     assert 'value: "s2p-curate-live-v5"' in template
     assert 'value: "curate-live-v5"' in template
 

@@ -163,7 +163,13 @@ def test_evidence_survives_missing_transient_object_without_truncation() -> None
     def put(**kwargs):
         stored.append(kwargs)
 
-    handoff = ScientificHandoff(SimpleNamespace(put_object=put), "gold")
+    handoff = ScientificHandoff(
+        SimpleNamespace(
+            put_object=put,
+            get_object=lambda **_: {"Body": io.BytesIO(document.model_dump_json().encode())},
+        ),
+        "gold",
+    )
     uri = handoff.preserve(document.doc_id, evidence_capsule(document), "s3://silver/expired")
     assert uri.startswith("s3://gold/scientific-evidence/")
     assert ScientificDocument.model_validate_json(stored[0]["Body"]) == document

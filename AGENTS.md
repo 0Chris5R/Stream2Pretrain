@@ -11,6 +11,20 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 
 ## Decision log
 
+### 2026-09-04 - Classifier activation and reliability approved
+
+- `docs/CLASSIFIER_ACTIVATION_AND_RELIABILITY.md` supersedes diagnostic isolation.
+- Apply arXiv >=3.0 and HF >=3.5 quality cutoffs now. Low-quality arXiv papers
+  do not run either post-training classifier or enter the Foundry. Licence
+  eligibility is independent, including transform-only post-training papers.
+- Mean post-training suitability ranks the queue. High section scores ONLY
+  add optional section-hint sentences to task generation. No reduced source
+  input, class-5 requirement or forced task allocation.
+- Clear stale unstarted queue work once, not historical artifacts/audits or
+  active work. Do not recover historical papers. Prevent old messages refilling it.
+- Local tests are deterministic correctness only. Deploy and measure in cloud.
+- The scheduled follow-up was deleted at the owner's request. Do not recreate it.
+
 ### 2026-09-03 - Source classifier diagnostic pilot
 
 - `docs/SOURCE_CLASSIFIER_PILOT.md` supersedes the older FinePDFs-only quality
@@ -82,7 +96,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Do not silently reduce, omit, proxy, or relabel its requirements because an
   implementation is expensive. Scope changes require an explicit team decision
   recorded in that file.
-- Source-specific ModernBERT quality heads are diagnostic in the current pilot.
+- Source-specific ModernBERT quality heads gate the current pipeline.
   Deterministic rejection runs before inference.
 - The normal UI must be concise and self-explanatory. Detailed limitations and
   implementation exposition live in documentation or collapsed audit views,
@@ -103,7 +117,7 @@ See README.md for the high-level project description and RESEARCH.md for the ful
 - Table format: **Apache Iceberg V3** + **Polaris** REST catalog (Iceberg picked over Delta for vendor-neutrality and row lineage).
 - HTML extraction: **Resiliparse** (DCLM-Baseline default, faster than Trafilatura).
 - MinHash: **Rensa** (Rust). Near-dup index: **LSHBloom** (band-partitioned Bloom).
-- Quality classifier: **source-specific ModernBERT** on CPU, diagnostic pilot.
+- Quality classifier: **source-specific ModernBERT** on CPU, source-specific gates.
 - UI: **Next.js 14 App Router + shadcn/ui + TanStack Query**.
 - Lakehouse query: **DuckDB + iceberg extension**.
 - Submit API: **FastAPI** (in v0.1.0 only; removed in v0.2.0 - see decision log).

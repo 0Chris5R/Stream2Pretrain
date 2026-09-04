@@ -61,13 +61,17 @@ from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiSanitization, PiiScanner
 from processor.operators.quality import QualityClassifier, QualityScore
 from processor.operators.scientific_document_quality import is_publication_template
-from processor.operators.source_classifiers import SourceQualityClassifier, bundle_revision
+from processor.operators.source_classifiers import (
+    SourcePosttrainClassifier,
+    SourceQualityClassifier,
+    bundle_revision,
+)
 from processor.operators.source_quality import (
     MetadataDiscoveryPolicy,
 )
 from processor.probes import start_probe_server
 from processor.quality_cache import CachedQualityScorer
-from processor.scientific_handoff import ScientificHandoff
+from processor.scientific_handoff import ScientificEvidenceUnavailableError, ScientificHandoff
 from processor.scientific_policy import (
     RouteDecision,
     aggregate_segment_scores,
@@ -138,12 +142,16 @@ class CurateState:
     prefetched_quality_skips: frozenset[str] = frozenset()
     quality_cache: CachedQualityScorer | None = None
     scientific_handoff: ScientificHandoff | None = None
+    posttrain_quality: QualityScorer | None = None
+    posttrain_quality_cache: CachedQualityScorer | None = None
 
     def close(self) -> None:
         self.decision_cache.close()
         self.lsh.close()
         if self.quality_cache is not None:
             self.quality_cache.close()
+        if self.posttrain_quality_cache is not None:
+            self.posttrain_quality_cache.close()
         for model_client in self.model_clients:
             model_client.close()
 
@@ -251,6 +259,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     model_clients: tuple[CuratorModelClient, ...] = ()
     kenlm: PerplexityScorer
     source_quality: QualityScorer
+    posttrain_quality: QualityScorer | None = None
     expected_quality_revision = (
         bundle_revision(json.loads(Path(__file__).with_name("source-classifiers.json").read_text()))
         if require_real_models
@@ -261,9 +270,13 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             model_service_url,
             startup_wait_seconds=600 if require_real_models else 0,
             expected_quality_revision=expected_quality_revision,
+            expected_classifier_protocol="quality-then-posttrain-v1"
+            if require_real_models
+            else None,
         )
         kenlm = RemoteKenLMScorer(model_client)
         source_quality = RemoteQualityClassifier(model_client, "source-pretrain-quality")
+        posttrain_quality = RemoteQualityClassifier(model_client, "source-arxiv-posttrain")
         model_clients = (model_client,)
     elif any(
         (
@@ -282,6 +295,9 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
                     expected_quality_revision=expected_quality_revision
                     if profile == "quality"
                     else None,
+                    expected_classifier_protocol="quality-then-posttrain-v1"
+                    if require_real_models and profile == "quality"
+                    else None,
                 )
             return CuratorModelClient(
                 url,
@@ -290,6 +306,9 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
                 startup_wait_seconds=600 if require_real_models else 0,
                 expected_quality_revision=expected_quality_revision
                 if profile == "quality"
+                else None,
+                expected_classifier_protocol="quality-then-posttrain-v1"
+                if require_real_models and profile == "quality"
                 else None,
             )
 
@@ -305,6 +324,7 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         )
         kenlm = RemoteKenLMScorer(kenlm_client)
         source_quality = RemoteQualityClassifier(quality_client, "source-pretrain-quality")
+        posttrain_quality = RemoteQualityClassifier(quality_client, "source-arxiv-posttrain")
         model_clients = tuple(dict.fromkeys((quality_client, kenlm_client)))
     else:
         kenlm = KenLMScorer(
@@ -318,6 +338,8 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             or os.path.isfile(os.path.join(models, "source-classifiers.json"))
             else QualityClassifier(None)
         )
+        if isinstance(source_quality, SourceQualityClassifier):
+            posttrain_quality = SourcePosttrainClassifier(source_quality)
     pii = PiiScanner(allow_fallback=not require_real_models)
     scoring_version = os.environ.get(SCORING_VERSION_ENV, CONTENT_POLICY_GENERATION)
     minhasher = MinHasher()
@@ -333,6 +355,13 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     quality_cache = CachedQualityScorer(
         source_quality, os.path.join(cfg.state_dir, "quality-scores.sqlite3")
     )
+    posttrain_cache = (
+        CachedQualityScorer(
+            posttrain_quality, os.path.join(cfg.state_dir, "posttrain-scores.sqlite3")
+        )
+        if posttrain_quality is not None
+        else None
+    )
     return CurateState(
         gopher=GopherFilter(),
         c4=C4Filter(),
@@ -343,11 +372,13 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         metadata_discovery=MetadataDiscoveryPolicy(),
         pii=pii,
         tokenizer=Tokenizer(allow_fallback=not require_real_models),
-        policy_revision=os.environ.get(POLICY_REVISION_ENV, "git:dev"),
+        policy_revision=os.environ.get(POLICY_REVISION_ENV, "git:dev") + ":source-gates-v1",
         scoring_version=scoring_version,
         decision_cache=DecisionCache(os.path.join(cfg.state_dir, "decision-cache.sqlite3")),
         model_clients=model_clients,
         quality_cache=quality_cache,
+        posttrain_quality=posttrain_cache,
+        posttrain_quality_cache=posttrain_cache,
         scientific_handoff=ScientificHandoff(
             boto3.client(
                 "s3",
@@ -597,15 +628,38 @@ def _score_perplexity_texts(
     return {text: scorer.score(text) for text in _unique_texts(texts)}
 
 
+def _quality_cutoff(source: str) -> float:
+    return 3.5 if source in {"hf-models", "hf-datasets"} else 3.0
+
+
+def _weighted_quality(results: Sequence[QualityScore]) -> float:
+    total = sum(max(1, result.tokens) for result in results)
+    return (
+        sum(result.edu_score * max(1, result.tokens) for result in results) / total
+        if total
+        else 0.0
+    )
+
+
 def _source_quality_report(
     scorer: QualityScorer,
     silver: SilverRecord,
     text: str,
+    posttrain_scorer: QualityScorer | None = None,
 ) -> dict[str, object]:
     """Preserve the training/evaluation aggregation, including overflow weighting."""
     _, sections = parse_sections(text, source=silver.source_feed)
     inputs = [model_input(section, source=silver.source_feed) for section in sections]
     results = _score_quality_texts(scorer, inputs)
+    eligible = _weighted_quality([results[value] for value in inputs]) >= _quality_cutoff(
+        silver.source_feed
+    )
+    if eligible and silver.source_feed == "arxiv-html-fetcher" and posttrain_scorer is not None:
+        extra = _score_quality_texts(posttrain_scorer, inputs)
+        results = {
+            value: replace(results[value], diagnostic_scores=extra[value].diagnostic_scores)
+            for value in inputs
+        }
     rows: list[dict[str, Any]] = []
     for section, value in zip(sections, inputs, strict=True):
         result = results[value]
@@ -622,7 +676,7 @@ def _source_quality_report(
                 "tokens": result.tokens or max(1, len(section.text.split())),
                 "chunks": result.chunks,
                 "model_revision": result.model_revision or result.revision,
-                "classifiers": result.diagnostic_scores or {},
+                "classifiers": (result.diagnostic_scores or {}) if eligible else {},
             }
         )
     total = sum(row["tokens"] for row in rows)
@@ -642,7 +696,7 @@ def _source_quality_report(
         best_row, best = max(head_rows, key=lambda pair: pair[1]["edu_score"])
         head_tokens = sum(value["tokens"] for _, value in head_rows)
         diagnostic_heads[task] = {
-            "mode": "diagnostic",
+            "mode": "active",
             "score": best["edu_score"],
             "class": best["score_class"],
             "confidence": best["confidence"],
@@ -656,7 +710,9 @@ def _source_quality_report(
             "class_5_sections": sum(value["score_class"] == 5 for _, value in head_rows),
         }
     return {
-        "mode": "diagnostic",
+        "mode": "active",
+        "cutoff": _quality_cutoff(silver.source_feed),
+        "passed": score >= _quality_cutoff(silver.source_feed),
         "score": score,
         "confidence": confidence,
         "class": max(0, min(5, round(score))),
@@ -685,6 +741,7 @@ def _prefetched_curate_state(
     quality_texts: list[str] = []
     kenlm_texts: list[str] = []
     quality_skips: set[str] = set()
+    paper_inputs: list[tuple[SilverRecord, list[str]]] = []
     for silver in silvers:
         policy = resolve_source_policy(
             source_feed=silver.source_feed,
@@ -714,9 +771,9 @@ def _prefetched_curate_state(
             quality_skips.add(silver.doc_id)
         else:
             _, sections = parse_sections(training_text, source=silver.source_feed)
-            quality_texts.extend(
-                model_input(section, source=silver.source_feed) for section in sections
-            )
+            inputs = [model_input(section, source=silver.source_feed) for section in sections]
+            quality_texts.extend(inputs)
+            paper_inputs.append((silver, inputs))
         for safe_segment in safe_segments:
             if policy.kenlm_mode != "off":
                 kenlm_texts.append(safe_segment.text)
@@ -735,12 +792,31 @@ def _prefetched_curate_state(
         quality_scores = quality_future.result()
         kenlm_scores = kenlm_future.result()
 
+    # The paper-level quality gate runs BEFORE either independent reasoning
+    # encoder. Passing papers still score every section with both heads.
+    if state.posttrain_quality is not None:
+        posttrain_inputs = _unique_texts(
+            [
+                text
+                for silver, inputs in paper_inputs
+                if silver.source_feed == "arxiv-html-fetcher"
+                and _weighted_quality([quality_scores[value] for value in inputs]) >= 3.0
+                for text in inputs
+                if not quality_scores[text].diagnostic_scores
+            ]
+        )
+        for text, result in _score_quality_texts(state.posttrain_quality, posttrain_inputs).items():
+            quality_scores[text] = replace(
+                quality_scores[text], diagnostic_scores=result.diagnostic_scores
+            )
+
     return replace(
         state,
         source_quality=_PrefetchedQualityScorer(state.source_quality, quality_scores),
         kenlm=_PrefetchedPerplexityScorer(state.kenlm, kenlm_scores),
         pii=pii,
         prefetched_quality_skips=frozenset(quality_skips),
+        posttrain_quality=None,
     )
 
 
@@ -869,9 +945,13 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     # Score exactly the retained pretraining projection, including its
     # structured surrogates, with the same section parser as the label set.
     quality_diagnostics = (
-        _source_quality_report(quality_scorer, silver, text) if quality_scorer is not None else None
+        _source_quality_report(quality_scorer, silver, text, state.posttrain_quality)
+        if quality_scorer is not None
+        else None
     )
     reject: list[RejectReason] = []
+    if quality_diagnostics is not None and not quality_diagnostics["passed"]:
+        reject.append("low_quality_score")
     minimum_words = 50
     if is_metadata:
         reject.append("metadata_only")
@@ -954,6 +1034,8 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
         perplexity_applicable=source_policy.kenlm_mode != "off",
         quality_applicable=False,
     )
+    if quality_diagnostics is not None:
+        quality_score = edu_score
     if hf_assessment is not None and not hf_assessment.accepted:
         reject.append("hf_card_quality_filter")
     if source_policy.language_gate and (silver.lang != "en" or silver.lang_score < 0.5):
@@ -1322,13 +1404,26 @@ def _materialize_uncached_decision(
     """Finalize one decision and mutate cache/dedup state in input order."""
     gold = curate_one(scoring_state, silver)
     if is_trainable_gold(gold) and state.scientific_handoff is not None:
-        uri = state.scientific_handoff.preserve(
-            silver.doc_id,
-            silver.scientific_evidence_gzip,
-            silver.scientific_artifact_s3_uri,
-        )
-        if uri != gold.scientific_artifact_s3_uri:
-            gold = gold.model_copy(update={"scientific_artifact_s3_uri": uri})
+        try:
+            uri = state.scientific_handoff.preserve(
+                silver.doc_id,
+                silver.scientific_evidence_gzip,
+                silver.scientific_artifact_s3_uri,
+            )
+            if silver.source_feed == "arxiv-html-fetcher" and not uri:
+                raise ScientificEvidenceUnavailableError("structured evidence URI is absent")
+            if uri != gold.scientific_artifact_s3_uri:
+                gold = gold.model_copy(update={"scientific_artifact_s3_uri": uri})
+        except ScientificEvidenceUnavailableError as exc:
+            gold = gold.model_copy(
+                update={
+                    "route": "quarantine",
+                    "eligible_routes": ["quarantine"],
+                    "risk_tier": 3,
+                    "reject_reasons": [*gold.reject_reasons, "incomplete_scientific_extraction"],
+                    "route_reasons": [str(exc)],
+                }
+            )
     _record_decision_metrics(metrics, gold)
     decision = common.gold_dumps(gold)
     trainable = is_trainable_gold(gold)

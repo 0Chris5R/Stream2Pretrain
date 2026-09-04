@@ -47,11 +47,11 @@ class _Cso:
 @pytest.mark.parametrize(
     ("profile", "expected_keys"),
     [
-        ("quality", {"ready", "profile", "quality"}),
-        ("quality", {"ready", "profile", "quality"}),
+        ("quality", {"ready", "profile", "quality", "classifier_protocol"}),
+        ("quality", {"ready", "profile", "quality", "classifier_protocol"}),
         ("kenlm", {"ready", "profile", "kenlm"}),
         ("shadow", {"ready", "profile", "shadow"}),
-        ("all", {"ready", "profile", "quality", "kenlm", "shadow"}),
+        ("all", {"ready", "profile", "quality", "kenlm", "shadow", "classifier_protocol"}),
     ],
 )
 def test_runtime_loads_only_its_selected_model_family(

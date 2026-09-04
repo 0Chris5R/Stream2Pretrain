@@ -54,9 +54,17 @@ def verify_live_protocol(base_url: str, headless_host: str, family: str) -> dict
                 for value in singles
             ):
                 raise RuntimeError(f"invalid scores or revision on {backend}")
-            diagnostics = singles[0].get("diagnostic_scores") or {}
-            if set(diagnostics) != set(ARXIV_DIAGNOSTIC_TASKS) or singles[1].get(
-                "diagnostic_scores"
+            second_stage, _ = _post_json(
+                client,
+                "/v1/quality",
+                {
+                    "model_family": "source-arxiv-posttrain",
+                    "text": texts[0],
+                },
+            )
+            diagnostics = second_stage.get("diagnostic_scores") or {}
+            if set(diagnostics) != set(ARXIV_DIAGNOSTIC_TASKS) or any(
+                value.get("diagnostic_scores") for value in singles
             ):
                 raise RuntimeError(f"missing arXiv heads or invalid HF routing on {backend}")
             for task, value in diagnostics.items():

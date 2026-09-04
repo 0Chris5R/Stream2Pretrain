@@ -117,6 +117,8 @@ class CuratorModelRuntime:
                 "backend": self.quality.backend,
                 "revision": self.quality.revision,
             }
+            quality["source-arxiv-posttrain"] = dict(quality["source-pretrain-quality"])
+            metadata["classifier_protocol"] = "quality-then-posttrain-v1"
         if quality:
             metadata["quality"] = quality
         if self.kenlm is not None:
@@ -133,7 +135,10 @@ class CuratorModelRuntime:
         return metadata
 
     def quality_many(self, family: str, texts: Sequence[str]) -> list[dict[str, Any]]:
-        classifiers = {"source-pretrain-quality": self.quality}
+        classifiers = {
+            "source-pretrain-quality": self.quality,
+            "source-arxiv-posttrain": self.quality,
+        }
         classifier = classifiers.get(family)
         if classifier is None:
             raise ValueError("unsupported model_family")
@@ -143,9 +148,15 @@ class CuratorModelRuntime:
             operation="quality",
             model_family=family,
             item_count=len(texts),
-            lock=self.locks[family],
+            # All four encoders share this Pod's CPU budget.
+            lock=self.locks["source-pretrain-quality"],
             callback=lambda: [
-                asdict(result) for result in (classifier.score(text) for text in texts)
+                asdict(
+                    classifier.score_posttrain(text)
+                    if family == "source-arxiv-posttrain"
+                    else classifier.score(text)
+                )
+                for text in texts
             ],
         )
 
@@ -283,7 +294,10 @@ class _Handler(BaseHTTPRequestHandler):
                     isinstance(text, str) for text in raw_texts
                 ):
                     raise ValueError("texts must be a list of strings")
-                if family != "source-pretrain-quality" or self.runtime.quality is None:
+                if (
+                    family not in {"source-pretrain-quality", "source-arxiv-posttrain"}
+                    or self.runtime.quality is None
+                ):
                     raise ValueError("unsupported model_family")
                 if not raw_texts or len(raw_texts) > self.runtime.max_batch_items:
                     raise ValueError("quality batch size is out of bounds")

@@ -84,6 +84,7 @@ def paper_bundle_from_gold(
             "extraction_pipeline": scientific.extraction_pipeline,
             "projection_version": scientific.projection_version,
             "valid_from": gold.valid_from.isoformat(),
+            "classifier_section_hints": classifier_section_hints(gold),
         },
         sections=[
             {
@@ -179,6 +180,33 @@ def paper_bundle_from_gold(
         source_gold_hash=gold_hash,
         scientific_artifact_hash=scientific_hash,
     )
+
+
+def classifier_section_hints(gold: GoldRecord) -> str:
+    """Optional pointers only: never select, remove or rewrite paper content."""
+    report = gold.quality_diagnostics or {}
+    if report.get("mode") != "active":
+        return ""
+    sentences = []
+    for task, template in (
+        ("arxiv-posttrain-suitability", "Sections {titles} seem especially relevant."),
+        (
+            "arxiv-math-reasoning",
+            "Sections {titles} seem mathematically suited to potentially creating a derivation or reasoning task.",
+        ),
+    ):
+        candidates = [
+            section
+            for section in report.get("sections", [])
+            if float(section.get("classifiers", {}).get(task, {}).get("edu_score", 0)) >= 4.0
+            and section.get("title")
+        ]
+        candidates.sort(key=lambda section: -float(section["classifiers"][task]["edu_score"]))
+        titles = list(dict.fromkeys(str(section["title"]) for section in candidates))[:3]
+        if titles:
+            # Quoted document-derived titles are data, not new instructions.
+            sentences.append(template.format(titles=canonical_json(titles).decode()))
+    return " ".join(sentences)
 
 
 def load_scientific_artifact(gold: GoldRecord, *, s3_client: object) -> ScientificDocument:
@@ -368,6 +396,9 @@ def bundle_prompt_json(
     passes and task-specific projections rather than rejected or ranked lower.
     """
     payload = bundle.model_dump(mode="json")
+    # Only task_designer gets the optional sentence; other role inputs are
+    # unchanged and no classifier signal selects their source spans.
+    payload.get("metadata", {}).pop("classifier_section_hints", None)
     payload["prompt_projection"] = "paper-bundle-model-view-v2"
     payload.pop("captions", None)
     payload["sections"] = [

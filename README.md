@@ -118,9 +118,13 @@ The fetcher turns raw bytes into normalized document records. It extracts readab
 Quality is source-aware:
 
 - Scientific HTML, PDF, LaTeX, and eligible Hugging Face card prose use the
-  source-specific ModernBERT quality profile, initially diagnostic only.
+  source-specific ModernBERT quality models. Token-weighted section means gate
+  arXiv at 3.0 and HF cards at 3.5 on a 0-5 scale.
 - Hugging Face cards use a Markdown prose projection and deterministic card
   gate before any learned-model inference.
+- Quality-passing arXiv papers also receive independent mathematical-reasoning
+  and post-training-suitability scores. Mean suitability ranks the daily queue;
+  high-scoring sections add optional prompt hints without replacing paper input.
 - RSS, OAI, and Hub-list envelopes are internal discovery messages and never become training text or UI corpus rows.
 
 The DHBW chart fails closed on missing models. Source-quality classifiers and KenLM

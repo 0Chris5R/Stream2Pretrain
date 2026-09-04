@@ -21,6 +21,10 @@ def evidence_capsule(document: ScientificDocument) -> bytes:
     return gzip.compress(document.model_dump_json().encode(), mtime=0)
 
 
+class ScientificEvidenceUnavailableError(ValueError):
+    """Permanent missing evidence; never publish an executable candidate."""
+
+
 class ScientificHandoff:
     def __init__(self, s3: Any, bucket: str) -> None:
         self.s3 = s3
@@ -31,8 +35,8 @@ class ScientificHandoff:
             payload = gzip.decompress(capsule)
         elif uri:
             parsed = urlsplit(uri)
-            if parsed.netloc == self.bucket:
-                return uri
+            if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+                raise ScientificEvidenceUnavailableError("invalid structured evidence URI")
             try:
                 body = self.s3.get_object(Bucket=parsed.netloc, Key=parsed.path.lstrip("/"))["Body"]
                 try:
@@ -41,15 +45,17 @@ class ScientificHandoff:
                     body.close()
             except ClientError as exc:
                 if str(exc.response.get("Error", {}).get("Code")) in {"NoSuchKey", "404"}:
-                    # Old queue entries may already have expired. Foundry's
-                    # existing explicit preflight outcome remains truthful.
-                    return uri
+                    raise ScientificEvidenceUnavailableError(
+                        "structured evidence object is missing"
+                    ) from exc
                 raise
         else:
             return None
         scientific = ScientificDocument.model_validate_json(payload)
         if scientific.doc_id != doc_id:
             raise ValueError("scientific handoff doc_id mismatch")
+        if capsule is None and uri and urlsplit(uri).netloc == self.bucket:
+            return uri
         digest = hashlib.sha256(payload).hexdigest()
         key = f"scientific-evidence/{doc_id.removeprefix('sha256:')}/{digest}.json"
         self.s3.put_object(

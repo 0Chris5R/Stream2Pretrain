@@ -69,6 +69,10 @@ class _SplitModelClient:
                         "backend": "transformers-cpu",
                         "revision": "finepdfs@pinned",
                     },
+                    "source-arxiv-posttrain": {
+                        "backend": "transformers-cpu",
+                        "revision": "finepdfs@pinned",
+                    },
                 },
             }
         elif "kenlm" in base_url:
@@ -545,7 +549,7 @@ def test_curate_clean_text_passes(cfg: ProcessorConfig, long_english_text: str) 
         state.close()
 
 
-def test_cluster_smoke_observes_but_does_not_gate_on_finepdfs_score(
+def test_cluster_smoke_obeys_the_real_quality_gate(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:
     state = build_state(cfg)
@@ -562,8 +566,8 @@ def test_cluster_smoke_observes_but_does_not_gate_on_finepdfs_score(
         gold = curate_one(state, silver)
 
         assert gold.quality_diagnostics["score"] == 1.0
-        assert "low_quality_score" not in gold.reject_reasons
-        assert is_trainable_gold(gold)
+        assert "low_quality_score" in gold.reject_reasons
+        assert not is_trainable_gold(gold)
     finally:
         state.close()
 

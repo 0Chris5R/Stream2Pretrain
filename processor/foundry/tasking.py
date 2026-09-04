@@ -1141,6 +1141,7 @@ def _designer_prompt(
         "fill the count with low-value tasks: return fewer tasks when necessary. Configuration or "
         "result-reproduction tasks require an audited official artifact. Route valuable but non-finite "
         "work to SFT.\n"
+        f"{bundle.metadata.get('classifier_section_hints', '')}\n"
         f"AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:\n{canonical_json(sorted(oracle_result_ids)).decode()}\n"
         f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}"

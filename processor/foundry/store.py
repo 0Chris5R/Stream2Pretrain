@@ -45,7 +45,13 @@ _PIPELINE_ACTIVITY_STATES = {
 
 
 class FoundryStore:
-    def __init__(self, path: str, *, recover_processing: bool = False) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        recover_processing: bool = False,
+        candidate_generation: str | None = None,
+    ) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -192,6 +198,11 @@ class FoundryStore:
               name TEXT PRIMARY KEY,
               value INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS candidate_control (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS candidate_admissions (
+              identity TEXT PRIMARY KEY, doc_id TEXT NOT NULL,
+              outcome TEXT NOT NULL, observed_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(state, updated_at DESC);
             CREATE INDEX IF NOT EXISTS artifacts_created_idx ON artifacts(created_at DESC);
             CREATE INDEX IF NOT EXISTS traces_provider_idx ON provider_traces(provider, completed_at DESC);
@@ -202,8 +213,53 @@ class FoundryStore:
         self._ensure_manual_run_columns()
         self._ensure_pool_assignment_columns()
         self._initialize_candidate_sequence()
+        if candidate_generation is not None:
+            self.reset_pending_candidates(candidate_generation)
         if recover_processing:
             self._conn.execute("UPDATE candidate_queue SET state='queued' WHERE state='processing'")
+
+    def reset_pending_candidates(self, generation: str) -> int:
+        """One-time owner-approved reset. Preserve active work and all artifacts."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                current = self._conn.execute(
+                    "SELECT value FROM candidate_control WHERE key='generation'"
+                ).fetchone()
+                if current is not None and current["value"] == generation:
+                    self._conn.commit()
+                    return 0
+                removed = self._conn.execute(
+                    "DELETE FROM candidate_queue WHERE state='queued'"
+                ).rowcount
+                self._conn.execute(
+                    "DELETE FROM daily_run_candidates WHERE doc_id NOT IN (SELECT doc_id FROM candidate_queue)"
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO candidate_control VALUES ('generation', ?)",
+                    (generation,),
+                )
+                self._conn.commit()
+                return removed
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def candidate_admission_seen(self, identity: str) -> bool:
+        with self._lock:
+            return (
+                self._conn.execute(
+                    "SELECT 1 FROM candidate_admissions WHERE identity=?", (identity,)
+                ).fetchone()
+                is not None
+            )
+
+    def record_candidate_admission(self, identity: str, doc_id: str, outcome: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO candidate_admissions VALUES (?, ?, ?, ?)",
+                (identity, doc_id, outcome, datetime.now(UTC).isoformat()),
+            )
 
     def _ensure_candidate_queue_columns(self) -> None:
         existing = {

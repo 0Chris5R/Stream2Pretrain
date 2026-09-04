@@ -106,7 +106,7 @@ def test_diagnostic_column_migrates_without_rebuilding_or_rotating_offsets(tmp_p
     ).fetchone()
     connection.execute("DROP VIEW serving_gold")
     connection.execute("DROP VIEW serving_decisions")
-    connection.execute("DROP INDEX serving_decision_key")
+    connection.execute("DROP INDEX IF EXISTS serving_decision_key")
     connection.execute("ALTER TABLE _serving_decision_records DROP COLUMN quality_diagnostics_json")
     connection.execute(
         "CREATE UNIQUE INDEX serving_decision_key ON _serving_decision_records (doc_id, scoring_version, classifier_revision, policy_revision)"

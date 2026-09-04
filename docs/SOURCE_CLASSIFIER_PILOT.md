@@ -1,5 +1,11 @@
 # Source-specific quality classifier pilot
 
+The pilot below is historical. The owner approved activation on 2026-09-04:
+see [the activation contract](CLASSIFIER_ACTIVATION_AND_RELIABILITY.md).
+Quality gates are arXiv >=3.0 and HF >=3.5. Both arXiv reasoning classifiers
+run only after quality passes. Mean suitability ranks the daily queue; section
+maxima only add optional generator hints and never replace paper context.
+
 2026-09-03: the owner requested deployment of the two completed Kaggle models
 in place of the public FinePDFs quality scorer, initially diagnostic only.
 Weights may be published through GitHub. On 2026-09-04 the owner also approved

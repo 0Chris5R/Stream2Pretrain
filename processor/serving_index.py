@@ -23,7 +23,7 @@ from schemas.license_admission import LicenseAdmissionDecision
 _LOG = logging.getLogger("s2p.serving-index")
 _DECISION_TABLE = "_serving_decision_records"
 _ADMISSION_TABLE = "_serving_license_admission_records"
-_INDEX_SCHEMA_REVISION = "serving-index-v3"
+_INDEX_SCHEMA_REVISION = "serving-index-v4"
 
 
 def _decision_values(record: GoldRecord) -> dict[str, Any]:
@@ -94,7 +94,13 @@ class ServingIndex:
 
     @property
     def ready(self) -> bool:
-        return self.running and all(event.is_set() for event in self._caught_up.values())
+        # _initialize completed the authoritative baseline before start().
+        # A healthy reader may serve that snapshot while consumers catch up.
+        return self.running
+
+    @property
+    def caught_up(self) -> bool:
+        return all(event.is_set() for event in self._caught_up.values())
 
     def start(self) -> None:
         if self._threads:
@@ -136,6 +142,7 @@ class ServingIndex:
             license_admissions_relation="serving_license_admissions",
             refresh_iceberg=False,
             artifact_store=ScientificArtifactStore.from_env(),
+            overview_relation="_serving_overview",
         )
 
     def counts(self) -> dict[str, int]:
@@ -185,24 +192,15 @@ class ServingIndex:
         rows = [[row[column] for column in columns] for row in selected.values()]
         placeholders = ", ".join("?" for _ in columns)
         names = ", ".join(columns)
-        assignments = ", ".join(
-            f"{column} = excluded.{column}"
-            for column in columns
-            if column not in {"doc_id", "scoring_version", "classifier_revision", "policy_revision"}
+        self._replace_batch(
+            connection,
+            _DECISION_TABLE,
+            rows,
+            names,
+            placeholders,
+            ("doc_id", "scoring_version", "classifier_revision", "policy_revision"),
+            earliest_trace=True,
         )
-        statement = (
-            f"INSERT INTO {_DECISION_TABLE} ({names}) VALUES ({placeholders}) "
-            "ON CONFLICT (doc_id, scoring_version, classifier_revision, policy_revision) "
-            f"DO UPDATE SET {assignments} WHERE excluded.trace_id < {_DECISION_TABLE}.trace_id"
-        )
-        with self._write_lock:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                connection.executemany(statement, rows)
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
 
     def apply_admission(self, connection: Any, record: LicenseAdmissionDecision) -> None:
         self.apply_admissions(connection, [record])
@@ -225,21 +223,86 @@ class ServingIndex:
         rows = [[row[column] for column in columns] for row in selected.values()]
         placeholders = ", ".join("?" for _ in columns)
         names = ", ".join(columns)
-        assignments = ", ".join(
-            f"{column} = excluded.{column}" for column in columns if column != "decision_id"
+        self._replace_batch(
+            connection,
+            _ADMISSION_TABLE,
+            rows,
+            names,
+            placeholders,
+            ("decision_id",),
         )
-        statement = (
-            f"INSERT INTO {_ADMISSION_TABLE} ({names}) VALUES ({placeholders}) "
-            f"ON CONFLICT (decision_id) DO UPDATE SET {assignments}"
-        )
+
+    def _replace_batch(
+        self,
+        connection: Any,
+        table: str,
+        rows: list[list[Any]],
+        names: str,
+        placeholders: str,
+        keys: tuple[str, ...],
+        *,
+        earliest_trace: bool = False,
+    ) -> None:
+        """Atomic set-based replacement, without DuckDB's wide-row ART upsert.
+
+        There are intentionally no indexes on these nested payload tables.
+        The single writer establishes uniqueness against a deduplicated staging
+        batch. Readers see either complete transaction; Kafka is acknowledged
+        afterwards. Work scans the compact serving table, never Iceberg history.
+        """
+        match = " AND ".join(f"target.{key}=incoming.{key}" for key in keys)
         with self._write_lock:
             connection.execute("BEGIN TRANSACTION")
             try:
-                connection.executemany(statement, rows)
+                connection.execute(
+                    f"CREATE OR REPLACE TEMP TABLE _incoming AS SELECT * FROM {table} WHERE FALSE"
+                )
+                connection.executemany(
+                    f"INSERT INTO _incoming ({names}) VALUES ({placeholders})", rows
+                )
+                if earliest_trace:
+                    connection.execute(
+                        f"DELETE FROM _incoming AS incoming USING {table} AS target "
+                        f"WHERE {match} AND target.trace_id <= incoming.trace_id"
+                    )
+                connection.execute(
+                    f"DELETE FROM {table} AS target USING _incoming AS incoming WHERE {match}"
+                )
+                connection.execute(f"INSERT INTO {table} SELECT * FROM _incoming")
+                connection.execute("DROP TABLE _incoming")
+                self._refresh_overview(connection)
                 connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                # A rollback must not mask the original error if DuckDB itself
+                # invalidated the connection.
+                from contextlib import suppress
+
+                with suppress(Exception):
+                    connection.execute("ROLLBACK")
                 raise
+
+    @staticmethod
+    def _refresh_overview(connection: Any) -> None:
+        """Publish headline aggregates with their exact decision transaction.
+
+        Computation uses only the retained local projection after a delta batch,
+        never remote history and never a dashboard page request.
+        """
+        import orjson
+
+        from processor.duckdb_api import DuckDBQueryService
+
+        overview = DuckDBQueryService(
+            connection,
+            gold_relation="serving_gold",
+            decisions_relation="serving_decisions",
+            license_admissions_relation="serving_license_admissions",
+        ).corpus_overview()
+        connection.execute("CREATE TABLE IF NOT EXISTS _serving_overview (payload VARCHAR)")
+        connection.execute("DELETE FROM _serving_overview")
+        connection.execute(
+            "INSERT INTO _serving_overview VALUES (?)", [orjson.dumps(overview).decode()]
+        )
 
     def _initialize(self) -> None:
         import duckdb  # type: ignore[import-untyped]
@@ -331,22 +394,12 @@ class ServingIndex:
                     connection.execute(
                         f"ALTER TABLE {_DECISION_TABLE} ADD COLUMN quality_diagnostics_json VARCHAR"
                     )
-                    connection.execute(
-                        f"CREATE UNIQUE INDEX serving_decision_key ON {_DECISION_TABLE} "
-                        "(doc_id, scoring_version, classifier_revision, policy_revision)"
-                    )
                     connection.execute("COMMIT")
                 except Exception:
                     connection.execute("ROLLBACK")
                     raise
-            connection.execute(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS serving_decision_key ON {_DECISION_TABLE} "
-                "(doc_id, scoring_version, classifier_revision, policy_revision)"
-            )
-            connection.execute(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS serving_admission_key ON {_ADMISSION_TABLE} "
-                "(decision_id)"
-            )
+            connection.execute("DROP INDEX IF EXISTS serving_decision_key")
+            connection.execute("DROP INDEX IF EXISTS serving_admission_key")
             existing = connection.execute(
                 "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"
             ).fetchone()
@@ -370,6 +423,7 @@ class ServingIndex:
                 "CREATE OR REPLACE VIEW serving_license_admissions AS "
                 f"SELECT * FROM {_ADMISSION_TABLE}"
             )
+            self._refresh_overview(connection)
         finally:
             connection.close()
 

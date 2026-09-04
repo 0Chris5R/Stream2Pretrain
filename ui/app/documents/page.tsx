@@ -349,7 +349,7 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
               <div className="mb-2 flex flex-wrap gap-2">
                 <RouteBadge route={document.route} />
                 <Badge variant="outline">{document.source_format.toUpperCase()}</Badge>
-                {document.quality_diagnostics ? <Badge variant="outline">Diagnostic scoring</Badge> : null}
+                {document.quality_diagnostics?.mode === 'diagnostic' ? <Badge variant="outline">Diagnostic scoring</Badge> : null}
               </div>
               <h2 className="text-xl font-semibold leading-tight">
                 {artifact?.title ?? document.title}
@@ -365,7 +365,7 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
           </div>
           <div className="grid grid-cols-3 gap-2">
             <Score label={classifier} value={document.edu_score.toFixed(2)} />
-            <Score label="Composite" value={document.quality_score.toFixed(2)} />
+            <Score label="Structure" value={document.structural_quality_score.toFixed(2)} />
             <Score label="Reasoning evidence" value={percent(document.reasoning_score)} />
           </div>
           {Object.keys(document.quality_diagnostics?.classifiers ?? {}).length > 0 ? (

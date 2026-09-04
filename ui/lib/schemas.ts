@@ -476,7 +476,9 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
   route_reasons: z.array(z.string()),
   segment_scores: z.array(SegmentScoreSchema),
   quality_diagnostics: z.object({
-    mode: z.literal('diagnostic'),
+    mode: z.enum(['diagnostic', 'active']),
+    cutoff: z.number().optional(),
+    passed: z.boolean().optional(),
     score: z.number(),
     confidence: z.number().nullable(),
     class: z.number(),
@@ -484,7 +486,7 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
     aggregation: z.string(),
     bundle_revision: z.string().optional(),
     classifiers: z.record(z.string(), z.object({
-      mode: z.literal('diagnostic'), score: z.number(), class: z.number(),
+      mode: z.enum(['diagnostic', 'active']), score: z.number(), class: z.number(),
       confidence: z.number().nullable(), aggregation: z.string(),
       weighted_mean: z.number(), mean: z.number(), best_section_id: z.string(),
       model_revision: z.string(), sections: z.number(), class_5_sections: z.number(),

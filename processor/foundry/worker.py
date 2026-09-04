@@ -113,7 +113,9 @@ class WorkerRuntime:
         # Only the single-writer worker owns crash recovery. Read-only API
         # sidecars must never requeue a candidate that this worker is handling.
         self.store = FoundryStore(
-            os.path.join(state_dir, "control.sqlite3"), recover_processing=True
+            os.path.join(state_dir, "control.sqlite3"),
+            recover_processing=True,
+            candidate_generation="source-gates-v1",
         )
         self.quota = QuotaLedger(
             os.path.join(state_dir, "quota.sqlite3"),
@@ -196,6 +198,21 @@ class WorkerRuntime:
         if source_policy.family != "scientific_paper":
             self.store.remove_queued_candidate(incoming.doc_id)
             return {"doc_id": incoming.doc_id, "status": "unsupported_posttrain_source"}
+        quality = incoming.quality_diagnostics or {}
+        # A historical Kafka replay is not a newly eligible paper. Do this
+        # before any S3 fetch or preflight job, so reset queues stay reset.
+        if quality.get("mode") != "active" or not quality.get("passed", False):
+            return {"doc_id": incoming.doc_id, "status": "outside_active_candidate_generation"}
+        admission_identity = sha256(
+            {
+                "doc_id": incoming.doc_id,
+                "evidence": incoming.scientific_artifact_s3_uri,
+                "classifier": incoming.classifier_revision,
+                "generation": "source-gates-v1",
+            }
+        )
+        if self.store.candidate_admission_seen(admission_identity):
+            return {"doc_id": incoming.doc_id, "status": "already_observed_candidate"}
         if not incoming.scientific_artifact_s3_uri or incoming.training_word_count < 1:
             parsed_artifact_uri = urlparse(incoming.scientific_artifact_s3_uri or "")
             exc = ScientificArtifactUnavailableError(
@@ -208,12 +225,10 @@ class WorkerRuntime:
                     else "Gold has no retained scientific body"
                 ),
             )
-            job_result = self._record_candidate_preflight_rejection(incoming, exc)
-            self._flush_job_outbox(job_result)
+            self.store.record_candidate_admission(admission_identity, incoming.doc_id, str(exc))
             self.store.remove_queued_candidate(incoming.doc_id)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
-            JOBS.labels(state=str(job_result["state"])).inc()
-            return {**job_result, "queued_candidates": self.store.queued_candidates()}
+            return {"doc_id": incoming.doc_id, "status": "evidence_unavailable", "reason": str(exc)}
         try:
             scientific_payload = self.store.candidate_scientific_payload(
                 incoming.doc_id,
@@ -227,12 +242,10 @@ class WorkerRuntime:
             else:
                 validate_scientific_artifact_payload(incoming, scientific_payload)
         except ScientificArtifactUnavailableError as exc:
-            job_result = self._record_candidate_preflight_rejection(incoming, exc)
-            self._flush_job_outbox(job_result)
+            self.store.record_candidate_admission(admission_identity, incoming.doc_id, str(exc))
             self.store.remove_queued_candidate(incoming.doc_id)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
-            JOBS.labels(state=str(job_result["state"])).inc()
-            return {**job_result, "queued_candidates": self.store.queued_candidates()}
+            return {"doc_id": incoming.doc_id, "status": "evidence_unavailable", "reason": str(exc)}
         self.store.enqueue_candidate(
             doc_id=incoming.doc_id,
             payload=payload,
@@ -245,6 +258,7 @@ class WorkerRuntime:
                 incoming.content_tags[0] if incoming.content_tags else "general_scientific"
             ),
         )
+        self.store.record_candidate_admission(admission_identity, incoming.doc_id, "queued")
         QUEUED_CANDIDATES.set(self.store.queued_candidates())
         return {
             "doc_id": incoming.doc_id,
@@ -322,7 +336,16 @@ class WorkerRuntime:
             }
         except ScientificArtifactUnavailableError as exc:
             gold = GoldRecord.model_validate_json(claimed_payload)
-            job_result = self._record_candidate_preflight_rejection(gold, exc)
+            self.store.record_candidate_admission(
+                sha256({"doc_id": gold.doc_id, "evidence": gold.scientific_artifact_s3_uri}),
+                gold.doc_id,
+                str(exc),
+            )
+            job_result = {
+                "doc_id": gold.doc_id,
+                "status": "evidence_unavailable",
+                "reason": str(exc),
+            }
         except Exception:
             self.store.release_candidate(claimed_doc_id)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
@@ -331,7 +354,8 @@ class WorkerRuntime:
         # restart after a sink failure cannot strand an accepted artifact or
         # an auditable terminal candidate preflight rejection.
         try:
-            self._flush_job_outbox(job_result)
+            if "job_id" in job_result:
+                self._flush_job_outbox(job_result)
         except Exception:
             self.store.release_candidate(claimed_doc_id)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
@@ -344,7 +368,8 @@ class WorkerRuntime:
         if manual_run_id is not None:
             self.store.record_manual_processed(manual_run_id)
         QUEUED_CANDIDATES.set(self.store.queued_candidates())
-        JOBS.labels(state=str(job_result["state"])).inc()
+        if "state" in job_result:
+            JOBS.labels(state=str(job_result["state"])).inc()
         return {**job_result, "queued_candidates": self.store.queued_candidates()}
 
     def _flush_job_outbox(self, job_result: dict[str, Any]) -> None:
@@ -358,62 +383,6 @@ class WorkerRuntime:
         self.kafka.job(job_result)
         self.lakehouse.flush()
         self.kafka.flush()
-
-    def _record_candidate_preflight_rejection(
-        self,
-        gold: GoldRecord,
-        exc: ScientificArtifactUnavailableError,
-    ) -> dict[str, Any]:
-        """Create a terminal, replay-safe audit job for an unusable candidate."""
-        paper_hash = sha256(
-            {
-                "doc_id": gold.doc_id,
-                "gold": sha256(gold),
-                "scientific_artifact_s3_uri": gold.scientific_artifact_s3_uri,
-                "stage": "candidate_preflight",
-            }
-        )
-        job_id, created = self.store.start_job(
-            paper_id=gold.doc_id,
-            paper_hash=paper_hash,
-            doc_id=gold.doc_id,
-            policy_version=f"{self.config.policy_version}:candidate-preflight-v1",
-        )
-        metadata = {
-            "stage": "candidate_preflight",
-            "source_feed": gold.source_feed,
-            "scientific_artifact_bucket": exc.bucket,
-            "scientific_artifact_key": exc.key,
-            "failure_kind": exc.reason,
-        }
-        received = self.store.append_event(
-            job_id=job_id,
-            paper_id=gold.doc_id,
-            state="RECEIVED",
-            metadata=metadata,
-            idempotency_suffix="candidate-preflight",
-        )
-        rejected = self.store.append_event(
-            job_id=job_id,
-            paper_id=gold.doc_id,
-            state="REJECTED",
-            reason=str(exc),
-            metadata=metadata,
-            idempotency_suffix="candidate-preflight",
-        )
-        if created:
-            STAGES.labels(state=received.state).inc()
-            STAGES.labels(state=rejected.state).inc()
-        return {
-            "job_id": job_id,
-            "paper_id": gold.doc_id,
-            "state": "REJECTED",
-            "artifacts": 0,
-            "status": "posttrain_preflight_rejected",
-            "rejection_reason": str(exc),
-            "scientific_artifact_bucket": exc.bucket,
-            "scientific_artifact_key": exc.key,
-        }
 
     def _recover_interrupted_calls(self, abandoned_reservations: int) -> None:
         """Close prior-process call events before the queue resumes them."""
@@ -711,7 +680,11 @@ class WorkerRuntime:
 
 
 def _candidate_ranking_score(record: GoldRecord) -> float:
-    """Equal-weight quality rank without cost or context-size features."""
+    """Learned mean suitability ranks fresh papers, never API cost or length."""
+    diagnostics = record.quality_diagnostics or {}
+    suitability = diagnostics.get("classifiers", {}).get("arxiv-posttrain-suitability")
+    if diagnostics.get("mode") == "active" and suitability is not None:
+        return float(suitability["weighted_mean"]) / 5.0
     evidence_richness = (
         sum(count > 0 for count in (record.equation_count, record.table_count, record.figure_count))
         / 3.0

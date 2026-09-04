@@ -121,6 +121,7 @@ class DuckDBQueryService:
         refresh_iceberg: bool = False,
         catalog_refresh_seconds: float = 30.0,
         artifact_store: ScientificArtifactStore | None = None,
+        overview_relation: str | None = None,
     ) -> None:
         if not _RELATION_RE.fullmatch(gold_relation):
             raise ValueError("gold_relation must be a simple DuckDB relation name")
@@ -136,6 +137,9 @@ class DuckDBQueryService:
         self._catalog_refresh_seconds = max(0.0, catalog_refresh_seconds)
         self._relation_refreshed_at: dict[str, float] = {}
         self._artifact_store = artifact_store
+        if overview_relation is not None and not _RELATION_RE.fullmatch(overview_relation):
+            raise ValueError("overview_relation must be a simple relation name")
+        self._overview_relation = overview_relation
 
     @classmethod
     def from_env(cls) -> DuckDBQueryService:
@@ -312,6 +316,11 @@ class DuckDBQueryService:
         anti-join reuses the decisions materialization instead of starting a
         second remote scan.
         """
+        if self._overview_relation is not None:
+            rows = self._rows(f"SELECT payload FROM {self._overview_relation}", [])
+            if len(rows) != 1:
+                raise RuntimeError("serving overview is not initialized")
+            return dict(json.loads(rows[0]["payload"]))
         if self._refresh_iceberg:
             self._prepare_relation(self._decisions)
             self._prepare_relation(self._gold)

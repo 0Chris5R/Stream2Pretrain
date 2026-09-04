@@ -29,7 +29,7 @@ HEAD_TOKENS = Counter("s2p_classifier_head_tokens_total", "Scored unique tokens.
 HEAD_WINDOWS = Counter("s2p_classifier_head_windows_total", "Scored model windows.", ["task"])
 HEAD_SCORES = Histogram(
     "s2p_classifier_head_score",
-    "Live section scores, diagnostic only.",
+    "Live section scores before document aggregation.",
     ["task"],
     buckets=(0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5),
 )
@@ -89,18 +89,17 @@ class SourceQualityClassifier:
         source = next((key for key in ("arxiv", "hf") if text.startswith(f"[SOURCE={key}] ")), None)
         if source is None:
             raise ValueError("Quality input must use the trained source/section header")
-        quality = self._score_task(f"{source}-pretrain-quality", text)
-        # These are independent full fine-tunes, not shared encoder heads.
-        # Run all three arXiv models on every retained section, not just sections
-        # predicted to be mathematical. HF runs only its own quality model.
-        if source == "arxiv":
-            diagnostics = {
-                task: asdict(self._score_task(task, text)) for task in ARXIV_DIAGNOSTIC_TASKS
-            }
-            for value in diagnostics.values():
-                value.pop("diagnostic_scores", None)
-            return replace(quality, diagnostic_scores=diagnostics)
-        return quality
+        return self._score_task(f"{source}-pretrain-quality", text)
+
+    def score_posttrain(self, text: str) -> QualityScore:
+        """Second stage, invoked only after the full paper passes quality."""
+        if not text.startswith("[SOURCE=arxiv] "):
+            raise ValueError("Post-training classifiers only accept arXiv sections")
+        results = {task: self._score_task(task, text) for task in ARXIV_DIAGNOSTIC_TASKS}
+        return replace(
+            results["arxiv-posttrain-suitability"],
+            diagnostic_scores={task: asdict(value) for task, value in results.items()},
+        )
 
     def _score_task(self, task: str, text: str) -> QualityScore:
         import torch
@@ -143,3 +142,21 @@ class SourceQualityClassifier:
         HEAD_WINDOWS.labels(task).inc(result.chunks)
         HEAD_SCORES.labels(task).observe(result.edu_score)
         return result
+
+
+class SourcePosttrainClassifier:
+    """Reuse the loaded encoders with a separately cacheable second-stage API."""
+
+    def __init__(self, classifier: SourceQualityClassifier) -> None:
+        self.classifier = classifier
+
+    @property
+    def revision(self) -> str:
+        return self.classifier.revision
+
+    @property
+    def backend(self) -> str:
+        return self.classifier.backend
+
+    def score(self, text: str) -> QualityScore:
+        return self.classifier.score_posttrain(text)
