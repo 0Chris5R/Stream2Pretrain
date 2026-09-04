@@ -191,3 +191,44 @@ while the model Deployment was being replaced. Strict startup now waits for
 ready, revision-matching backends for up to ten minutes before starting
 Bytewax, within the existing fifteen-minute startup-probe allowance. Runtime
 inference retries and recovery state remain unchanged.
+
+### Transfer pending, 2026-09-04 08:41 UTC checkpoint
+
+Implementation passed 611 remote tests and Helm validation at `6e6d2bb`.
+The new model archives are not deployed yet. The initial Mac upload was slow;
+the archive's original Kaggle signed URL expired at 07:47 UTC. A fresh download
+link is required for the faster cloud-to-cloud transfer. The direct upload
+continues as a fallback. `publish-classifiers` is a separate no-cluster workflow
+mode that verifies the entire Kaggle archive and packages only final inference
+files. Packaging is reproducible across Mac and Linux. No corpus is uploaded.
+
+The second live check (`33854519584`) still audited application `24245f9`:
+18,424 unique durable decisions, 6,687 strict training exports, normalized 222,
+curator trainable 181, decision writes 185, Gold writes 136. No new curator
+restarts since 07:44:08. Today's Foundry cohort started at 08:30:01 UTC with 64
+papers: one processing, 63 queued, all with cached scientific evidence. A new
+`graph_critic` model stream was recorded at 08:41:57 UTC. The historical raw
+object-missing counter reached 154; do not count failed bodies as normalized
+documents or claim these old objects were recovered.
+
+After both release assets are available, deploy the prepared four-head bundle,
+record its own baseline, and measure again after one stable hour. The thread
+follow-up handles that continuation; it must stay quiet while an upload is
+unchanged and stop after the final measurement.
+
+### Public HF transfer, 2026-09-04 09:25 UTC
+
+At the owner's request, the direct Mac-to-GitHub upload was stopped and the
+same two checksum-pinned inference archives are uploading to the temporary
+public model repository `ChrisR05/transfer-20260904-092445`. No model card,
+description, labels, source texts, training checkpoints or credentials are
+included. The HF write token is used only by the local transfer process.
+
+The publication workflow now downloads these public archives without HF
+credentials, verifies their existing manifest checksums and copies them to
+the GitHub release. Its public base URL is configured by repository variable
+`S2P_CLASSIFIER_TRANSFER_BASE_URL`. Deployment still uses the permanent GitHub
+URLs, so the temporary HF repository may be deleted after that copy succeeds.
+Do not retry the cancelled GitHub upload or the expired Kaggle URL. Wait for
+the HF commit before running `publish-classifiers`, then deploy and take the
+one-hour production measurement as above.

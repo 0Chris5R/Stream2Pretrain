@@ -3,9 +3,6 @@ name: Publish pinned classifier weights
 on:
   workflow_dispatch:
   workflow_call:
-    secrets:
-      S2P_CLASSIFIER_RESULTS_URL:
-        required: true
 
 permissions:
   contents: write
@@ -16,37 +13,21 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Download exact Kaggle result archive
+      - name: Download pinned public inference archives
         env:
-          RESULTS_URL: ${{ secrets.S2P_CLASSIFIER_RESULTS_URL }}
+          TRANSFER_BASE_URL: ${{ vars.S2P_CLASSIFIER_TRANSFER_BASE_URL }}
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --location --retry 2 \
-            --max-time 600 "$RESULTS_URL" --output "$RUNNER_TEMP/results.tar"
-          echo "1f8cfa5e4945ba10c6d66ed2778d99126f1ab2f16b92bede10041f1eb3cf421b  $RUNNER_TEMP/results.tar" | sha256sum --check
-      - name: Package only final inference files and verify pinned checksums
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/models" "$RUNNER_TEMP/release"
+          [[ "$TRANSFER_BASE_URL" == https://huggingface.co/*/resolve/* ]]
+          mkdir -p "$RUNNER_TEMP/release"
           for task in arxiv-math-reasoning arxiv-posttrain-suitability; do
-            tar -xf "$RUNNER_TEMP/results.tar" -C "$RUNNER_TEMP/models" \
-              "$task/model/config.json" "$task/model/model.safetensors" \
-              "$task/model/special_tokens_map.json" "$task/model/tokenizer.json" \
-              "$task/model/tokenizer_config.json" "$task/training-result.json"
+            archive="$RUNNER_TEMP/release/$task.tar"
+            curl --fail --silent --show-error --location --retry 2 \
+              --connect-timeout 20 --max-time 600 \
+              "$TRANSFER_BASE_URL/$task.tar" --output "$archive"
+            expected="$(jq -er --arg task "$task" '.models[$task].archive_sha256' processor/source-classifiers.json)"
+            echo "$expected  $archive" | sha256sum --check
           done
-          python scripts/package_source_classifiers.py "$RUNNER_TEMP/models" \
-            "$RUNNER_TEMP/release" --tasks arxiv-math-reasoning arxiv-posttrain-suitability \
-            --release source-classifiers-2026-09-04 --version source-modernbert-2026-09-04 \
-            > "$RUNNER_TEMP/packaged.json"
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          actual = json.loads((Path(os.environ['RUNNER_TEMP']) / 'packaged.json').read_text())
-          expected = json.loads(Path('processor/source-classifiers.json').read_text())
-          for task, artifact in actual['models'].items():
-              assert artifact == expected['models'][task], f'Checkpoint mismatch: {task}'
-          print('Both final models match the committed manifest')
-          PY
       - name: Publish inference archives
         env:
           GH_TOKEN: ${{ github.token }}

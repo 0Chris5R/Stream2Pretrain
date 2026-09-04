@@ -50,7 +50,6 @@ jobs:
     permissions:
       contents: write
     uses: ./.github/workflows/publish-source-classifiers.yml
-    secrets: inherit
 
   changes:
     name: Plan changed release scopes
