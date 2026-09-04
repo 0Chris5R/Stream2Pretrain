@@ -483,7 +483,7 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
     model_revision: z.string(),
     aggregation: z.string(),
     bundle_revision: z.string().optional(),
-    classifiers: z.record(z.object({
+    classifiers: z.record(z.string(), z.object({
       mode: z.literal('diagnostic'), score: z.number(), class: z.number(),
       confidence: z.number().nullable(), aggregation: z.string(),
       weighted_mean: z.number(), mean: z.number(), best_section_id: z.string(),
@@ -495,7 +495,7 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
       class: z.number().nullable(), probabilities: z.array(z.number()),
       tokens: z.number(), chunks: z.number(), model_revision: z.string(),
       text: z.string().optional(),
-      classifiers: z.record(z.object({
+      classifiers: z.record(z.string(), z.object({
         edu_score: z.number(), confidence: z.number().nullable(),
         score_class: z.number().nullable(), probabilities: z.array(z.number()),
         tokens: z.number(), chunks: z.number(), model_revision: z.string(),

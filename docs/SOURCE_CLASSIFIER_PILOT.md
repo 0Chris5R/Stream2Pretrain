@@ -260,3 +260,9 @@ checks. The release is now explicitly published, and the publication workflow
 does that after each completed transfer. Public download URLs include
 `?download=1` to bypass the negative 404 cache created before publication.
 Anonymous checks of those URLs succeed. Weight bytes and checksums are unchanged.
+
+The four-model base image built successfully in run `33862519184`. That run
+then stopped before rollout on a UI type error: the two new diagnostic maps
+used Zod's old one-argument `record` form. Both now provide explicit string
+key schemas, consistent with the existing Zod 4 schemas. Full UI TypeScript
+checking passes after the correction; no classifier or routing logic changed.
