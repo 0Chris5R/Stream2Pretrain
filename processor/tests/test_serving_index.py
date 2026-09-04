@@ -133,6 +133,22 @@ def test_as_of_retains_policy_generations_and_half_open_intervals(tmp_path) -> N
     assert service.as_of("2026-09-03T00:00:00Z") == [
         {"source_feed": "arxiv-html-fetcher", "tokens": 20, "documents": 1}
     ]
+    index.apply_decision(
+        connection,
+        second.model_copy(
+            update={
+                "valid_from": datetime(2026, 9, 4),
+                "policy_revision": "p3",
+                "route": "quarantine",
+                "risk_tier": 3,
+                "reject_reasons": ["low_quality_score"],
+            }
+        ),
+    )
+    assert service.as_of("2026-09-03T00:00:00Z") == [
+        {"source_feed": "arxiv-html-fetcher", "tokens": 20, "documents": 1}
+    ]
+    assert service.as_of("2026-09-04T00:00:00Z") == []
     connection.close()
 
 

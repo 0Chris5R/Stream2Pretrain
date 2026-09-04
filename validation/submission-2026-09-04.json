@@ -1,0 +1,337 @@
+{
+  "release_baseline": "f58257269b234493f67c57d4a226ba0e631be224",
+  "workflow_runs": {
+    "baseline": 33886619878,
+    "end": 33889256262,
+    "content_audit": 33888403238
+  },
+  "start": "2026-09-04T14:57:10.709007+00:00",
+  "end": "2026-09-04T15:24:41.496144+00:00",
+  "interval_seconds": 1650.787137,
+  "caveats": [
+    "Interval includes release verification and content-audit load, not a steady-state maximum-capacity benchmark.",
+    "Broker events may include replay; latest-per-document totals count revisions once.",
+    "Sequential object inventories are not atomic and short-interval daily extrapolations are not retention-adjusted forecasts."
+  ],
+  "broker_events": {
+    "raw.fetched": {
+      "count": 405,
+      "per_hour": 883.2150235006344
+    },
+    "docs.normalized": {
+      "count": 113,
+      "per_hour": 246.427895445856
+    },
+    "curation.decisions": {
+      "count": 32,
+      "per_hour": 69.78489074572914
+    },
+    "docs.curated": {
+      "count": 16,
+      "per_hour": 34.89244537286457
+    }
+  },
+  "corpus_start": {
+    "durable_decisions": 17835,
+    "training_export_documents": 6729,
+    "rejected_by_reason": {
+      "near_duplicate": 8053,
+      "hf_card_quality_filter": 4749,
+      "language_filter": 1410,
+      "insufficient_body": 2797,
+      "incomplete_scientific_extraction": 247,
+      "insufficient_scientific_body": 30,
+      "pii_detected": 199,
+      "low_quality_score": 15,
+      "high_perplexity": 4,
+      "license_not_permitted": 659
+    },
+    "per_source_acceptance": [
+      {
+        "source": "arxiv-html-fetcher",
+        "accepted": 4078,
+        "total": 5085
+      },
+      {
+        "source": "hf-datasets",
+        "accepted": 857,
+        "total": 6034
+      },
+      {
+        "source": "hf-models",
+        "accepted": 1794,
+        "total": 6716
+      }
+    ]
+  },
+  "corpus_end": {
+    "durable_decisions": 17849,
+    "training_export_documents": 6730,
+    "rejected_by_reason": {
+      "near_duplicate": 8058,
+      "hf_card_quality_filter": 4750,
+      "language_filter": 1411,
+      "insufficient_body": 2798,
+      "incomplete_scientific_extraction": 251,
+      "insufficient_scientific_body": 30,
+      "pii_detected": 199,
+      "low_quality_score": 18,
+      "high_perplexity": 4,
+      "license_not_permitted": 659
+    },
+    "per_source_acceptance": [
+      {
+        "source": "arxiv-html-fetcher",
+        "accepted": 4077,
+        "total": 5088
+      },
+      {
+        "source": "hf-datasets",
+        "accepted": 858,
+        "total": 6040
+      },
+      {
+        "source": "hf-models",
+        "accepted": 1795,
+        "total": 6721
+      }
+    ]
+  },
+  "source_activity_24h": {
+    "window_hours": 24,
+    "sources": [
+      {
+        "source_feed": "arxiv-html-fetcher",
+        "documents": 2172,
+        "admitted": 1026,
+        "posttrain_transform_only": 1011,
+        "quarantined": 135,
+        "last_observed_at": "2026-09-04 15:22:33.129733",
+        "license_distribution": [
+          {
+            "license_id": "CC-BY-4.0",
+            "status": "admitted",
+            "count": 973
+          },
+          {
+            "license_id": "arxiv-non-exclusive-distribution",
+            "status": "posttrain_transform_only",
+            "count": 900
+          },
+          {
+            "license_id": "CC-BY-NC-ND-4.0",
+            "status": "quarantined",
+            "count": 134
+          },
+          {
+            "license_id": "CC-BY-NC-SA-4.0",
+            "status": "posttrain_transform_only",
+            "count": 92
+          },
+          {
+            "license_id": "CC-BY-SA-4.0",
+            "status": "admitted",
+            "count": 38
+          },
+          {
+            "license_id": "unknown",
+            "status": "posttrain_transform_only",
+            "count": 19
+          },
+          {
+            "license_id": "CC0-1.0",
+            "status": "admitted",
+            "count": 15
+          },
+          {
+            "license_id": "http://arxiv.org/licenses/assumed-1991-2003",
+            "status": "quarantined",
+            "count": 1
+          }
+        ],
+        "license_provenance": [
+          {
+            "license_source": "html_meta",
+            "count": 2153
+          },
+          {
+            "license_source": "unknown",
+            "count": 19
+          }
+        ]
+      },
+      {
+        "source_feed": "hf-datasets",
+        "documents": 4610,
+        "admitted": 4610,
+        "posttrain_transform_only": 0,
+        "quarantined": 0,
+        "last_observed_at": "2026-09-04 15:20:23.245115",
+        "license_distribution": [
+          {
+            "license_id": "HF-Public-Repository-Terms-2022-09-15",
+            "status": "admitted",
+            "count": 4610
+          }
+        ],
+        "license_provenance": [
+          {
+            "license_source": "source_terms",
+            "count": 4610
+          }
+        ]
+      },
+      {
+        "source_feed": "hf-models",
+        "documents": 4098,
+        "admitted": 4098,
+        "posttrain_transform_only": 0,
+        "quarantined": 0,
+        "last_observed_at": "2026-09-04 15:19:39.67517",
+        "license_distribution": [
+          {
+            "license_id": "HF-Public-Repository-Terms-2022-09-15",
+            "status": "admitted",
+            "count": 4098
+          }
+        ],
+        "license_provenance": [
+          {
+            "license_source": "source_terms",
+            "count": 4098
+          }
+        ]
+      }
+    ]
+  },
+  "storage": [
+    {
+      "bucket": "s2p-bronze",
+      "start_bytes": 1836407740,
+      "end_bytes": 1909507825,
+      "net_bytes": 73100085,
+      "end_objects": 27136
+    },
+    {
+      "bucket": "s2p-silver",
+      "start_bytes": 10267869826,
+      "end_bytes": 10373730396,
+      "net_bytes": 105860570,
+      "end_objects": 24258
+    },
+    {
+      "bucket": "s2p-gold",
+      "start_bytes": 43143354055,
+      "end_bytes": 43152300470,
+      "net_bytes": 8946415,
+      "end_objects": 100941
+    },
+    {
+      "bucket": "s2p-posttrain",
+      "start_bytes": 38929343,
+      "end_bytes": 38929343,
+      "net_bytes": 0,
+      "end_objects": 108
+    },
+    {
+      "bucket": "s2p-state",
+      "start_bytes": 307959117,
+      "end_bytes": 308003284,
+      "net_bytes": 44167,
+      "end_objects": 138878
+    }
+  ],
+  "core_restart_counts": [
+    {
+      "pod": "stream2pretrain-ingest-arxiv-html-db4b5c5f-hdnfl",
+      "container": "arxiv-html",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-ui-78b677748b-htfll",
+      "container": "ui",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-duckdb-6bcc84d4c5-dgzj6",
+      "container": "duckdb-api",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-fetcher-canary-5486684958-pkzdq",
+      "container": "fetcher",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-mixture-controller-5dc746d9f5-kwmnp",
+      "container": "controller",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-fetcher-59cb8b94f7-v4bht",
+      "container": "fetcher",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-iceberg-writer-5bbb66d4bf-4qg62",
+      "container": "iceberg-writer",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-ingest-hf-cards-54579b6c88-w2kgc",
+      "container": "hf-cards",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-curate-0",
+      "container": "curate",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-model-service-kenlm-597699cdd9-h9hzq",
+      "container": "model-service",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-model-service-quality-5688d488b848q87",
+      "container": "model-service",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-model-service-quality-5688d488b85xjl9",
+      "container": "model-service",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-model-service-quality-5688d488b8x22kp",
+      "container": "model-service",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-processor-model-service-quality-5688d488b8vfkw2",
+      "container": "model-service",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-foundry-0",
+      "container": "api",
+      "restarts": 0
+    },
+    {
+      "pod": "stream2pretrain-foundry-0",
+      "container": "worker",
+      "restarts": 0
+    }
+  ],
+  "foundry_queue": [
+    {
+      "state": "queued",
+      "count": 3,
+      "retained_evidence": 3
+    }
+  ],
+  "storage_interval": {
+    "start": "2026-09-04T14:57:14.030791+00:00",
+    "end": "2026-09-04T15:24:44.445783+00:00"
+  }
+}

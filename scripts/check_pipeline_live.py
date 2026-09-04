@@ -7,7 +7,9 @@ import os
 import sqlite3
 import sys
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 
 def main() -> None:
@@ -47,6 +49,8 @@ def main() -> None:
         return
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     paths = ["/readyz", "/corpus-overview"] if role == "duckdb" else ["/healthz", "/metrics"]
+    if role == "duckdb":
+        paths.append("/as-of?ts=" + quote(datetime.now(UTC).isoformat()))
     port = 8090 if role == "duckdb" else 9090
     for path in paths:
         with opener.open(f"http://[::1]:{port}{path}", timeout=30) as response:

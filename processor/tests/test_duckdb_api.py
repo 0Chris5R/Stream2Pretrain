@@ -148,9 +148,13 @@ def test_as_of_collapses_policy_generations_to_latest_document() -> None:
           trace_id VARCHAR,
           valid_from TIMESTAMP,
           valid_to TIMESTAMP,
-          tokens BIGINT
+          tokens BIGINT,
+          risk_tier INTEGER DEFAULT 1,
+          route VARCHAR DEFAULT 'pretrain',
+          pii_flags VARCHAR[] DEFAULT []
         );
-        INSERT INTO gold VALUES
+        INSERT INTO gold (doc_id, source_feed, reject_reasons, scoring_version,
+          policy_revision, trace_id, valid_from, valid_to, tokens) VALUES
           ('d1', 'arxiv-html', [], 'pretrain-content-v2', 'p2', 't2',
            '2026-08-01', NULL, 100),
           ('d1', 'arxiv-html', [], 'pretrain-content-v3', 'p3', 't3',
@@ -161,7 +165,7 @@ def test_as_of_collapses_policy_generations_to_latest_document() -> None:
            '2026-08-20', NULL, 60);
         """
     )
-    service = DuckDBQueryService(connection, gold_relation="gold")
+    service = DuckDBQueryService(connection, gold_relation="gold", decisions_relation="gold")
 
     assert service.as_of("2026-09-02T00:00:00Z") == [
         {"source_feed": "arxiv-html", "tokens": 120, "documents": 1},

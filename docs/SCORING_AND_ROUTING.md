@@ -80,9 +80,10 @@ retains privacy, licence, exact/near-duplicate, and validity checks.
 ### 3.3 Language, privacy, and deduplication
 
 - FastLangID must select English with confidence at least 0.5.
-- Presidio plus the regex/Luhn pack removes high-confidence affected sections,
-  then scans the rebuilt projection again. A remaining blocking match
-  quarantines the record.
+- Presidio plus the regex/Luhn pack redacts matched contact data in place,
+  preserving surrounding section text. High-risk identifiers are also redacted
+  from the audit projection and quarantine the record even after redaction.
+  Structured text and the rebuilt projection are checked as well.
 - MinHash uses 112 permutations. The LSH/Bloom backend treats any matching LSH
   band as a candidate, then confirms at least 0.80 estimated MinHash similarity
   against the durable anchor signature. State is retained across worker

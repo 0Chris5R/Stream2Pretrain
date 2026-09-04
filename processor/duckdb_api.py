@@ -179,7 +179,7 @@ class DuckDBQueryService:
             ORDER BY valid_from DESC, scoring_version DESC,
                      policy_revision DESC, trace_id ASC
           ) AS revision_rank
-          FROM {self._gold}
+          FROM {self._decisions}
           WHERE valid_from <= CAST(? AS TIMESTAMP)
             AND (valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP))
         )
@@ -190,10 +190,11 @@ class DuckDBQueryService:
         FROM valid_decisions
         WHERE revision_rank = 1
           AND {_dashboard_decision_predicate()}
+          AND {_TRAINABLE_DECISION_SQL}
         GROUP BY source_feed
         ORDER BY tokens DESC, source_feed ASC
         """
-        return self._rows(sql, [ts, ts], relation=self._gold)
+        return self._rows(sql, [ts, ts], relation=self._decisions)
 
     def quality_histogram(self) -> dict[str, list[dict[str, Any]]]:
         composite_sql = f"""

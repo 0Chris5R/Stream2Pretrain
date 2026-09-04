@@ -35,10 +35,12 @@ The relevant Big Data characteristics are:
 | Veracity | Near duplicates, personal data, extraction failures, missing licenses, and low-quality pages must remain visible as explicit decisions. |
 | Value | Accepted records become a queryable training export. Rejected records remain useful for auditing and policy improvement. |
 
-The bounded cloud check on 4 September 2026 returned 17,786 unique durable
-decisions and 6,754 training-export documents across all policy generations.
-These are corpus totals, not daily throughput. A sustained fresh-input
-measurement is still required to establish catch-up capacity.
+The bounded cloud check on 4 September 2026 returned 17,849 unique durable
+decisions and 6,730 training-export documents across all policy generations.
+Over 27.5 minutes, 113 normalized events and 32 decision events were published,
+about 246 and 70 per hour respectively. The processing backlog grew during this
+verification-loaded interval; sustained catch-up capacity is not demonstrated.
+These event rates include replay and are not counts of new unique papers.
 
 ## 3. Architecture Decision
 
@@ -256,6 +258,12 @@ The API and document screenshots in section 11 use the same live cluster data sh
 
 The Helm chart parameterizes replica counts, resources, images, topics, endpoints, model settings, and ingress. Helmfile deploys edge, platform, catalog, and application tiers in dependency order.
 
+The measured cluster exposes 16 vCPUs across three nodes, with approximately
+32/8/8 GiB RAM. Logical object storage occupied about 52 GiB during the final
+check, including 40.2 GiB in Gold and 11.4 GiB in transient Bronze/Silver.
+The short interval added about 8.5 MiB to Gold. Its linear extrapolation is
+0.44 GiB/day, not a retention-adjusted or full-capacity storage forecast.
+
 Horizontal scale was demonstrated on the DHBW cluster. The UI Deployment scaled from one to three ready replicas in 14 measured seconds. The pod screenshot shows all three replicas. A temporary request for twenty replicas left seven unavailable, triggered `Stream2PretrainDeploymentUnavailable`, and the alert cleared after restoring one replica.
 
 The core fetcher and curator are coordinated Bytewax executions. They retain
@@ -405,6 +413,10 @@ Additional live checks confirmed:
 - The UI scale-out from one to three ready replicas took 14 seconds.
 - The availability alert fired during a controlled capacity shortfall and cleared after recovery.
 
+The [submission evidence](docs/submission-evidence.md) records the release checks,
+resource measurements and content spot-check. Classifier training code and
+held-out evaluation statistics are included; source corpora and credentials are not.
+
 ## 12. Prototype Limits and Outlook
 
 This is a course prototype, not a production training-data service.
@@ -418,8 +430,9 @@ Known limits are:
   a single writer until its commit coordination is externalized.
 - Polaris uses an in-memory catalog backend in the dev profile. MinIO data is persistent, but production catalog recovery needs a relational backend.
 - Ingress, DNS, and TLS use Traefik, ExternalDNS with RFC2136, and the shared wildcard certificate. NetworkPolicy, Gatekeeper enforcement, Tempo, and Loki remain disabled in the measured profile.
-- Production throughput, safe partition counts, and maximum corpus size are `needs-measurement`.
-- Post-training has produced accepted SFT and RL artifacts, but generation can still fail. In the latest bounded check, a solver response failed JSON parsing and two papers remained queued. Acceptance yield and sustained provider-limited throughput require a longer measurement.
+- The measured curation rate trails normalized input. Sustainable fresh-input throughput, safe partition counts and maximum corpus size remain `needs-measurement`.
+- Content filters are imperfect. The spot-check found retained PDF author metadata, numerical PII false positives and older admissions below today's quality cutoffs. Existing corpus rows are not silently relabeled when a policy changes.
+- Post-training has produced accepted SFT and RL artifacts, but automated acceptance still needs human review. The spot-check found an incomplete accepted SFT answer and simple historical RL tasks. This remains an experimental side feature, not a demonstrated frontier-training corpus.
 - License detection is a curation heuristic. It is not legal advice or a compliance guarantee.
 
 The next practical work is to add worker capacity, enable a persistent Polaris
@@ -437,7 +450,12 @@ mixtures and compare held-out per-domain loss using a time-limited GPU budget.
 
 - Chris led use-case research, source acquisition, schemas, processing logic, classifier routing, Iceberg integration, and the UI.
 - Julian led OpenStack and k3s deployment, Helmfile and cluster configuration, operational fixes, cluster validation, and deployment policy.
-- Cluster validation, evidence capture and report alignment integrate both work areas.
+- Tristan contributed source adapters, ingestion cursors, source-aware routing, Bytewax recovery and ingestion validation.
+- Finn contributed the monitoring UI, DuckDB serving, source activity, browser audits and storage observability.
+- Jan contributed CI/CD, immutable image reuse, stateless model services, Foundry scheduling and verifier validation.
+
+These areas follow authored commit history and overlap across the team. The
+accumulated agent-assisted classifier and pipeline work is attributed to Chris.
 
 The submission includes source, manifests and embedded evidence. Running the
 system requires external infrastructure and credentials; grading does not.
