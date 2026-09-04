@@ -42,7 +42,13 @@ def main() -> None:
         ).hexdigest()
         with tarfile.open(archive, "w") as bundle:
             for name in FILES:
-                bundle.add(model / name, arcname=f"{task}/{name}")
+                info = bundle.gettarinfo(str(model / name), arcname=f"{task}/{name}")
+                info.uid = info.gid = info.mtime = 0
+                info.uname = info.gname = ""
+                info.mode = 0o644
+                info.pax_headers = {}
+                with (model / name).open("rb") as content:
+                    bundle.addfile(info, content)
         archive_sha = hashlib.file_digest(archive.open("rb"), "sha256").hexdigest()
         models[task] = {
             "url": f"https://github.com/0Chris5R/Stream2Pretrain/releases/download/{args.release}/{archive.name}",

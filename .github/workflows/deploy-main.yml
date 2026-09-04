@@ -22,6 +22,7 @@ on:
           - validate-foundry
           - inspect-storage
           - recover-storage
+          - publish-classifiers
       batch_ids:
         description: Comma-separated OpenAI Batch IDs for check-pretrain
         required: false
@@ -44,6 +45,13 @@ env:
   HELMFILE_VERSION: v1.7.3
 
 jobs:
+  publish-classifiers:
+    if: inputs.mode == 'publish-classifiers'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-source-classifiers.yml
+    secrets: inherit
+
   changes:
     name: Plan changed release scopes
     if: inputs.mode == '' || inputs.mode == 'deploy'
@@ -943,7 +951,7 @@ jobs:
     name: Deploy application release
     if: >-
       always() &&
-      ((github.event_name == 'workflow_dispatch' && inputs.mode != 'deploy') ||
+      ((github.event_name == 'workflow_dispatch' && inputs.mode != 'deploy' && inputs.mode != 'publish-classifiers') ||
       (needs.changes.outputs.deploy == 'true' &&
       (needs.validate.result == 'success' || needs.validate.result == 'skipped') &&
       needs.build.result == 'success' &&

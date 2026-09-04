@@ -105,6 +105,19 @@ def main() -> None:
         "job_counts": dict(Counter(str(job["state"]) for job in jobs)),
         "artifact_counts": dict(sorted(artifact_counts.items())),
         "candidate_queue": queue,
+        "daily_runs": [
+            dict(row)
+            for row in connection.execute("SELECT * FROM daily_runs ORDER BY run_date DESC LIMIT 3")
+        ],
+        "queue_evidence": [
+            dict(row)
+            for row in connection.execute(
+                "SELECT state, COUNT(*) AS candidates, "
+                "SUM(scientific_payload IS NOT NULL) AS cached_evidence, "
+                "MIN(enqueued_at) AS oldest, MAX(enqueued_at) AS newest "
+                "FROM candidate_queue GROUP BY state"
+            )
+        ],
         "stream_checkpoints": stream_checkpoints,
         "verifier_attempts": verifier_attempts,
         "jobs": jobs,
