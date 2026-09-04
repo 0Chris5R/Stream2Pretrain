@@ -1,4 +1,4 @@
-"""Package only the two completed deployment models from extracted Kaggle output."""
+"""Package only final inference files from selected extracted Kaggle models."""
 
 from __future__ import annotations
 
@@ -22,10 +22,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--tasks", nargs="+", default=TASKS)
+    parser.add_argument("--release", default="source-classifiers-2026-09-03")
+    parser.add_argument("--version", default="source-modernbert-2026-09-03")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     models = {}
-    for task in TASKS:
+    for task in args.tasks:
+        if task not in (*TASKS, "arxiv-math-reasoning", "arxiv-posttrain-suitability"):
+            raise ValueError(f"Unsupported classifier task: {task}")
         model = args.root / task / "model"
         config = json.loads((model / "config.json").read_text())
         if config.get("stream2pretrain_task") != task or len(config["id2label"]) != 6:
@@ -40,14 +45,14 @@ def main() -> None:
                 bundle.add(model / name, arcname=f"{task}/{name}")
         archive_sha = hashlib.file_digest(archive.open("rb"), "sha256").hexdigest()
         models[task] = {
-            "url": f"https://github.com/0Chris5R/Stream2Pretrain/releases/download/source-classifiers-2026-09-03/{archive.name}",
+            "url": f"https://github.com/0Chris5R/Stream2Pretrain/releases/download/{args.release}/{archive.name}",
             "archive_sha256": archive_sha,
             "weights_sha256": weights_sha,
             "revision": f"{task}@sha256:{weights_sha}",
             "base_model": result["base_model"],
             "base_revision": result["base_revision"],
         }
-    print(json.dumps({"version": "source-modernbert-2026-09-03", "models": models}, indent=2))
+    print(json.dumps({"version": args.version, "models": models}, indent=2))
 
 
 if __name__ == "__main__":

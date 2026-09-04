@@ -2469,6 +2469,12 @@ jobs:
           PY
             echo "::endgroup::"
 
+            echo "::group::Live classifier decision samples"
+            kubectl -n stream2pretrain exec -i \
+              statefulset/stream2pretrain-processor-curate -c curate -- python - \
+              < scripts/live_classifier_diagnostics.py || true
+            echo "::endgroup::"
+
             echo "::group::Live activity metric audit"
             kubectl -n monitoring get service,pod,servicemonitor -o wide || true
             kubectl -n monitoring port-forward \
@@ -2510,6 +2516,10 @@ jobs:
                 'sum by (profile, pod) (rate(s2p_model_requests_total{status="success"}[15m]))' \
                 'histogram_quantile(0.95, sum by (le, profile) (rate(s2p_model_inference_seconds_bucket[15m])))' \
                 'histogram_quantile(0.95, sum by (le, profile) (rate(s2p_model_queue_seconds_bucket[15m])))' \
+                'sum by (task) (increase(s2p_classifier_head_seconds_count[15m]))' \
+                'sum by (task) (rate(s2p_classifier_head_seconds_sum[15m])) / sum by (task) (rate(s2p_classifier_head_seconds_count[15m]))' \
+                'sum by (task) (increase(s2p_classifier_head_tokens_total[15m]))' \
+                'sum by (task) (rate(s2p_classifier_head_score_sum[15m])) / sum by (task) (rate(s2p_classifier_head_score_count[15m]))' \
                 'sum by (profile, pod) (s2p_model_active_requests + s2p_model_waiting_requests)'; do
                 echo "Prometheus query: $query"
                 curl --fail --silent --show-error --get \

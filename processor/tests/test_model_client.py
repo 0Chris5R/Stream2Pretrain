@@ -44,7 +44,11 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
                 200,
                 json={
                     "results": [
-                        {"edu_score": 4.25, "revision": "finepdfs@pinned"}
+                        {
+                            "edu_score": 4.25,
+                            "revision": "finepdfs@pinned",
+                            "diagnostic_scores": {"arxiv-math-reasoning": {"edu_score": 3.5}},
+                        }
                         for _ in range(item_count)
                     ]
                 },
@@ -67,6 +71,7 @@ def test_remote_model_facades_preserve_revisions_and_results() -> None:
     kenlm = RemoteKenLMScorer(client)
 
     assert finepdfs.score("paper").edu_score == 4.25
+    assert finepdfs.score("paper").diagnostic_scores["arxiv-math-reasoning"]["edu_score"] == 3.5
     assert [result.revision for result in finepdfs.score_many(["paper", "paper"])] == [
         "finepdfs@pinned",
         "finepdfs@pinned",
@@ -88,6 +93,36 @@ def test_model_service_5xx_is_transient() -> None:
     )
     with pytest.raises(ModelServiceError, match="returned 503"):
         client.perplexity("retry me")
+    client.close()
+
+
+def test_startup_waits_for_model_dns_without_restarting_worker(monkeypatch) -> None:
+    from processor import model_client
+
+    lookups = []
+    sleeps = []
+    monkeypatch.setattr(model_client.time, "sleep", sleeps.append)
+
+    def resolver():
+        lookups.append(1)
+        if len(lookups) == 1:
+            raise ModelServiceError("headless DNS absent during Recreate")
+        return ("http://ready-pod",)
+
+    def client_for(url):
+        return httpx.Client(
+            base_url=url,
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=_metadata())),
+        )
+
+    client = CuratorModelClient(
+        "http://models",
+        client=client_for("http://models"),
+        endpoint_resolver=resolver,
+        endpoint_client_factory=client_for,
+        startup_wait_seconds=30,
+    )
+    assert len(lookups) == 2 and len(sleeps) == 1
     client.close()
 
 

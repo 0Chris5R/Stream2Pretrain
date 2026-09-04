@@ -250,7 +250,9 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     kenlm: PerplexityScorer
     source_quality: QualityScorer
     if model_service_url:
-        model_client = CuratorModelClient(model_service_url)
+        model_client = CuratorModelClient(
+            model_service_url, startup_wait_seconds=600 if require_real_models else 0
+        )
         kenlm = RemoteKenLMScorer(model_client)
         source_quality = RemoteQualityClassifier(model_client, "source-pretrain-quality")
         model_clients = (model_client,)
@@ -265,11 +267,14 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
 
         def split_model_client(url: str, profile: str, discovery_host: str) -> CuratorModelClient:
             if not discovery_host:
-                return CuratorModelClient(url)
+                return CuratorModelClient(
+                    url, startup_wait_seconds=600 if require_real_models else 0
+                )
             return CuratorModelClient(
                 url,
                 profile=profile,
                 endpoint_resolver=headless_endpoint_resolver(url, discovery_host),
+                startup_wait_seconds=600 if require_real_models else 0,
             )
 
         quality_client = split_model_client(
@@ -601,6 +606,7 @@ def _source_quality_report(
                 "tokens": result.tokens or max(1, len(section.text.split())),
                 "chunks": result.chunks,
                 "model_revision": result.model_revision or result.revision,
+                "classifiers": result.diagnostic_scores or {},
             }
         )
     total = sum(row["tokens"] for row in rows)
@@ -610,6 +616,29 @@ def _source_quality_report(
         if rows and all(row["confidence"] is not None for row in rows)
         else None
     )
+    diagnostic_heads: dict[str, dict[str, object]] = {}
+    tasks = {task for row in rows for task in row["classifiers"]}
+    for task in sorted(tasks):
+        # Do not silently aggregate a partially scored paper.
+        if any(task not in row["classifiers"] for row in rows):
+            raise RuntimeError(f"Incomplete diagnostic sections for {task}")
+        head_rows = [(row, row["classifiers"][task]) for row in rows]
+        best_row, best = max(head_rows, key=lambda pair: pair[1]["edu_score"])
+        head_tokens = sum(value["tokens"] for _, value in head_rows)
+        diagnostic_heads[task] = {
+            "mode": "diagnostic",
+            "score": best["edu_score"],
+            "class": best["score_class"],
+            "confidence": best["confidence"],
+            "aggregation": "maximum",
+            "weighted_mean": sum(value["edu_score"] * value["tokens"] for _, value in head_rows)
+            / head_tokens,
+            "mean": sum(value["edu_score"] for _, value in head_rows) / len(head_rows),
+            "best_section_id": best_row["section_id"],
+            "model_revision": best["model_revision"],
+            "sections": len(head_rows),
+            "class_5_sections": sum(value["score_class"] == 5 for _, value in head_rows),
+        }
     return {
         "mode": "diagnostic",
         "score": score,
@@ -617,8 +646,10 @@ def _source_quality_report(
         "class": max(0, min(5, round(score))),
         "aggregation": "token_weighted_mean",
         "input_contract": "stream2pretrain-section-labels-v1",
+        "bundle_revision": scorer.revision,
         "model_revision": rows[0]["model_revision"] if rows else scorer.revision,
         "sections": rows,
+        "classifiers": diagnostic_heads,
     }
 
 

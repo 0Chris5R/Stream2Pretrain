@@ -116,7 +116,21 @@ def test_section_cache_survives_restart_and_invalidates_exact_inputs(tmp_path: P
 
     def score_many(texts):
         calls.extend(texts)
-        return [QualityScore(edu_score=4.2, revision="r1", probabilities=(0.1, 0.9)) for _ in texts]
+        return [
+            QualityScore(
+                edu_score=4.2,
+                revision="r1",
+                probabilities=(0.1, 0.9),
+                diagnostic_scores={
+                    "arxiv-math-reasoning": {
+                        "edu_score": 3.2,
+                        "probabilities": [0.1, 0.9],
+                        "model_revision": "math@pinned",
+                    }
+                },
+            )
+            for _ in texts
+        ]
 
     scorer = SimpleNamespace(revision="r1", backend="test", score_many=score_many)
     path = str(tmp_path / "scores.sqlite3")

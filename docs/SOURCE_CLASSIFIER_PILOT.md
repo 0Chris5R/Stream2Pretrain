@@ -2,19 +2,23 @@
 
 2026-09-03: the owner requested deployment of the two completed Kaggle models
 in place of the public FinePDFs quality scorer, initially diagnostic only.
-Weights may be published through GitHub. The math and post-training classifiers
-are separate unfinished training jobs and are not part of this deployment.
+Weights may be published through GitHub. On 2026-09-04 the owner also approved
+the completed math and post-training models for full live diagnostic scoring.
 
 ## Model and input contract
 
 - `arxiv-pretrain-quality`: independent ModernBERT-base fine-tune for arXiv.
 - `hf-pretrain-quality`: independent ModernBERT-base fine-tune for model and
   dataset cards. No weights or dataset rows are fetched from those sources.
+- `arxiv-math-reasoning`: independent fine-tune for mathematical reasoning.
+- `arxiv-posttrain-suitability`: independent fine-tune for grounded post-training
+  task potential. Neither new head runs on HF cards.
 - Base: `answerdotai/ModernBERT-base`, revision
   `8949b909ec900327062f0ebf497f51aef5e6f0c8`, Apache-2.0.
 - Exact final weight and archive hashes are in
   `processor/source-classifiers.json`. Final weights, not intermediate optimizer
-  checkpoints, are published in the `source-classifiers-2026-09-03` release.
+  checkpoints, are published in the `source-classifiers-2026-09-03` and
+  `source-classifiers-2026-09-04` releases.
 - CPU, FP32, Transformers 4.57.6, SDPA; no quantization, truncation-only
   shortcut, secondary public quality model, or production heuristic fallback.
 - Existing license, privacy, extraction, HF-card and duplicate rejection runs
@@ -33,6 +37,11 @@ are separate unfinished training jobs and are not part of this deployment.
   probability and not the teacher's confidence. Class is the rounded score.
 - Document score and confidence are token-weighted section means. Weights are
   summed encoded lengths minus overlap, matching the reported evaluation.
+- The two arXiv reasoning heads score every eligible retained section, including
+  non-mathematical sections. Their original evaluation aggregation is maximum;
+  retain that plus the unweighted and token-weighted means, best section ID,
+  and count of rounded class-5 sections. None ranks, filters, or changes prompts.
+  The team has not yet selected an operational aggregation or cutoff.
 
 ## Diagnostic isolation
 
@@ -58,19 +67,19 @@ all-corpus; this rollout does not replay, delete or rescore historical records.
 ## Deployment and validation
 
 GitHub release archives are checksum-verified while building the dedicated
-quality image. Its final filesystem contains the two trained heads, not the
+quality image. Its final filesystem contains the four trained heads, not the
 old FinePDFs checkpoint. Only the pinned Python environment is copied from
 the established dependency image. The unrelated fetcher and KenLM model bases
 remain unchanged. Pods never redownload weights at startup.
 
 Stateless quality replicas retain KEDA demand scaling, two baseline
 replicas and a cloud maximum of four. Each requests 1 CPU and 2 GiB RAM with limits of
-2 CPU and 6 GiB RAM to accommodate both heads and full-length sections. This is
+2 CPU and 6 GiB RAM for the heads and full-length sections. This is
 capacity configuration, not a measured memory claim. Actual peak RSS, latency
 and sustained throughput: needs-measurement on the deployed workload.
 
 Acceptance checks: unit/schema/API tests; Helm and UI checks; CPU model startup;
-both source heads returning finite values; replica distribution and batch
+all four heads returning finite values; replica distribution and batch
 parity; fresh durable records with matching API and UI diagnostics. Quality
 review after a representative live interval remains a separate team decision.
 
@@ -110,6 +119,40 @@ and Foundry progress. Sustained post-fix throughput remains needs-measurement
 until that comparison. Model weights, scoring aggregation, and all admission
 gates are unchanged.
 
+### Live baseline for the one-hour follow-up
+
+Release `24245f9491f3b35f95daeaf34ebe1004d4bfbb17`, Helm revision 138, became
+ready at 2026-09-04 07:45:38 UTC. The legacy distribution stress test then
+timed out; the corrected read-only production-protocol check passed on all
+four quality Pods in diagnostic run `33850823680`. No second application
+rollout was performed. Remote CI passed 606 tests, with one environment-based
+integration skip, plus Helm validation.
+
+At 07:55:31-37 UTC, process counters were 58 normalized records, 11 trainable
+curator outputs (10 arXiv, one HF dataset), 17 decision writes and nine Gold
+writes. These are stage-work counters, not unique-document counts. At
+07:56:36 UTC the curator had four startup restarts, with its last restart
+during model-service replacement; Foundry and all four quality Pods had zero.
+No quality Pods were Pending.
+
+The all-corpus API baseline at 07:55:41 UTC was 18,303 durable decisions and
+6,643 training-export documents. Per-source accepted/total: arXiv 4,038/5,857;
+HF dataset cards 849/5,871; HF model cards 1,756/6,575.
+
+Foundry at 07:57 UTC had 63 queued candidates. Its sampled artifact inventory
+contained 27 accepted and 91 rejected RL environments, and 44 accepted and 59
+rejected SFT trajectories. The diagnostic reads at most 500 artifacts and 100
+jobs, so those are not guarantees of complete historical totals. Recent jobs
+were explicit preflight outcomes for already-expired historical Silver
+artifacts; the latest recorded model stream was still from September 3 at
+22:37 UTC. A new model-generation success after rollout is not yet established.
+Keep the configured 08:30 UTC daily cohort boundary for the follow-up.
+
+The one-time thread follow-up is scheduled for approximately 09:01 UTC
+(11:01 Europe/Berlin). Compare counter deltas and unique corpus growth, verify
+no steady-state restarts, examine the new daily Foundry cohort and durable
+scientific-evidence pointers, then stop the follow-up automation.
+
 Held-out document agreement with Luna labels from the downloaded run:
 
 | Model | Documents | Spearman | QWK | MAE |
@@ -122,3 +165,29 @@ independent human quality measurements. arXiv document labels are concentrated
 at class 4, so accuracy alone is not an appropriate promotion criterion.
 
 Runtime reference: [Transformers ModernBERT documentation](https://huggingface.co/docs/transformers/v4.57.6/model_doc/modernbert).
+
+## Four-head live measurement, 2026-09-04
+
+The pre-expansion check (`33852461980`, around 08:16 UTC) found no steady-state
+curator, Foundry, or model-service restarts. Unique durable decisions grew from
+18,303 to 18,346 and strict training exports from 6,643 to 6,667 in about twenty
+minutes. Process counters reached 155 normalized, 91 trainable outputs, 103
+decision writes and 78 Gold writes. These count replay work separately from
+unique corpus growth. Historical missing raw/scientific objects still produce
+explicit failures; the new handoff does not reconstruct expired evidence.
+
+All four models run inline in the production inference path so the pilot pays
+the actual full classifier cost. Each arXiv section executes three independent
+encoders sequentially on its leased Pod; an HF section executes one. Per-head
+Prometheus histograms expose full-section wall seconds and score distributions,
+with token/window counters. Do not sum overlapping model-service timing and
+per-head timing as though they were separate work. Compare a stable live
+interval, including cache hits, with ingestion, durable decisions and restart
+deltas. Four-head sustained throughput and live quality remain
+needs-measurement until this rollout has produced new scored corpus records.
+
+The remaining rollout-only curator crash was a headless-DNS discovery failure
+while the model Deployment was being replaced. Strict startup now waits for
+ready, revision-matching backends for up to ten minutes before starting
+Bytewax, within the existing fifteen-minute startup-probe allowance. Runtime
+inference retries and recovery state remain unchanged.

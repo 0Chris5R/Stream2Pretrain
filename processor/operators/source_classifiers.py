@@ -1,18 +1,38 @@
-"""Strict CPU inference for the team's two independent ModernBERT classifiers."""
+"""Strict CPU inference for the team's four independent ModernBERT classifiers."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import time
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
+
+from prometheus_client import Counter, Histogram
 
 from processor.operators.quality import QualityScore
 
 FAMILY = "source-pretrain-quality"
 MAX_LENGTH = 8192
 STRIDE = 512
+ARXIV_DIAGNOSTIC_TASKS = ("arxiv-math-reasoning", "arxiv-posttrain-suitability")
+TASKS = ("arxiv-pretrain-quality", "hf-pretrain-quality", *ARXIV_DIAGNOSTIC_TASKS)
+HEAD_SECONDS = Histogram(
+    "s2p_classifier_head_seconds",
+    "Full section inference including every window.",
+    ["task"],
+    buckets=(0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 180, 600),
+)
+HEAD_TOKENS = Counter("s2p_classifier_head_tokens_total", "Scored unique tokens.", ["task"])
+HEAD_WINDOWS = Counter("s2p_classifier_head_windows_total", "Scored model windows.", ["task"])
+HEAD_SCORES = Histogram(
+    "s2p_classifier_head_score",
+    "Live section scores, diagnostic only.",
+    ["task"],
+    buckets=(0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5),
+)
 
 
 def ordinal_output(logits: list[float]) -> tuple[float, float, int, tuple[float, ...]]:
@@ -44,14 +64,13 @@ class SourceQualityClassifier:
         self.models: dict[str, Any] = {}
         self.tokenizers: dict[str, Any] = {}
         self.model_revisions: dict[str, str] = {}
-        for source in ("arxiv", "hf"):
-            task = f"{source}-pretrain-quality"
+        for task in TASKS:
             path = root / task
             config = json.loads((path / "config.json").read_text())
             if config.get("stream2pretrain_task") != task or len(config["id2label"]) != 6:
                 raise RuntimeError(f"Unexpected task or head in {path}")
-            self.model_revisions[source] = str(manifest["models"][task]["revision"])
-            self.tokenizers[source] = AutoTokenizer.from_pretrained(path, local_files_only=True)
+            self.model_revisions[task] = str(manifest["models"][task]["revision"])
+            self.tokenizers[task] = AutoTokenizer.from_pretrained(path, local_files_only=True)
             model = AutoModelForSequenceClassification.from_pretrained(
                 path,
                 local_files_only=True,
@@ -60,15 +79,30 @@ class SourceQualityClassifier:
                 reference_compile=False,
             )
             model.eval()
-            self.models[source] = model
+            self.models[task] = model
 
     def score(self, text: str) -> QualityScore:
-        import torch
-
-        source = next((key for key in self.models if text.startswith(f"[SOURCE={key}] ")), None)
+        source = next((key for key in ("arxiv", "hf") if text.startswith(f"[SOURCE={key}] ")), None)
         if source is None:
             raise ValueError("Quality input must use the trained source/section header")
-        encoded = self.tokenizers[source](
+        quality = self._score_task(f"{source}-pretrain-quality", text)
+        # These are independent full fine-tunes, not shared encoder heads.
+        # Run all three arXiv models on every retained section, not just sections
+        # predicted to be mathematical. HF runs only its own quality model.
+        if source == "arxiv":
+            diagnostics = {
+                task: asdict(self._score_task(task, text)) for task in ARXIV_DIAGNOSTIC_TASKS
+            }
+            for value in diagnostics.values():
+                value.pop("diagnostic_scores", None)
+            return replace(quality, diagnostic_scores=diagnostics)
+        return quality
+
+    def _score_task(self, task: str, text: str) -> QualityScore:
+        import torch
+
+        started = time.monotonic()
+        encoded = self.tokenizers[task](
             text,
             truncation=True,
             max_length=MAX_LENGTH,
@@ -82,7 +116,7 @@ class SourceQualityClassifier:
         # No top/bottom sampling or discarded middle content.
         with torch.inference_mode():
             for ids, mask in zip(encoded["input_ids"], encoded["attention_mask"], strict=True):
-                result = self.models[source](
+                result = self.models[task](
                     input_ids=torch.tensor([ids], dtype=torch.long),
                     attention_mask=torch.tensor([mask], dtype=torch.long),
                 )
@@ -90,7 +124,7 @@ class SourceQualityClassifier:
                 lengths.append(len(ids))
         mean_logits = [sum(values) / len(logits) for values in zip(*logits, strict=True)]
         score, confidence, score_class, probabilities = ordinal_output(mean_logits)
-        return QualityScore(
+        result = QualityScore(
             edu_score=score,
             revision=self.revision,
             confidence=confidence,
@@ -98,5 +132,10 @@ class SourceQualityClassifier:
             probabilities=probabilities,
             tokens=max(1, sum(lengths) - STRIDE * max(0, len(lengths) - 1)),
             chunks=len(lengths),
-            model_revision=self.model_revisions[source],
+            model_revision=self.model_revisions[task],
         )
+        HEAD_SECONDS.labels(task).observe(time.monotonic() - started)
+        HEAD_TOKENS.labels(task).inc(result.tokens)
+        HEAD_WINDOWS.labels(task).inc(result.chunks)
+        HEAD_SCORES.labels(task).observe(result.edu_score)
+        return result

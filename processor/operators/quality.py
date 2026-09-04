@@ -34,6 +34,9 @@ class QualityScore:
     tokens: int = 0
     chunks: int = 0
     model_revision: str | None = None
+    # Independent arXiv heads, diagnostic only. Each value has this score's
+    # scalar/probability/provenance fields, without recursive diagnostics.
+    diagnostic_scores: dict[str, dict[str, Any]] | None = None
 
 
 class QualityClassifier:

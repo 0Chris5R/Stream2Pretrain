@@ -333,7 +333,7 @@ processor:
     # This avoids a monolithic multi-GB image/process and lets Kubernetes
     # schedule or scale the resources each backend actually consumes.
     profiles:
-      # Two independent source-specific heads, diagnostic only.
+      # Four independent heads: HF quality; arXiv quality, math and posttrain.
       quality:
         runtimeProfile: quality
         image: stream2pretrain/processor-quality-model

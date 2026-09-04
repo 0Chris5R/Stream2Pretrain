@@ -1,11 +1,27 @@
 {
-  "version": "source-modernbert-2026-09-03",
+  "version": "source-modernbert-2026-09-04",
   "models": {
     "arxiv-pretrain-quality": {
       "url": "https://github.com/0Chris5R/Stream2Pretrain/releases/download/source-classifiers-2026-09-03/arxiv-pretrain-quality.tar",
       "archive_sha256": "8c5613d22eea051627b2668a3be42fc4292789d7654c5a87fcd360f06a0caf96",
       "weights_sha256": "3b57c108cde77a0ba94641b6a3578d7ae2ba80445f4ffd2f7c0b8674c9ad5a5e",
       "revision": "arxiv-pretrain-quality@sha256:3b57c108cde77a0ba94641b6a3578d7ae2ba80445f4ffd2f7c0b8674c9ad5a5e",
+      "base_model": "answerdotai/ModernBERT-base",
+      "base_revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8"
+    },
+    "arxiv-math-reasoning": {
+      "url": "https://github.com/0Chris5R/Stream2Pretrain/releases/download/source-classifiers-2026-09-04/arxiv-math-reasoning.tar",
+      "archive_sha256": "4d8c660956fdd3a95edf5c2a36c7b594f9792332d8cf01a914619470e6662f4c",
+      "weights_sha256": "678e88d37dd0afd59045f4d56f79f25efc484bd288bce603a8e9c983680f5201",
+      "revision": "arxiv-math-reasoning@sha256:678e88d37dd0afd59045f4d56f79f25efc484bd288bce603a8e9c983680f5201",
+      "base_model": "answerdotai/ModernBERT-base",
+      "base_revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8"
+    },
+    "arxiv-posttrain-suitability": {
+      "url": "https://github.com/0Chris5R/Stream2Pretrain/releases/download/source-classifiers-2026-09-04/arxiv-posttrain-suitability.tar",
+      "archive_sha256": "36959e709c6306bf26781b212e5fbf84441bdc8ecec65b45767923965f3b5848",
+      "weights_sha256": "38f23dd0481fb1ea67d193765b591fdfe8d84fc747c31374ae26fe0ba613afd0",
+      "revision": "arxiv-posttrain-suitability@sha256:38f23dd0481fb1ea67d193765b591fdfe8d84fc747c31374ae26fe0ba613afd0",
       "base_model": "answerdotai/ModernBERT-base",
       "base_revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8"
     },

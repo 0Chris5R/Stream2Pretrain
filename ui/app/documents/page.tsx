@@ -368,6 +368,16 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
             <Score label="Composite" value={document.quality_score.toFixed(2)} />
             <Score label="Reasoning evidence" value={percent(document.reasoning_score)} />
           </div>
+          {Object.keys(document.quality_diagnostics?.classifiers ?? {}).length > 0 ? (
+            <div className="grid grid-cols-2 gap-2">
+              {Object.entries(document.quality_diagnostics!.classifiers).map(([task, result]) => (
+                <div key={task} className="rounded-lg border p-3 text-sm">
+                  <div className="font-medium">{classifierLabel(task)}</div>
+                  <div>Max {result.score.toFixed(2)} · Mean {result.weighted_mean.toFixed(2)}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {document.quality_diagnostics?.confidence != null ? (
             <div className="text-sm">Model confidence {percent(document.quality_diagnostics.confidence)}</div>
           ) : null}
@@ -409,6 +419,10 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
   );
 }
 
+function classifierLabel(task: string) {
+  return task === 'arxiv-math-reasoning' ? 'Math reasoning' : 'Post-training fit';
+}
+
 function ClassifierSections({ document }: { document: CuratedDocumentDetail }) {
   return <div className="space-y-2">
     {document.quality_diagnostics?.sections.map((section) => (
@@ -422,6 +436,13 @@ function ClassifierSections({ document }: { document: CuratedDocumentDetail }) {
         </summary>
         <div className="space-y-3 border-t px-3 py-3 text-sm">
           <div className="text-muted-foreground">{humanize(section.section_type)} · {formatInt(section.tokens)} tokens · {section.chunks} chunks</div>
+          {Object.entries(section.classifiers).map(([task, result]) => (
+            <div key={task} className="flex items-center gap-2">
+              <span>{classifierLabel(task)}</span>
+              <Badge variant="outline">{result.edu_score.toFixed(2)} / 5</Badge>
+              {result.confidence != null ? <Badge variant="secondary">{percent(result.confidence)}</Badge> : null}
+            </div>
+          ))}
           <p className="whitespace-pre-wrap leading-relaxed">{section.text}</p>
         </div>
       </details>

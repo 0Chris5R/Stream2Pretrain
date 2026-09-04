@@ -21,6 +21,10 @@ See README.md for the high-level project description and RESEARCH.md for the ful
   exclusion from route decisions and post-training ranking, until approved.
 - The owner approved GitHub for public model transfer. Do not include labels,
   source corpus, optimizer checkpoints, or credentials in release artifacts.
+- On 2026-09-04, also deploy `arxiv-math-reasoning` and
+  `arxiv-posttrain-suitability` on every eligible arXiv section, diagnostic only.
+  Record maximum and mean aggregations without changing gates, queue ranking,
+  or Foundry prompts. Measure the complete four-model live inference cost.
 
 ### 2026-08-23 - Pipeline remediation contract locked
 

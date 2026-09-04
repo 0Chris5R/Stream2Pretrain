@@ -342,23 +342,35 @@ class CuratorModelClient:
         endpoint_resolver: EndpointResolver | None = None,
         endpoint_refresh_seconds: float = 5.0,
         endpoint_client_factory: HttpClientFactory | None = None,
+        startup_wait_seconds: float = 0.0,
     ) -> None:
         self._client = client or _new_http_client(base_url, timeout_seconds)
-        self.metadata = _metadata(self._client)
         factory = endpoint_client_factory or (
             lambda endpoint: _new_http_client(endpoint, timeout_seconds)
         )
-        self._endpoint_pool = (
-            _EndpointPool(
-                profile=profile,
-                resolver=endpoint_resolver,
-                client_factory=factory,
-                expected_metadata=self.metadata,
-                refresh_seconds=endpoint_refresh_seconds,
-            )
-            if endpoint_resolver is not None
-            else None
-        )
+        deadline = time.monotonic() + startup_wait_seconds
+        while True:
+            try:
+                self.metadata = _metadata(self._client)
+                self._endpoint_pool = (
+                    _EndpointPool(
+                        profile=profile,
+                        resolver=endpoint_resolver,
+                        client_factory=factory,
+                        expected_metadata=self.metadata,
+                        refresh_seconds=endpoint_refresh_seconds,
+                    )
+                    if endpoint_resolver is not None
+                    else None
+                )
+                break
+            except ModelServiceError:
+                if time.monotonic() >= deadline:
+                    self._client.close()
+                    raise
+                # Recreate briefly removes headless DNS and ready backends.
+                # Wait before starting Bytewax rather than crash/replay its state.
+                time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
 
     def quality(self, model_family: str, text: str) -> QualityScore:
         return self.quality_many(model_family, [text])[0]
@@ -400,6 +412,7 @@ class CuratorModelClient:
                         tokens=int(item.get("tokens", 0)),
                         chunks=int(item.get("chunks", 0)),
                         model_revision=item.get("model_revision"),
+                        diagnostic_scores=item.get("diagnostic_scores"),
                     )
                 )
         except (KeyError, TypeError, ValueError) as exc:

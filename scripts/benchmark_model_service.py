@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from processor.model_client import _new_http_client, _post_json, resolved_endpoint_urls
+from processor.operators.source_classifiers import ARXIV_DIAGNOSTIC_TASKS
 
 
 def verify_live_protocol(base_url: str, headless_host: str, family: str) -> dict[str, Any]:
@@ -53,7 +54,23 @@ def verify_live_protocol(base_url: str, headless_host: str, family: str) -> dict
                 for value in singles
             ):
                 raise RuntimeError(f"invalid scores or revision on {backend}")
-            return {"backend": backend, "revision": expected, "both_heads_and_batch_parity": True}
+            diagnostics = singles[0].get("diagnostic_scores") or {}
+            if set(diagnostics) != set(ARXIV_DIAGNOSTIC_TASKS) or singles[1].get(
+                "diagnostic_scores"
+            ):
+                raise RuntimeError(f"missing arXiv heads or invalid HF routing on {backend}")
+            for task, value in diagnostics.items():
+                if not (
+                    math.isfinite(value["edu_score"])
+                    and 0 <= value["edu_score"] <= 5
+                    and str(value["model_revision"]).startswith(task + "@sha256:")
+                ):
+                    raise RuntimeError(f"invalid {task} score or provenance on {backend}")
+            return {
+                "backend": backend,
+                "revision": expected,
+                "all_four_heads_and_batch_parity": True,
+            }
 
     with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
         results = list(pool.map(check, endpoints))
