@@ -217,7 +217,12 @@ jobs:
         run: |
           uv run ruff check schemas ingest processor tests scripts
           uv run ruff format --check schemas ingest processor tests scripts
-          uv run pytest
+          # Exercise the real serving, scientific projection and Iceberg test
+          # modules. These optional runtime libraries were missing from CI's
+          # lightweight workspace sync; versions match the production lock.
+          uv run --with duckdb==1.5.3 --with beautifulsoup4==4.15.0 \
+            --with lxml==6.1.1 --with pillow==12.3.0 \
+            --with 'pyiceberg[sql-sqlite]==0.11.1' --with sqlitedict==2.1.0 pytest
 
       - name: Execute generated Prime Verifiers package
         if: needs.changes.outputs.foundry_package == 'true'
