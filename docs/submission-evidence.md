@@ -8,8 +8,8 @@ The four independent ModernBERT classifiers are active. No model, extraction
 stage or quality gate was reduced for this check.
 
 The application baseline is `f58257269b234493f67c57d4a226ba0e631be224`.
-The release-check and indexed source-validity changes are in `b2483dc`, with
-the formatted release at `9697e27`.
+The deployed release is `1241e71f8e17698bf2bf20b319234cbea6fccd37`, including
+the release-check and indexed source-validity changes.
 Cloud verification uses the repository's GitHub Actions VPN workflow; no
 workstation Kubernetes context or local pipeline was used.
 
@@ -32,7 +32,7 @@ Kubernetes cleared the taints and the Foundry became Ready at approximately
 14:51 UTC without a code, quality or resource-limit change. The subsequent
 read-only check found all core services Ready with zero container restarts.
 
-The final release workflow `33889908880` passed. Its canary captures the smoke
+Release workflow `33889908880` passed. Its canary captures the smoke
 topic's numeric partition frontiers before starting its isolated worker and
 waits for actual runtime readiness before injection. At 15:41 UTC, one controlled
 record completed Bronze, normalization, active quality scoring and curated
@@ -52,6 +52,24 @@ typed API probes, including `as-of`, with no page exceptions. It also retrieved
 dashboard screenshot comes from this run. Numerical inspection additionally
 identified the old-acceptance selection-order issue covered by the regression
 above.
+
+Final release workflow `33891512171` passed on its second attempt. The first
+attempt stopped before rolling application workloads because MinIO had no
+Ready service endpoint. At about 15:51 UTC, its health probes timed out and
+Kubernetes restarted it. The existing Iceberg writer also restarted after an
+object-read connection failure. MinIO recovered, and the retry reused the built
+images. The deployment script completed in 228 seconds, excluding earlier image
+builds and CI. Its isolated canary completed in 6.06 seconds with quality score
+4.027, a `pretrain` route and no rejection reasons. Production-topic isolation
+passed. The underlying cause of the MinIO probe timeout remains unconfirmed;
+this is an observed storage-reliability issue, not a solved incident.
+
+Read-only check `33892168753` at 15:58 UTC found every application Pod Ready.
+The corpus overview and current-time `as-of` query agreed exactly: 4,069 arXiv
+papers, 1,796 HF model cards and 858 HF dataset cards, totaling 6,723 training
+documents and 66,856,486 tokens. The overview contained 17,864 durable decisions.
+This verifies current-query consistency without equating worker events with
+unique corpus growth.
 
 At 14:52 UTC the master exposed 4 vCPUs and about 32 GiB RAM; each worker exposed
 6 vCPUs and about 8 GiB RAM. Node working-memory usage was 24%, 72% and 53%.
@@ -123,6 +141,8 @@ with cached scientific evidence. The ready worker was therefore idle by
 schedule, not stuck. Cumulative generated outputs were 46 accepted SFT
 trajectories and 27 accepted RL environments. Acceptance is automated validation,
 not a substitute for a named human audit.
+The final 15:59 UTC check found three newer candidates queued, all three with
+retained scientific evidence, and the Foundry Pod Ready with zero restarts.
 
 ## Content spot-check
 

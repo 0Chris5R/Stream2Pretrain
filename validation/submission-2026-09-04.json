@@ -1,9 +1,32 @@
 {
   "release_baseline": "f58257269b234493f67c57d4a226ba0e631be224",
+  "deployed_release": "1241e71f8e17698bf2bf20b319234cbea6fccd37",
   "workflow_runs": {
     "baseline": 33886619878,
     "end": 33889256262,
-    "content_audit": 33888403238
+    "content_audit": 33888403238,
+    "final_browser_audit": 33890545842,
+    "final_deployment": 33891512171,
+    "final_read_only_check": 33892168753
+  },
+  "final_check": {
+    "observed_at": "2026-09-04T15:58:58+00:00",
+    "durable_decisions": 17864,
+    "training_export_documents": 6723,
+    "current_as_of_documents": 6723,
+    "current_as_of_tokens": 66856486,
+    "per_source_training_documents": {
+      "arxiv-html-fetcher": 4069,
+      "hf-models": 1796,
+      "hf-datasets": 858
+    },
+    "application_pods_ready": true,
+    "queued_foundry_candidates": 3,
+    "queued_candidates_with_retained_evidence": 3,
+    "deployment_attempt": 2,
+    "deployment_script_seconds": 228,
+    "canary_seconds": 6.06,
+    "incident": "MinIO probe timeouts caused a restart at approximately 15:51 UTC and an Iceberg writer connection failure/restart. Both recovered; the underlying MinIO timeout cause remains unconfirmed."
   },
   "start": "2026-09-04T14:57:10.709007+00:00",
   "end": "2026-09-04T15:24:41.496144+00:00",
