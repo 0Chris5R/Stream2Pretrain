@@ -975,6 +975,7 @@ jobs:
       REDPANDA_CHANGED: ${{ needs.changes.outputs.redpanda }}
       DNS_INFRA_CHANGED: ${{ needs.changes.outputs.dns_infra }}
       MODEL_RUNTIME_CHANGED: ${{ needs.changes.outputs.model_runtime }}
+      VERIFY_CLASSIFIERS: ${{ inputs.verify_classifiers }}
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
       IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
@@ -1215,7 +1216,7 @@ jobs:
           fi
           finish_phase "CoreDNS availability preflight"
 
-          if [[ "$DEPLOY_MODE" == "diagnose" && "${{ inputs.verify_classifiers }}" == "true" ]]; then
+          if [[ "$DEPLOY_MODE" == "diagnose" && "$VERIFY_CLASSIFIERS" == "true" ]]; then
             model="stream2pretrain-processor-model-service-quality"
             kubectl -n stream2pretrain exec -i \
               statefulset/stream2pretrain-processor-curate -c curate -- \
