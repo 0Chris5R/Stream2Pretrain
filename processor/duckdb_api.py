@@ -1748,8 +1748,7 @@ async def serve(
         if not ts:
             return web.json_response({"detail": "missing ts"}, status=400)
         try:
-            target = historical_service or service
-            return web.json_response(await run_historical(target.as_of, ts))
+            return web.json_response(await run_query(service.as_of, ts))
         except Exception as exc:
             return web.json_response({"detail": str(exc)}, status=503)
 

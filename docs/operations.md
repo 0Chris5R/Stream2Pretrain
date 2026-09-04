@@ -265,8 +265,10 @@ keeps a retained current-state read model from `curation.decisions` and
 `license.admissions`, acknowledging Kafka records only after the local upsert.
 Headline totals, Documents, Sources, and Dataset selection query this compact
 index. Documents use cursor pagination and fetch further rows only on demand.
-The explicit `as-of` and read-only SQL routes use a separate executor against
-Iceberg, so an expensive historical query cannot block monitoring pages.
+The `as-of` route applies source-validity intervals to the same retained index,
+which includes all scoring generations. It does not reconstruct processing-time
+Iceberg snapshots. Explicit read-only SQL uses a separate executor against
+Iceberg, so an expensive lakehouse query cannot block monitoring pages.
 
 The serving-index PVC is retained across Helm releases. If that PVC is
 deliberately removed, use a fresh index identity and replay the still-retained

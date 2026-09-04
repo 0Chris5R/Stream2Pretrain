@@ -2519,8 +2519,10 @@ jobs:
           # isolated consumer group. This gives the release canary its own
           # bounded execution lane without permanently reserving another GiB
           # of memory or letting production replay lag hide a broken release.
-          curator_canary_job="s2p-curate-smoke-${GITHUB_RUN_ID}"
-          curator_canary_group="s2p-curate-smoke-${GITHUB_RUN_ID}"
+          curator_canary_job="s2p-curate-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          curator_canary_group="$curator_canary_job"
+          kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+            python - --prepare-curator "$curator_canary_group" < scripts/cluster_smoke.py
           kubectl -n stream2pretrain get \
             statefulset/stream2pretrain-processor-curate -o json \
             | jq \
@@ -2556,11 +2558,6 @@ jobs:
                               .containers[]
                               | select(.name == "curate")
                               | .name = "curate-canary"
-                              | del(
-                                  .startupProbe,
-                                  .livenessProbe,
-                                  .readinessProbe
-                                )
                               # The one-record smoke lane uses the identical
                               # curator and keeps the production burst limits,
                               # but it must not reserve a second full steady-
@@ -2594,7 +2591,7 @@ jobs:
                                       {name: "S2P_CURATOR_DECISIONS_TOPIC", value: "curation.decisions.smoke"},
                                       {name: "S2P_CURATOR_CURATED_TOPIC", value: "docs.curated.smoke"},
                                       {name: "S2P_CURATOR_RETRY_TOPIC", value: "raw.smoke"},
-                                      {name: "S2P_KAFKA_START_OFFSET", value: "beginning"},
+                                      {name: "S2P_KAFKA_START_OFFSET", value: "stored"},
                                       {name: "S2P_BYTEWAX_FLOW_NAME", value: "s2p-curate-smoke-v1"},
                                       {name: "S2P_BYTEWAX_RECOVERY_NAME", value: "curate-smoke-v1"},
                                       {name: "S2P_BYTEWAX_RECOVERY_PARTITIONS", value: "1"},
@@ -2665,10 +2662,8 @@ jobs:
             exit 1
           fi
 
-          # The record-level timeout must measure curation, not a cold canary
-          # Pod waiting for model services and initialising Presidio. The live
-          # curator took longer than that startup allowance after the measured
-          # memory resize even though it resumed and routed records correctly.
+          # Production readiness includes model initialization and assigned
+          # input partitions. Only then does the record-level deadline begin.
           if ! kubectl -n stream2pretrain wait \
             --for=condition=Ready \
             "pod" \

@@ -93,6 +93,39 @@ def test_diagnostic_scores_survive_index_and_document_api(tmp_path) -> None:
     connection.close()
 
 
+def test_as_of_retains_policy_generations_and_half_open_intervals(tmp_path) -> None:
+    path = tmp_path / "validity.duckdb"
+    index = ServingIndex(
+        database_path=str(path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    connection = duckdb.connect(str(path))
+    first = _gold(0).model_copy(update={
+        "valid_from": datetime(2026, 8, 1),
+        "valid_to": datetime(2026, 9, 1),
+        "policy_revision": "p1", "tokens": 10,
+    })
+    second = first.model_copy(update={
+        "valid_from": datetime(2026, 9, 1),
+        "valid_to": None, "policy_revision": "p2", "tokens": 20,
+    })
+    index.apply_decisions(connection, [first, second])
+    index.apply_decision(connection, _gold(1, route="quarantine").model_copy(
+        update={"risk_tier": 3, "reject_reasons": ["low_quality_score"]}
+    ))
+    service = index.query_service()
+    assert service.as_of("2026-07-31T23:59:59Z") == []
+    assert service.as_of("2026-08-15T00:00:00Z") == [
+        {"source_feed": "arxiv-html-fetcher", "tokens": 10, "documents": 1}
+    ]
+    assert service.as_of("2026-09-01T00:00:00Z") == [
+        {"source_feed": "arxiv-html-fetcher", "tokens": 20, "documents": 1}
+    ]
+    assert service.as_of("2026-09-03T00:00:00Z") == [
+        {"source_feed": "arxiv-html-fetcher", "tokens": 20, "documents": 1}
+    ]
+    connection.close()
+
+
 def test_diagnostic_column_migrates_without_rebuilding_or_rotating_offsets(tmp_path) -> None:
     path = tmp_path / "old-index.duckdb"
     kwargs = dict(

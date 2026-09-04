@@ -44,6 +44,7 @@ def test_monitoring_queries_are_isolated_from_explicit_history_queries() -> None
     assert 'thread_name_prefix="serving-query"' in source
     assert 'thread_name_prefix="history-query"' in source
     assert "historical_service or service" in source
+    assert "await run_query(service.as_of, ts)" in source
     assert "S2P_SERVING_INDEX_ENABLED" in chart
     assert "mountPath: /var/lib/s2p-serving" in chart
     assert "helm.sh/resource-policy: keep" in chart

@@ -9,7 +9,8 @@
  * The route forwards the timestamp to the in-cluster duckdb-server,
  * which runs the half-open-interval predicate
  *   `valid_from <= ts AND (valid_to IS NULL OR valid_to > ts)`
- * against the Iceberg gold table.
+ * against the retained serving projection of the Iceberg corpus. This is
+ * source-validity time, not an Iceberg snapshot/processing-time query.
  */
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
@@ -35,7 +36,7 @@ export async function GET(req: Request): Promise<NextResponse> {
   try {
     const resp = await fetch(
       `${UPSTREAM.duckdb}/as-of?ts=${encodeURIComponent(parsedDate.toISOString())}`,
-      { cache: 'no-store' },
+      { cache: 'no-store', signal: AbortSignal.timeout(25_000) },
     );
     if (!resp.ok) {
       return NextResponse.json(upstreamError(`duckdb_status_${resp.status}`), { status: 502 });
