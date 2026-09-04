@@ -266,3 +266,47 @@ then stopped before rollout on a UI type error: the two new diagnostic maps
 used Zod's old one-argument `record` form. Both now provide explicit string
 key schemas, consistent with the existing Zod 4 schemas. Full UI TypeScript
 checking passes after the correction; no classifier or routing logic changed.
+
+### Four-head rollout complete, 2026-09-04 10:36 UTC
+
+Deployment run `33863316369` successfully applied application commit
+`456144961a9f5789e3fd8638a4e13a54bb2d9a13`, Helm revision 139. Changed workloads
+were ready at 10:36:40 UTC. At 10:36:55 UTC the production asynchronous protocol
+check passed all four heads and singleton/batch parity on all four quality
+service replicas. Their bundle revision is
+`source-modernbert-2026-09-04@sha256:26db4247d5f403c4a227eb256e3d7b4542783f2b1aa592c84a783d3eed262381`.
+
+The complete production path is now deployed: arXiv sections run quality,
+math-reasoning and post-training-suitability heads; HF sections run the HF
+quality head. All learned scores remain diagnostic only. A read-only
+diagnostic run was requested immediately after readiness to capture unique
+corpus totals, live section diagnostics, resource use and process counters.
+Take the comparison at least one hour after that baseline, not one hour after
+the earlier two-head baseline or upload completion.
+
+Read-only baseline run `33864159487` succeeded. At 10:39:47 UTC the all-corpus
+API reported 18,671 unique durable decisions and 6,777 strict training exports:
+arXiv accepted/total 4,131/6,011, HF datasets 857/5,982, HF models 1,789/6,678.
+The unchanged fetcher had emitted 464 normalized documents cumulatively
+(329 arXiv, 59 HF datasets, 76 HF models), with 356 missing-raw-object failures,
+eight normalization ValueErrors and two PDF timeouts. These are process-work
+counters, not unique daily arrivals.
+
+The new curator and all four model Pods had zero restarts. The curator had
+completed 54 successful production model requests across all four backends
+and had eight requests waiting for a free backend. Its first fresh document
+batch was not yet published: the last 160 decision messages contained no
+four-head record at 10:39:53 UTC. Per-head Prometheus metrics are populated,
+but their initial 15-minute window includes the deployment test and startup;
+do not report that window as sustained throughput or finished-paper quality.
+
+At 10:38:54 UTC node CPU was 81%, 36%, 72% and memory 39%, 76%, 62% for master,
+worker-1 and worker-2 respectively. All four inference Pods were using about
+two cores. No node reported pressure. Master root filesystem free space was
+11,087,097,856 bytes; inspect its trend and PVC-specific storage separately.
+Foundry at 10:41:14 UTC had completed three members of today's 64-paper cohort,
+with one processing and 65 queued across cohorts, all 66 carrying cached
+evidence. A solver-contract repair stream was active at 10:40:33 UTC.
+
+The one-hour comparison is due no earlier than 11:40 UTC on September 4. Leave
+the pipeline running unchanged until then unless a concrete failure is found.
