@@ -68,6 +68,7 @@ from processor.operators.source_quality import (
 )
 from processor.probes import start_probe_server
 from processor.quality_cache import CachedQualityScorer
+from processor.scientific import scientific_body_start
 from processor.scientific_handoff import ScientificEvidenceUnavailableError, ScientificHandoff
 from processor.scientific_policy import (
     RouteDecision,
@@ -487,7 +488,10 @@ def _score_quality_batch(
 
 def _source_segments(silver: SilverRecord) -> list[SilverSegment]:
     """Return the exact segment projection consumed by classifier inference."""
-    return list(silver.segments) or [
+    segments = list(silver.segments)
+    if segments and _uses_scientific_quality_profile(silver):
+        segments = segments[scientific_body_start([segment.role for segment in segments]) :]
+    return segments or [
         SilverSegment(
             segment_id="document",
             title=silver.title or "Document",
@@ -865,7 +869,12 @@ def curate_one(state: CurateState, silver: SilverRecord) -> GoldRecord:
     )
     segment_scores: list[SegmentScore] = []
     kept_segments: list[SilverSegment] = []
-    runtime_excluded: list[str] = []
+    retained_ids = {segment.segment_id for segment in source_segments}
+    runtime_excluded: list[str] = [
+        f"{segment.title}: front matter and author metadata retained for provenance"
+        for segment in silver.segments
+        if segment.segment_id not in retained_ids
+    ]
     removed_body_pii: list[PiiFlag] = []
     blocking_artifact_pii: list[PiiFlag] = []
     removed_for_c4 = False

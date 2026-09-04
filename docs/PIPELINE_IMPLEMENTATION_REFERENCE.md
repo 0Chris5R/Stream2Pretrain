@@ -74,6 +74,9 @@ applies to section paragraphs and model-input text. Docling text items beginning
 with an Abstract label also establish that boundary; plain PDF text preserves
 line breaks and recognizes explicit scientific headings. Documents without a
 recognizable Abstract or Introduction boundary retain their unstructured body.
+The curator applies the same boundary before classifier inference and export,
+including to queued normalized records. Excluded sections are recorded in the
+document audit; this does not rewrite already stored historical decisions.
 
 PDF fallback uses Docling 2.114.0 on CPU, Tesseract English OCR, TableFormer FAST
 with cell matching, picture images at scale 1.5, no page images, and no formula

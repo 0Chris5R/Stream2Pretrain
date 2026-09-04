@@ -751,6 +751,43 @@ def test_curate_redacts_contact_details_without_removing_the_section(
         state.close()
 
 
+def test_scientific_curation_excludes_pre_abstract_segments(
+    cfg: ProcessorConfig, long_english_text: str
+) -> None:
+    state = build_state(cfg)
+    try:
+        silver = _silver(long_english_text).model_copy(
+            update={
+                "source_feed": "arxiv-html-fetcher",
+                "source_format": "pdf",
+                "segments": [
+                    SilverSegment(
+                        segment_id="author",
+                        title="Ada Researcher",
+                        text="Example University",
+                        role="other",
+                        word_count=2,
+                    ),
+                    SilverSegment(
+                        segment_id="abstract",
+                        title="Abstract",
+                        text=long_english_text,
+                        role="abstract",
+                        word_count=len(long_english_text.split()),
+                    ),
+                ],
+            }
+        )
+        gold = curate_one(state, silver)
+        assert "Ada Researcher" not in gold.text
+        assert "Example University" not in gold.text
+        assert long_english_text.strip() in gold.text
+        assert not any(score.segment_id == "author" for score in gold.segment_scores)
+        assert any("Ada Researcher: front matter" in value for value in gold.excluded_sections)
+    finally:
+        state.close()
+
+
 def test_author_email_is_metadata_not_a_body_reject(
     cfg: ProcessorConfig, long_english_text: str
 ) -> None:

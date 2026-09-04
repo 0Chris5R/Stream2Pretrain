@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1127,14 +1128,7 @@ def _exclude_front_matter(sections: list[ScientificSection]) -> list[ScientificS
     front matter when an explicit Abstract or Introduction boundary is present.
     Unstructured documents without either boundary are left unchanged.
     """
-    abstract = next((i for i, section in enumerate(sections) if section.role == "abstract"), None)
-    boundary = (
-        abstract
-        if abstract is not None
-        else next((i for i, section in enumerate(sections) if section.role == "introduction"), None)
-    )
-    if boundary is None:
-        return sections
+    boundary = scientific_body_start([section.role for section in sections])
     reason = _section_exclusion_reason("metadata", "Front matter")
     return [
         section.model_copy(
@@ -1154,6 +1148,15 @@ def _exclude_front_matter(sections: list[ScientificSection]) -> list[ScientificS
         else section
         for index, section in enumerate(sections)
     ]
+
+
+def scientific_body_start(roles: Sequence[str]) -> int:
+    """Return the explicit scientific body boundary, or zero when unidentified."""
+    for boundary_role in ("abstract", "introduction"):
+        for index, role in enumerate(roles):
+            if role == boundary_role:
+                return index
+    return 0
 
 
 def _pdf_text_headings(text: str) -> str:
