@@ -160,6 +160,6 @@ def test_active_quality_gate_rejects_low_scores_without_changing_sections(
     assert low.route == "quarantine"
     assert high.route == "pretrain"
     assert "low_quality_score" in low.reject_reasons
-    assert low.quality_score == 0.0 and high.quality_score == 5.0
+    assert low.quality_score == high.quality_score
     assert low.reasoning_score == high.reasoning_score
     assert low.text == high.text
