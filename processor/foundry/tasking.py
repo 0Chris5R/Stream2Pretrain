@@ -90,6 +90,7 @@ class TrajectoryGroundingDecision(BaseModel):
     findings: list[str] = Field(default_factory=list)
     unsupported_claims: list[str] = Field(default_factory=list)
     contradictory_claims: list[str] = Field(default_factory=list)
+    missing_required_outputs: list[str] = Field(default_factory=list)
 
 
 class GroundingCritique(BaseModel):
@@ -505,16 +506,18 @@ def _complete_grounding_decisions(
 def grounding_decision_blocks(decision: TrajectoryGroundingDecision) -> bool:
     """Only substantive scientific errors block a trajectory.
 
-    A critic sometimes emits a negative boolean while its prose says the answer
-    is scientifically correct and complains only about an internal identifier or
-    manifest shape. Executable validators own those concerns. Requiring an
-    format-only finding prevents that proven false-negative mode, while empty
-    or substantive negative findings still fail closed.
+    Explicit scientific errors or missing deliverables take precedence over the
+    summary boolean. Format-only findings belong to executable validators;
+    empty or substantive negative findings fail closed.
     """
+    if (
+        decision.unsupported_claims
+        or decision.contradictory_claims
+        or decision.missing_required_outputs
+    ):
+        return True
     if decision.scientifically_grounded:
         return False
-    if decision.unsupported_claims or decision.contradictory_claims:
-        return True
     if not decision.findings:
         return True
     format_object = (
@@ -1095,7 +1098,21 @@ manufacture complexity by demanding internal manifest fields. Route valuable ope
 omit low-value or underspecified tasks entirely. Method DAG and corruption families are last-resort tasks and
 must involve a multi-step scientific failure or algorithmic chain, not schema reconstruction. Official-artifact
 configuration or reproduction tasks require audited oracle results. Keep answers hidden, context paper-local,
-and distractors same-paper only. The response must validate exactly against REQUIRED_JSON_SCHEMA.
+and distractors same-paper only.
+
+Construct the scientific solution before proposing the task: identify the supplied inputs, linked reasoning
+steps, requested outputs, and independently checkable target values. Every necessary equation, table cell,
+assumption and definition must exist in the learner-accessible paper context or frozen tools, not just in the
+private graph. A caption or quoted aggregate is not a substitute for missing rows. Never ask for unavailable
+per-condition calculations and then use the paper's reported mean as the reference solution.
+For RL, the hidden numeric/symbolic outcome must depend on the reasoning, not be a decorative extra beside
+an edge reversal. Require consequences beyond the correction itself. Two unrelated arithmetic operations
+or extra graph identifiers do not make a deep task. Prefer, when supported, deriving a LoRA scaling relation
+and checking its limiting regime, composing affine log-score transformations, deriving a T-SVD factorization
+consequence, or analyzing a quasi-Newton approximation under changed assumptions. These are depth examples,
+not permission to introduce topics or mathematics absent from this paper. An empty task list is better than
+invented difficulty. SFT should explain a substantive paper-specific inference, not pad a trivial task.
+The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
 
@@ -1134,7 +1151,7 @@ def _designer_prompt(
 ) -> str:
     supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
-        f"Propose exactly {count} materially different TaskSpecs. Cover the strongest supported "
+        f"Propose up to {count} materially different TaskSpecs. Cover the strongest supported "
         "scientific problems, prioritizing derivation, scaling-law or regime inference, multi-result "
         "numerical synthesis, assumption consequences, and algorithm analysis. At least half of the "
         "proposals should come from those high-value categories when the graph supports them. Do not "
@@ -1152,12 +1169,19 @@ def _answerability_system() -> str:
     schema = canonical_json(AnswerabilityBatch.model_json_schema()).decode()
     return f"""Independently audit scientific tasks using only the supplied paper. Return strict JSON
 with decisions. Reject tasks that require external knowledge, expose their answer, admit multiple
-incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier.
+incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier when
+proposed for RL. Valuable answerable open-ended SFT synthesis does not require a finite RL outcome.
 Also reject shallow tasks whose substance is one lookup, one arithmetic operation, internal-ID listing,
 simple edge reversal, or manifest-format compliance. Mark unique_enough_for_rl only for difficulty 4-5
 work requiring multiple linked reasoning steps and an answer-facing numeric, symbolic, or discrete outcome.
 Do not confuse a long instruction with deep reasoning. A concise formula derivation can be deep; a long list
 of requested fields can still be shallow.
+Check each requested output against the actual learner-accessible spans and tools, not merely against
+the private graph or hidden answer. Missing table rows, definitions or initial assumptions make a numerical
+task unanswerable even if the paper states an aggregate result. Work through the dependency chain: do not
+trust a self-reported difficulty or a list of reasoning operations. Reject decorative numeric targets whose
+answer does not depend on the claimed multi-step reasoning. A method-chain correction qualifies only when
+it requires deriving and checking nontrivial scientific consequences, not restoring a supplied relation.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -1195,7 +1219,13 @@ substitute for reasoning. Every conclusion must commit to allowed graph node IDs
 evidence span IDs only when the public answer policy requires citations; derivation reports must instead give
 a natural step-by-step derivation and final expression without mentioning internal IDs. Do not quote long
 passages, use outside knowledge, claim unexecuted tool results, expose hidden construction instructions, or
-answer by merely enumerating graph identifiers. The response must validate exactly against
+answer by merely enumerating graph identifiers. Address every requested subproblem in the readable report. For numeric synthesis,
+show the actual inputs, intermediate results and aggregation with units and denominators. Do not substitute
+a reported mean for requested per-condition results. If a necessary table or input is absent, use the
+allowed tools to look for it; if it remains absent, state precisely what cannot be computed and do not
+invent values, imply completion or put unsupported results in the manifest. For derivations, state the
+assumptions and show the transformations and requested boundary or consistency checks.
+The response must validate exactly against
 REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -1314,11 +1344,18 @@ def _grounding_system() -> str:
 Return one decisions entry for every supplied trajectory_id plus task-level findings. For each trajectory,
 set scientifically_grounded=false only when its readable scientific answer contains a specific unsupported
 claim, contradiction, wrong calculation, or materially incomplete conclusion, and list that concrete error
-under unsupported_claims or contradictory_claims. Judge trajectories independently: one bad solution must
+under unsupported_claims, contradictory_claims or missing_required_outputs. Judge trajectories independently: one bad solution must
 never reject a good paired solution. Do not reject for missing node IDs, relation labels, evidence ordering,
 configuration keys, manifest shape, or other format concerns; executable deterministic validators own those
 checks. Do not require two solutions to agree. A correct but differently worded solution is grounded. Your
 vote cannot override deterministic security, replay, adversarial, mutation, symbolic, or numeric checks.
+Audit every requested scientific deliverable, not just the final scalar or the manifest. List each omitted
+calculation, condition, derivation step or conclusion in missing_required_outputs. An honest statement that
+the requested evidence is missing is not a completed training solution. Reject an answer that says a table
+is unavailable but supplies an aggregate without its required per-row derivation. Independently recompute
+numeric results from supplied values and check units, populations, denominators and limiting cases. Graph
+targets and agreement between two solvers are not independent proof. If any of these three error lists is
+non-empty, set scientifically_grounded=false. Do not put mere formatting or internal-ID issues in them.
 The response must validate exactly against
 REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:

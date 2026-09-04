@@ -1085,6 +1085,9 @@ derivation_partial_order,
 required_qualifications, configuration_constraints, report_manifest_consistency.
 Return one JSON VerifierSpec. Use finite hidden targets, hard gates,
 weighted outcome checks, no prose judgement, no network, and no executable model-generated code.
+Every requested numeric or symbolic result must have an outcome check; graph membership or correct edge
+ordering alone cannot verify a derivation or quantitative consequence. Use only justified tolerances and
+check equivalent expressions without requiring one arbitrary algebraic form.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -1105,7 +1108,11 @@ false negatives, equivalent correct answers, missing hard gates, reward hacks, c
 and brittle ordering or tolerance checks. Return strict JSON with accepted, findings,
 false_positive_risks, false_negative_risks, repair_instructions. Set accepted=false only when a
 listed risk is release-blocking and requires a repair; accepted=true may retain explicitly
-documented residual risks that do not invalidate the deterministic verifier. The response must
+documented residual risks that do not invalidate the deterministic verifier. Test whether an answer with
+correct identifiers but wrong scientific results could pass. Missing requested
+numeric or symbolic outcome checks are release-blocking. Correct algebraic equivalences, reordered
+independent steps and valid alternative calculations must not fail for a preferred serialization.
+The response must
 validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""

@@ -96,6 +96,12 @@ advance production progress or mutate production state. Any deterministic
 canary-only failure is separated under the state bucket's
 `canary-processing-failures/` prefix instead of the production Gold ledger.
 
+Pretraining consumes its queue in order and has no 24-hour unfinished-work
+cutoff. The one-day Bronze/Silver retention is an audit-asset lifetime, not a
+pretraining scheduler. Only the Foundry freezes and expires daily cohorts.
+Dropping pending pretraining records would require a separate explicit intake
+policy; it bounds queue age by reducing coverage, not by increasing capacity.
+
 When a core or source contract changes, `scripts/reconcile_topic_partitions.sh`
 also reconciles
 the seven-day core and 24-hour smoke retention already declared in

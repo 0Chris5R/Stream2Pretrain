@@ -426,6 +426,21 @@ class ScientificProcessor:
                 value = _clean(item.text)
                 if not value or label in {"caption", "page_header", "page_footer"}:
                     continue
+                abstract = re.match(
+                    r"^(?i:abstract)(?:[.:\-\u2013\u2014]\s*|\s+(?=[A-Z])|$)(.*)$", value
+                )
+                body_roles = {"abstract", "introduction", "background", "methods", "results"}
+                if (
+                    abstract
+                    and _section_role(current_title) not in body_roles
+                    and not any(section.role in body_roles for section in sections)
+                ):
+                    flush_section()
+                    current_title = "Abstract"
+                    current_level = 2
+                    if abstract.group(1):
+                        current_text.append(abstract.group(1))
+                    continue
                 if label == "reference":
                     citations.append(
                         ScientificCitation(citation_id=f"citation-{len(citations) + 1}", text=value)
@@ -530,32 +545,15 @@ class ScientificProcessor:
             if self._max_pdf_pages
             else len(reader.pages)
         )
-        sections: list[ScientificSection] = []
         page_texts: list[str] = []
-        for index, page in enumerate(reader.pages[:page_limit]):
-            value = _clean(page.extract_text() or "")
+        for page in reader.pages[:page_limit]:
+            value = (page.extract_text() or "").strip()
             if not value:
                 continue
             page_texts.append(value)
-            sections.append(
-                ScientificSection(
-                    section_id=f"page-{index + 1}",
-                    level=2,
-                    title=f"Page {index + 1}",
-                    text=value,
-                    role="other",
-                    include_in_training=True,
-                    word_count=_word_count(value),
-                    paragraphs=[
-                        ScientificParagraph(
-                            paragraph_id=f"page-{index + 1}-text",
-                            text=value,
-                            include_in_training=True,
-                        )
-                    ],
-                )
-            )
         plain_text = "\n\n".join(page_texts).strip()
+        blocks, _ = _parse_heading_text(_pdf_text_headings(plain_text))
+        sections = _scientific_text_sections(blocks)
         metadata = reader.metadata
         metadata_title = _clean(str(getattr(metadata, "title", "") or "")) or None
         title = metadata_title or _infer_pdf_title(plain_text)
@@ -640,6 +638,9 @@ class ScientificProcessor:
     def _store_document(
         self, *, document: ScientificDocument, plain_text: str
     ) -> ScientificProcessingResult:
+        document = document.model_copy(
+            update={"sections": _exclude_front_matter(document.sections)}
+        )
         included = [section for section in document.sections if section.include_in_training]
         excluded = [section for section in document.sections if not section.include_in_training]
         document = document.model_copy(
@@ -1115,7 +1116,64 @@ def _scientific_text_sections(
                 paragraphs=paragraphs,
             )
         )
-    return sections
+    return _exclude_front_matter(sections)
+
+
+def _exclude_front_matter(sections: list[ScientificSection]) -> list[ScientificSection]:
+    """Keep the pre-abstract/title-page region out of every training projection.
+
+    Layout extraction can promote author names and affiliations to headings.
+    Document order, rather than the heading's guessed semantic role, defines
+    front matter when an explicit Abstract or Introduction boundary is present.
+    Unstructured documents without either boundary are left unchanged.
+    """
+    abstract = next((i for i, section in enumerate(sections) if section.role == "abstract"), None)
+    boundary = (
+        abstract
+        if abstract is not None
+        else next((i for i, section in enumerate(sections) if section.role == "introduction"), None)
+    )
+    if boundary is None:
+        return sections
+    reason = _section_exclusion_reason("metadata", "Front matter")
+    return [
+        section.model_copy(
+            update={
+                "role": "metadata",
+                "include_in_training": False,
+                "exclusion_reason": reason,
+                "paragraphs": [
+                    paragraph.model_copy(
+                        update={"include_in_training": False, "exclusion_reason": reason}
+                    )
+                    for paragraph in section.paragraphs
+                ],
+            }
+        )
+        if index < boundary
+        else section
+        for index, section in enumerate(sections)
+    ]
+
+
+def _pdf_text_headings(text: str) -> str:
+    """Expose explicit PDF text headings while preserving ordinary prose lines."""
+    lines: list[str] = []
+    for raw in text.splitlines():
+        value = raw.strip()
+        abstract = re.fullmatch(r"(?i:abstract)(?:[.:\-\u2013\u2014]\s*|$)(.*)", value)
+        if abstract:
+            lines.extend(["", "## Abstract", "", abstract.group(1)])
+        elif re.fullmatch(
+            r"(?i)(?:(?:\d+(?:\.\d+)*|[IVX]+)[.\s]+)?"
+            r"(?:introduction|background|related work|methods?|results?|discussion|"
+            r"conclusions?|limitations|references|bibliography|acknowledg(?:e)?ments)[.:]?",
+            value,
+        ):
+            lines.extend(["", f"## {value}", ""])
+        else:
+            lines.append(raw)
+    return "\n".join(lines)
 
 
 def _text_equations(text: str) -> list[ScientificEquation]:

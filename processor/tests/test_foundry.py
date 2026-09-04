@@ -915,6 +915,28 @@ def test_grounding_gate_ignores_only_proven_format_false_negative() -> None:
     assert grounding_decision_blocks(explicit)
 
 
+@pytest.mark.parametrize(
+    "error_field", ["unsupported_claims", "contradictory_claims", "missing_required_outputs"]
+)
+def test_grounding_scientific_errors_override_positive_summary(error_field: str) -> None:
+    decision = TrajectoryGroundingDecision.model_validate(
+        {
+            "trajectory_id": "trajectory:incomplete-table",
+            "scientifically_grounded": True,
+            error_field: ["The seven requested per-condition differences are not derived."],
+        }
+    )
+    assert grounding_decision_blocks(decision)
+
+
+def test_complete_grounded_trajectory_remains_eligible() -> None:
+    assert not grounding_decision_blocks(
+        TrajectoryGroundingDecision(
+            trajectory_id="trajectory:complete", scientifically_grounded=True
+        )
+    )
+
+
 def test_inspection_keeps_legacy_and_v2_prompt_revisions_separate() -> None:
     assert not _uses_v2_content_policy("paper-foundry-prompts-v3")
     assert _uses_v2_content_policy("paper-foundry-prompts-v4")
@@ -937,6 +959,12 @@ def test_v2_prompts_encode_deep_task_and_per_trajectory_contracts() -> None:
     assert "one decisions entry for every supplied trajectory_id" in grounding
     assert "one bad solution must" in grounding
     assert '"decisions"' in grounding
+    assert "learner-accessible paper context" in designer
+    assert "decorative numeric targets" in answerability
+    assert "per-condition results" in solver
+    assert "missing_required_outputs" in grounding
+    assert "An honest statement" in grounding
+    assert FoundryConfig().prompt_version == "paper-foundry-prompts-v5"
 
 
 def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> None:

@@ -67,6 +67,14 @@ and 128 display equations of at most 2,000 characters each. Figure captions,
 alt text, and type are included. OCR is not included unless the figure has
 `ocr_training_eligible=true`; its default is false.
 
+Before persistence, all sections preceding an explicit Abstract are marked
+metadata, including author/affiliation text misclassified as a heading. An
+Introduction is the boundary when no Abstract is present. The same exclusion
+applies to section paragraphs and model-input text. Docling text items beginning
+with an Abstract label also establish that boundary; plain PDF text preserves
+line breaks and recognizes explicit scientific headings. Documents without a
+recognizable Abstract or Introduction boundary retain their unstructured body.
+
 PDF fallback uses Docling 2.114.0 on CPU, Tesseract English OCR, TableFormer FAST
 with cell matching, picture images at scale 1.5, no page images, and no formula
 vision enrichment. Defaults are two CPU threads, 180-second document timeout,
@@ -349,12 +357,16 @@ independent answerability audit, diversity selection, two independent solver
 plans with bounded frozen tools, grounding critic, SFT deterministic verifier
 or RL compiled verifier, full executable suite, signed package, and human audit.
 
-Task-family priority is derivation, figure/table, assumption/consequence,
-corruption diagnosis, claim/evidence, single-paper research, method DAG,
-grounded explanation, experiment configuration, and result reproduction.
+Task-family priority is derivation, assumption/consequence, single-paper
+research, result reproduction, experiment configuration, figure/table,
+claim/evidence, method DAG and grounded explanation, then corruption diagnosis.
 Up to six tasks are proposed and up to three diverse tasks are retained per
-paper. If no corruption task exists, a deterministic reversed relation task is
-added when a suitable relation is available.
+paper. Low-value proposals are omitted rather than filling a quota. No synthetic
+edge-reversal task is added. Prompt provenance uses `paper-foundry-prompts-v5`.
+The grounding critic records missing scientific deliverables per trajectory.
+An unsupported claim, contradiction or missing required output blocks that
+trajectory even if the critic's summary boolean is positive. Formatting concerns
+remain the responsibility of deterministic validators.
 
 ## 5. Verbatim model prompt templates
 
@@ -468,24 +480,46 @@ CRITIQUE:
 ### 5.4 Task designer
 
 ```text
-Design high-value scientific post-training TaskSpecs from one hidden evidence graph.
-Return strict JSON {"tasks": [...]}. Use only supplied stable spans. Propose the requested mixture
-across claim/evidence, derivation, method DAG, figure/table, corruption diagnosis,
-assumption/consequence, long single-paper research, and grounded SFT reasoning where evidence
-permits. Prefer answerable formula derivations, scaling-law calculations, numeric transformations,
-factorizations, approximations, and figure/table synthesis over another routine method DAG when the
-paper supports them. When audited official artifacts are present, also consider experiment configuration and
-result reproduction. Separate public context from hidden targets, add same-paper distractors only,
-avoid answer leakage, and reject underspecified families rather than inventing. A derivation task must
-provide a canonical, parseable LaTeX expected expression or equality for deterministic checking, but its
-public instruction must ask for a normal mathematical derivation rather than span-ID citations. The response must
-validate exactly against REQUIRED_JSON_SCHEMA.
+Design frontier-model scientific reasoning TaskSpecs from one evidence graph.
+Return strict JSON {"tasks": [...]} and use only supplied paper evidence. Optimize first for:
+1. multi-step derivations in which at least two equations are transformed or composed;
+2. scaling-law inference that derives exponents, coefficients, regimes, or consequences;
+3. numerical synthesis across multiple rows, columns, figures, ablations, or conditions;
+4. assumption and failure-mode analysis that propagates a changed premise through several claims;
+5. algorithm analysis comparing complexity, convergence, invariants, or design tradeoffs.
+
+An RL proposal must be difficulty 4 or 5, require at least two distinct reasoning operations, expose a
+finite answer-facing numeric, symbolic, or discrete outcome in hidden_targets.expected_values or
+configuration_constraints, and support a deterministic verifier. A derivation must contain a parseable
+canonical expression and a genuine equation dependency chain. Public instructions must read like natural
+scientific questions. Never ask the learner to list node IDs, equation IDs, span IDs, reverse one graph edge,
+copy one value, identify the largest cell, or perform a single subtraction or percentage calculation. Do not
+manufacture complexity by demanding internal manifest fields. Route valuable open-ended synthesis to SFT;
+omit low-value or underspecified tasks entirely. Method DAG and corruption families are last-resort tasks and
+must involve a multi-step scientific failure or algorithmic chain, not schema reconstruction. Official-artifact
+configuration or reproduction tasks require audited oracle results. Keep answers hidden, context paper-local,
+and distractors same-paper only.
+
+Construct the scientific solution before proposing the task: identify the supplied inputs, linked reasoning
+steps, requested outputs, and independently checkable target values. Every necessary equation, table cell,
+assumption and definition must exist in the learner-accessible paper context or frozen tools, not just in the
+private graph. A caption or quoted aggregate is not a substitute for missing rows. Never ask for unavailable
+per-condition calculations and then use the paper's reported mean as the reference solution.
+For RL, the hidden numeric/symbolic outcome must depend on the reasoning, not be a decorative extra beside
+an edge reversal. Require consequences beyond the correction itself. Two unrelated arithmetic operations
+or extra graph identifiers do not make a deep task. Prefer, when supported, deriving a LoRA scaling relation
+and checking its limiting regime, composing affine log-score transformations, deriving a T-SVD factorization
+consequence, or analyzing a quasi-Newton approximation under changed assumptions. These are depth examples,
+not permission to introduce topics or mathematics absent from this paper. An empty task list is better than
+invented difficulty. SFT should explain a substantive paper-specific inference, not pad a trivial task.
+The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(TaskBatch.model_json_schema()).decode()}
 ```
 
 ```text
-Propose exactly {count} materially different TaskSpecs. Cover the strongest supported families, including the five deterministic RL templates and a long paper-local tool task. Configuration or result-reproduction tasks require an audited official artifact. Route valuable but non-finite work to SFT.
+Propose up to {count} materially different TaskSpecs. Cover the strongest supported scientific problems, prioritizing derivation, scaling-law or regime inference, multi-result numerical synthesis, assumption consequences, and algorithm analysis. At least half of the proposals should come from those high-value categories when the graph supports them. Do not fill the count with low-value tasks: return fewer tasks when necessary. Configuration or result-reproduction tasks require an audited official artifact. Route valuable but non-finite work to SFT.
+{bundle.metadata.get('classifier_section_hints', '')}
 AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:
 {canonical_json(sorted(oracle_result_ids)).decode()}
 PAPER_BUNDLE:
@@ -510,7 +544,19 @@ head. No hint changes the PaperBundle or appears in other model-role inputs.
 ```text
 Independently audit scientific tasks using only the supplied paper. Return strict JSON
 with decisions. Reject tasks that require external knowledge, expose their answer, admit multiple
-incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier.
+incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier when
+proposed for RL. Valuable answerable open-ended SFT synthesis does not require a finite RL outcome.
+Also reject shallow tasks whose substance is one lookup, one arithmetic operation, internal-ID listing,
+simple edge reversal, or manifest-format compliance. Mark unique_enough_for_rl only for difficulty 4-5
+work requiring multiple linked reasoning steps and an answer-facing numeric, symbolic, or discrete outcome.
+Do not confuse a long instruction with deep reasoning. A concise formula derivation can be deep; a long list
+of requested fields can still be shallow.
+Check each requested output against the actual learner-accessible spans and tools, not merely against
+the private graph or hidden answer. Missing table rows, definitions or initial assumptions make a numerical
+task unanswerable even if the paper states an aggregate result. Work through the dependency chain: do not
+trust a self-reported difficulty or a list of reasoning operations. Reject decorative numeric targets whose
+answer does not depend on the claimed multi-step reasoning. A method-chain correction qualifies only when
+it requires deriving and checking nontrivial scientific consequences, not restoring a supplied relation.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(AnswerabilityBatch.model_json_schema()).decode()}
@@ -552,11 +598,20 @@ INVALID_RESPONSE:
 Solve one scientific task using only its supplied same-paper context and the allowed
 frozen tools. Return strict JSON with status, report, answer_manifest, and tool_calls. Use status
 tool_request with non-empty tool_calls when evidence must be searched or recomputed; use status final
-with report and answer_manifest only after reviewing the returned observations. Every conclusion must
-commit to allowed graph node IDs. Include evidence span IDs only when the public answer policy requires
-citations; derivation tasks instead require a natural step-by-step derivation and final expression. Do not
-quote long passages, use outside knowledge, claim unexecuted
-tool results, or expose hidden construction instructions. The response must validate exactly against
+with report and answer_manifest only after reviewing the returned observations. The readable report is the
+scientific answer: show intermediate reasoning, calculations, assumptions, and the final requested values or
+expressions there. The manifest is machine-readable provenance and must agree with the report; it is never a
+substitute for reasoning. Every conclusion must commit to allowed graph node IDs in the manifest. Include
+evidence span IDs only when the public answer policy requires citations; derivation reports must instead give
+a natural step-by-step derivation and final expression without mentioning internal IDs. Do not quote long
+passages, use outside knowledge, claim unexecuted tool results, expose hidden construction instructions, or
+answer by merely enumerating graph identifiers. Address every requested subproblem in the readable report. For numeric synthesis,
+show the actual inputs, intermediate results and aggregation with units and denominators. Do not substitute
+a reported mean for requested per-condition results. If a necessary table or input is absent, use the
+allowed tools to look for it; if it remains absent, state precisely what cannot be computed and do not
+invent values, imply completion or put unsupported results in the manifest. For derivations, state the
+assumptions and show the transformations and requested boundary or consistency checks.
+The response must validate exactly against
 REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(SolverTurn.model_json_schema()).decode()}
@@ -615,11 +670,23 @@ CURRENT_FINAL_TURN:
 ### 5.8 Grounding critic
 
 ```text
-Audit the available independently generated reference solutions against one paper
-and task. Return strict
-JSON with accepted, findings, unsupported_claims, contradictory_claims. Check
-manifest/prose consistency, exact evidence support, calculations, completeness, and scientific value.
-Your vote cannot override deterministic checks. The response must validate exactly against
+Audit each independently generated reference trajectory against one paper and task.
+Return one decisions entry for every supplied trajectory_id plus task-level findings. For each trajectory,
+set scientifically_grounded=false only when its readable scientific answer contains a specific unsupported
+claim, contradiction, wrong calculation, or materially incomplete conclusion, and list that concrete error
+under unsupported_claims, contradictory_claims or missing_required_outputs. Judge trajectories independently: one bad solution must
+never reject a good paired solution. Do not reject for missing node IDs, relation labels, evidence ordering,
+configuration keys, manifest shape, or other format concerns; executable deterministic validators own those
+checks. Do not require two solutions to agree. A correct but differently worded solution is grounded. Your
+vote cannot override deterministic security, replay, adversarial, mutation, symbolic, or numeric checks.
+Audit every requested scientific deliverable, not just the final scalar or the manifest. List each omitted
+calculation, condition, derivation step or conclusion in missing_required_outputs. An honest statement that
+the requested evidence is missing is not a completed training solution. Reject an answer that says a table
+is unavailable but supplies an aggregate without its required per-row derivation. Independently recompute
+numeric results from supplied values and check units, populations, denominators and limiting cases. Graph
+targets and agreement between two solvers are not independent proof. If any of these three error lists is
+non-empty, set scientifically_grounded=false. Do not put mere formatting or internal-ID issues in them.
+The response must validate exactly against
 REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(GroundingCritique.model_json_schema()).decode()}
@@ -647,6 +714,9 @@ derivation_partial_order,
 required_qualifications, configuration_constraints, report_manifest_consistency.
 Return one JSON VerifierSpec. Use finite hidden targets, hard gates,
 weighted outcome checks, no prose judgement, no network, and no executable model-generated code.
+Every requested numeric or symbolic result must have an outcome check; graph membership or correct edge
+ordering alone cannot verify a derivation or quantitative consequence. Use only justified tolerances and
+check equivalent expressions without requiring one arbitrary algebraic form.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(VerifierSpec.model_json_schema()).decode()}
@@ -667,7 +737,11 @@ false negatives, equivalent correct answers, missing hard gates, reward hacks, c
 and brittle ordering or tolerance checks. Return strict JSON with accepted, findings,
 false_positive_risks, false_negative_risks, repair_instructions. Set accepted=false only when a
 listed risk is release-blocking and requires a repair; accepted=true may retain explicitly
-documented residual risks that do not invalidate the deterministic verifier. The response must
+documented residual risks that do not invalidate the deterministic verifier. Test whether an answer with
+correct identifiers but wrong scientific results could pass. Missing requested
+numeric or symbolic outcome checks are release-blocking. Correct algebraic equivalences, reordered
+independent steps and valid alternative calculations must not fail for a preferred serialization.
+The response must
 validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(VerifierCritique.model_json_schema()).decode()}
