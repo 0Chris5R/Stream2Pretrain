@@ -126,6 +126,30 @@ def test_startup_waits_for_model_dns_without_restarting_worker(monkeypatch) -> N
     client.close()
 
 
+def test_startup_does_not_adopt_previous_release_models(monkeypatch) -> None:
+    from processor import model_client
+
+    calls = []
+    monkeypatch.setattr(model_client.time, "sleep", lambda seconds: None)
+
+    def handler(request):
+        calls.append(1)
+        metadata = _metadata()
+        if len(calls) > 1:
+            metadata["quality"]["source-pretrain-quality"]["revision"] = "new@pinned"
+        return httpx.Response(200, json=metadata)
+
+    client = CuratorModelClient(
+        "http://models",
+        client=httpx.Client(base_url="http://models", transport=httpx.MockTransport(handler)),
+        startup_wait_seconds=30,
+        expected_quality_revision="new@pinned",
+    )
+    assert len(calls) == 2
+    assert client.metadata["quality"]["source-pretrain-quality"]["revision"] == "new@pinned"
+    client.close()
+
+
 def test_quality_batch_requires_one_result_per_input() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/metadata":

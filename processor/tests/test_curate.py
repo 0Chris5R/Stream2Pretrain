@@ -59,7 +59,7 @@ def _silver(text: str, doc_id: str = "sha256:" + "a" * 64) -> SilverRecord:
 class _SplitModelClient:
     closed: ClassVar[list[str]] = []
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, **_kwargs: object) -> None:
         self.base_url = base_url
         if any(value in base_url for value in ("quality", "finepdfs")):
             self.metadata = {

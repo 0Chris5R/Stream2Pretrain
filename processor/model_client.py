@@ -343,6 +343,7 @@ class CuratorModelClient:
         endpoint_refresh_seconds: float = 5.0,
         endpoint_client_factory: HttpClientFactory | None = None,
         startup_wait_seconds: float = 0.0,
+        expected_quality_revision: str | None = None,
     ) -> None:
         self._client = client or _new_http_client(base_url, timeout_seconds)
         factory = endpoint_client_factory or (
@@ -352,6 +353,14 @@ class CuratorModelClient:
         while True:
             try:
                 self.metadata = _metadata(self._client)
+                if expected_quality_revision is not None:
+                    revision = (
+                        self.metadata.get("quality", {})
+                        .get("source-pretrain-quality", {})
+                        .get("revision")
+                    )
+                    if revision != expected_quality_revision:
+                        raise ModelServiceError("waiting for the release-pinned classifier bundle")
                 self._endpoint_pool = (
                     _EndpointPool(
                         profile=profile,

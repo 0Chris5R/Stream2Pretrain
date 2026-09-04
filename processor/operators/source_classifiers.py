@@ -35,6 +35,11 @@ HEAD_SCORES = Histogram(
 )
 
 
+def bundle_revision(manifest: dict[str, Any]) -> str:
+    digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    return f"{manifest['version']}@sha256:{digest}"
+
+
 def ordinal_output(logits: list[float]) -> tuple[float, float, int, tuple[float, ...]]:
     """Same six-bin expectation, entropy confidence and rounding as training."""
     if len(logits) != 6 or not all(math.isfinite(value) for value in logits):
@@ -59,8 +64,7 @@ class SourceQualityClassifier:
 
         root = Path(model_path)
         manifest = json.loads((root / "source-classifiers.json").read_text())
-        digest = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
-        self.revision = f"{manifest['version']}@sha256:{digest}"
+        self.revision = bundle_revision(manifest)
         self.models: dict[str, Any] = {}
         self.tokenizers: dict[str, Any] = {}
         self.model_revisions: dict[str, str] = {}

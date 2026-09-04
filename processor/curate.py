@@ -22,6 +22,7 @@ audit. Only trainable rows are also published to
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -29,6 +30,7 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC
+from pathlib import Path
 from typing import Any, Protocol
 
 import boto3
@@ -59,7 +61,7 @@ from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiSanitization, PiiScanner
 from processor.operators.quality import QualityClassifier, QualityScore
 from processor.operators.scientific_document_quality import is_publication_template
-from processor.operators.source_classifiers import SourceQualityClassifier
+from processor.operators.source_classifiers import SourceQualityClassifier, bundle_revision
 from processor.operators.source_quality import (
     MetadataDiscoveryPolicy,
 )
@@ -249,9 +251,16 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
     model_clients: tuple[CuratorModelClient, ...] = ()
     kenlm: PerplexityScorer
     source_quality: QualityScorer
+    expected_quality_revision = (
+        bundle_revision(json.loads(Path(__file__).with_name("source-classifiers.json").read_text()))
+        if require_real_models
+        else None
+    )
     if model_service_url:
         model_client = CuratorModelClient(
-            model_service_url, startup_wait_seconds=600 if require_real_models else 0
+            model_service_url,
+            startup_wait_seconds=600 if require_real_models else 0,
+            expected_quality_revision=expected_quality_revision,
         )
         kenlm = RemoteKenLMScorer(model_client)
         source_quality = RemoteQualityClassifier(model_client, "source-pretrain-quality")
@@ -268,13 +277,20 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         def split_model_client(url: str, profile: str, discovery_host: str) -> CuratorModelClient:
             if not discovery_host:
                 return CuratorModelClient(
-                    url, startup_wait_seconds=600 if require_real_models else 0
+                    url,
+                    startup_wait_seconds=600 if require_real_models else 0,
+                    expected_quality_revision=expected_quality_revision
+                    if profile == "quality"
+                    else None,
                 )
             return CuratorModelClient(
                 url,
                 profile=profile,
                 endpoint_resolver=headless_endpoint_resolver(url, discovery_host),
                 startup_wait_seconds=600 if require_real_models else 0,
+                expected_quality_revision=expected_quality_revision
+                if profile == "quality"
+                else None,
             )
 
         quality_client = split_model_client(
