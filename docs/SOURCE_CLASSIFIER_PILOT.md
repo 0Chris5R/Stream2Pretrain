@@ -232,3 +232,31 @@ URLs, so the temporary HF repository may be deleted after that copy succeeds.
 Do not retry the cancelled GitHub upload or the expired Kaggle URL. Wait for
 the HF commit before running `publish-classifiers`, then deploy and take the
 one-hour production measurement as above.
+
+The first HF uploader subsequently stalled after repeated 300-second Xet
+network timeouts; its public commit never completed. It was restarted against
+the same repository with `HF_XET_CLIENT_READ_TIMEOUT=1800s` and one concurrent
+upload stream. Current transfer process is Python PID 59521 (uv parent 59520),
+exec session 82680. The former PID 40443/session 1799 was intentionally stopped.
+No application deployment or classifier change occurred during this retry.
+
+HF publication completed at 2026-09-04 10:07:49 UTC, commit
+`307db3ffde06e3189bc7567c50debdbf2fd01def`. Both public LFS SHA256 values match
+the manifest exactly. The cloud transfer variable now pins that immutable HF
+commit, and publication run `33861892180` was dispatched at 10:09:49 UTC to copy
+the two archives to their permanent GitHub release URLs. Do not require the HF
+write token for this or any deployment step.
+
+The permanent GitHub publication succeeded in 56 seconds. At 10:11 UTC both
+release assets report `uploaded` and their GitHub SHA256 digests match the
+manifest. The owner can now delete the temporary HF repository; production
+builds no longer depend on it. A single four-head deployment was dispatched
+at 10:11 UTC with `verify_classifiers=true` on branch commit `96f3397`.
+
+Deployment run `33862002504` stopped before rollout: the original interrupted
+GitHub release creation had left the release as a draft, making its assets
+invisible to anonymous image builds despite successful authenticated asset
+checks. The release is now explicitly published, and the publication workflow
+does that after each completed transfer. Public download URLs include
+`?download=1` to bypass the negative 404 cache created before publication.
+Anonymous checks of those URLs succeed. Weight bytes and checksums are unchanged.

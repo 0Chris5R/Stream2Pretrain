@@ -35,3 +35,4 @@ jobs:
           gh release upload source-classifiers-2026-09-04 \
             "$RUNNER_TEMP/release/arxiv-math-reasoning.tar" \
             "$RUNNER_TEMP/release/arxiv-posttrain-suitability.tar"
+          gh release edit source-classifiers-2026-09-04 --draft=false --latest=false
