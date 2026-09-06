@@ -2,19 +2,331 @@
 
 from __future__ import annotations
 
-import math
-from collections.abc import Iterable
+import json
+import re
+import socket
+import threading
+import time
+from collections import deque
+from collections.abc import Callable, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
+from prometheus_client import Counter, Gauge, Histogram
 
 from processor.operators.kenlm_score import PerplexityResult
 from processor.operators.quality import QualityScore
-from schemas.decon import BenchmarkName
+
+MODEL_SERVICE_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+
+MODEL_CLIENT_ENDPOINTS = Gauge(
+    "s2p_curator_model_endpoints",
+    "Ready model Pod endpoints known to the curator.",
+    ["profile"],
+)
+MODEL_CLIENT_WAITING = Gauge(
+    "s2p_curator_model_waiting_requests",
+    "Curator requests waiting for a free model Pod endpoint.",
+    ["profile"],
+)
+MODEL_CLIENT_WAIT_SECONDS = Histogram(
+    "s2p_curator_model_wait_seconds",
+    "Time a curator request waits for a free model Pod endpoint.",
+    ["profile"],
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60),
+)
+MODEL_CLIENT_REQUESTS = Counter(
+    "s2p_curator_model_requests_total",
+    "Direct curator requests by resolved model backend.",
+    ["profile", "backend", "status"],
+)
 
 
 class ModelServiceError(RuntimeError):
     """Transient model-service failure that must not advance a Kafka offset."""
+
+
+EndpointResolver = Callable[[], Sequence[str]]
+HttpClientFactory = Callable[[str], httpx.Client]
+
+
+def _new_http_client(base_url: str, timeout_seconds: float) -> httpx.Client:
+    return httpx.Client(
+        base_url=base_url.rstrip("/"),
+        timeout=httpx.Timeout(timeout_seconds, connect=10.0),
+        # Each backend owns one inference lock. Keep direct connections short
+        # lived so a replaced Pod cannot retain a stale connection.
+        limits=httpx.Limits(max_keepalive_connections=0, max_connections=16),
+        headers={"Connection": "close"},
+        trust_env=False,
+    )
+
+
+def _metadata(client: httpx.Client) -> dict[str, Any]:
+    try:
+        response = client.get("/v1/metadata")
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ModelServiceError("curator model service metadata is unavailable") from exc
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ModelServiceError("curator model service metadata is not valid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("ready") is not True:
+        raise RuntimeError("curator model service did not report ready")
+    return payload
+
+
+def resolved_endpoint_urls(service_host: str, *, scheme: str, port: int) -> list[str]:
+    """Resolve one headless Service into stable, numeric Pod URLs."""
+    addresses: set[str] = set()
+    try:
+        records = socket.getaddrinfo(
+            service_host,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise ModelServiceError(f"model endpoint discovery failed for {service_host}") from exc
+    for _family, _type, _protocol, _canonical, socket_address in records:
+        host = str(socket_address[0])
+        authority = f"[{host}]" if ":" in host else host
+        addresses.add(f"{scheme}://{authority}:{port}")
+    if not addresses:
+        raise ModelServiceError(f"model endpoint discovery returned no Pods for {service_host}")
+    return sorted(addresses)
+
+
+def headless_endpoint_resolver(base_url: str, service_host: str) -> EndpointResolver:
+    """Build a resolver that keeps the configured service scheme and port."""
+    parsed = urlsplit(base_url)
+    port = parsed.port
+    if parsed.scheme not in {"http", "https"} or port is None:
+        raise ValueError("model service URL must contain an HTTP(S) scheme and explicit port")
+    return lambda: resolved_endpoint_urls(
+        service_host,
+        scheme=parsed.scheme,
+        port=port,
+    )
+
+
+class _EndpointPool:
+    """Lease at most one request to each single-lock model Pod."""
+
+    def __init__(
+        self,
+        *,
+        profile: str,
+        resolver: EndpointResolver,
+        client_factory: HttpClientFactory,
+        expected_metadata: dict[str, Any],
+        refresh_seconds: float,
+    ) -> None:
+        if refresh_seconds <= 0:
+            raise ValueError("endpoint refresh interval must be positive")
+        self._profile = profile
+        self._resolver = resolver
+        self._client_factory = client_factory
+        self._expected_metadata = expected_metadata
+        self._refresh_seconds = refresh_seconds
+        self._condition = threading.Condition()
+        self._refresh_lock = threading.Lock()
+        self._clients: dict[str, httpx.Client] = {}
+        self._available: deque[str] = deque()
+        self._leased: set[str] = set()
+        self._stale: set[str] = set()
+        self._next_refresh = 0.0
+        self._closed = False
+        self._refresh(force=True)
+
+    def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        failed_endpoints: set[str] = set()
+        last_error: ModelServiceError | None = None
+        # A direct classifier call is side-effect free. Retry once on a
+        # different ready Pod when an endpoint disappears during HPA churn;
+        # otherwise surface the transient error so Bytewax does not advance.
+        for attempt in range(2):
+            endpoint, client = self._lease(excluding=failed_endpoints)
+            discard = False
+            try:
+                value, backend = _post_json(client, path, payload)
+            except ModelServiceError as exc:
+                last_error = exc
+                discard = True
+                failed_endpoints.add(endpoint)
+            else:
+                MODEL_CLIENT_REQUESTS.labels(self._profile, backend or endpoint, "success").inc()
+                return value
+            finally:
+                self._release(endpoint, discard=discard)
+            MODEL_CLIENT_REQUESTS.labels(self._profile, endpoint, "error").inc()
+            if attempt == 0:
+                self._refresh(force=True)
+        assert last_error is not None
+        raise last_error
+
+    def _lease(self, *, excluding: set[str]) -> tuple[str, httpx.Client]:
+        waiting = False
+        wait_started = time.monotonic()
+        try:
+            while True:
+                self._refresh(force=False)
+                with self._condition:
+                    if self._closed:
+                        raise ModelServiceError("curator model endpoint pool is closed")
+                    for _ in range(len(self._available)):
+                        endpoint = self._available.popleft()
+                        if endpoint in excluding or endpoint in self._stale:
+                            self._available.append(endpoint)
+                            continue
+                        client = self._clients.get(endpoint)
+                        if client is None:
+                            continue
+                        self._leased.add(endpoint)
+                        return endpoint, client
+                    if not any(
+                        endpoint not in excluding and endpoint not in self._stale
+                        for endpoint in self._clients
+                    ):
+                        raise ModelServiceError("no untried model Pod endpoint is available")
+                    if not waiting:
+                        waiting = True
+                        MODEL_CLIENT_WAITING.labels(self._profile).inc()
+                    self._condition.wait(timeout=min(1.0, self._refresh_seconds))
+        finally:
+            if waiting:
+                MODEL_CLIENT_WAITING.labels(self._profile).dec()
+                MODEL_CLIENT_WAIT_SECONDS.labels(self._profile).observe(
+                    time.monotonic() - wait_started
+                )
+
+    def _release(self, endpoint: str, *, discard: bool) -> None:
+        client_to_close: httpx.Client | None = None
+        with self._condition:
+            self._leased.discard(endpoint)
+            if discard or endpoint in self._stale:
+                client_to_close = self._clients.pop(endpoint, None)
+                self._stale.discard(endpoint)
+                self._available = deque(item for item in self._available if item != endpoint)
+            elif endpoint in self._clients:
+                self._available.append(endpoint)
+            MODEL_CLIENT_ENDPOINTS.labels(self._profile).set(len(self._clients))
+            self._condition.notify_all()
+        if client_to_close is not None:
+            client_to_close.close()
+
+    def _refresh(self, *, force: bool) -> None:
+        now = time.monotonic()
+        with self._condition:
+            if not force and now < self._next_refresh:
+                return
+        with self._refresh_lock:
+            now = time.monotonic()
+            with self._condition:
+                if not force and now < self._next_refresh:
+                    return
+            try:
+                resolved = set(self._resolver())
+            except ModelServiceError:
+                with self._condition:
+                    if self._clients:
+                        self._next_refresh = now + self._refresh_seconds
+                        return
+                raise
+            if not resolved:
+                with self._condition:
+                    if self._clients:
+                        self._next_refresh = now + self._refresh_seconds
+                        return
+                raise ModelServiceError("model endpoint discovery returned no ready Pods")
+
+            with self._condition:
+                current = set(self._clients)
+            additions: dict[str, httpx.Client] = {}
+            for endpoint in sorted(resolved - current):
+                client = self._client_factory(endpoint)
+                try:
+                    endpoint_metadata = _metadata(client)
+                    if endpoint_metadata != self._expected_metadata:
+                        raise ModelServiceError(f"model endpoint metadata drift at {endpoint}")
+                except Exception:
+                    client.close()
+                    continue
+                additions[endpoint] = client
+
+            clients_to_close: list[httpx.Client] = []
+            with self._condition:
+                for endpoint, client in additions.items():
+                    if endpoint not in self._clients:
+                        self._clients[endpoint] = client
+                        self._available.append(endpoint)
+                    else:
+                        clients_to_close.append(client)
+                for endpoint in set(self._clients) - resolved:
+                    if endpoint in self._leased:
+                        self._stale.add(endpoint)
+                    else:
+                        client = self._clients.pop(endpoint)
+                        clients_to_close.append(client)
+                        self._available = deque(
+                            item for item in self._available if item != endpoint
+                        )
+                self._next_refresh = now + self._refresh_seconds
+                MODEL_CLIENT_ENDPOINTS.labels(self._profile).set(len(self._clients))
+                self._condition.notify_all()
+                if not self._clients:
+                    raise ModelServiceError("no revision-matching model Pod endpoint is ready")
+            for client in clients_to_close:
+                client.close()
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            clients = list(self._clients.values())
+            self._clients.clear()
+            self._available.clear()
+            self._stale.clear()
+            MODEL_CLIENT_ENDPOINTS.labels(self._profile).set(0)
+            self._condition.notify_all()
+        for client in clients:
+            client.close()
+
+
+def _post_json(
+    client: httpx.Client,
+    path: str,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    try:
+        headers = {"Prefer": "respond-async"} if path.startswith("/v1/quality") else {}
+        response = client.post(path, json=payload, headers=headers)
+        while response.status_code == 202:
+            try:
+                job_id = response.json()["job_id"]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ModelServiceError("invalid pending quality job response") from exc
+            if not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{64}", job_id):
+                raise ModelServiceError("invalid quality job identifier")
+            # The Pod lease stays held. Long polls finish within 20 seconds;
+            # complete scientific sections have no artificial inference deadline.
+            response = client.get(f"/v1/quality-jobs/{job_id}")
+            if response.status_code == 404:
+                raise ModelServiceError("quality job was lost when its model Pod was replaced")
+    except httpx.HTTPError as exc:
+        raise ModelServiceError(f"curator model service request failed for {path}") from exc
+    if response.status_code >= 500:
+        raise ModelServiceError(f"curator model service returned {response.status_code} for {path}")
+    if response.status_code >= 400:
+        raise ValueError(f"curator model service rejected {path} with {response.status_code}")
+    try:
+        value = response.json()
+    except ValueError as exc:
+        raise ModelServiceError(f"curator model service returned invalid JSON for {path}") from exc
+    if not isinstance(value, dict):
+        raise ModelServiceError(f"curator model service returned invalid JSON for {path}")
+    return value, response.headers.get("X-S2P-Model-Backend", "").strip()
 
 
 class CuratorModelClient:
@@ -26,40 +338,107 @@ class CuratorModelClient:
         *,
         timeout_seconds: float = 180.0,
         client: httpx.Client | None = None,
+        profile: str = "combined",
+        endpoint_resolver: EndpointResolver | None = None,
+        endpoint_refresh_seconds: float = 5.0,
+        endpoint_client_factory: HttpClientFactory | None = None,
+        startup_wait_seconds: float = 0.0,
+        expected_quality_revision: str | None = None,
+        expected_classifier_protocol: str | None = None,
     ) -> None:
-        self._client = client or httpx.Client(
-            base_url=base_url.rstrip("/"),
-            timeout=httpx.Timeout(timeout_seconds, connect=10.0),
-            trust_env=False,
+        self._client = client or _new_http_client(base_url, timeout_seconds)
+        factory = endpoint_client_factory or (
+            lambda endpoint: _new_http_client(endpoint, timeout_seconds)
         )
-        try:
-            response = self._client.get("/v1/metadata")
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise ModelServiceError("curator model service metadata is unavailable") from exc
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ModelServiceError("curator model service metadata is not valid JSON") from exc
-        if not isinstance(payload, dict) or payload.get("ready") is not True:
-            raise RuntimeError("curator model service did not report ready")
-        self.metadata: dict[str, Any] = payload
+        deadline = time.monotonic() + startup_wait_seconds
+        while True:
+            try:
+                self.metadata = _metadata(self._client)
+                if (
+                    expected_classifier_protocol is not None
+                    and self.metadata.get("classifier_protocol") != expected_classifier_protocol
+                ):
+                    raise ModelServiceError("waiting for the two-stage classifier protocol")
+                if expected_quality_revision is not None:
+                    revision = (
+                        self.metadata.get("quality", {})
+                        .get("source-pretrain-quality", {})
+                        .get("revision")
+                    )
+                    if revision != expected_quality_revision:
+                        raise ModelServiceError("waiting for the release-pinned classifier bundle")
+                self._endpoint_pool = (
+                    _EndpointPool(
+                        profile=profile,
+                        resolver=endpoint_resolver,
+                        client_factory=factory,
+                        expected_metadata=self.metadata,
+                        refresh_seconds=endpoint_refresh_seconds,
+                    )
+                    if endpoint_resolver is not None
+                    else None
+                )
+                break
+            except ModelServiceError:
+                if time.monotonic() >= deadline:
+                    self._client.close()
+                    raise
+                # Recreate briefly removes headless DNS and ready backends.
+                # Wait before starting Bytewax rather than crash/replay its state.
+                time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
 
     def quality(self, model_family: str, text: str) -> QualityScore:
-        payload = self._post("/v1/quality", {"model_family": model_family, "text": text})
+        return self.quality_many(model_family, [text])[0]
+
+    def quality_many(self, model_family: str, texts: Sequence[str]) -> list[QualityScore]:
+        """Score one bounded batch while preserving input order and revisions."""
+        if not texts:
+            return []
+        request_payload = {"model_family": model_family, "texts": list(texts)}
+        # Combining otherwise valid singleton calls must never make a document
+        # fail the service's unchanged 2 MiB request limit. Fall back to the
+        # exact singleton path when only the batch envelope crosses that bound.
+        encoded_size = len(json.dumps(request_payload).encode("utf-8"))
+        if len(texts) > 1 and encoded_size > MODEL_SERVICE_MAX_REQUEST_BYTES:
+            return [self.quality_many(model_family, [text])[0] for text in texts]
+        payload = self._post(
+            "/v1/quality:batch",
+            request_payload,
+        )
+        raw_results = payload.get("results")
+        if not isinstance(raw_results, list) or len(raw_results) != len(texts):
+            raise ModelServiceError("curator model service returned invalid quality batch data")
+        scores: list[QualityScore] = []
         try:
-            score = QualityScore(
-                edu_score=float(payload["edu_score"]),
-                revision=str(payload["revision"]),
-            )
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    raise TypeError("quality batch item is not an object")
+                scores.append(
+                    QualityScore(
+                        score=float(item["score"]),
+                        revision=str(item["revision"]),
+                        confidence=(
+                            float(item["confidence"])
+                            if item.get("confidence") is not None
+                            else None
+                        ),
+                        score_class=item.get("score_class"),
+                        probabilities=tuple(item.get("probabilities", ())),
+                        tokens=int(item.get("tokens", 0)),
+                        chunks=int(item.get("chunks", 0)),
+                        model_revision=item.get("model_revision"),
+                        diagnostic_scores=item.get("diagnostic_scores"),
+                    )
+                )
         except (KeyError, TypeError, ValueError) as exc:
             raise ModelServiceError("curator model service returned invalid quality data") from exc
         expected = str(self.metadata["quality"][model_family]["revision"])
-        if score.revision != expected:
-            raise ModelServiceError(
-                f"curator model service revision drift: {score.revision} != {expected}"
-            )
-        return score
+        for score in scores:
+            if score.revision != expected:
+                raise ModelServiceError(
+                    f"curator model service revision drift: {score.revision} != {expected}"
+                )
+        return scores
 
     def perplexity(self, text: str) -> PerplexityResult:
         payload = self._post("/v1/perplexity", {"text": text})
@@ -78,43 +457,19 @@ class CuratorModelClient:
             )
         return result
 
-    def embed(self, text: str) -> list[float]:
-        payload = self._post("/v1/embed", {"text": text})
-        vector = payload.get("embedding")
-        if not isinstance(vector, list) or not vector:
-            raise ModelServiceError("curator model service returned an empty embedding")
-        try:
-            return [float(value) for value in vector]
-        except (TypeError, ValueError) as exc:
-            raise ModelServiceError("curator model service returned an invalid embedding") from exc
-
-    def _post(self, path: str, payload: dict[str, str]) -> dict[str, Any]:
-        try:
-            response = self._client.post(path, json=payload)
-        except httpx.HTTPError as exc:
-            raise ModelServiceError(f"curator model service request failed for {path}") from exc
-        if response.status_code >= 500:
-            raise ModelServiceError(
-                f"curator model service returned {response.status_code} for {path}"
-            )
-        if response.status_code >= 400:
-            raise ValueError(f"curator model service rejected {path} with {response.status_code}")
-        try:
-            value = response.json()
-        except ValueError as exc:
-            raise ModelServiceError(
-                f"curator model service returned invalid JSON for {path}"
-            ) from exc
-        if not isinstance(value, dict):
-            raise ModelServiceError(f"curator model service returned invalid JSON for {path}")
-        return value
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._endpoint_pool is not None:
+            return self._endpoint_pool.post(path, payload)
+        return _post_json(self._client, path, payload)[0]
 
     def close(self) -> None:
+        if self._endpoint_pool is not None:
+            self._endpoint_pool.close()
         self._client.close()
 
 
 class RemoteQualityClassifier:
-    """QualityClassifier-compatible facade backed by the model service."""
+    """Source-quality scorer facade backed by the model service."""
 
     def __init__(self, client: CuratorModelClient, model_family: str) -> None:
         self._client = client
@@ -142,6 +497,9 @@ class RemoteQualityClassifier:
     def score(self, text: str) -> QualityScore:
         return self._client.quality(self._model_family, text)
 
+    def score_many(self, texts: Sequence[str]) -> list[QualityScore]:
+        return self._client.quality_many(self._model_family, texts)
+
 
 class RemoteKenLMScorer:
     """KenLMScorer-compatible facade backed by the model service."""
@@ -165,48 +523,3 @@ class RemoteKenLMScorer:
 
     def score(self, text: str) -> PerplexityResult:
         return self._client.perplexity(text)
-
-
-class RemoteEmbeddingSketch:
-    """Decon-Gate embedding index using remote E5 inference."""
-
-    def __init__(self, client: CuratorModelClient) -> None:
-        self._client = client
-        metadata = client.metadata.get("embedding", {})
-        if metadata.get("backend") != "onnxruntime-cpu":
-            raise RuntimeError("the remote E5 embedding backend is not real")
-        self._revision = str(metadata.get("revision", ""))
-        if not self._revision:
-            raise RuntimeError("the remote E5 embedding backend has no revision")
-        self._index: dict[BenchmarkName, list[list[float]]] = {}
-
-    @property
-    def revision(self) -> str:
-        return self._revision
-
-    @property
-    def backend(self) -> str:
-        return "onnxruntime-cpu-remote"
-
-    def add(self, benchmark: BenchmarkName, text: str) -> None:
-        self._index.setdefault(benchmark, []).append(self._client.embed(text))
-
-    def query(self, text: str) -> Iterable[tuple[BenchmarkName, float]]:
-        if not self._index:
-            return []
-        query = self._client.embed(text)
-        return [
-            (benchmark, max((_cosine(query, vector) for vector in vectors), default=0.0))
-            for benchmark, vectors in self._index.items()
-        ]
-
-
-def _cosine(left: list[float], right: list[float]) -> float:
-    if not left or len(left) != len(right):
-        return 0.0
-    numerator = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = math.sqrt(sum(value * value for value in left))
-    right_norm = math.sqrt(sum(value * value for value in right))
-    if left_norm == 0 or right_norm == 0:
-        return 0.0
-    return numerator / (left_norm * right_norm)

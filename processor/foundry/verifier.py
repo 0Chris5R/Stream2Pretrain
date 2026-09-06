@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from processor.foundry.control import ProviderControlPlane
+from processor.foundry.symbolic import (
+    symbolic_expression_is_checkable,
+    symbolically_equivalent,
+)
 from processor.foundry.util import canonical_json, stable_id
 from schemas.foundry import (
     FoundryAnswer,
@@ -60,6 +65,40 @@ class VerifierCompiler:
         graph: PaperEvidenceGraph,
         task: TaskSpec,
     ) -> tuple[VerifierSpec, list[ProviderTrace]]:
+        if task.content_policy_revision == "scientific-reasoning-v2":
+            # The executable contract is derived solely from reviewed TaskSpec
+            # targets. The model critic may identify risks for audit, but it
+            # cannot add qualifications, targets, or predicate schemas.
+            spec = deterministic_verifier(task, bundle, graph)
+            critique_data, critic_trace = self.control.call(
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                role="verifier_critic",
+                system=_critic_system(),
+                user=_critic_prompt(bundle, graph, task, spec),
+                max_output_tokens=6_000,
+                call_key=f"verifier_critic:{task.task_id}:deterministic-v2",
+            )
+            critique, critique_repair = _validate_critic(
+                control=self.control,
+                data=critique_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"verifier_critic:{task.task_id}:deterministic-v2",
+            )
+            return (
+                spec.model_copy(
+                    update={
+                        "critic_audit": [
+                            {
+                                **_critic_audit("deterministic-v2", critique),
+                                "action": "audit_only_no_contract_mutation",
+                            }
+                        ]
+                    }
+                ),
+                [critic_trace, *([critique_repair] if critique_repair is not None else [])],
+            )
         data, compiler_trace = self.control.call(
             job_id=job_id,
             paper_id=bundle.paper_id,
@@ -69,13 +108,20 @@ class VerifierCompiler:
             max_output_tokens=8_000,
             call_key=f"verifier_compiler:{task.task_id}",
         )
-        spec = VerifierSpec.model_validate(data)
-        spec = normalize_spec(
-            spec,
-            task,
-            bundle,
-            graph,
-        )
+        compiler_findings: list[dict[str, Any]] = []
+        try:
+            raw_spec = VerifierSpec.model_validate(data)
+            spec = normalize_spec(raw_spec, task, bundle, graph)
+        except (TypeError, ValueError) as exc:
+            compiler_findings.append(
+                {
+                    "stage": "compiler_normalization",
+                    "accepted": False,
+                    "findings": [str(exc)],
+                    "action": "deterministic_fallback",
+                }
+            )
+            spec = deterministic_verifier(task, bundle, graph)
         critique_data, critic_trace = self.control.call(
             job_id=job_id,
             paper_id=bundle.paper_id,
@@ -85,8 +131,19 @@ class VerifierCompiler:
             max_output_tokens=6_000,
             call_key=f"verifier_critic:{task.task_id}",
         )
-        critique = VerifierCritique.model_validate(critique_data)
-        traces = [compiler_trace, critic_trace]
+        critique, critique_repair = _validate_critic(
+            control=self.control,
+            data=critique_data,
+            job_id=job_id,
+            paper_id=bundle.paper_id,
+            call_key=f"verifier_critic:{task.task_id}",
+        )
+        critic_audit = [*compiler_findings, _critic_audit("initial", critique)]
+        traces = [
+            compiler_trace,
+            critic_trace,
+            *([critique_repair] if critique_repair is not None else []),
+        ]
         if not critique.accepted:
             repair_data, repair_trace = self.control.call(
                 job_id=job_id,
@@ -98,12 +155,23 @@ class VerifierCompiler:
                 call_key=f"verifier_repair:{task.task_id}",
             )
             traces.append(repair_trace)
-            spec = normalize_spec(
-                VerifierSpec.model_validate(repair_data),
-                task,
-                bundle,
-                graph,
-            )
+            try:
+                spec = normalize_spec(
+                    VerifierSpec.model_validate(repair_data),
+                    task,
+                    bundle,
+                    graph,
+                )
+            except ValueError as exc:
+                critic_audit.append(
+                    {
+                        "stage": "repair_normalization",
+                        "accepted": False,
+                        "findings": [str(exc)],
+                        "action": "deterministic_fallback",
+                    }
+                )
+                spec = deterministic_verifier(task, bundle, graph)
             recheck_data, recheck_trace = self.control.call(
                 job_id=job_id,
                 paper_id=bundle.paper_id,
@@ -114,10 +182,71 @@ class VerifierCompiler:
                 call_key=f"verifier_critic:{task.task_id}:post_repair",
             )
             traces.append(recheck_trace)
-            recheck = VerifierCritique.model_validate(recheck_data)
+            recheck, recheck_repair = _validate_critic(
+                control=self.control,
+                data=recheck_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"verifier_critic:{task.task_id}:post_repair",
+            )
+            if recheck_repair is not None:
+                traces.append(recheck_repair)
+            critic_audit.append(_critic_audit("post_repair", recheck))
             if not recheck.accepted:
-                raise ValueError("independent verifier critic rejected the bounded repair")
-        return spec, traces
+                # A model critic may identify a real risk, but it is not itself
+                # a deterministic verifier. Fall back to the task-derived
+                # verifier and let the complete executable suite decide.
+                spec = deterministic_verifier(task, bundle, graph)
+                critic_audit.append(
+                    {
+                        "stage": "post_repair",
+                        "accepted": False,
+                        "findings": ["bounded repair rejected by independent critic"],
+                        "action": "deterministic_fallback",
+                    }
+                )
+        return spec.model_copy(update={"critic_audit": critic_audit}), traces
+
+
+def _validate_critic(
+    *,
+    control: ProviderControlPlane,
+    data: dict[str, Any] | list[Any],
+    job_id: str,
+    paper_id: str,
+    call_key: str,
+) -> tuple[VerifierCritique, ProviderTrace | None]:
+    try:
+        return VerifierCritique.model_validate(data), None
+    except ValueError as initial_error:
+        repair_data, repair_trace = control.call(
+            job_id=job_id,
+            paper_id=paper_id,
+            role="final_repair",
+            system=(
+                "Repair a verifier critique to the exact JSON schema. Preserve its scientific "
+                "judgment and findings; change only invalid structure or field types."
+            ),
+            user=(
+                f"VALIDATION_ERROR:\n{initial_error}\n"
+                f"REQUIRED_JSON_SCHEMA:\n"
+                f"{canonical_json(VerifierCritique.model_json_schema()).decode()}\n"
+                f"INVALID_CRITIQUE:\n{canonical_json(data).decode()}"
+            ),
+            max_output_tokens=6_000,
+            call_key=f"schema_repair:{call_key}",
+        )
+        try:
+            return VerifierCritique.model_validate(repair_data), repair_trace
+        except ValueError:
+            return (
+                VerifierCritique(
+                    accepted=False,
+                    findings=["verifier critic remained structurally invalid after repair"],
+                    false_positive_risks=["independent critic result unavailable"],
+                ),
+                repair_trace,
+            )
 
 
 def normalize_spec(
@@ -135,6 +264,13 @@ def normalize_spec(
         for edge in task.hidden_targets.required_relations
         if edge.relation == "precedes"
     ]
+    node_types = {node.id: node.type for node in graph.nodes}
+    derivation_order = _derivation_order(task, node_types)
+    required_relations_config = {
+        "relations": [
+            edge.model_dump(mode="json") for edge in task.hidden_targets.required_relations
+        ]
+    }
     predicates: list[VerifierPredicate] = []
     for raw_predicate in spec.predicates:
         predicate = raw_predicate
@@ -167,6 +303,8 @@ def normalize_spec(
                 }
             )
         elif predicate.type == "evidence_membership":
+            if task.family == "derivation_completion":
+                continue
             predicate = predicate.model_copy(
                 update={
                     "target": None,
@@ -175,6 +313,8 @@ def normalize_spec(
                 }
             )
         elif predicate.type == "evidence_coverage":
+            if task.family == "derivation_completion":
+                continue
             config = dict(predicate.config)
             if task.hidden_targets.accepted_evidence_sets:
                 config["accepted_sets"] = task.hidden_targets.accepted_evidence_sets
@@ -188,7 +328,13 @@ def normalize_spec(
         elif predicate.type == "required_relations":
             if not task.hidden_targets.required_relations:
                 continue
-            predicate = predicate.model_copy(update={"target": None, "targets": []})
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": [],
+                    "config": required_relations_config,
+                }
+            )
         elif predicate.type == "method_partial_order":
             if not method_order:
                 continue
@@ -197,6 +343,16 @@ def normalize_spec(
                     "target": None,
                     "targets": [],
                     "config": {"precedes": method_order},
+                }
+            )
+        elif predicate.type == "derivation_partial_order":
+            if not derivation_order:
+                continue
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": [],
+                    "config": {"precedes": derivation_order},
                 }
             )
         elif predicate.type == "required_qualifications":
@@ -208,28 +364,63 @@ def normalize_spec(
                     "targets": list(task.hidden_targets.required_qualifications),
                 }
             )
-        elif predicate.type == "numeric_tolerance" and predicate.target in expected_values:
-            expected = expected_values[str(predicate.target)]
-            if not isinstance(expected, (int, float)) or isinstance(expected, bool):
-                raise ValueError(
-                    f"numeric predicate {predicate.id} targets non-numeric expected value"
+        elif predicate.type == "numeric_tolerance":
+            numeric_ids = [
+                key
+                for key, value in expected_values.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            target = predicate.target
+            if target not in expected_values and len(numeric_ids) == 1:
+                target = numeric_ids[0]
+            expected = expected_values.get(str(target)) if target else None
+            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                numeric_expected = float(expected)
+                predicate = predicate.model_copy(
+                    update={
+                        "target": target,
+                        "expected": numeric_expected,
+                        "tolerance": _numeric_tolerance(numeric_expected),
+                    }
                 )
-            predicate = predicate.model_copy(update={"expected": float(expected)})
-        elif predicate.type == "symbolic_equivalence" and predicate.target in expected_values:
-            expected = expected_values[str(predicate.target)]
+            elif isinstance(expected, str) and task.family == "derivation_completion":
+                predicate = VerifierPredicate(
+                    id=predicate.id,
+                    type="symbolic_equivalence",
+                    target=str(target),
+                    expected=expected,
+                    weight=predicate.weight,
+                    required=predicate.required,
+                )
+            elif isinstance(expected, str):
+                predicate = VerifierPredicate(
+                    id=predicate.id,
+                    type="configuration_constraints",
+                    weight=predicate.weight,
+                    required=predicate.required,
+                    config={"constraints": {"required_values": {str(target): expected}}},
+                )
+            else:
+                continue
+        elif predicate.type == "symbolic_equivalence":
+            symbolic_ids = [key for key, value in expected_values.items() if isinstance(value, str)]
+            target = predicate.target
+            if target not in expected_values and len(symbolic_ids) == 1:
+                target = symbolic_ids[0]
+            if target not in expected_values:
+                continue
+            expected = expected_values[str(target)]
             if not isinstance(expected, str):
-                raise ValueError(
-                    f"symbolic predicate {predicate.id} targets non-symbolic expected value"
-                )
+                continue
             if task.family == "derivation_completion":
-                predicate = predicate.model_copy(update={"expected": expected})
+                predicate = predicate.model_copy(update={"target": target, "expected": expected})
             else:
                 predicate = VerifierPredicate(
                     id=predicate.id,
                     type="configuration_constraints",
                     weight=predicate.weight,
                     required=predicate.required,
-                    config={"constraints": {"required_values": {predicate.target: expected}}},
+                    config={"constraints": {"required_values": {str(target): expected}}},
                 )
         elif predicate.type == "fault_identification":
             if not task.hidden_targets.required_faults:
@@ -246,6 +437,16 @@ def normalize_spec(
                     "target": None,
                     "targets": list(task.hidden_targets.required_faults),
                     "config": config,
+                }
+            )
+        elif predicate.type == "forbidden_faults":
+            if not task.hidden_targets.forbidden_faults:
+                continue
+            predicate = predicate.model_copy(
+                update={
+                    "target": None,
+                    "targets": list(task.hidden_targets.forbidden_faults),
+                    "config": {},
                 }
             )
         elif predicate.type == "configuration_constraints":
@@ -306,7 +507,7 @@ def normalize_spec(
             weight=0.0,
             required=True,
         )
-    if task.hidden_targets.accepted_evidence_sets:
+    if task.hidden_targets.accepted_evidence_sets and task.family != "derivation_completion":
         baseline["evidence_membership"] = VerifierPredicate(
             id="hard:evidence_membership",
             type="evidence_membership",
@@ -327,6 +528,7 @@ def normalize_spec(
             type="required_relations",
             weight=0.0,
             required=True,
+            config=required_relations_config,
         )
         if method_order:
             baseline["method_partial_order"] = VerifierPredicate(
@@ -335,6 +537,14 @@ def normalize_spec(
                 weight=0.0,
                 required=True,
                 config={"precedes": method_order},
+            )
+        if task.family == "derivation_completion" and derivation_order:
+            baseline["derivation_partial_order"] = VerifierPredicate(
+                id="hard:derivation_partial_order",
+                type="derivation_partial_order",
+                weight=0.0,
+                required=True,
+                config={"precedes": derivation_order},
             )
     if task.hidden_targets.required_qualifications:
         baseline["required_qualifications"] = VerifierPredicate(
@@ -352,6 +562,14 @@ def normalize_spec(
             weight=0.0,
             required=True,
             config={"forbidden": task.hidden_targets.forbidden_faults},
+        )
+    if task.hidden_targets.forbidden_faults:
+        baseline["forbidden_faults"] = VerifierPredicate(
+            id="hard:forbidden_faults",
+            type="forbidden_faults",
+            targets=task.hidden_targets.forbidden_faults,
+            weight=0.0,
+            required=True,
         )
     if task.hidden_targets.configuration_constraints:
         baseline["configuration_constraints"] = VerifierPredicate(
@@ -373,10 +591,33 @@ def normalize_spec(
         if isinstance(expected, (int, float)) and not isinstance(expected, bool)
     }
     missing_numeric_targets = required_numeric_targets - numeric_targets
-    if missing_numeric_targets:
-        raise ValueError(
-            "verifier omitted numeric predicates for expected targets: "
-            + ", ".join(sorted(missing_numeric_targets))
+    for target in sorted(missing_numeric_targets):
+        expected = float(expected_values[target])
+        predicates.append(
+            VerifierPredicate(
+                id=f"hard:numeric:{target}",
+                type="numeric_tolerance",
+                target=target,
+                expected=expected,
+                tolerance=_numeric_tolerance(expected),
+                weight=1.0,
+                required=True,
+            )
+        )
+    discrete_targets = {
+        key: expected
+        for key, expected in expected_values.items()
+        if isinstance(expected, str) and task.family != "derivation_completion"
+    }
+    for target, expected in sorted(discrete_targets.items()):
+        predicates.append(
+            VerifierPredicate(
+                id=f"hard:expected:{target}",
+                type="configuration_constraints",
+                weight=1.0,
+                required=True,
+                config={"constraints": {"required_values": {target: expected}}},
+            )
         )
     if task.family == "derivation_completion":
         symbolic_targets = {
@@ -385,11 +626,42 @@ def normalize_spec(
             if predicate.type == "symbolic_equivalence" and predicate.target
         }
         for target, expected in expected_values.items():
-            if not isinstance(expected, str) or target in symbolic_targets:
+            if (
+                not isinstance(expected, str)
+                or target in symbolic_targets
+                or not symbolic_expression_is_checkable(expected)
+            ):
                 continue
             predicates.append(
                 VerifierPredicate(
                     id=f"hard:symbolic:{target}",
+                    type="symbolic_equivalence",
+                    target=target,
+                    expected=expected,
+                    weight=1.0,
+                    required=True,
+                )
+            )
+        graph_by_id = {node.id: node for node in graph.nodes}
+        symbolic_targets.update(
+            predicate.target
+            for predicate in predicates
+            if predicate.type == "symbolic_equivalence" and predicate.target
+        )
+        for target in task.hidden_targets.required_nodes:
+            node = graph_by_id.get(target)
+            expected = node.canonical_symbolic_form or node.latex if node is not None else None
+            if (
+                node is None
+                or node.type != "equation"
+                or target in symbolic_targets
+                or not expected
+                or not symbolic_expression_is_checkable(expected)
+            ):
+                continue
+            predicates.append(
+                VerifierPredicate(
+                    id=f"hard:symbolic-node:{target}",
                     type="symbolic_equivalence",
                     target=target,
                     expected=expected,
@@ -407,18 +679,127 @@ def normalize_spec(
                 ) from exc
     predicates.extend(predicate for key, predicate in baseline.items() if key not in existing_types)
     if not any(predicate.weight > 0 for predicate in predicates):
-        raise ValueError("verifier needs at least one weighted outcome predicate")
+        outcome_order = (
+            "numeric_tolerance",
+            "symbolic_equivalence",
+            "required_relations",
+            "method_partial_order",
+            "derivation_partial_order",
+            "required_nodes",
+            "evidence_coverage",
+            "fault_identification",
+            "forbidden_faults",
+            "configuration_constraints",
+            "report_manifest_consistency",
+            "manifest_required",
+        )
+        selected_index = next(
+            (
+                index
+                for predicate_type in outcome_order
+                for index, predicate in enumerate(predicates)
+                if predicate.type == predicate_type
+            ),
+            None,
+        )
+        if selected_index is None:
+            raise ValueError("verifier has no executable outcome predicate")
+        predicates[selected_index] = predicates[selected_index].model_copy(update={"weight": 1.0})
     return spec.model_copy(
         update={
-            "verifier_id": stable_id("verifier", task.task_id, "v1"),
+            "verifier_id": stable_id(
+                "verifier",
+                task.task_id,
+                task.content_policy_revision,
+            ),
             "task_id": task.task_id,
-            "version": max(1, spec.version),
+            "version": max(
+                2 if task.content_policy_revision == "scientific-reasoning-v2" else 1,
+                spec.version,
+            ),
             "predicates": predicates,
             "runtime_dependencies": sorted(set([*spec.runtime_dependencies, "sympy==1.13.3"])),
             "network_required": False,
             "determinism_seed": _task_seed(task.task_id),
         }
     )
+
+
+def deterministic_verifier(
+    task: TaskSpec,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+) -> VerifierSpec:
+    """Compile the hidden TaskSpec contract without another model call."""
+    return normalize_spec(
+        VerifierSpec(
+            verifier_id="deterministic-task-contract",
+            task_id=task.task_id,
+            version=1,
+            predicates=[],
+            runtime_dependencies=[],
+            network_required=False,
+            determinism_seed=0,
+        ),
+        task,
+        bundle,
+        graph,
+    )
+
+
+def deterministic_sft_verifier(
+    task: TaskSpec,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+) -> VerifierSpec:
+    """Compile a supervised-target contract without RL graph-format gates."""
+    full = deterministic_verifier(task, bundle, graph)
+    allowed = {
+        "nonempty_report",
+        "manifest_required",
+        "report_manifest_consistency",
+        "numeric_tolerance",
+        "symbolic_equivalence",
+        "configuration_constraints",
+    }
+    predicates = [
+        predicate
+        for predicate in full.predicates
+        if predicate.type in allowed
+        and not (
+            predicate.type == "symbolic_equivalence"
+            and predicate.target not in task.hidden_targets.expected_values
+        )
+    ]
+    if not any(predicate.weight > 0 for predicate in predicates):
+        selected = next(
+            (
+                index
+                for preferred in ("report_manifest_consistency", "nonempty_report")
+                for index, predicate in enumerate(predicates)
+                if predicate.type == preferred
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError("SFT verifier has no answer-facing predicate")
+        predicates[selected] = predicates[selected].model_copy(update={"weight": 1.0})
+    return full.model_copy(update={"predicates": predicates})
+
+
+def _numeric_tolerance(expected: float) -> float:
+    return max(1e-9, abs(expected) * 1e-6)
+
+
+def _critic_audit(stage: str, critique: VerifierCritique) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "accepted": critique.accepted,
+        "findings": list(critique.findings),
+        "false_positive_risks": list(critique.false_positive_risks),
+        "false_negative_risks": list(critique.false_negative_risks),
+        "repair_instructions": list(critique.repair_instructions),
+    }
 
 
 def evaluate(
@@ -491,10 +872,17 @@ def _evaluate_predicate(
         details = f"{count} structured commitments"
     elif predicate.type in {"required_nodes", "required_dependency_nodes"}:
         targets = set(predicate.targets or ([predicate.target] if predicate.target else []))
-        overlap = targets & committed
-        passed = targets <= committed
-        score = len(overlap) / len(targets) if targets else 1.0
-        details = f"resolved {len(overlap)}/{len(targets)} required nodes"
+        resolved = targets & committed
+        if task.family == "derivation_completion":
+            node_types = {node.id: node.type for node in graph.nodes}
+            submitted_equations = {equation.id for equation in manifest.equations}
+            equation_targets = {
+                target for target in targets if node_types.get(target) == "equation"
+            }
+            resolved = (resolved - equation_targets) | (equation_targets & submitted_equations)
+        passed = targets <= resolved
+        score = len(resolved) / len(targets) if targets else 1.0
+        details = f"resolved {len(resolved)}/{len(targets)} required nodes"
     elif predicate.type == "forbidden_nodes":
         targets = set(predicate.targets)
         passed = not (targets & committed)
@@ -529,7 +917,7 @@ def _evaluate_predicate(
             if not predicate.target or equation.id == predicate.target
         ]
         passed = bool(expected) and any(
-            _symbolically_equivalent(value, str(expected)) for value in comparisons
+            _symbolic_submission_matches(value, str(expected)) for value in comparisons
         )
         score = float(passed)
         details = f"checked {len(comparisons)} submitted equations"
@@ -565,6 +953,15 @@ def _evaluate_predicate(
         passed = bool(checks) and all(checks)
         score = sum(checks) / len(checks) if checks else 0.0
         details = f"{sum(checks)}/{len(checks)} ordering edges valid"
+    elif predicate.type == "derivation_partial_order":
+        order = {equation.id: index for index, equation in enumerate(manifest.equations)}
+        pairs = predicate.config.get("precedes", [])
+        checks = [
+            left in order and right in order and order[left] < order[right] for left, right in pairs
+        ]
+        passed = bool(checks) and all(checks)
+        score = sum(checks) / len(checks) if checks else 0.0
+        details = f"{sum(checks)}/{len(checks)} derivation edges ordered"
     elif predicate.type == "fault_identification":
         targets = set(predicate.targets)
         forbidden = set(predicate.config.get("forbidden", []))
@@ -572,10 +969,19 @@ def _evaluate_predicate(
         passed = targets <= submitted and not (forbidden & submitted) and not (submitted - targets)
         score = len(targets & submitted) / len(targets | submitted) if targets | submitted else 0.0
         details = f"fault overlap {sorted(targets & submitted)}"
+    elif predicate.type == "forbidden_faults":
+        forbidden = set(predicate.targets)
+        submitted = set(manifest.faults)
+        overlap = forbidden & submitted
+        passed = not overlap
+        score = float(passed)
+        details = f"forbidden fault overlap: {sorted(overlap)}"
     elif predicate.type == "required_relations":
         required_relations = {
-            (edge.source, edge.relation, edge.target)
-            for edge in task.hidden_targets.required_relations
+            (str(edge["source"]), str(edge["relation"]), str(edge["target"]))
+            for edge in predicate.config.get("relations", [])
+            if isinstance(edge, dict)
+            and all(key in edge for key in ("source", "relation", "target"))
         }
         submitted_relations = {
             (edge.source, edge.relation, edge.target) for edge in manifest.relations
@@ -597,9 +1003,13 @@ def _evaluate_predicate(
             predicate.config.get("constraints", task.hidden_targets.configuration_constraints),
         )
     elif predicate.type == "report_manifest_consistency":
-        passed = bool(answer.report.strip()) and bool(committed | set(manifest.evidence))
+        present = bool(answer.report.strip()) and bool(committed | set(manifest.evidence))
+        if present and task.content_policy_revision == "scientific-reasoning-v2":
+            passed, details = _scientific_report_consistency(answer, task, committed)
+        else:
+            passed = present
+            details = "report and structured manifest are both present"
         score = float(passed)
-        details = "report and structured manifest are both present"
     else:
         details = f"unsupported predicate {predicate.type}"
     return PredicateResult(
@@ -609,6 +1019,122 @@ def _evaluate_predicate(
         required=predicate.required,
         details=details,
     )
+
+
+_REPORT_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_])([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)(\s*%)?"
+)
+_MATH_SEGMENT = re.compile(r"(?:\$+|\\\(|\\\[)?([^\n;]+=[^\n;]+?)(?:\$+|\\\)|\\\])?(?:$|[.;])")
+_INTERNAL_ID_TOKEN = re.compile(
+    r"^(?:eq|equation|node|span|claim|method|fault|table|figure|fig|result)[-_:.]?\d+$",
+    re.IGNORECASE,
+)
+
+
+def _scientific_report_consistency(
+    answer: FoundryAnswer,
+    task: TaskSpec,
+    committed: set[str],
+) -> tuple[bool, str]:
+    """Require answer-facing scientific results, not hidden-manifest gaming."""
+    report = answer.report.strip()
+    failures: list[str] = []
+    if _report_is_internal_id_listing(report, committed):
+        failures.append("report only lists internal manifest identifiers")
+
+    for target, expected in task.hidden_targets.expected_values.items():
+        if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+            tolerance = _report_numeric_tolerance(float(expected))
+            if not _numeric_value_appears(report, float(expected), tolerance):
+                failures.append(f"numeric target {target} is absent from the report")
+        elif (
+            isinstance(expected, str)
+            and task.family == "derivation_completion"
+            and symbolic_expression_is_checkable(expected)
+            and not _symbolic_value_appears(report, expected)
+        ):
+            failures.append(f"symbolic target {target} is absent from the report")
+        elif (
+            isinstance(expected, str)
+            and task.family != "derivation_completion"
+            and expected.casefold() not in report.casefold()
+        ):
+            failures.append(f"discrete target {target} is absent from the report")
+
+    required_values = task.hidden_targets.configuration_constraints.get("required_values", {})
+    if isinstance(required_values, dict):
+        for target, expected in required_values.items():
+            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                if not _numeric_value_appears(
+                    report,
+                    float(expected),
+                    _report_numeric_tolerance(float(expected)),
+                ):
+                    failures.append(f"configuration value {target} is absent from the report")
+            elif isinstance(expected, str) and expected.casefold() not in report.casefold():
+                failures.append(f"configuration value {target} is absent from the report")
+
+    if failures:
+        return False, "; ".join(failures)
+    return True, "report exposes the checked scientific result and agrees with the manifest"
+
+
+def _numeric_value_appears(report: str, expected: float, tolerance: float) -> bool:
+    for raw, percent in _REPORT_NUMBER.findall(report.replace(",", "")):
+        try:
+            value = float(raw)
+            candidates = (value, value / 100.0) if percent else (value,)
+            if any(abs(candidate - expected) <= tolerance for candidate in candidates):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _report_numeric_tolerance(expected: float) -> float:
+    """Permit ordinary displayed rounding while the manifest stays exact."""
+    return max(_numeric_tolerance(expected), abs(expected) * 5e-4, 1e-8)
+
+
+def _symbolic_submission_matches(submitted: str, expected: str) -> bool:
+    """Accept a canonical result alone or as one side of a submitted equality."""
+    if symbolically_equivalent(submitted, expected):
+        return True
+    return any(
+        symbolically_equivalent(component.strip(), expected)
+        for component in submitted.split("=")
+        if component.strip()
+    )
+
+
+def _symbolic_value_appears(report: str, expected: str) -> bool:
+    compact_expected = re.sub(r"\s+", "", expected).strip("$\\()[]")
+    compact_report = re.sub(r"\s+", "", report)
+    if compact_expected and compact_expected in compact_report:
+        return True
+    for candidate in _MATH_SEGMENT.findall(report):
+        cleaned = candidate.strip().strip("$\\()[] .")
+        try:
+            if symbolically_equivalent(cleaned, expected):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _report_is_internal_id_listing(report: str, committed: set[str]) -> bool:
+    tokens = [token for token in re.split(r"[\s,;|]+", report.strip()) if token]
+    if not tokens:
+        return True
+    normalized_committed = {value.casefold().strip(".,:;()[]{}") for value in committed}
+    substantive = [
+        token
+        for token in tokens
+        if token.casefold().strip(".,:;()[]{}") not in normalized_committed
+        and not _INTERNAL_ID_TOKEN.fullmatch(token.strip(".,:;()[]{}"))
+        and any(character.isalpha() for character in token)
+    ]
+    return not substantive
 
 
 def _configuration_constraints(
@@ -645,31 +1171,20 @@ def _configuration_constraints(
     return all(checks), score, f"{sum(checks)}/{len(checks)} configuration checks passed"
 
 
-def _symbolically_equivalent(left: str, right: str) -> bool:
-    try:
-        import sympy
-
-        left_expr = _sympy_parse(left)
-        right_expr = _sympy_parse(right)
-        return bool(sympy.simplify(left_expr - right_expr) == 0)
-    except Exception:
-        return _normalize_expression(left) == _normalize_expression(right)
-
-
-def _sympy_parse(value: str) -> Any:
-    normalized = value.strip().strip("$")
-    if len(normalized) > 2_000:
-        raise ValueError("symbolic answer exceeds safe length bound")
-    try:
-        from sympy.parsing.latex import parse_latex
-
-        return parse_latex(normalized)
-    except Exception as exc:
-        raise ValueError("symbolic answer is not parseable LaTeX") from exc
-
-
-def _normalize_expression(value: str) -> str:
-    return re.sub(r"\s+|\\left|\\right|\$", "", value).replace("^", "**")
+def _derivation_order(task: TaskSpec, node_types: Mapping[str, str]) -> list[list[str]]:
+    pairs: list[list[str]] = []
+    for edge in task.hidden_targets.required_relations:
+        if node_types.get(edge.source) != "equation" or node_types.get(edge.target) != "equation":
+            continue
+        if edge.relation in {"precedes", "derives", "enables", "produces"}:
+            pair = [edge.source, edge.target]
+        elif edge.relation in {"depends_on", "uses"}:
+            pair = [edge.target, edge.source]
+        else:
+            continue
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs
 
 
 def _task_seed(task_id: str) -> int:
@@ -682,9 +1197,13 @@ def _compiler_system() -> str:
 predicate types: nonempty_report, manifest_required, required_nodes, forbidden_nodes,
 required_dependency_nodes, evidence_membership, evidence_coverage, symbolic_equivalence,
 numeric_tolerance, method_partial_order, fault_identification, required_relations,
+derivation_partial_order,
 required_qualifications, configuration_constraints, report_manifest_consistency.
 Return one JSON VerifierSpec. Use finite hidden targets, hard gates,
 weighted outcome checks, no prose judgement, no network, and no executable model-generated code.
+Every requested numeric or symbolic result must have an outcome check; graph membership or correct edge
+ordering alone cannot verify a derivation or quantitative consequence. Use only justified tolerances and
+check equivalent expressions without requiring one arbitrary algebraic form.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -705,7 +1224,11 @@ false negatives, equivalent correct answers, missing hard gates, reward hacks, c
 and brittle ordering or tolerance checks. Return strict JSON with accepted, findings,
 false_positive_risks, false_negative_risks, repair_instructions. Set accepted=false only when a
 listed risk is release-blocking and requires a repair; accepted=true may retain explicitly
-documented residual risks that do not invalidate the deterministic verifier. The response must
+documented residual risks that do not invalidate the deterministic verifier. Test whether an answer with
+correct identifiers but wrong scientific results could pass. Missing requested
+numeric or symbolic outcome checks are release-blocking. Correct algebraic equivalences, reordered
+independent steps and valid alternative calculations must not fail for a preferred serialization.
+The response must
 validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -745,6 +1268,8 @@ __all__ = [
     "RewardResult",
     "VerifierCompiler",
     "VerifierCritique",
+    "deterministic_sft_verifier",
+    "deterministic_verifier",
     "evaluate",
     "normalize_spec",
 ]

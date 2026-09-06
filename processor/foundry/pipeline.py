@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,12 +16,23 @@ from processor.foundry.paper_adapter import bundle_json, paper_bundle_from_gold
 from processor.foundry.providers import ProviderError, ProviderOutputError
 from processor.foundry.quota import QuotaExceededError
 from processor.foundry.store import FoundryStore
-from processor.foundry.tasking import SolvedTask, TaskFactory, TaskOutputError
+from processor.foundry.tasking import (
+    SolvedTask,
+    SolverFailure,
+    TaskFactory,
+    TaskOutputError,
+    TrajectoryGroundingDecision,
+    grounding_decision_blocks,
+)
 from processor.foundry.util import canonical_json, sha256, stable_id
-from processor.foundry.validation import run_acceptance_suite, suite_passes
-from processor.foundry.verifier import VerifierCompiler
+from processor.foundry.validation import run_acceptance_suite, sft_suite_passes, suite_passes
+from processor.foundry.verifier import (
+    VerifierCompiler,
+    deterministic_sft_verifier,
+)
 from schemas.foundry import (
     DatasetSplit,
+    FoundryAnswer,
     FoundryArtifactRecord,
     FoundryEvent,
     OfficialArtifact,
@@ -34,6 +44,7 @@ from schemas.foundry import (
     TaskSpec,
     Trajectory,
     ValidationReport,
+    VerifierSpec,
 )
 from schemas.gold import GoldRecord
 from schemas.scientific import ScientificDocument
@@ -50,6 +61,25 @@ class PipelineResult:
     final_state: str
     artifacts: list[FoundryArtifactRecord]
     rejection_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectorySuite:
+    """One independently validated generated trajectory and its audit cases."""
+
+    trajectory: Trajectory
+    report: ValidationReport
+    cases: dict[str, list[FoundryAnswer]]
+
+
+@dataclass(frozen=True, slots=True)
+class UnsolvedTask:
+    """A routed task that failed before any valid trajectory could be audited."""
+
+    task: TaskSpec
+    reason: str
+    traces: tuple[ProviderTrace, ...]
+    solver_failures: tuple[SolverFailure, ...]
 
 
 class FoundryPipeline:
@@ -165,7 +195,7 @@ class FoundryPipeline:
                 },
             )
             solved: list[SolvedTask] = []
-            task_failures: list[str] = []
+            task_failures: list[UnsolvedTask] = []
             for task in tasks:
                 try:
                     solved.append(
@@ -177,8 +207,16 @@ class FoundryPipeline:
                         )
                     )
                 except TaskOutputError as exc:
-                    task_failures.append(f"{task.task_id}: {exc}")
-            if not solved:
+                    task_failures.append(
+                        UnsolvedTask(
+                            task=task,
+                            reason=str(exc),
+                            traces=exc.traces,
+                            solver_failures=exc.solver_failures,
+                        )
+                    )
+            unsolved_sft = [value for value in task_failures if value.task.route == "sft"]
+            if not solved and not unsolved_sft:
                 raise ValueError("no task produced a valid solution after bounded repairs")
             self._transition(
                 job_id,
@@ -198,6 +236,7 @@ class FoundryPipeline:
                 solved=solved,
                 common_traces=[*graph_traces, *task_traces],
                 oracle_results=oracle_results,
+                unsolved_sft=unsolved_sft,
             )
         except ProviderOutputError as exc:
             # A completed but malformed structured response is deterministic
@@ -279,73 +318,157 @@ class FoundryPipeline:
         solved: list[SolvedTask],
         common_traces: list[ProviderTrace],
         oracle_results: list[OracleResult],
+        unsolved_sft: list[UnsolvedTask] | None = None,
     ) -> list[FoundryArtifactRecord]:
-        artifacts: list[FoundryArtifactRecord] = []
+        artifacts = [
+            self._rejected_artifact(
+                job_id=job_id,
+                bundle=bundle,
+                task=failure.task,
+                traces=[*common_traces, *failure.traces],
+                reason="routed SFT task produced no valid trajectory",
+                details={
+                    "failure_stage": "solution_generation",
+                    "task": failure.task.model_dump(mode="json"),
+                    "task_failure": failure.reason,
+                    "solver_failures": [
+                        solver_failure.audit() for solver_failure in failure.solver_failures
+                    ],
+                    "prompt_trace_ids": list(
+                        dict.fromkeys(
+                            [
+                                *failure.task.construction_provenance,
+                                *(trace.trace_id for trace in failure.traces),
+                            ]
+                        )
+                    ),
+                },
+            )
+            for failure in (unsolved_sft or [])
+        ]
         verifiers_compiled = 0
         adversarial_validated = 0
         for value in solved:
             task_traces = [*common_traces, *value.traces]
-            if not value.critic.accepted:
-                artifacts.append(
-                    self._rejected_artifact(
-                        job_id=job_id,
-                        bundle=bundle,
-                        task=value.task,
-                        traces=task_traces,
-                        reason="grounding critic gate failed",
-                    )
+            decisions = {decision.trajectory_id: decision for decision in value.critic.decisions}
+            grounded: list[Trajectory] = []
+            critic_rejected: list[tuple[Trajectory, TrajectoryGroundingDecision]] = []
+            for trajectory in value.trajectories:
+                decision = decisions.get(
+                    trajectory.trajectory_id,
+                    TrajectoryGroundingDecision(
+                        trajectory_id=trajectory.trajectory_id,
+                        scientifically_grounded=False,
+                        findings=["grounding critic omitted this trajectory"],
+                        unsupported_claims=["trajectory was not independently reviewed"],
+                    ),
                 )
-                continue
+                audited = _with_grounding_decision(trajectory, decision)
+                if grounding_decision_blocks(decision):
+                    critic_rejected.append((audited, decision))
+                else:
+                    grounded.append(audited)
+
             if value.task.route == "sft":
-                report, trajectories = _validate_sft(
-                    value,
-                    bundle,
-                    graph,
-                )
-                if not report.positive_pass:
+                for trajectory, decision in critic_rejected:
                     artifacts.append(
                         self._rejected_artifact(
                             job_id=job_id,
                             bundle=bundle,
                             task=value.task,
                             traces=task_traces,
-                            reason="SFT grounding/manifest gate failed",
-                            validation=report,
+                            reason="trajectory scientific grounding gate failed",
+                            trajectory=trajectory,
+                            details={"grounding_decision": decision.model_dump(mode="json")},
                         )
                     )
+                suites = _validate_trajectories(
+                    task=value.task,
+                    bundle=bundle,
+                    graph=graph,
+                    trajectories=grounded,
+                    verifier=deterministic_sft_verifier(value.task, bundle, graph),
+                    detail_context={
+                        "route": "sft",
+                        "grounding_critic": value.critic.model_dump(mode="json"),
+                        "solver_failures": [failure.audit() for failure in value.solution_failures],
+                    },
+                )
+                accepted_suites = [suite for suite in suites if sft_suite_passes(suite.report)]
+                for suite in suites:
+                    if sft_suite_passes(suite.report):
+                        continue
+                    artifacts.append(
+                        self._rejected_artifact(
+                            job_id=job_id,
+                            bundle=bundle,
+                            task=value.task,
+                            traces=task_traces,
+                            reason="trajectory deterministic SFT contract failed",
+                            validation=suite.report,
+                            trajectory=suite.trajectory,
+                        )
+                    )
+                if not accepted_suites:
                     continue
                 pool: PosttrainPool = "sft"
                 dataset_split, _pool_ordinal = self.store.assign_pool_split(
                     allocation_key=f"{pool}:{bundle.paper_family_id}",
                     pool=pool,
                 )
-                package = self.packager.build(
-                    bundle=bundle,
-                    graph=graph,
-                    task=value.task,
-                    trajectories=trajectories,
-                    validation=report,
-                    traces=task_traces,
-                    verifier=None,
-                    pool=pool,
-                    dataset_split=dataset_split,
-                    oracle_results=oracle_results,
-                )
-                uri = self.package_sink.write(
-                    package, paper_id=bundle.paper_id, task_id=value.task.task_id
-                )
-                artifacts.extend(
-                    self._accepted_sft_records(
+                for suite in accepted_suites:
+                    package = self.packager.build(
+                        bundle=bundle,
+                        graph=graph,
+                        task=value.task,
+                        trajectories=[suite.trajectory],
+                        validation=suite.report,
+                        traces=task_traces,
+                        verifier=None,
+                        pool=pool,
+                        dataset_split=dataset_split,
+                        validation_cases=suite.cases,
+                        oracle_results=oracle_results,
+                    )
+                    uri = self.package_sink.write(
+                        package,
+                        paper_id=bundle.paper_id,
+                        task_id=value.task.task_id,
+                    )
+                    artifacts.extend(
+                        self._accepted_sft_records(
+                            job_id=job_id,
+                            bundle=bundle,
+                            task=value.task,
+                            trajectories=[suite.trajectory],
+                            validations={suite.trajectory.trajectory_id: suite.report},
+                            traces=task_traces,
+                            package=package,
+                            package_uri=uri,
+                            pool=pool,
+                            dataset_split=dataset_split,
+                        )
+                    )
+                continue
+
+            if not grounded:
+                artifacts.append(
+                    self._rejected_artifact(
                         job_id=job_id,
                         bundle=bundle,
                         task=value.task,
-                        trajectories=trajectories,
-                        validation=report,
                         traces=task_traces,
-                        package=package,
-                        package_uri=uri,
-                        pool=pool,
-                        dataset_split=dataset_split,
+                        reason="no scientifically grounded RL reference trajectory",
+                        details={
+                            "grounding_decisions": [
+                                decision.model_dump(mode="json")
+                                for _trajectory, decision in critic_rejected
+                            ],
+                            "reference_trajectories": [
+                                trajectory.model_dump(mode="json")
+                                for trajectory, _decision in critic_rejected
+                            ],
+                        },
                     )
                 )
                 continue
@@ -365,20 +488,42 @@ class FoundryPipeline:
                         task=value.task,
                         traces=task_traces,
                         reason=f"verifier construction failed: {exc}",
+                        details={
+                            "reference_trajectories": [
+                                trajectory.model_dump(mode="json") for trajectory in grounded
+                            ]
+                        },
                     )
                 )
                 continue
             verifiers_compiled += 1
             all_traces = [*task_traces, *verifier_traces]
-            report, trajectories, validation_cases = run_acceptance_suite(
+            suites = _validate_trajectories(
                 task=value.task,
-                spec=verifier,
                 bundle=bundle,
                 graph=graph,
-                trajectories=value.trajectories,
+                trajectories=grounded,
+                verifier=verifier,
+                detail_context={
+                    "route": "rl",
+                    "grounding_critic": value.critic.model_dump(mode="json"),
+                },
             )
             adversarial_validated += 1
-            if not suite_passes(report):
+            accepted_suites = [suite for suite in suites if suite_passes(suite.report)]
+            if not accepted_suites:
+                report = _aggregate_reports(
+                    value.task.task_id,
+                    suites,
+                    details={
+                        "discarded_reference_trajectories": [
+                            suite.trajectory.trajectory_id for suite in suites
+                        ],
+                        "reference_trajectories": [
+                            suite.trajectory.model_dump(mode="json") for suite in suites
+                        ],
+                    },
+                )
                 artifacts.append(
                     self._rejected_artifact(
                         job_id=job_id,
@@ -390,6 +535,40 @@ class FoundryPipeline:
                     )
                 )
                 continue
+            report = _aggregate_reports(
+                value.task.task_id,
+                accepted_suites,
+                details={
+                    "accepted_reference_trajectories": [
+                        suite.trajectory.trajectory_id for suite in accepted_suites
+                    ],
+                    "discarded_reference_trajectories": [
+                        suite.trajectory.trajectory_id
+                        for suite in suites
+                        if not suite_passes(suite.report)
+                    ],
+                    "critic_rejected_reference_trajectories": [
+                        trajectory.trajectory_id for trajectory, _decision in critic_rejected
+                    ],
+                    "discarded_reference_validations": {
+                        suite.trajectory.trajectory_id: {
+                            "trajectory": suite.trajectory.model_dump(mode="json"),
+                            "validation": suite.report.model_dump(mode="json"),
+                        }
+                        for suite in suites
+                        if not suite_passes(suite.report)
+                    },
+                    "critic_rejected_reference_validations": {
+                        trajectory.trajectory_id: {
+                            "trajectory": trajectory.model_dump(mode="json"),
+                            "decision": decision.model_dump(mode="json"),
+                        }
+                        for trajectory, decision in critic_rejected
+                    },
+                },
+            )
+            trajectories = [suite.trajectory for suite in accepted_suites]
+            validation_cases = _merge_validation_cases(accepted_suites)
             pool = "rl"
             dataset_split, _pool_ordinal = self.store.assign_pool_split(
                 allocation_key=f"{pool}:{bundle.paper_family_id}",
@@ -455,7 +634,7 @@ class FoundryPipeline:
         bundle: PaperBundle,
         task: TaskSpec,
         trajectories: list[Trajectory],
-        validation: ValidationReport,
+        validations: dict[str, ValidationReport],
         traces: list[ProviderTrace],
         package: PackageResult,
         package_uri: str,
@@ -470,7 +649,7 @@ class FoundryPipeline:
                 task=task,
                 kind="sft_trajectory",
                 status="accepted",
-                validation=validation,
+                validation=validations[trajectory.trajectory_id],
                 traces=traces,
                 package=package,
                 package_uri=package_uri,
@@ -490,8 +669,10 @@ class FoundryPipeline:
         traces: list[ProviderTrace],
         reason: str,
         validation: ValidationReport | None = None,
+        trajectory: Trajectory | None = None,
+        details: dict[str, object] | None = None,
     ) -> FoundryArtifactRecord:
-        report = validation or ValidationReport(
+        base_report = validation or ValidationReport(
             task_id=task.task_id,
             positive_pass=False,
             equivalent_pass=False,
@@ -503,11 +684,51 @@ class FoundryPipeline:
             security_pass=True,
             false_positive_count=0,
             false_negative_count=0,
-            details={"rejection_reason": reason},
         )
-        digest = sha256({"task": task, "validation": report, "reason": reason})
+        report = base_report.model_copy(
+            update={
+                "details": {
+                    **base_report.details,
+                    "rejection_reason": reason,
+                    **(
+                        {
+                            "trajectory_id": trajectory.trajectory_id,
+                            "trajectory": trajectory.model_dump(mode="json"),
+                        }
+                        if trajectory is not None
+                        else {}
+                    ),
+                    **(details or {}),
+                }
+            }
+        )
+        digest = sha256(
+            {
+                "task": task,
+                "trajectory_id": trajectory.trajectory_id if trajectory else None,
+                "validation": report,
+                "reason": reason,
+            }
+        )
+        provider_trace_ids = list(
+            dict.fromkeys(
+                [
+                    *(trace.trace_id for trace in traces),
+                    *(
+                        [trajectory.provider_trace_id]
+                        if trajectory is not None and trajectory.provider_trace_id
+                        else []
+                    ),
+                    *(trajectory.provider_trace_ids if trajectory is not None else []),
+                ]
+            )
+        )
         record = FoundryArtifactRecord(
-            artifact_id=stable_id("rejected-artifact", task.task_id, digest),
+            artifact_id=stable_id(
+                "rejected-trajectory" if trajectory is not None else "rejected-artifact",
+                trajectory.trajectory_id if trajectory is not None else task.task_id,
+                digest,
+            ),
             job_id=job_id,
             paper_id=bundle.paper_id,
             task_id=task.task_id,
@@ -520,7 +741,7 @@ class FoundryPipeline:
             package_hash=digest,
             environment_hash=digest,
             paper_hash=bundle.paper_hash,
-            provider_trace_ids=[trace.trace_id for trace in traces],
+            provider_trace_ids=provider_trace_ids,
             constructor_family=_family_for_role(traces, "task_designer"),
             critic_family=_family_for_role(traces, "grounding_critic"),
             validation=report,
@@ -597,97 +818,132 @@ def _validate_sft(
     value: SolvedTask,
     bundle: PaperBundle,
     graph: PaperEvidenceGraph,
-) -> tuple[ValidationReport, list[Trajectory]]:
-    span_ids = {span.span_id for span in bundle.stable_spans}
-    node_ids = {node.id for node in graph.nodes}
-    public_span_ids = {
-        *value.task.public_context_policy.included_spans,
-        *value.task.public_context_policy.same_paper_distractors,
-    }
-    required_nodes = set(value.task.hidden_targets.required_nodes)
-    required_relations = {
-        (edge.source, edge.relation, edge.target)
-        for edge in value.task.hidden_targets.required_relations
-    }
-    accepted_evidence_sets = [
-        set(item) for item in value.task.hidden_targets.accepted_evidence_sets
-    ]
-    numeric_targets = {
-        key: float(expected)
-        for key, expected in value.task.hidden_targets.expected_values.items()
-        if isinstance(expected, (int, float)) and not isinstance(expected, bool)
-    }
-    validated: list[Trajectory] = []
-    for trajectory in value.trajectories:
-        manifest = trajectory.answer.answer_manifest
-        manifest_node_ids = {
-            value
-            for value in [
-                *manifest.claims,
-                *manifest.method_nodes,
-                *manifest.faults,
-                *manifest.qualifications,
-                *(eq.id for eq in manifest.equations),
-            ]
-            if value in node_ids
-        }
-        submitted_evidence = set(manifest.evidence)
-        submitted_relations = {
-            (edge.source, edge.relation, edge.target) for edge in manifest.relations
-        }
-        numeric_results = {result.id: result.value for result in manifest.numeric_results}
-        checks = {
-            "report_present": bool(trajectory.answer.report.strip()),
-            "manifest_present": bool(manifest_node_ids or submitted_evidence),
-            "evidence_resolves": bool(submitted_evidence)
-            and submitted_evidence <= span_ids
-            and submitted_evidence <= public_span_ids,
-            "evidence_covers_target": not accepted_evidence_sets
-            or any(expected <= submitted_evidence for expected in accepted_evidence_sets),
-            "required_nodes": required_nodes <= manifest_node_ids,
-            "required_relations": required_relations <= submitted_relations,
-            "numeric_targets": all(
-                key in numeric_results
-                and math.isclose(
-                    numeric_results[key],
-                    expected,
-                    rel_tol=1e-6,
-                    abs_tol=1e-9,
-                )
-                for key, expected in numeric_targets.items()
-            ),
-            "tool_execution": all(call.error is None for call in trajectory.tool_calls),
-        }
-        passed = all(checks.values())
-        validated.append(
-            trajectory.model_copy(
-                update={
-                    "accepted": passed,
-                    "reward": 1.0 if passed else 0.0,
-                    "validation": checks,
+) -> tuple[ValidationReport, list[Trajectory], dict[str, list[FoundryAnswer]]]:
+    """Run the supervised answer contract and retain RL diagnostics."""
+    verifier = deterministic_sft_verifier(value.task, bundle, graph)
+    report, validated, validation_cases = run_acceptance_suite(
+        task=value.task,
+        spec=verifier,
+        bundle=bundle,
+        graph=graph,
+        trajectories=value.trajectories,
+    )
+    return (
+        report.model_copy(
+            update={
+                "details": {
+                    **report.details,
+                    "route": "sft",
+                    "grounding_critic": value.critic.model_dump(mode="json"),
+                    "validation_verifier": verifier.model_dump(mode="json"),
                 }
+            }
+        ),
+        validated,
+        validation_cases,
+    )
+
+
+def _with_grounding_decision(
+    trajectory: Trajectory,
+    decision: TrajectoryGroundingDecision,
+) -> Trajectory:
+    """Attach the trajectory-specific critic decision without losing solver audit data."""
+    return trajectory.model_copy(
+        update={
+            "validation": {
+                **trajectory.validation,
+                "grounding_decision": decision.model_dump(mode="json"),
+            }
+        }
+    )
+
+
+def _validate_trajectories(
+    *,
+    task: TaskSpec,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+    trajectories: list[Trajectory],
+    verifier: VerifierSpec,
+    detail_context: dict[str, object] | None = None,
+) -> list[TrajectorySuite]:
+    """Run the full executable suite independently for every trajectory.
+
+    A weak or malformed sibling can therefore never discard a sound SFT
+    trajectory or the only sound RL reference answer.
+    """
+    suites: list[TrajectorySuite] = []
+    for trajectory in trajectories:
+        report, validated, cases = run_acceptance_suite(
+            task=task,
+            spec=verifier,
+            bundle=bundle,
+            graph=graph,
+            trajectories=[trajectory],
+        )
+        audited_report = report.model_copy(
+            update={
+                "details": {
+                    **report.details,
+                    **(detail_context or {}),
+                    "trajectory_id": trajectory.trajectory_id,
+                    "validation_verifier": verifier.model_dump(mode="json"),
+                }
+            }
+        )
+        suites.append(
+            TrajectorySuite(
+                trajectory=validated[0],
+                report=audited_report,
+                cases=cases,
             )
         )
-    positive = bool(validated) and all(value.accepted for value in validated)
-    report = ValidationReport(
-        task_id=value.task.task_id,
-        positive_pass=positive,
-        equivalent_pass=True,
-        adversarial_pass=True,
-        mutation_killed=0,
-        mutation_total=0,
-        metamorphic_pass=True,
-        replay_pass=True,
-        security_pass=True,
-        false_positive_count=0,
-        false_negative_count=sum(not item.accepted for item in validated),
-        details={"route": "sft", "grounding_critic": value.critic.model_dump(mode="json")},
+    return suites
+
+
+def _aggregate_reports(
+    task_id: str,
+    suites: list[TrajectorySuite],
+    *,
+    details: dict[str, object] | None = None,
+) -> ValidationReport:
+    """Summarize independently executed suites without masking any failure."""
+    reports = [suite.report for suite in suites]
+    return ValidationReport(
+        task_id=task_id,
+        positive_pass=bool(reports) and all(report.positive_pass for report in reports),
+        equivalent_pass=bool(reports) and all(report.equivalent_pass for report in reports),
+        adversarial_pass=bool(reports) and all(report.adversarial_pass for report in reports),
+        mutation_killed=sum(report.mutation_killed for report in reports),
+        mutation_total=sum(report.mutation_total for report in reports),
+        metamorphic_pass=bool(reports) and all(report.metamorphic_pass for report in reports),
+        replay_pass=bool(reports) and all(report.replay_pass for report in reports),
+        security_pass=bool(reports) and all(report.security_pass for report in reports),
+        false_positive_count=sum(report.false_positive_count for report in reports),
+        false_negative_count=sum(report.false_negative_count for report in reports),
+        details={
+            **(details or {}),
+            "trajectory_reports": {
+                suite.trajectory.trajectory_id: suite.report.model_dump(mode="json")
+                for suite in suites
+            },
+        },
     )
-    return report, validated
+
+
+def _merge_validation_cases(
+    suites: list[TrajectorySuite],
+) -> dict[str, list[FoundryAnswer]]:
+    merged: dict[str, list[FoundryAnswer]] = {}
+    for suite in suites:
+        for family, cases in suite.cases.items():
+            merged.setdefault(family, []).extend(cases)
+    return merged
 
 
 def _family_for_role(traces: list[ProviderTrace], role: str) -> str:
     return next((trace.model_family for trace in reversed(traces) if trace.role == role), "unknown")
 
 
-__all__ = ["FoundryPipeline", "PipelineResult"]
+__all__ = ["FoundryPipeline", "PipelineResult", "TrajectorySuite"]

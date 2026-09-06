@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import re
 from collections.abc import Iterable
 from urllib.parse import urlparse
@@ -18,6 +19,24 @@ from schemas.foundry import (
 )
 from schemas.gold import GoldRecord
 from schemas.scientific import ScientificDocument, ScientificSection
+
+
+class ScientificArtifactUnavailableError(ValueError):
+    """A referenced scientific artifact cannot ever satisfy foundry preflight."""
+
+    def __init__(
+        self,
+        *,
+        uri: str,
+        bucket: str,
+        key: str,
+        reason: str,
+    ) -> None:
+        self.uri = uri
+        self.bucket = bucket
+        self.key = key
+        self.reason = reason
+        super().__init__(f"scientific artifact {reason}: s3://{bucket}/{key}")
 
 
 def paper_bundle_from_gold(
@@ -60,12 +79,13 @@ def paper_bundle_from_gold(
             "source_feed": gold.source_feed,
             "source_format": gold.source_format,
             "quality_score": gold.quality_score,
-            "edu_score": gold.edu_score,
+            "source_quality_score": gold.source_quality_score,
             "reasoning_score": gold.reasoning_score,
             "content_tags": gold.content_tags,
             "extraction_pipeline": scientific.extraction_pipeline,
             "projection_version": scientific.projection_version,
             "valid_from": gold.valid_from.isoformat(),
+            "classifier_section_hints": classifier_section_hints(gold),
         },
         sections=[
             {
@@ -156,7 +176,6 @@ def paper_bundle_from_gold(
             "extraction_completeness": gold.extraction_completeness,
             "risk_tier": gold.risk_tier,
             "pii_action": gold.pii_action,
-            "benchmark_set_version": gold.benchmark_set_version,
         },
         official_artifacts=official_artifacts or [],
         source_gold_hash=gold_hash,
@@ -164,16 +183,130 @@ def paper_bundle_from_gold(
     )
 
 
+def classifier_section_hints(gold: GoldRecord) -> str:
+    """Optional pointers only: never select, remove or rewrite paper content."""
+    report = gold.quality_diagnostics or {}
+    if report.get("mode") != "active":
+        return ""
+    sentences = []
+    for task, template in (
+        ("arxiv-posttrain-suitability", "Sections {titles} seem especially relevant."),
+        (
+            "arxiv-math-reasoning",
+            "Sections {titles} seem mathematically suited to potentially creating a derivation or reasoning task.",
+        ),
+    ):
+        candidates = [
+            section
+            for section in report.get("sections", [])
+            if float(section.get("classifiers", {}).get(task, {}).get("score", 0)) >= 4.0
+            and section.get("title")
+        ]
+        candidates.sort(key=lambda section: -float(section["classifiers"][task]["score"]))
+        titles = list(dict.fromkeys(str(section["title"]) for section in candidates))[:3]
+        if titles:
+            # Quoted document-derived titles are data, not new instructions.
+            sentences.append(template.format(titles=canonical_json(titles).decode()))
+    return " ".join(sentences)
+
+
 def load_scientific_artifact(gold: GoldRecord, *, s3_client: object) -> ScientificDocument:
+    document, _ = load_scientific_artifact_payload(gold, s3_client=s3_client)
+    return document
+
+
+def load_scientific_artifact_payload(
+    gold: GoldRecord,
+    *,
+    s3_client: object,
+) -> tuple[ScientificDocument, bytes]:
+    """Load and validate the exact structured artifact referenced by Gold.
+
+    Missing objects and malformed immutable artifacts are permanent candidate
+    failures. Other storage exceptions remain transient so the stream runtime
+    can retry them without silently discarding a valid paper.
+    """
     uri = gold.scientific_artifact_s3_uri
     if not uri:
-        raise ValueError("post-training candidates require a scientific artifact")
+        raise ScientificArtifactUnavailableError(
+            uri="",
+            bucket="unknown",
+            key="unknown",
+            reason="URI is absent",
+        )
     parsed = urlparse(uri)
     if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
-        raise ValueError(f"invalid scientific artifact URI: {uri}")
-    response = s3_client.get_object(Bucket=parsed.netloc, Key=parsed.path.lstrip("/"))  # type: ignore[attr-defined]
-    payload = response["Body"].read()
-    return ScientificDocument.model_validate_json(payload)
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=parsed.netloc or "unknown",
+            key=parsed.path.lstrip("/") or "unknown",
+            reason="URI is invalid",
+        )
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+    try:
+        response = s3_client.get_object(Bucket=bucket, Key=key)  # type: ignore[attr-defined]
+    except Exception as exc:
+        response_data = getattr(exc, "response", None)
+        error = response_data.get("Error", {}) if isinstance(response_data, dict) else {}
+        code = str(error.get("Code", ""))
+        if code in {"NoSuchKey", "404", "NotFound"} or exc.__class__.__name__ == "NoSuchKey":
+            raise ScientificArtifactUnavailableError(
+                uri=uri,
+                bucket=bucket,
+                key=key,
+                reason="object is missing",
+            ) from exc
+        raise
+    payload = bytes(response["Body"].read())
+    return validate_scientific_artifact_payload(gold, payload)
+
+
+def validate_scientific_artifact_payload(
+    gold: GoldRecord,
+    payload: bytes,
+) -> tuple[ScientificDocument, bytes]:
+    """Validate a queue-cached artifact under the same immutable URI contract."""
+    uri = gold.scientific_artifact_s3_uri or ""
+    parsed = urlparse(uri)
+    bucket = parsed.netloc or "unknown"
+    key = parsed.path.lstrip("/") or "unknown"
+    try:
+        decoded = gzip.decompress(payload) if payload.startswith(b"\x1f\x8b") else payload
+        document = ScientificDocument.model_validate_json(decoded)
+    except Exception as exc:
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=bucket,
+            key=key,
+            reason="payload is invalid",
+        ) from exc
+    if document.doc_id != gold.doc_id:
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=bucket,
+            key=key,
+            reason="document identity does not match Gold",
+        )
+    has_training_body = any(
+        section.include_in_training
+        and (
+            any(
+                paragraph.include_in_training and paragraph.text.strip()
+                for paragraph in section.paragraphs
+            )
+            or section.text.strip()
+        )
+        for section in document.sections
+    )
+    if not has_training_body:
+        raise ScientificArtifactUnavailableError(
+            uri=uri,
+            bucket=bucket,
+            key=key,
+            reason="payload has no retained scientific body",
+        )
+    return document, payload
 
 
 def _stable_spans(sections: Iterable[ScientificSection]) -> Iterable[StableSpan]:
@@ -250,39 +383,96 @@ def bundle_json(bundle: PaperBundle) -> bytes:
     return canonical_json(bundle)
 
 
-def bundle_prompt_json(bundle: PaperBundle) -> bytes:
-    """Losslessly compact duplicate scientific representations for model prompts.
+def bundle_prompt_json(
+    bundle: PaperBundle,
+    *,
+    span_ids: set[str] | None = None,
+    section_roles: set[str] | None = None,
+    max_bytes: int = 450_000,
+) -> bytes:
+    """Build a bounded, non-duplicated scientific prompt projection.
 
     The durable PaperBundle remains unchanged. The prompt projection keeps every
-    training span and scientific object while choosing one equation encoding,
-    one table encoding, and the object-local caption instead of sending large
-    duplicate representations through the model context window.
+    selected stable span and its scientific objects while removing the duplicate
+    full section bodies. Oversized papers are covered by role-sharded graph
+    passes and task-specific projections rather than rejected or ranked lower.
     """
     payload = bundle.model_dump(mode="json")
-    payload["prompt_projection"] = "paper-bundle-model-view-v1"
+    # Only task_designer gets the optional sentence; other role inputs are
+    # unchanged and no classifier signal selects their source spans.
+    payload.get("metadata", {}).pop("classifier_section_hints", None)
+    payload["prompt_projection"] = "paper-bundle-model-view-v2"
     payload.pop("captions", None)
+    payload["sections"] = [
+        {
+            key: value
+            for key, value in section.items()
+            if key in {"section_id", "title", "role", "ordinal"}
+        }
+        for section in payload.get("sections", [])
+    ]
+    candidates = [
+        span
+        for span in bundle.stable_spans
+        if (span_ids is None or span.span_id in span_ids)
+        and (section_roles is None or span.section_role in section_roles)
+    ]
+    if not candidates and span_ids is not None:
+        candidates = [span for span in bundle.stable_spans if span.span_id in span_ids]
+    selected_spans: list[dict[str, object]] = []
+    payload["stable_spans"] = selected_spans
+    payload["equations"] = []
+    payload["tables"] = []
+    payload["figures"] = []
+    for span in sorted(candidates, key=lambda value: (value.ordinal, value.span_id)):
+        candidate = span.model_dump(mode="json")
+        selected_spans.append(candidate)
+        if len(canonical_json(payload)) > max_bytes:
+            selected_spans.pop()
+    selected_ids = {str(span["span_id"]) for span in selected_spans}
     payload["equations"] = [
         {
-            "equation_id": equation["equation_id"],
-            "representation_format": "latex" if equation.get("latex") else "mathml",
-            "representation": equation.get("latex") or equation.get("mathml"),
-            "source_span_ids": equation.get("source_span_ids", []),
+            "equation_id": equation.equation_id,
+            "representation_format": "latex" if equation.latex else "mathml",
+            "representation": equation.latex or equation.mathml,
+            "source_span_ids": equation.source_span_ids,
         }
-        for equation in payload.get("equations", [])
+        for equation in bundle.equations
+        if set(equation.source_span_ids) & selected_ids
     ]
     payload["tables"] = [
         {
-            "table_id": table["table_id"],
-            "caption": table.get("caption"),
-            "rows": table.get("rows", []),
-            "source_span_ids": table.get("source_span_ids", []),
+            "table_id": table.table_id,
+            "caption": table.caption,
+            "rows": table.rows,
+            "source_span_ids": table.source_span_ids,
         }
-        for table in payload.get("tables", [])
+        for table in bundle.tables
+        if set(table.source_span_ids) & selected_ids
     ]
     payload["figures"] = [
-        {key: value for key, value in figure.items() if key not in {"asset_uri", "image_hash"}}
-        for figure in payload.get("figures", [])
+        {
+            key: value
+            for key, value in figure.model_dump(mode="json").items()
+            if key not in {"asset_uri", "image_hash"}
+        }
+        for figure in bundle.figures
+        if set(figure.source_span_ids) & selected_ids
     ]
+    # Objects can themselves be large. Add them in stable order only while the
+    # complete JSON remains inside the window-derived projection budget.
+    for key in ("equations", "tables", "figures"):
+        values = list(payload[key])
+        payload[key] = []
+        for value in values:
+            payload[key].append(value)
+            if len(canonical_json(payload)) > max_bytes:
+                payload[key].pop()
+    payload["projection_coverage"] = {
+        "selected_spans": len(selected_spans),
+        "available_spans": len(candidates),
+        "selection": "stable-complete-spans-with-role-sharding",
+    }
     return canonical_json(payload)
 
 

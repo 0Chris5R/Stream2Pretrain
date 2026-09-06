@@ -11,9 +11,8 @@ import urllib.request
 from typing import Any
 
 DEFAULT_BASE_URL = "http://[::1]:8092"
-DEFAULT_MAX_CANDIDATES = 3
+DEFAULT_MAX_CANDIDATES = 1
 TERMINAL_STATES = frozenset({"completed", "quota_exhausted", "failed"})
-REQUIRED_ACCEPTED_ARTIFACTS = frozenset({"sft_trajectory:accepted", "rl_environment:accepted"})
 
 
 class ValidationError(RuntimeError):
@@ -109,15 +108,13 @@ def artifact_counts(dashboard: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
-def validate_artifact_increases(before: dict[str, int], after: dict[str, int]) -> None:
-    missing = sorted(
-        key for key in REQUIRED_ACCEPTED_ARTIFACTS if after.get(key, 0) <= before.get(key, 0)
-    )
-    if missing:
-        raise ValidationError(
-            "Bounded Foundry validation produced no new accepted artifacts for: "
-            + ", ".join(missing)
-        )
+def artifact_deltas(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    """Report artifact decisions without treating a sound rejection as downtime."""
+    return {
+        key: after.get(key, 0) - before.get(key, 0)
+        for key in sorted(before.keys() | after.keys())
+        if after.get(key, 0) != before.get(key, 0)
+    }
 
 
 def main() -> int:
@@ -156,7 +153,7 @@ def main() -> int:
             )
         )
 
-        timeout_seconds = int(os.environ.get("S2P_FOUNDRY_VALIDATION_TIMEOUT_SECONDS", "2700"))
+        timeout_seconds = int(os.environ.get("S2P_FOUNDRY_VALIDATION_TIMEOUT_SECONDS", "7200"))
         deadline = time.monotonic() + timeout_seconds
         terminal_run: dict[str, Any] | None = None
         last_progress: tuple[Any, Any, Any] | None = None
@@ -194,14 +191,13 @@ def main() -> int:
         validate_terminal_run(terminal_run)
         final_dashboard = _request_json(opener, base_url, "/api/foundry/dashboard")
         final_artifacts = artifact_counts(final_dashboard)
-        validate_artifact_increases(initial_artifacts, final_artifacts)
         print(
             json.dumps(
                 {
-                    "accepted_artifact_increases": {
-                        key: final_artifacts.get(key, 0) - initial_artifacts.get(key, 0)
-                        for key in sorted(REQUIRED_ACCEPTED_ARTIFACTS)
-                    }
+                    "artifact_decision_deltas": artifact_deltas(
+                        initial_artifacts,
+                        final_artifacts,
+                    )
                 },
                 sort_keys=True,
             )

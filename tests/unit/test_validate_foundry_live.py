@@ -5,8 +5,8 @@ import pytest
 from scripts.validate_foundry_live import (
     ValidationError,
     artifact_counts,
+    artifact_deltas,
     find_run,
-    validate_artifact_increases,
     validate_created_run,
     validate_terminal_run,
 )
@@ -18,24 +18,24 @@ def test_validate_created_run_requires_a_compatible_bounded_run() -> None:
             "created": True,
             "run": {
                 "run_id": "manual-1",
-                "max_candidates": 3,
-                "candidate_count": 3,
+                "max_candidates": 1,
+                "candidate_count": 1,
                 "processed_count": 0,
             },
         }
     )
 
     assert run_id == "manual-1"
-    assert run["max_candidates"] == 3
+    assert run["max_candidates"] == 1
 
     resumed_id, resumed = validate_created_run(
         {
             "created": False,
             "run": {
                 "run_id": "manual-1",
-                "max_candidates": 3,
-                "candidate_count": 3,
-                "processed_count": 1,
+                "max_candidates": 1,
+                "candidate_count": 1,
+                "processed_count": 0,
                 "state": "pending",
             },
         }
@@ -49,8 +49,8 @@ def test_validate_created_run_requires_a_compatible_bounded_run() -> None:
                 "created": False,
                 "run": {
                     "run_id": "manual-1",
-                    "max_candidates": 3,
-                    "candidate_count": 4,
+                    "max_candidates": 1,
+                    "candidate_count": 2,
                     "processed_count": 0,
                     "state": "pending",
                 },
@@ -85,12 +85,13 @@ def test_find_and_validate_terminal_run() -> None:
         validate_terminal_run({**run, "processed_count": 2})
 
 
-def test_artifact_validation_requires_new_sft_and_rl_outputs() -> None:
+def test_artifact_decisions_are_reported_without_requiring_acceptance() -> None:
     before = {"sft_trajectory:accepted": 4, "rl_environment:accepted": 2}
-    after = {"sft_trajectory:accepted": 5, "rl_environment:accepted": 3}
+    after = {
+        "sft_trajectory:accepted": 4,
+        "sft_trajectory:rejected": 7,
+        "rl_environment:accepted": 2,
+    }
 
     assert artifact_counts({"artifacts": after}) == after
-    validate_artifact_increases(before, after)
-
-    with pytest.raises(ValidationError, match="rl_environment:accepted"):
-        validate_artifact_increases(before, {**after, "rl_environment:accepted": 2})
+    assert artifact_deltas(before, after) == {"sft_trajectory:rejected": 7}

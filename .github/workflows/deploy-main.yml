@@ -7,19 +7,25 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Deploy, diagnose, audit UI, validate sources/foundry, inspect storage, or recover storage
+        description: Deploy, check pipeline, audit UI, validate sources or Foundry, or maintain storage
         required: true
         default: deploy
         type: choice
         options:
           - deploy
           - diagnose
+          - check-pipeline
           - audit-ui
-          - repair-monitoring
           - validate-sources
           - validate-foundry
           - inspect-storage
-          - recover-storage
+          - maintain-storage
+          - capture-evidence
+      verify_classifiers:
+        description: Verify new classifier weights and replica distribution after deployment
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: stream2pretrain-production
@@ -33,26 +39,167 @@ env:
   HELMFILE_VERSION: v1.7.3
 
 jobs:
+  changes:
+    name: Plan changed release scopes
+    if: inputs.mode == '' || inputs.mode == 'deploy'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.scope.outputs.deploy }}
+      python: ${{ steps.scope.outputs.python }}
+      helm: ${{ steps.scope.outputs.helm }}
+      core: ${{ steps.scope.outputs.core }}
+      sources: ${{ steps.scope.outputs.sources }}
+      monitoring: ${{ steps.scope.outputs.monitoring }}
+      redpanda: ${{ steps.scope.outputs.redpanda }}
+      catalog: ${{ steps.scope.outputs.catalog }}
+      foundry_package: ${{ steps.scope.outputs.foundry_package }}
+      dns_infra: ${{ steps.scope.outputs.dns_infra }}
+      model_runtime: ${{ steps.scope.outputs.model_runtime }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          # A queued push can contain several commits. The planner must retain
+          # github.event.before or it can silently miss changed components.
+          fetch-depth: 0
+
+      - name: Resolve changed scopes
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "python=true" >> "$GITHUB_OUTPUT"
+            echo "helm=true" >> "$GITHUB_OUTPUT"
+            echo "core=false" >> "$GITHUB_OUTPUT"
+            echo "sources=false" >> "$GITHUB_OUTPUT"
+            echo "monitoring=false" >> "$GITHUB_OUTPUT"
+            echo "redpanda=false" >> "$GITHUB_OUTPUT"
+            echo "catalog=false" >> "$GITHUB_OUTPUT"
+            echo "foundry_package=false" >> "$GITHUB_OUTPUT"
+            echo "dns_infra=false" >> "$GITHUB_OUTPUT"
+            echo "model_runtime=${{ inputs.verify_classifiers }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          if [[ -z "$before" || "$before" =~ ^0+$ ]] \
+             || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            before="$(git rev-parse HEAD^)"
+          fi
+          changed="$RUNNER_TEMP/changed-files.txt"
+          git diff --name-only "$before" HEAD > "$changed"
+          python=false
+          helm=false
+          deploy=false
+          core=false
+          sources=false
+          monitoring=false
+          redpanda=false
+          catalog=false
+          foundry_package=false
+          dns_infra=false
+          model_runtime=false
+          if grep -Eq \
+            '^(schemas/|ingest/|processor/|tests/|scripts/.*\.py$|pyproject\.toml$|uv\.lock$|[^/]+/pyproject\.toml$)' \
+            "$changed"; then
+            python=true
+          fi
+          if grep -Eq \
+            '^(\.github/workflows/deploy-main\.yml$|charts/|infra/helmfile-values/|infra/kubernetes/|helmfile\.yaml$|scripts/)' \
+            "$changed"; then
+            helm=true
+          fi
+          if grep -Eq \
+            '^(\.github/workflows/deploy-main\.yml$|schemas/|ingest/|processor/|ui/|charts/|infra/helmfile-values/|infra/kubernetes/|scripts/|pyproject\.toml$|uv\.lock$|\.dockerignore$|helmfile\.yaml$)' \
+            "$changed"; then
+            deploy=true
+          fi
+          if grep -Eq \
+            '^(\.github/workflows/deploy-main\.yml$|schemas/|charts/stream2pretrain/|infra/helmfile-values/|scripts/(cluster_smoke|reconcile_topic_partitions)\.)' \
+            "$changed"; then
+            core=true
+          fi
+          if grep -E '^processor/' "$changed" \
+             | grep -Ev '^processor/foundry/' >/dev/null; then
+            core=true
+          fi
+          if grep -Eq \
+            '^(\.github/workflows/deploy-main\.yml$|ingest/|schemas/(sourcefeed|license_admission|bronze)\.py$|charts/stream2pretrain/(files/feeds|templates/ingest-|templates/source|values)|infra/helmfile-values/|scripts/load_seed_feeds\.sh$|processor/source_controller\.py$)' \
+            "$changed"; then
+            sources=true
+          fi
+          if grep -Eq \
+            '^(infra/helmfile-values/kube-prometheus-stack\.dev\.yaml|helmfile\.yaml)$' \
+            "$changed"; then
+            monitoring=true
+          fi
+          if grep -Eq \
+            '^(infra/helmfile-values/redpanda\.dev\.yaml|helmfile\.yaml)$' \
+            "$changed"; then
+            redpanda=true
+          fi
+          if grep -Eq \
+            '^(charts/polaris-(postgres|metastore-bootstrap)/.*|infra/helmfile-values/polaris\.dev\.yaml|helmfile\.yaml)$' \
+            "$changed"; then
+            catalog=true
+          fi
+          if grep -Eq \
+            '^(processor/foundry/(packaging|standalone_verifier)\.py|schemas/foundry\.py)$' \
+            "$changed"; then
+            foundry_package=true
+          fi
+          if grep -Eq \
+            '^(infra/kubernetes/coredns-(ha-patch|pdb)\.yaml|scripts/validate_storage_dns\.py)$' \
+            "$changed"; then
+            dns_infra=true
+          fi
+          if grep -Eq \
+            '^(processor/(curate|model_client|model_service)\.py|processor/operators/(quality|source_classifiers)\.py|charts/stream2pretrain/templates/(processor-curate|processor-model-service|servicemonitors)\.yaml|charts/stream2pretrain/values\.yaml|scripts/benchmark_model_service\.py)$' \
+            "$changed"; then
+            model_runtime=true
+          fi
+          echo "Changed files:"
+          sed 's/^/  /' "$changed"
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+          echo "helm=$helm" >> "$GITHUB_OUTPUT"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "sources=$sources" >> "$GITHUB_OUTPUT"
+          echo "monitoring=$monitoring" >> "$GITHUB_OUTPUT"
+          echo "redpanda=$redpanda" >> "$GITHUB_OUTPUT"
+          echo "catalog=$catalog" >> "$GITHUB_OUTPUT"
+          echo "foundry_package=$foundry_package" >> "$GITHUB_OUTPUT"
+          echo "dns_infra=$dns_infra" >> "$GITHUB_OUTPUT"
+          echo "model_runtime=$model_runtime" >> "$GITHUB_OUTPUT"
+
   validate:
     name: Validate repository
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.helm == 'true'
+    needs:
+      - changes
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
 
       - name: Install uv
+        if: needs.changes.outputs.python == 'true' || needs.changes.outputs.helm == 'true'
         uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "0.8.17"
           enable-cache: true
 
       - name: Install Helm 3
+        if: needs.changes.outputs.helm == 'true'
         uses: azure/setup-helm@v5.0.1
         with:
           version: "${{ env.HELM_VERSION }}"
 
       - name: Install Helmfile
+        if: needs.changes.outputs.helm == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -66,15 +213,30 @@ jobs:
           helmfile version
 
       - name: Install Python dependencies
+        if: needs.changes.outputs.python == 'true' || needs.changes.outputs.helm == 'true'
         run: uv sync --all-packages --all-groups --locked
 
       - name: Run Python checks
+        if: needs.changes.outputs.python == 'true'
         run: |
           uv run ruff check schemas ingest processor tests scripts
           uv run ruff format --check schemas ingest processor tests scripts
-          uv run pytest
+          # Exercise the real serving, scientific projection and Iceberg test
+          # modules. These optional runtime libraries were missing from CI's
+          # lightweight workspace sync; versions match the production lock.
+          uv run --with duckdb==1.5.3 --with beautifulsoup4==4.15.0 \
+            --with lxml==6.1.1 --with pillow==12.3.0 \
+            --with 'pyiceberg[sql-sqlite]==0.11.1' --with sqlitedict==2.1.0 pytest
+
+      - name: Execute generated Prime Verifiers package
+        if: needs.changes.outputs.foundry_package == 'true'
+        run: >-
+          uv run --with verifiers==0.3.1 pytest
+          processor/tests/test_foundry.py
+          -k acceptance_suite_and_signed_package_are_reproducible
 
       - name: Lint Helm chart and release graph
+        if: needs.changes.outputs.helm == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -108,7 +270,6 @@ jobs:
           for name in (
               "stream2pretrain-ingest-rss",
               "stream2pretrain-ingest-oaipmh",
-              "stream2pretrain-ingest-sitemap",
           ):
               resource = by_name.get(("CronJob", name))
               if resource is None:
@@ -126,6 +287,31 @@ jobs:
               resource = by_name.get((kind, name))
               if resource is None or resource.get("spec", {}).get("replicas") != 1:
                   raise SystemExit(f"core workload must render exactly one replica: {name}")
+
+          for profile in ("quality",):
+              name = f"stream2pretrain-processor-model-service-{profile}"
+              deployment = by_name.get(("Deployment", name))
+              service = by_name.get(("Service", name))
+              scaler = by_name.get(("ScaledObject", name))
+              monitor = by_name.get(("ServiceMonitor", name))
+              if any(value is None for value in (deployment, service, scaler, monitor)):
+                  raise SystemExit(f"classifier runtime contract is incomplete: {name}")
+              if scaler.get("spec", {}).get("minReplicaCount") != 2:
+                  raise SystemExit(f"classifier must retain two baseline replicas: {name}")
+              trigger = scaler.get("spec", {}).get("triggers", [{}])[0]
+              query = trigger.get("metadata", {}).get("query", "")
+              if "s2p_model_active_requests" not in query or "s2p_model_waiting_requests" not in query:
+                  raise SystemExit(f"classifier queue autoscaling drifted: {name}")
+              runtime_profile = next(
+                  item.get("value")
+                  for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+                  if item.get("name") == "S2P_MODEL_SERVICE_PROFILE"
+              )
+              if runtime_profile != profile:
+                  raise SystemExit(f"classifier runtime profile drifted: {name}")
+              endpoint = monitor.get("spec", {}).get("endpoints", [{}])[0]
+              if endpoint.get("port") != "http" or endpoint.get("path") != "/metrics":
+                  raise SystemExit(f"classifier metrics endpoint drifted: {name}")
 
           def container_env(kind, workload_name, container_name):
               resource = by_name[(kind, workload_name)]
@@ -146,8 +332,8 @@ jobs:
                   "fetcher",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-v2",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-v2",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-live-v5",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-live-v5",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -157,8 +343,8 @@ jobs:
                   "curate",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-v2",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-v2",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-live-v5",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-live-v5",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "4",
                   },
               ),
@@ -168,6 +354,8 @@ jobs:
                   "iceberg-writer",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-iceberg-writer-live-v2",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "iceberg-writer-live-v2",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "1",
                   },
               ),
@@ -203,10 +391,78 @@ jobs:
             --file helmfile.yaml \
             --environment dev \
             lint
+          redpanda_rendered="$RUNNER_TEMP/redpanda-rendered.yaml"
+          monitoring_rendered="$RUNNER_TEMP/monitoring-rendered.yaml"
+          helmfile \
+            --helm-binary "$(command -v helm)" \
+            --file helmfile.yaml \
+            --environment dev \
+            --selector name=redpanda \
+            template > "$redpanda_rendered"
+          helmfile \
+            --helm-binary "$(command -v helm)" \
+            --file helmfile.yaml \
+            --environment dev \
+            --selector name=kube-prometheus-stack \
+            template > "$monitoring_rendered"
+          uv run python - "$redpanda_rendered" "$monitoring_rendered" <<'PY'
+          import sys
+
+          import yaml
+
+
+          def resources(path):
+              with open(path) as stream:
+                  return [item for item in yaml.safe_load_all(stream) if item]
+
+
+          redpanda = resources(sys.argv[1])
+          monitor = next(
+              item
+              for item in redpanda
+              if item.get("kind") == "ServiceMonitor"
+              and item.get("metadata", {}).get("name") == "redpanda"
+          )
+          endpoint = monitor["spec"]["endpoints"][0]
+          if monitor["metadata"].get("namespace") != "redpanda":
+              raise SystemExit("Redpanda ServiceMonitor must live in redpanda")
+          if endpoint.get("path") != "/public_metrics" or endpoint.get("port") != "admin":
+              raise SystemExit("Redpanda ServiceMonitor must scrape admin/public_metrics")
+
+          monitoring = resources(sys.argv[2])
+          prometheus = next(
+              item
+              for item in monitoring
+              if item.get("kind") == "Prometheus"
+              and item.get("metadata", {}).get("name") == "kps-prometheus"
+          )
+          if prometheus["spec"].get("serviceMonitorNamespaceSelector") != {}:
+              raise SystemExit("Prometheus must discover cross-namespace ServiceMonitors")
+          grafana_secret = next(
+              item
+              for item in monitoring
+              if item.get("kind") == "Secret"
+              and item.get("metadata", {}).get("name")
+              == "kube-prometheus-stack-grafana"
+          )
+          if not {"admin-user", "admin-password"} <= set(grafana_secret.get("data", {})):
+              raise SystemExit("Grafana chart-owned Secret keys are incomplete")
+          grafana = next(
+              item
+              for item in monitoring
+              if item.get("kind") == "Deployment"
+              and item.get("metadata", {}).get("name")
+              == "kube-prometheus-stack-grafana"
+          )
+          if grafana["spec"].get("strategy", {}).get("type") != "Recreate":
+              raise SystemExit("Single-replica Grafana must use Recreate")
+          PY
 
   processor-base:
     name: Build processor base (${{ matrix.profile }})
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
+    needs:
+      - changes
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -221,9 +477,6 @@ jobs:
           - profile: quality
             repository: processor-base-quality
             extra: quality-service
-          - profile: embedding
-            repository: processor-base-embedding
-            extra: embedding-service
           - profile: kenlm
             repository: processor-base-kenlm
             extra: kenlm-service
@@ -269,7 +522,11 @@ jobs:
           )"
           base_key="$(
             {
-              sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
+              if [[ "${{ matrix.profile }}" == quality ]]; then
+                cat processor/Dockerfile.quality-base processor/source-classifiers.json scripts/download_source_classifiers.py
+              else
+                sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
+              fi
               printf '%s\n' "resolved-dependencies=$dependency_key"
               printf '%s\n' "model-profile=${{ matrix.profile }}"
               printf '%s\n' "install-extra=${{ matrix.extra }}"
@@ -308,7 +565,7 @@ jobs:
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
-          file: processor/Dockerfile
+          file: ${{ matrix.profile == 'quality' && 'processor/Dockerfile.quality-base' || 'processor/Dockerfile' }}
           target: runtime-base
           platforms: linux/amd64
           push: true
@@ -320,8 +577,9 @@ jobs:
 
   processor-base-pin:
     name: Pin processor bases by digest
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
     needs:
+      - changes
       - processor-base
     runs-on: ubuntu-latest
     permissions:
@@ -330,7 +588,6 @@ jobs:
     outputs:
       image: ${{ steps.pin.outputs.image }}
       quality_image: ${{ steps.pin.outputs.quality_image }}
-      embedding_image: ${{ steps.pin.outputs.embedding_image }}
       kenlm_image: ${{ steps.pin.outputs.kenlm_image }}
       fetcher_image: ${{ steps.pin.outputs.fetcher_image }}
     steps:
@@ -378,7 +635,11 @@ jobs:
             )"
             base_key="$(
               {
-                sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
+                if [[ "$profile" == quality ]]; then
+                  cat processor/Dockerfile.quality-base processor/source-classifiers.json scripts/download_source_classifiers.py
+                else
+                  sed '/^FROM runtime-base AS runtime$/,$d' processor/Dockerfile
+                fi
                 printf '%s\n' "resolved-dependencies=$dependency_key"
                 printf '%s\n' "model-profile=$profile"
                 printf '%s\n' "install-extra=$extra"
@@ -403,14 +664,14 @@ jobs:
           }
           pin_image image "$(resolve_image none processor-base runtime)"
           pin_image quality_image "$(resolve_image quality processor-base-quality quality-service)"
-          pin_image embedding_image "$(resolve_image embedding processor-base-embedding embedding-service)"
           pin_image kenlm_image "$(resolve_image kenlm processor-base-kenlm kenlm-service)"
           pin_image fetcher_image "$(resolve_image fetcher processor-base-fetcher fetcher-service)"
 
   build:
     name: Build ${{ matrix.image }}
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
     needs:
+      - changes
       - processor-base-pin
     runs-on: ubuntu-latest
     permissions:
@@ -428,18 +689,6 @@ jobs:
             context: .
             dockerfile: ingest/oaipmh_poller/Dockerfile
             inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/oaipmh_poller
-          - image: ingest-sitemap
-            context: .
-            dockerfile: ingest/sitemap_poller/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/sitemap_poller
-          - image: ingest-github-events
-            context: .
-            dockerfile: ingest/github_events/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_events
-          - image: ingest-github-releases
-            context: .
-            dockerfile: ingest/github_releases/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_events ingest/github_releases
           - image: ingest-hf
             context: .
             dockerfile: ingest/hf_poller/Dockerfile
@@ -448,37 +697,28 @@ jobs:
             context: .
             dockerfile: ingest/arxiv_html_fetcher/Dockerfile
             inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher
-          - image: ingest-github-tarball-fetcher
-            context: .
-            dockerfile: ingest/github_release_tarball_fetcher/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/github_release_tarball_fetcher
-          - image: ingest-openreview
-            context: .
-            dockerfile: ingest/openreview_poller/Dockerfile
-            inputs: .dockerignore pyproject.toml README.md schemas ingest/__init__.py ingest/common ingest/openreview_poller
           - image: processor
             context: .
             dockerfile: processor/Dockerfile.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller ingest/sitemap_poller processor docs/provider-terms
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common ingest/arxiv_html_fetcher ingest/oaipmh_poller ingest/rss_poller processor/*.py processor/Dockerfile.app processor/container_entrypoint.sh processor/operators docs/provider-terms
+          - image: processor-foundry
+            context: .
+            dockerfile: processor/Dockerfile.foundry.app
+            inputs: .dockerignore schemas processor/Dockerfile.foundry.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/iceberg_catalog.py processor/probes.py processor/sign.py processor/source_policy.py processor/foundry docs/provider-terms
           - image: processor-quality-model
             model_profile: quality
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
-          - image: processor-embedding-model
-            model_profile: embedding
-            context: .
-            dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/model_jobs.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py
           - image: processor-kenlm-model
             model_profile: kenlm
             context: .
             dockerfile: processor/Dockerfile.model-service.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/decon_gate.py processor/sign.py processor/operators/__init__.py processor/operators/quality.py processor/operators/kenlm_score.py
+            inputs: .dockerignore schemas processor/Dockerfile.model-service.app processor/__init__.py processor/common.py processor/model_service.py processor/model_jobs.py processor/operators/__init__.py processor/operators/quality.py processor/operators/source_classifiers.py processor/operators/kenlm_score.py
           - image: processor-fetcher-model
             context: .
             dockerfile: processor/Dockerfile.fetcher.app
-            inputs: .dockerignore pyproject.toml uv.lock tests/pyproject.toml ingest/*/pyproject.toml schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/metrics.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/source_policy.py
+            inputs: .dockerignore schemas ingest/__init__.py ingest/common processor/Dockerfile.fetcher.app processor/__init__.py processor/common.py processor/container_entrypoint.sh processor/fetcher.py processor/expired_inputs.py processor/metrics.py processor/pdf_worker.py processor/operators/__init__.py processor/operators/extract.py processor/operators/langid.py processor/operators/minhash.py processor/operators/validity.py processor/probes.py processor/scientific.py processor/scientific_handoff.py processor/source_policy.py processor/work_cutoff.py
           - image: ui
             context: ui
             dockerfile: Dockerfile
@@ -506,7 +746,6 @@ jobs:
           IMAGE_INPUTS: ${{ matrix.inputs }}
           PROCESSOR_BASE_IMAGE: ${{ needs.processor-base-pin.outputs.image }}
           PROCESSOR_QUALITY_IMAGE: ${{ needs.processor-base-pin.outputs.quality_image }}
-          PROCESSOR_EMBEDDING_IMAGE: ${{ needs.processor-base-pin.outputs.embedding_image }}
           PROCESSOR_KENLM_IMAGE: ${{ needs.processor-base-pin.outputs.kenlm_image }}
           PROCESSOR_FETCHER_IMAGE: ${{ needs.processor-base-pin.outputs.fetcher_image }}
         run: |
@@ -516,7 +755,6 @@ jobs:
           selected_processor_base="$PROCESSOR_BASE_IMAGE"
           case "${{ matrix.image }}" in
             processor-quality-model) selected_processor_base="$PROCESSOR_QUALITY_IMAGE" ;;
-            processor-embedding-model) selected_processor_base="$PROCESSOR_EMBEDDING_IMAGE" ;;
             processor-kenlm-model) selected_processor_base="$PROCESSOR_KENLM_IMAGE" ;;
             processor-fetcher-model) selected_processor_base="$PROCESSOR_FETCHER_IMAGE" ;;
           esac
@@ -568,8 +806,10 @@ jobs:
           REVISION_REF: ${{ steps.image.outputs.revision_ref }}
         run: docker buildx imagetools create --tag "$REVISION_REF" "$REUSE_REF"
 
-      - name: Build and publish image
-        if: steps.image.outputs.exists != 'true'
+      - name: Build and publish cached image
+        if: >-
+          steps.image.outputs.exists != 'true' &&
+          !startsWith(matrix.image, 'processor')
         uses: docker/build-push-action@v7.3.0
         with:
           context: ${{ matrix.context }}
@@ -588,6 +828,21 @@ jobs:
             type=gha,scope=${{ matrix.image }}
             type=registry,ref=${{ steps.image.outputs.registry }}/stream2pretrain/${{ matrix.image }}:buildcache
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      - name: Build and publish thin processor image
+        if: >-
+          steps.image.outputs.exists != 'true' &&
+          startsWith(matrix.image, 'processor')
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.revision_ref }}
+          build-args: |
+            PROCESSOR_BASE_IMAGE=${{ steps.image.outputs.processor_base }}
+            S2P_MODEL_SERVICE_PROFILE=${{ matrix.model_profile }}
 
       - name: Smoke-test Python runtime imports
         # Ingest images use relocated console entrypoints and need this guard.
@@ -612,8 +867,9 @@ jobs:
 
   image-pin:
     name: Pin release images by digest
-    if: inputs.mode == '' || inputs.mode == 'deploy'
+    if: needs.changes.outputs.deploy == 'true'
     needs:
+      - changes
       - build
     runs-on: ubuntu-latest
     permissions:
@@ -621,16 +877,11 @@ jobs:
     outputs:
       ingest_rss: ${{ steps.pin.outputs.ingest_rss }}
       ingest_oaipmh: ${{ steps.pin.outputs.ingest_oaipmh }}
-      ingest_sitemap: ${{ steps.pin.outputs.ingest_sitemap }}
-      ingest_github_events: ${{ steps.pin.outputs.ingest_github_events }}
-      ingest_github_releases: ${{ steps.pin.outputs.ingest_github_releases }}
       ingest_hf: ${{ steps.pin.outputs.ingest_hf }}
       ingest_arxiv_html: ${{ steps.pin.outputs.ingest_arxiv_html }}
-      ingest_github_tarball_fetcher: ${{ steps.pin.outputs.ingest_github_tarball_fetcher }}
-      ingest_openreview: ${{ steps.pin.outputs.ingest_openreview }}
       processor: ${{ steps.pin.outputs.processor }}
+      processor_foundry: ${{ steps.pin.outputs.processor_foundry }}
       processor_quality_model: ${{ steps.pin.outputs.processor_quality_model }}
-      processor_embedding_model: ${{ steps.pin.outputs.processor_embedding_model }}
       processor_kenlm_model: ${{ steps.pin.outputs.processor_kenlm_model }}
       processor_fetcher_model: ${{ steps.pin.outputs.processor_fetcher_model }}
       ui: ${{ steps.pin.outputs.ui }}
@@ -669,16 +920,11 @@ jobs:
           }
           pin_component ingest_rss ingest-rss
           pin_component ingest_oaipmh ingest-oaipmh
-          pin_component ingest_sitemap ingest-sitemap
-          pin_component ingest_github_events ingest-github-events
-          pin_component ingest_github_releases ingest-github-releases
           pin_component ingest_hf ingest-hf
           pin_component ingest_arxiv_html ingest-arxiv-html
-          pin_component ingest_github_tarball_fetcher ingest-github-tarball-fetcher
-          pin_component ingest_openreview ingest-openreview
           pin_component processor processor
+          pin_component processor_foundry processor-foundry
           pin_component processor_quality_model processor-quality-model
-          pin_component processor_embedding_model processor-embedding-model
           pin_component processor_kenlm_model processor-kenlm-model
           pin_component processor_fetcher_model processor-fetcher-model
           pin_component ui ui
@@ -688,9 +934,12 @@ jobs:
     if: >-
       always() &&
       ((github.event_name == 'workflow_dispatch' && inputs.mode != 'deploy') ||
-      (needs.validate.result == 'success' && needs.build.result == 'success' &&
+      (needs.changes.outputs.deploy == 'true' &&
+      (needs.validate.result == 'success' || needs.validate.result == 'skipped') &&
+      needs.build.result == 'success' &&
       needs.image-pin.result == 'success'))
     needs:
+      - changes
       - validate
       - build
       - image-pin
@@ -708,18 +957,21 @@ jobs:
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       DEPLOY_MODE: ${{ inputs.mode || 'deploy' }}
+      CORE_CHANGED: ${{ needs.changes.outputs.core }}
+      SOURCES_CHANGED: ${{ needs.changes.outputs.sources }}
+      MONITORING_CHANGED: ${{ needs.changes.outputs.monitoring }}
+      REDPANDA_CHANGED: ${{ needs.changes.outputs.redpanda }}
+      CATALOG_CHANGED: ${{ needs.changes.outputs.catalog }}
+      DNS_INFRA_CHANGED: ${{ needs.changes.outputs.dns_infra }}
+      MODEL_RUNTIME_CHANGED: ${{ needs.changes.outputs.model_runtime }}
+      VERIFY_CLASSIFIERS: ${{ inputs.verify_classifiers }}
       IMAGE_DIGEST_INGEST_RSS: ${{ needs.image-pin.outputs.ingest_rss }}
       IMAGE_DIGEST_INGEST_OAIPMH: ${{ needs.image-pin.outputs.ingest_oaipmh }}
-      IMAGE_DIGEST_INGEST_SITEMAP: ${{ needs.image-pin.outputs.ingest_sitemap }}
-      IMAGE_DIGEST_INGEST_GITHUB_EVENTS: ${{ needs.image-pin.outputs.ingest_github_events }}
-      IMAGE_DIGEST_INGEST_GITHUB_RELEASES: ${{ needs.image-pin.outputs.ingest_github_releases }}
       IMAGE_DIGEST_INGEST_HF: ${{ needs.image-pin.outputs.ingest_hf }}
       IMAGE_DIGEST_INGEST_ARXIV_HTML: ${{ needs.image-pin.outputs.ingest_arxiv_html }}
-      IMAGE_DIGEST_INGEST_GITHUB_TARBALL: ${{ needs.image-pin.outputs.ingest_github_tarball_fetcher }}
-      IMAGE_DIGEST_INGEST_OPENREVIEW: ${{ needs.image-pin.outputs.ingest_openreview }}
       IMAGE_DIGEST_PROCESSOR: ${{ needs.image-pin.outputs.processor }}
+      IMAGE_DIGEST_PROCESSOR_FOUNDRY: ${{ needs.image-pin.outputs.processor_foundry }}
       IMAGE_DIGEST_PROCESSOR_QUALITY: ${{ needs.image-pin.outputs.processor_quality_model }}
-      IMAGE_DIGEST_PROCESSOR_EMBEDDING: ${{ needs.image-pin.outputs.processor_embedding_model }}
       IMAGE_DIGEST_PROCESSOR_KENLM: ${{ needs.image-pin.outputs.processor_kenlm_model }}
       IMAGE_DIGEST_PROCESSOR_FETCHER: ${{ needs.image-pin.outputs.processor_fetcher_model }}
       IMAGE_DIGEST_UI: ${{ needs.image-pin.outputs.ui }}
@@ -732,7 +984,7 @@ jobs:
         with:
           version: "${{ env.HELM_VERSION }}"
 
-      - name: Install Helmfile and Helm diff
+      - name: Install Helmfile
         shell: bash
         run: |
           set -euo pipefail
@@ -743,7 +995,6 @@ jobs:
             --output "$archive"
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           sudo install -m 0755 "$RUNNER_TEMP/helmfile" /usr/local/bin/helmfile
-          helm plugin install https://github.com/databus23/helm-diff --version v3.9.12
 
       - name: Install Cisco AnyConnect-compatible VPN client
         run: |
@@ -755,6 +1006,16 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          deploy_started_at="$(date +%s)"
+          phase_started_at="$deploy_started_at"
+          finish_phase() {
+            local name="$1"
+            local now
+            now="$(date +%s)"
+            echo "::notice title=Deployment phase::${name}: $((now - phase_started_at))s"
+            phase_started_at="$now"
+          }
+
           : "${CISCO_VPN_SERVER:?Missing CISCO_VPN_SERVER}"
           : "${CISCO_VPN_USERNAME:?Missing CISCO_VPN_USERNAME}"
           : "${CISCO_VPN_PASSWORD:?Missing CISCO_VPN_PASSWORD}"
@@ -765,6 +1026,15 @@ jobs:
           chmod 600 "$kubeconfig"
           export KUBECONFIG="$kubeconfig"
 
+          api_server="$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}')"
+          api_host="${api_server#https://}"
+          if [[ "$api_host" == \[*\]* ]]; then
+            api_host="${api_host#\[}"
+            api_host="${api_host%%\]*}"
+          else
+            api_host="${api_host%%:*}"
+          fi
+
           vpnc_script="$(dpkg -L vpnc-scripts | awk '/\/vpnc-script$/ {print; exit}')"
           if [[ -z "$vpnc_script" || ! -x "$vpnc_script" ]]; then
             echo "The vpnc-scripts package did not provide an executable vpnc-script." >&2
@@ -773,11 +1043,12 @@ jobs:
           fi
 
           vpn_log="$RUNNER_TEMP/openconnect.log"
+          vpn_pid=""
           ui_port_forward_pid=""
           foundry_port_forward_pid=""
           prometheus_port_forward_pid=""
           curator_canary_job=""
-          curator_migration_pod=""
+          maintenance_cron_states=()
           vpn_args=(
             --protocol=anyconnect
             --user="$CISCO_VPN_USERNAME"
@@ -791,17 +1062,35 @@ jobs:
             vpn_args+=(--servercert="$CISCO_VPN_SERVERCERT")
           fi
 
-          printf '%s\n' "$CISCO_VPN_PASSWORD" \
-            | sudo -n openconnect "${vpn_args[@]}" "$CISCO_VPN_SERVER" \
-                >"$vpn_log" 2>&1 &
-          vpn_pid=$!
+          start_vpn() {
+            : > "$vpn_log"
+            printf '%s\n' "$CISCO_VPN_PASSWORD" \
+              | sudo -n openconnect "${vpn_args[@]}" "$CISCO_VPN_SERVER" \
+                  >"$vpn_log" 2>&1 &
+            vpn_pid=$!
+          }
+          stop_vpn() {
+            if [[ -n "$vpn_pid" ]]; then
+              sudo -n kill "$vpn_pid" 2>/dev/null || true
+              wait "$vpn_pid" 2>/dev/null || true
+              vpn_pid=""
+            fi
+          }
+          restore_maintenance_cronjobs() {
+            local entry cronjob suspended
+            for entry in "${maintenance_cron_states[@]}"; do
+              cronjob="${entry%%:*}"
+              suspended="${entry##*:}"
+              kubectl -n stream2pretrain patch "cronjob/$cronjob" \
+                --type=merge \
+                -p "{\"spec\":{\"suspend\":$suspended}}" \
+                >/dev/null 2>&1 || true
+            done
+            maintenance_cron_states=()
+          }
           cleanup() {
             if [[ -n "$curator_canary_job" ]]; then
               kubectl -n stream2pretrain delete "job/$curator_canary_job" \
-                --ignore-not-found --wait=false >/dev/null 2>&1 || true
-            fi
-            if [[ -n "$curator_migration_pod" ]]; then
-              kubectl -n stream2pretrain delete "pod/$curator_migration_pod" \
                 --ignore-not-found --wait=false >/dev/null 2>&1 || true
             fi
             if [[ -n "$ui_port_forward_pid" ]]; then
@@ -813,24 +1102,44 @@ jobs:
             if [[ -n "$prometheus_port_forward_pid" ]]; then
               kill "$prometheus_port_forward_pid" 2>/dev/null || true
             fi
-            sudo -n kill "$vpn_pid" 2>/dev/null || true
+            restore_maintenance_cronjobs
+            stop_vpn
             sudo -n pkill -TERM -x openconnect 2>/dev/null || true
           }
           trap cleanup EXIT
 
           tunnel_ready=false
           vpn_interface=""
-          for _ in $(seq 1 60); do
-            if ! kill -0 "$vpn_pid" 2>/dev/null; then
-              tail -n 80 "$vpn_log" >&2 || true
-              exit 1
-            fi
-            vpn_interface="$(ip -o link show up | awk -F': ' '$2 ~ /^tun[0-9]+/ {print $2; exit}')"
-            if [[ -n "$vpn_interface" ]]; then
-              tunnel_ready=true
-              break
-            fi
-            sleep 2
+          for connection_attempt in $(seq 1 3); do
+            start_vpn
+            for _ in $(seq 1 15); do
+              if ! kill -0 "$vpn_pid" 2>/dev/null; then
+                break
+              fi
+              vpn_interface="$(
+                ip -o link show up \
+                  | awk -F': ' '$2 ~ /^tun[0-9]+$/ {print $2; exit}'
+              )"
+              if [[ -n "$vpn_interface" ]]; then
+                if [[ "$api_host" != *:* ]] \
+                  || ip -6 -o addr show dev "$vpn_interface" scope global \
+                    | grep -q 'inet6'; then
+                  tunnel_ready=true
+                  break 2
+                fi
+              fi
+              sleep 2
+            done
+            echo "VPN attempt ${connection_attempt} did not provide a usable tunnel; reconnecting." >&2
+            tail -n 40 "$vpn_log" >&2 || true
+            stop_vpn
+            for _ in $(seq 1 10); do
+              if ! ip -o link show up \
+                | awk -F': ' '$2 ~ /^tun[0-9]+$/ {found=1} END {exit found ? 0 : 1}'; then
+                break
+              fi
+              sleep 1
+            done
           done
           if [[ "$tunnel_ready" != true ]]; then
             tail -n 80 "$vpn_log" >&2 || true
@@ -846,21 +1155,22 @@ jobs:
           ip -o link show dev "$vpn_interface" >&2 || true
           ip -6 -o addr show dev "$vpn_interface" >&2 || true
 
-          api_server="$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}')"
-          api_host="${api_server#https://}"
-          if [[ "$api_host" == \[*\]* ]]; then
-            api_host="${api_host#\[}"
-            api_host="${api_host%%\]*}"
-          else
-            api_host="${api_host%%:*}"
-          fi
-
           if [[ "$api_host" == *:* ]] && ! ip -6 route get "$api_host" >/dev/null 2>&1; then
-            vpn_peer="$(ip -6 -o addr show dev "$vpn_interface" scope global \
-              | sed -n 's/.* peer \([^ ]*\)\/[0-9][0-9]*.*/\1/p' \
-              | head -n 1)"
             route_ready=false
             for _ in $(seq 1 30); do
+              vpn_interface="$(
+                ip -o link show up \
+                  | awk -F': ' '$2 ~ /^tun[0-9]+$/ {print $2; exit}'
+              )"
+              if [[ -z "$vpn_interface" ]] \
+                || ! ip -6 -o addr show dev "$vpn_interface" scope global \
+                  | grep -q 'inet6'; then
+                sleep 1
+                continue
+              fi
+              vpn_peer="$(ip -6 -o addr show dev "$vpn_interface" scope global \
+                | sed -n 's/.* peer \([^ ]*\)\/[0-9][0-9]*.*/\1/p' \
+                | head -n 1)"
               if [[ -n "$vpn_peer" ]]; then
                 route_args=("$api_host/128" via "$vpn_peer" dev "$vpn_interface" onlink)
               else
@@ -882,56 +1192,73 @@ jobs:
           ip -6 route get "$api_host" >&2 || true
 
           kubectl --request-timeout=20s get nodes
+          finish_phase "VPN and cluster connection"
 
-          if [[ "$DEPLOY_MODE" == "repair-monitoring" ]]; then
-            monitoring_diagnostics() {
-              kubectl -n monitoring get deployment,statefulset,pod,service,endpoints \
-                -o wide >&2 || true
-              kubectl -n monitoring get events \
-                --sort-by=.metadata.creationTimestamp >&2 || true
-              kubectl -n monitoring describe pod/prometheus-kps-prometheus-0 >&2 || true
-              kubectl -n monitoring logs prometheus-kps-prometheus-0 \
-                -c prometheus --tail=200 >&2 || true
-              kubectl -n monitoring logs prometheus-kps-prometheus-0 \
-                -c prometheus --previous --tail=200 >&2 || true
-              kubectl top pods -A --containers >&2 || true
-            }
-            if ! helmfile \
-              --helm-binary "$(command -v helm)" \
-              --file helmfile.yaml \
-              --environment dev \
-              --selector name=kube-prometheus-stack \
-              apply \
-              --reset-values \
-              --wait=false \
-              --timeout 600 \
-              --suppress-secrets; then
-              monitoring_diagnostics
+          if [[ "$DNS_INFRA_CHANGED" == "true" ]]; then
+            kubectl -n kube-system patch deployment/coredns \
+              --type=strategic \
+              --patch-file=infra/kubernetes/coredns-ha-patch.yaml
+            kubectl apply -f infra/kubernetes/coredns-pdb.yaml
+            kubectl -n kube-system rollout status deployment/coredns --timeout=180s
+          else
+            coredns_replicas="$(
+              kubectl -n kube-system get deployment/coredns \
+                -o jsonpath='{.spec.replicas}'
+            )"
+            if [[ "$coredns_replicas" -lt 2 ]] \
+               || ! kubectl -n kube-system get poddisruptionbudget/coredns >/dev/null; then
+              echo "CoreDNS HA drifted; apply infra/kubernetes/coredns-* before deploying." >&2
               exit 1
             fi
-            if ! kubectl -n monitoring wait \
-              --for=condition=Ready pod/prometheus-kps-prometheus-0 \
-              --timeout=600s; then
-              monitoring_diagnostics
-              exit 1
-            fi
-            kubectl -n monitoring port-forward \
-              service/kps-prometheus 19090:9090 \
-              >"$RUNNER_TEMP/prometheus-port-forward.log" 2>&1 &
-            prometheus_port_forward_pid=$!
-            for _ in $(seq 1 60); do
-              if curl --fail --silent --show-error \
-                http://127.0.0.1:19090/-/ready; then
-                exit 0
-              fi
-              if ! kill -0 "$prometheus_port_forward_pid" 2>/dev/null; then
-                cat "$RUNNER_TEMP/prometheus-port-forward.log" >&2
-                exit 1
-              fi
-              sleep 2
+          fi
+          finish_phase "CoreDNS availability preflight"
+
+          if [[ "$DEPLOY_MODE" == "diagnose" && "$VERIFY_CLASSIFIERS" == "true" ]]; then
+            model="stream2pretrain-processor-model-service-quality"
+            kubectl -n stream2pretrain exec -i \
+              statefulset/stream2pretrain-processor-curate -c curate -- \
+              python - --live-recovery-check --expected-backends 2 \
+                --base-url "http://${model}:8094" \
+                --headless-host "${model}-headless" \
+                --model-family source-pretrain-quality < scripts/benchmark_model_service.py
+          fi
+
+
+
+          if [[ "$DEPLOY_MODE" == "capture-evidence" ]]; then
+            evidence_dir="$RUNNER_TEMP/submission-evidence"
+            mkdir -p "$evidence_dir"
+            kubectl get nodes -o json > "$evidence_dir/nodes.json"
+            kubectl -n stream2pretrain get pods -o json | jq '{items: [.items[] | {name: .metadata.name, created: .metadata.creationTimestamp, node: .spec.nodeName, containers: [.spec.containers[] | {name,image,resources}], status: .status}]}' > "$evidence_dir/pods.json"
+            kubectl top nodes > "$evidence_dir/node-usage.txt"
+            kubectl -n stream2pretrain top pods --containers > "$evidence_dir/pod-usage.txt"
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+              python - < scripts/capture_submission_metrics.py > "$evidence_dir/metrics.json"
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+              python - < scripts/inspect_object_store.py > "$evidence_dir/storage.json"
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-foundry -c api -- \
+              python - foundry < scripts/check_pipeline_live.py > "$evidence_dir/foundry.json"
+            for node in $(kubectl get nodes -o name); do
+              node="${node#node/}"
+              kubectl get --raw "/api/v1/nodes/${node}/proxy/stats/summary" \
+                > "$evidence_dir/node-storage-${node}.json"
             done
-            monitoring_diagnostics
-            exit 1
+            exit 0
+          fi
+
+          if [[ "$DEPLOY_MODE" == "check-pipeline" ]]; then
+            kubectl -n stream2pretrain get pods -o wide
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+              python - duckdb < scripts/check_pipeline_live.py
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-curate -c curate -- \
+              python - curator < scripts/check_pipeline_live.py
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-processor-fetcher -- \
+              python - fetcher < scripts/check_pipeline_live.py
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-curate -c curate -- \
+              python - < scripts/live_classifier_diagnostics.py
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-foundry -c api -- \
+              python - foundry < scripts/check_pipeline_live.py
+            exit 0
           fi
 
           if [[ "$DEPLOY_MODE" == "audit-ui" ]]; then
@@ -996,28 +1323,16 @@ jobs:
               kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io \
                 -o name | wc -l
             )"
-            if [[ "$source_count" -lt 10 ]]; then
-              echo "Expected all 10 Phase-1 SourceFeeds, found $source_count" >&2
+            if [[ "$source_count" -ne 5 ]]; then
+              echo "Expected exactly five internal arXiv discovery SourceFeeds, found $source_count" >&2
               exit 1
             fi
-            kubectl -n stream2pretrain rollout status \
-              deployment/stream2pretrain-ingest-github-events --timeout=180s
-            kubectl -n stream2pretrain rollout status \
-              deployment/stream2pretrain-ingest-github-tarball-fetcher --timeout=180s
             kubectl -n stream2pretrain rollout status \
               deployment/stream2pretrain-ingest-hf-cards --timeout=180s
             kubectl -n stream2pretrain rollout status \
               deployment/stream2pretrain-ingest-arxiv-html --timeout=180s
 
-            cronjobs=(
-              stream2pretrain-ingest-github-releases
-              stream2pretrain-ingest-hf-daily-papers
-              stream2pretrain-iceberg-maintenance
-            )
-            if kubectl -n stream2pretrain get \
-              cronjob/stream2pretrain-ingest-openreview-live >/dev/null 2>&1; then
-              cronjobs+=(stream2pretrain-ingest-openreview-live)
-            fi
+            cronjobs=()
             while read -r cronjob; do
               [[ -n "$cronjob" ]] || continue
               cronjobs+=("${cronjob#cronjob.batch/}")
@@ -1102,7 +1417,14 @@ jobs:
               base="${cronjob#stream2pretrain-}"
               job="s2p-val-${base:0:42}-${suffix}"
               kubectl -n stream2pretrain delete "job/$job" --ignore-not-found --wait=true
-              kubectl -n stream2pretrain create job "$job" --from="cronjob/$cronjob"
+              kubectl -n stream2pretrain create job "$job" \
+                --from="cronjob/$cronjob" --dry-run=client -o json \
+                | jq '
+                    .spec.backoffLimit = 0
+                    | .spec.ttlSecondsAfterFinished = 900
+                    | .spec.template.spec.restartPolicy = "Never"
+                  ' \
+                | kubectl -n stream2pretrain apply -f -
               validation_jobs+=("$job")
               if ! wait_for_source_job "$job"; then
                 exit 1
@@ -1118,17 +1440,6 @@ jobs:
               echo "HF model source completed but admitted no licensed model" >&2
               exit 1
             }
-            github_events_logs="$(
-              kubectl -n stream2pretrain logs \
-                deployment/stream2pretrain-ingest-github-events --tail=240
-            )"
-            printf '%s\n' "$github_events_logs"
-            grep -Eq 'github_events\.(batch|not_modified)' <<<"$github_events_logs" || {
-              echo "GitHub Events has no verified successful upstream poll in recent logs" >&2
-              exit 1
-            }
-            kubectl -n stream2pretrain logs \
-              deployment/stream2pretrain-ingest-github-tarball-fetcher --tail=240
             kubectl -n stream2pretrain logs \
               deployment/stream2pretrain-ingest-arxiv-html --tail=240
             kubectl -n stream2pretrain rollout status \
@@ -1139,286 +1450,162 @@ jobs:
             exit 0
           fi
 
-          if [[ "$DEPLOY_MODE" == "recover-storage" ]]; then
-            echo "::group::Pause storage writers"
-            kubectl -n stream2pretrain annotate scaledobject --all \
-              autoscaling.keda.sh/paused=true --overwrite || true
-            kubectl -n stream2pretrain scale \
-              deployment/stream2pretrain-processor-iceberg-writer \
-              --replicas=0
-            while read -r cronjob; do
-              [[ -n "$cronjob" ]] || continue
-              kubectl -n stream2pretrain patch "$cronjob" \
-                --type=merge -p '{"spec":{"suspend":true}}'
-            done < <(kubectl -n stream2pretrain get cronjob -o name)
-            echo "::endgroup::"
 
-            echo "::group::Compact durable curator LevelDB state"
-            curator_statefulset=stream2pretrain-processor-curate
-            curator_compactor=stream2pretrain-curator-state-compactor
-            curator_replicas="$(
-              kubectl -n stream2pretrain get "statefulset/$curator_statefulset" \
-                -o jsonpath='{.spec.replicas}'
-            )"
-            curator_image="$(
-              kubectl -n stream2pretrain get "statefulset/$curator_statefulset" -o json \
-                | jq -r '
-                    .spec.template.spec.containers[]
-                    | select(.name == "curate")
-                    | .image
-                  '
-            )"
-            curator_claim="$(
-              kubectl -n stream2pretrain get pvc \
-                -l app.kubernetes.io/component=processor-curate -o json \
-                | jq -r 'first(.items[].metadata.name) // empty'
-            )"
-            : "${curator_image:?Curator image was not found}"
-            : "${curator_claim:?Curator checkpoint PVC was not found}"
-
-            kubectl -n stream2pretrain scale \
-              "statefulset/$curator_statefulset" --replicas=0
-            kubectl -n stream2pretrain wait --for=delete \
-              "pod/${curator_statefulset}-0" --timeout=180s \
-              || ! kubectl -n stream2pretrain get \
-                "pod/${curator_statefulset}-0" >/dev/null 2>&1
-            kubectl -n stream2pretrain delete "job/$curator_compactor" \
-              --ignore-not-found --wait=true
-
-            compaction_script="$(< scripts/compact_lsh_state.py)"
-            compactor_json="$(
-              kubectl -n stream2pretrain create job "$curator_compactor" \
-                --image="$curator_image" --dry-run=client -o json
-            )"
-            compaction_ok=true
-            if ! jq \
-              --arg claim "$curator_claim" \
-              --arg script "$compaction_script" '
-                .spec.backoffLimit = 0
-                | .spec.activeDeadlineSeconds = 1800
-                | .spec.ttlSecondsAfterFinished = 300
-                | .spec.template.spec.priorityClassName = "system-node-critical"
-                | .spec.template.spec.tolerations = [{
-                    key: "node.kubernetes.io/disk-pressure",
-                    operator: "Exists",
-                    effect: "NoSchedule"
-                  }]
-                | .spec.template.spec.containers[0].name = "compactor"
-                | .spec.template.spec.containers[0].command = ["python", "-c", $script]
-                | .spec.template.spec.containers[0].imagePullPolicy = "IfNotPresent"
-                | .spec.template.spec.containers[0].resources = {
-                    requests: {
-                      cpu: "50m",
-                      memory: "128Mi",
-                      "ephemeral-storage": "16Mi"
-                    },
-                    limits: {
-                      cpu: "500m",
-                      memory: "512Mi",
-                      "ephemeral-storage": "128Mi"
-                    }
-                  }
-                | .spec.template.spec.containers[0].volumeMounts = [{
-                    name: "checkpoint",
-                    mountPath: "/var/lib/s2p/checkpoint"
-                  }]
-                | .spec.template.spec.volumes = [{
-                    name: "checkpoint",
-                    persistentVolumeClaim: {claimName: $claim}
-                  }]
-              ' <<<"$compactor_json" \
-              | kubectl -n stream2pretrain apply -f -; then
-              compaction_ok=false
-            elif ! kubectl -n stream2pretrain wait \
-              --for=condition=Complete "job/$curator_compactor" --timeout=1800s; then
-              compaction_ok=false
-            fi
-            kubectl -n stream2pretrain logs "job/$curator_compactor" \
-              --all-containers --prefix --ignore-errors || true
-            if [[ "$compaction_ok" != true ]]; then
-              kubectl -n stream2pretrain describe "job/$curator_compactor" || true
-            fi
-            kubectl -n stream2pretrain delete "job/$curator_compactor" \
-              --ignore-not-found --wait=false
-            kubectl -n stream2pretrain scale \
-              "statefulset/$curator_statefulset" --replicas="$curator_replicas"
-            kubectl -n stream2pretrain get \
-              "statefulset/$curator_statefulset" pod -o wide || true
-            if [[ "$compaction_ok" != true ]]; then
-              echo "Curator state compaction failed; the original PVC was preserved." >&2
-              exit 1
-            fi
-            echo "::endgroup::"
-
-            echo "::group::Start MinIO for API-level recovery"
-            kubectl -n minio patch deployment/minio --type=merge -p '
-              {"spec":{"template":{"spec":{
-                "priorityClassName":"system-node-critical",
-                "tolerations":[{
-                  "key":"node.kubernetes.io/disk-pressure",
-                  "operator":"Exists",
-                  "effect":"NoSchedule"
-                }]
-              }}}}'
-            kubectl -n minio rollout status deployment/minio --timeout=180s
-            minio_ready=false
-            for _ in $(seq 1 60); do
-              ready_addresses="$(
-                kubectl -n minio get endpointslice \
-                  -l kubernetes.io/service-name=minio -o json \
-                  | jq '[
-                      .items[].endpoints[]?
-                      | select(.conditions.ready != false)
-                      | .addresses[]?
-                    ] | length'
-              )"
-              if [[ "$ready_addresses" -gt 0 ]]; then
-                minio_ready=true
-                break
-              fi
-              sleep 2
-            done
-            if [[ "$minio_ready" != true ]]; then
-              kubectl -n minio get deployment,pod,endpointslice -o wide
-              exit 1
-            fi
-            kubectl -n polaris rollout status deployment/polaris --timeout=180s
-            kubectl -n stream2pretrain rollout status \
-              deployment/stream2pretrain-duckdb --timeout=180s
-            echo "::endgroup::"
-
-            echo "::group::Restore the Polaris catalog and plan cleanup"
-            kubectl -n stream2pretrain exec -i \
-              deployment/stream2pretrain-duckdb -- python - \
-              < scripts/bootstrap_polaris.py
-            kubectl -n stream2pretrain exec -i \
-              deployment/stream2pretrain-duckdb -- python - \
-              < processor/iceberg_maintenance.py
-            echo "::endgroup::"
-
-            echo "::group::Apply bounded Iceberg cleanup"
+          if [[ "$DEPLOY_MODE" == "inspect-storage" ]]; then
+            # Query the S3 API instead of recursively walking the MinIO PVC.
+            # The latter took longer than ten minutes once the object count
+            # grew, while this reports the logical retained bytes we need for
+            # lifecycle sizing and does not depend on a node-local PVC path.
             kubectl -n stream2pretrain exec -i \
               deployment/stream2pretrain-duckdb -- \
-              python - --apply --register-missing \
-              < processor/iceberg_maintenance.py
-            echo "::endgroup::"
-
-            echo "::group::Wait for node pressure to clear"
-            for _ in $(seq 1 60); do
-              pressure="$(kubectl get node stream2pretrain-worker-2 \
-                -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}')"
-              [[ "$pressure" == "False" ]] && break
-              sleep 5
-            done
-            pressure="$(kubectl get node stream2pretrain-worker-2 \
-              -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}')"
-            if [[ "$pressure" != "False" ]]; then
-              kubectl describe node stream2pretrain-worker-2
-              exit 1
-            fi
-            kubectl get --raw \
-              /api/v1/nodes/stream2pretrain-worker-2/proxy/stats/summary \
-              | jq '{node: .node.nodeName, rootFs: .node.fs}'
-            echo "::endgroup::"
-
-            echo "::group::Remove recovery scheduling override"
-            kubectl -n minio patch deployment/minio --type=json -p '[
-              {"op":"remove","path":"/spec/template/spec/priorityClassName"},
-              {"op":"remove","path":"/spec/template/spec/tolerations"}
-            ]'
-            kubectl -n minio rollout status deployment/minio --timeout=180s
-            while read -r cronjob; do
-              [[ -n "$cronjob" ]] || continue
-              kubectl -n stream2pretrain patch "$cronjob" \
-                --type=merge -p '{"spec":{"suspend":false}}'
-            done < <(kubectl -n stream2pretrain get cronjob -o name)
-            echo "The writer remains paused until a normal deployment installs the fixed image."
-            echo "::endgroup::"
+              python - < scripts/inspect_object_store.py
             exit 0
           fi
 
-          if [[ "$DEPLOY_MODE" == "inspect-storage" ]]; then
-            inspector=stream2pretrain-storage-inspector
-            kubectl -n kube-system delete pod "$inspector" \
-              --ignore-not-found --wait=true
-            kubectl -n kube-system apply -f - <<'EOF'
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: stream2pretrain-storage-inspector
-          spec:
-            nodeName: stream2pretrain-worker-2
-            priorityClassName: system-node-critical
-            restartPolicy: Never
-            tolerations:
-              - key: node.kubernetes.io/disk-pressure
-                operator: Exists
-                effect: NoSchedule
-            containers:
-              - name: inspector
-                image: busybox:1.36.1
-                command:
-                  - sh
-                  - -ec
-                  - |
-                    volume=/host/var/lib/rancher/k3s/storage/pvc-731446d1-c621-4aeb-8b1e-f4e4d92535cb_minio_minio-data
-                    echo 'MinIO top-level directories (KiB):'
-                    du -x -k -d 1 "$volume" 2>/dev/null | sort -n
-                    echo 'MinIO system directories (KiB):'
-                    du -x -k -d 2 "$volume/.minio.sys" 2>/dev/null \
-                      | sort -n | tail -n 100
-                    gold="$volume/s2p-gold"
-                    echo 'Gold directory breakdown (KiB):'
-                    du -x -k -d 5 "$gold" 2>/dev/null \
-                      | sort -n | tail -n 100
-                    echo 'Gold file count:'
-                    find "$gold" -xdev -type f | wc -l
-                    echo 'Gold file extensions:'
-                    find "$gold" -xdev -type f \
-                      | sed 's/.*\.//' | sort | uniq -c | sort -n
-                resources:
-                  requests:
-                    cpu: 10m
-                    memory: 16Mi
-                    ephemeral-storage: 1Mi
-                  limits:
-                    cpu: 100m
-                    memory: 64Mi
-                    ephemeral-storage: 16Mi
-                securityContext:
-                  allowPrivilegeEscalation: false
-                  readOnlyRootFilesystem: true
-                  runAsUser: 0
-                volumeMounts:
-                  - name: host-root
-                    mountPath: /host
-                    readOnly: true
-            volumes:
-              - name: host-root
-                hostPath:
-                  path: /
-                  type: Directory
-          EOF
-            if ! kubectl -n kube-system wait \
-              --for=jsonpath='{.status.phase}'=Succeeded \
-              "pod/$inspector" --timeout=600s; then
-              kubectl -n kube-system describe pod "$inspector" || true
-              kubectl -n kube-system logs "$inspector" || true
-              kubectl -n kube-system delete pod "$inspector" \
-                --ignore-not-found --wait=false
+          if [[ "$DEPLOY_MODE" == "maintain-storage" ]]; then
+            mapfile -t maintenance_cronjobs < <(
+              kubectl -n stream2pretrain get cronjob \
+                -l app.kubernetes.io/component=iceberg-maintenance \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+            )
+            if (( ${#maintenance_cronjobs[@]} == 0 )); then
+              echo "No Iceberg maintenance CronJobs are deployed." >&2
               exit 1
             fi
-            kubectl -n kube-system logs "$inspector"
-            kubectl -n kube-system delete pod "$inspector" --wait=true
+            for cronjob in "${maintenance_cronjobs[@]}"; do
+              suspended="$(
+                kubectl -n stream2pretrain get "cronjob/$cronjob" \
+                  -o jsonpath='{.spec.suspend}'
+              )"
+              maintenance_cron_states+=("$cronjob:${suspended:-false}")
+              kubectl -n stream2pretrain patch "cronjob/$cronjob" \
+                --type=merge -p '{"spec":{"suspend":true}}' >/dev/null
+            done
+            kubectl -n stream2pretrain delete job \
+              -l app.kubernetes.io/component=iceberg-maintenance \
+              --ignore-not-found --wait=true
+            suffix="${GITHUB_RUN_ID: -8}${GITHUB_RUN_ATTEMPT}"
+            maintenance_jobs=()
+            index=0
+            for cronjob in "${maintenance_cronjobs[@]}"; do
+              index=$((index + 1))
+              job="s2p-im-${index}-${suffix}"
+              maintenance_jobs+=("$job")
+              kubectl -n stream2pretrain create job "$job" \
+                --from="cronjob/$cronjob" --dry-run=client -o json \
+                | jq '
+                    del(.metadata.ownerReferences)
+                    | .spec.activeDeadlineSeconds = 14400
+                    | .spec.backoffLimit = 0
+                    | .spec.ttlSecondsAfterFinished = 86400
+                    | .spec.template.spec.restartPolicy = "Never"
+                  ' \
+                | kubectl -n stream2pretrain apply -f -
+            done
+            maintenance_deadline=$((SECONDS + 14400))
+            while (( SECONDS < maintenance_deadline )); do
+              complete=0
+              failed_job=""
+              for job in "${maintenance_jobs[@]}"; do
+                maintenance_state="$(
+                  kubectl -n stream2pretrain get "job/$job" -o json \
+                    | jq -r '
+                        if any(.status.conditions[]?; .type == "Complete" and .status == "True")
+                        then "complete"
+                        elif any(.status.conditions[]?; .type == "Failed" and .status == "True")
+                        then "failed"
+                        else "running"
+                        end
+                      '
+                )"
+                if [[ "$maintenance_state" == "failed" ]]; then
+                  failed_job="$job"
+                  break
+                fi
+                [[ "$maintenance_state" == "complete" ]] && complete=$((complete + 1))
+              done
+              [[ -z "$failed_job" ]] || break
+              (( complete == ${#maintenance_jobs[@]} )) && break
+              sleep 10
+            done
+            if [[ -n "$failed_job" ]] || (( complete != ${#maintenance_jobs[@]} )); then
+              for job in "${maintenance_jobs[@]}"; do
+                kubectl -n stream2pretrain describe "job/$job" || true
+                kubectl -n stream2pretrain logs "job/$job" \
+                  --all-containers --prefix --ignore-errors || true
+              done
+              echo "Iceberg maintenance did not complete for every table." >&2
+              exit 1
+            fi
+            for job in "${maintenance_jobs[@]}"; do
+              kubectl -n stream2pretrain logs "job/$job" \
+                --all-containers --prefix
+            done
+            restore_maintenance_cronjobs
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- \
+              python - < scripts/inspect_object_store.py
             exit 0
           fi
 
           if [[ "$DEPLOY_MODE" == "diagnose" ]]; then
             echo "::group::Read-only cluster diagnostics"
+            # Name application containers explicitly: --all-containers --previous
+            # can fail on an init container before returning the actual crash.
+            for target in \
+              stream2pretrain-processor-curate-0:curate \
+              stream2pretrain-foundry-0:worker; do
+              pod="${target%:*}"
+              container="${target##*:}"
+              echo "::group::Application crash: ${pod}/${container}"
+              kubectl -n stream2pretrain logs "$pod" -c "$container" \
+                --previous --timestamps --tail=400 || true
+              kubectl -n stream2pretrain logs "$pod" -c "$container" \
+                --timestamps --tail=400 || true
+              echo "::endgroup::"
+            done
+            duckdb_pod="$(
+              kubectl -n stream2pretrain get pod \
+                -l app.kubernetes.io/component=duckdb \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+            )"
+            if [[ -n "$duckdb_pod" ]]; then
+              echo "::group::Application crash: ${duckdb_pod}/duckdb-api"
+              kubectl -n stream2pretrain describe "pod/$duckdb_pod" || true
+              kubectl -n stream2pretrain logs "$duckdb_pod" -c duckdb-api \
+                --previous --timestamps --tail=400 || true
+              kubectl -n stream2pretrain logs "$duckdb_pod" -c duckdb-api \
+                --timestamps --tail=400 || true
+              echo "::endgroup::"
+            fi
+            writer_pod="$(
+              kubectl -n stream2pretrain get pod \
+                -l app.kubernetes.io/component=processor-iceberg-writer \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+            )"
+            if [[ -n "$writer_pod" ]]; then
+              echo "::group::Application crash: ${writer_pod}/iceberg-writer"
+              kubectl -n stream2pretrain describe "pod/$writer_pod" || true
+              kubectl -n stream2pretrain logs "$writer_pod" -c iceberg-writer \
+                --previous --timestamps --tail=400 || true
+              kubectl -n stream2pretrain logs "$writer_pod" -c iceberg-writer \
+                --timestamps --tail=400 || true
+              echo "::endgroup::"
+            fi
             echo "::group::Helm release state"
             helm list --all --all-namespaces || true
             helm history stream2pretrain -n stream2pretrain || true
             helm status stream2pretrain -n stream2pretrain --show-desc || true
+            echo "::endgroup::"
+            echo "::group::Polaris metastore state"
+            kubectl -n polaris get statefulset,job,pod,pvc -o wide || true
+            kubectl -n polaris describe job/polaris-metastore-bootstrap || true
+            kubectl -n polaris describe pod \
+              -l job-name=polaris-metastore-bootstrap || true
+            kubectl -n polaris logs job/polaris-metastore-bootstrap \
+              --all-containers --prefix --timestamps --tail=400 || true
+            kubectl -n polaris logs statefulset/polaris-postgres \
+              --all-containers --prefix --timestamps --tail=200 || true
             echo "::endgroup::"
             kubectl get nodes -o json | jq -r '
               .items[]
@@ -1441,6 +1628,7 @@ jobs:
                 }
             '
             kubectl top nodes || true
+            kubectl -n stream2pretrain top pods --containers || true
             for node in $(kubectl get nodes -o name); do
               node="${node#node/}"
               kubectl get --raw "/api/v1/nodes/${node}/proxy/stats/summary" \
@@ -1556,6 +1744,180 @@ jobs:
             done
             echo "::endgroup::"
 
+            echo "::group::Durable pretraining audit"
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- python - <<'PY' || true
+          from __future__ import annotations
+
+          import json
+          import urllib.parse
+          import urllib.request
+          from datetime import UTC, datetime, timedelta
+
+          base = "http://[::1]:8090"
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+          def request(path: str, params: list[tuple[str, str]] | None = None) -> dict:
+              query = urllib.parse.urlencode(params or [])
+              url = f"{base}{path}" + (f"?{query}" if query else "")
+              # First access after an Iceberg snapshot refresh can enumerate
+              # historical manifests. Product queries are consolidated, but
+              # diagnostics must still wait long enough to report the cost
+              # rather than hiding it behind a client-side timeout.
+              with opener.open(url, timeout=180) as response:
+                  payload = json.load(response)
+              if not isinstance(payload, dict):
+                  raise RuntimeError(f"non-object response from {path}")
+              return payload
+
+          now = datetime.now(UTC)
+          start = now - timedelta(hours=24)
+          date_from = start.isoformat()
+          date_to = now.isoformat()
+          accepted_routes = (
+              "pretrain",
+              "broad_pretraining",
+              "posttrain_candidate",
+              "reasoning_candidate",
+          )
+          overview = request("/corpus-overview")
+          activity = request("/source-activity", [("window_hours", "24")])
+          admissions = request("/license-admissions", [("recent_limit", "100")])
+          facets = request("/document-facets")
+          cumulative = {
+              str(row["source"]): row
+              for row in overview.get("per_source_acceptance", [])
+              if isinstance(row, dict) and row.get("source")
+          }
+          activity_by_source = {
+              str(row["source_feed"]): row
+              for row in activity.get("sources", [])
+              if isinstance(row, dict) and row.get("source_feed")
+          }
+          source_rows = []
+          for source in facets.get("sources", []):
+              common = [
+                  ("page", "1"),
+                  ("page_size", "1"),
+                  ("source", str(source)),
+                  ("date_from", date_from),
+                  ("date_to", date_to),
+              ]
+              observed = request("/documents", common)
+              route_counts = {}
+              for route in (*accepted_routes, "quarantine", "retry"):
+                  payload = request("/documents", [*common, ("route", route)])
+                  route_counts[route] = int(payload.get("total", 0))
+              selection = [
+                  ("date_from", date_from),
+                  ("date_to", date_to),
+                  ("source", str(source)),
+                  ("include_structured", "true"),
+                  *[("route", route) for route in accepted_routes],
+              ]
+              export = request("/datasets/summary", selection)
+              source_rows.append(
+                  {
+                      "source": source,
+                      "publication_date_last_24h_not_processing_throughput": {
+                          "observed": int(observed.get("total", 0)),
+                          "strict_training_exports": int(export.get("documents", 0)),
+                          "routes": route_counts,
+                          "accepted_revisions": export.get("manifest", {}).get("revisions", {}),
+                      },
+                      "cumulative": cumulative.get(str(source), {"accepted": 0, "total": 0}),
+                      "ingestion_activity_last_24h": activity_by_source.get(str(source)),
+                  }
+              )
+
+          print(
+              json.dumps(
+                  {
+                      "window": {"from": date_from, "to": date_to},
+                      "overview": overview,
+                      "license_totals": {
+                          "admitted": admissions.get("admitted", 0),
+                          "posttrain_transform_only": admissions.get(
+                              "posttrain_transform_only", 0
+                          ),
+                          "quarantined": admissions.get("quarantined", 0),
+                          "by_license": admissions.get("by_license", []),
+                          "recent": admissions.get("recent", []),
+                      },
+                      "sources": source_rows,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+          PY
+            echo "::endgroup::"
+
+            echo "::group::Live classifier decision samples"
+            kubectl -n stream2pretrain exec -i \
+              statefulset/stream2pretrain-processor-curate -c curate -- python - \
+              < scripts/live_classifier_diagnostics.py || true
+            echo "::endgroup::"
+
+            echo "::group::Live activity metric audit"
+            kubectl -n monitoring get service,pod,servicemonitor -o wide || true
+            kubectl -n monitoring port-forward \
+              service/kps-prometheus 19090:9090 \
+              >"$RUNNER_TEMP/prometheus-diagnose-port-forward.log" 2>&1 &
+            prometheus_port_forward_pid=$!
+            prometheus_ready=false
+            for _ in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:19090/-/ready >/dev/null; then
+                prometheus_ready=true
+                break
+              fi
+              if ! kill -0 "$prometheus_port_forward_pid" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$prometheus_ready" == true ]]; then
+              curl --fail --silent --show-error \
+                http://127.0.0.1:19090/api/v1/label/__name__/values \
+                | jq '{
+                    redpanda_metric_count: ([
+                      .data[] | select(startswith("redpanda_"))
+                    ] | length),
+                    activity_metric_present: any(
+                      .data[]; . == "redpanda_kafka_max_offset"
+                    )
+                  }' \
+                || true
+              for query in \
+                'up{namespace="redpanda"}' \
+                'redpanda_application_uptime_seconds_total' \
+                'redpanda_kafka_max_offset{redpanda_namespace="kafka"}' \
+                's2p_processor_ingested_total' \
+                's2p_processor_routed_total' \
+                'sum by (source) (rate(s2p_processor_ingested_total[15m]))' \
+                'sum by (source) (rate(s2p_processor_curated_total[15m]))' \
+                'sum by (route) (rate(s2p_processor_routed_total[15m]))' \
+                'sum by (profile, pod) (rate(s2p_model_requests_total{status="success"}[15m]))' \
+                'histogram_quantile(0.95, sum by (le, profile) (rate(s2p_model_inference_seconds_bucket[15m])))' \
+                'histogram_quantile(0.95, sum by (le, profile) (rate(s2p_model_queue_seconds_bucket[15m])))' \
+                'sum by (task) (increase(s2p_classifier_head_seconds_count[15m]))' \
+                'sum by (task) (rate(s2p_classifier_head_seconds_sum[15m])) / sum by (task) (rate(s2p_classifier_head_seconds_count[15m]))' \
+                'sum by (task) (increase(s2p_classifier_head_tokens_total[15m]))' \
+                'sum by (task) (rate(s2p_classifier_head_score_sum[15m])) / sum by (task) (rate(s2p_classifier_head_score_count[15m]))' \
+                'sum by (profile, pod) (s2p_model_active_requests + s2p_model_waiting_requests)'; do
+                echo "Prometheus query: $query"
+                curl --fail --silent --show-error --get \
+                  --data-urlencode "query=$query" \
+                  http://127.0.0.1:19090/api/v1/query | jq . || true
+              done
+            else
+              cat "$RUNNER_TEMP/prometheus-diagnose-port-forward.log" >&2 || true
+            fi
+            kill "$prometheus_port_forward_pid" 2>/dev/null || true
+            wait "$prometheus_port_forward_pid" 2>/dev/null || true
+            prometheus_port_forward_pid=""
+            echo "::endgroup::"
+
             for namespace in minio polaris traefik stream2pretrain; do
               echo "::group::Namespace: $namespace"
               kubectl -n "$namespace" get \
@@ -1596,6 +1958,196 @@ jobs:
           registry="ghcr.io/${owner}"
 
           kubectl create namespace stream2pretrain --dry-run=client -o yaml | kubectl apply -f -
+
+          cleanup_stale_monitoring_pods() {
+            local pod
+            local -a stale_pods
+            mapfile -t stale_pods < <(
+              kubectl -n monitoring get pods -o json 2>/dev/null \
+                | jq -r '
+                    .items[]
+                    | select(
+                        .metadata.deletionTimestamp != null
+                        or .status.phase == "Failed"
+                        or .status.phase == "Succeeded"
+                        or any(
+                          .status.containerStatuses[]?;
+                          .state.terminated.reason == "ContainerStatusUnknown"
+                        )
+                      )
+                    | .metadata.name
+                  ' \
+                || true
+            )
+            for pod in "${stale_pods[@]}"; do
+              [[ -n "$pod" ]] || continue
+              echo "Deleting terminal monitoring Pod: $pod"
+              kubectl -n monitoring delete "pod/$pod" \
+                --ignore-not-found --wait=false
+            done
+          }
+
+          if [[ "$MONITORING_CHANGED" == "true" ]]; then
+            echo "::group::Reconcile kube-prometheus-stack"
+            cleanup_stale_monitoring_pods
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=kube-prometheus-stack \
+              sync \
+              --reset-values \
+              --wait=false \
+              --timeout 600 \
+              --suppress-secrets
+
+            # Recreate marks the superseded, unavailable ReplicaSet Pods for
+            # deletion. Remove only those terminal objects so they cannot keep
+            # polluting health reports after the worker has recovered.
+            sleep 2
+            cleanup_stale_monitoring_pods
+            grafana_secret_keys="$(
+              kubectl -n monitoring get secret kube-prometheus-stack-grafana \
+                -o json | jq -c '.data | keys | sort'
+            )"
+            echo "Grafana administrator Secret keys: $grafana_secret_keys"
+            for required_key in admin-user admin-password; do
+              if ! jq -e --arg key "$required_key" \
+                '.data | has($key)' \
+                < <(kubectl -n monitoring get secret \
+                  kube-prometheus-stack-grafana -o json) >/dev/null; then
+                echo "Grafana chart-owned Secret is missing key: $required_key" >&2
+                exit 1
+              fi
+            done
+            kubectl -n monitoring rollout status \
+              deployment/kube-prometheus-stack-grafana --timeout=300s
+            kubectl -n monitoring wait \
+              --for=condition=Ready pod/prometheus-kps-prometheus-0 \
+              --timeout=300s
+            grafana_addresses="$(
+              kubectl -n monitoring get endpointslice \
+                -l kubernetes.io/service-name=kube-prometheus-stack-grafana \
+                -o json \
+                | jq '[
+                    .items[].endpoints[]?
+                    | select(.conditions.ready == true)
+                    | .addresses[]?
+                  ] | length'
+            )"
+            if [[ "$grafana_addresses" -lt 1 ]]; then
+              echo "Grafana has no Ready service endpoint." >&2
+              exit 1
+            fi
+            kubectl get --raw \
+              '/api/v1/namespaces/monitoring/services/http:kube-prometheus-stack-grafana:80/proxy/api/health' \
+              | jq -e '.database == "ok"' >/dev/null
+            cleanup_stale_monitoring_pods
+            echo "::endgroup::"
+            finish_phase "Monitoring reconciliation"
+          else
+            echo "Keeping kube-prometheus-stack unchanged."
+          fi
+
+          if [[ "$REDPANDA_CHANGED" == "true" ]]; then
+            echo "::group::Reconcile Redpanda monitoring"
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=redpanda \
+              sync \
+              --reset-values \
+              --wait=false \
+              --timeout 600 \
+              --suppress-secrets
+            kubectl -n redpanda rollout status statefulset/redpanda --timeout=300s
+            kubectl -n redpanda wait --for=condition=Ready pod/redpanda-0 \
+              --timeout=300s
+            kubectl -n redpanda get servicemonitor redpanda -o name
+            echo "::endgroup::"
+            finish_phase "Redpanda reconciliation"
+          else
+            echo "Keeping Redpanda unchanged."
+          fi
+
+          if [[ "$MONITORING_CHANGED" == "true" \
+             || "$REDPANDA_CHANGED" == "true" ]]; then
+            echo "::group::Verify Redpanda Prometheus target"
+            kubectl -n monitoring port-forward \
+              service/kps-prometheus 19090:9090 \
+              >"$RUNNER_TEMP/prometheus-platform-port-forward.log" 2>&1 &
+            prometheus_port_forward_pid=$!
+            prometheus_ready=false
+            for _ in $(seq 1 60); do
+              if curl --fail --silent http://127.0.0.1:19090/-/ready >/dev/null; then
+                prometheus_ready=true
+                break
+              fi
+              if ! kill -0 "$prometheus_port_forward_pid" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$prometheus_ready" != "true" ]]; then
+              cat "$RUNNER_TEMP/prometheus-platform-port-forward.log" >&2 || true
+              exit 1
+            fi
+
+            redpanda_target_ready=false
+            for _ in $(seq 1 60); do
+              active_targets="$(
+                curl --fail --silent --show-error \
+                  'http://127.0.0.1:19090/api/v1/targets?state=active'
+              )"
+              if jq -e '
+                  any(
+                    .data.activeTargets[]?;
+                    .health == "up"
+                    and (
+                      .labels.namespace == "redpanda"
+                      or .discoveredLabels.__meta_kubernetes_namespace == "redpanda"
+                    )
+                    and (
+                      (.labels.job // "" | test("redpanda"))
+                      or .discoveredLabels.__meta_kubernetes_service_name == "redpanda"
+                    )
+                  )
+                ' <<<"$active_targets" >/dev/null; then
+                redpanda_target_ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [[ "$redpanda_target_ready" != "true" ]]; then
+              jq '{
+                  activeRedpandaTargets: [
+                    .data.activeTargets[]?
+                    | select(
+                        .labels.namespace == "redpanda"
+                        or .discoveredLabels.__meta_kubernetes_namespace == "redpanda"
+                      )
+                    | {labels, health, lastError, scrapeUrl}
+                  ]
+                }' <<<"$active_targets" >&2
+              exit 1
+            fi
+            redpanda_metric_count="$(
+              curl --fail --silent --show-error \
+                http://127.0.0.1:19090/api/v1/label/__name__/values \
+                | jq '[.data[] | select(startswith("redpanda_"))] | length'
+            )"
+            if [[ "$redpanda_metric_count" -lt 1 ]]; then
+              echo "Prometheus target is up but exposes no redpanda_* series." >&2
+              exit 1
+            fi
+            echo "Redpanda Prometheus target is up with $redpanda_metric_count metric names."
+            kill "$prometheus_port_forward_pid" 2>/dev/null || true
+            wait "$prometheus_port_forward_pid" 2>/dev/null || true
+            prometheus_port_forward_pid=""
+            echo "::endgroup::"
+            finish_phase "Redpanda metrics verification"
+          fi
 
           report_deploy_failure() {
             echo "::group::Kubernetes deployment diagnostics"
@@ -1770,273 +2322,130 @@ jobs:
             report_deploy_failure
             exit 1
           fi
+          finish_phase "Capacity preflight"
 
-          # Preserve any pre-native Bytewax progress in the broker group before
-          # the native-consumer-to-Bytewax cutback. The durable marker makes
-          # this a one-time handoff even when the workflow or Helm deployment
-          # is retried. Marker identity must match the stable v2 flow and
-          # recovery names or the release fails closed.
-          legacy_fetcher_checkpoint="$(
-            kubectl -n stream2pretrain get deployment \
-              stream2pretrain-processor-fetcher -o json 2>/dev/null \
-              | jq -r '
-                  any(
-                    .spec.template.spec.containers[]?.volumeMounts[]?;
-                    .name == "checkpoint"
-                  )
-                ' \
-              || true
-          )"
-          existing_fetcher_flow="$(
-            kubectl -n stream2pretrain get deployment \
-              stream2pretrain-processor-fetcher -o json 2>/dev/null \
-              | jq -r '
-                  first(
-                    .spec.template.spec.containers[]?
-                    | select(.name == "fetcher")
-                    | .env[]?
-                    | select(.name == "S2P_BYTEWAX_FLOW_NAME")
-                    | .value
-                  ) // empty
-                ' \
-              || true
-          )"
-          if [[ "$existing_fetcher_flow" == "s2p-fetcher-v2" ]]; then
-            echo "Fetcher already declares the stable Bytewax v2 identity."
-          elif [[ "$legacy_fetcher_checkpoint" == "true" ]]; then
-            fetcher_pod="$(
-              kubectl -n stream2pretrain get pod \
-                -l app.kubernetes.io/component=processor-fetcher \
-                -o json \
-                | jq -r '
-                    first(
-                      .items[]
-                      | select(.status.phase == "Running")
-                      | .metadata.name
-                    ) // empty
-                  '
+          if [[ "$CATALOG_CHANGED" == "true" ]]; then
+            echo "::group::Reconcile persistent Polaris metastore"
+            kubectl create namespace polaris --dry-run=client -o yaml | kubectl apply -f -
+            if ! kubectl -n polaris get secret polaris-persistence >/dev/null 2>&1; then
+              postgres_password="$(openssl rand -hex 32)"
+              kubectl -n polaris create secret generic polaris-persistence \
+                --from-literal=username=polaris \
+                --from-literal=password="$postgres_password" \
+                --from-literal=jdbcUrl='jdbc:postgresql://polaris-postgres.polaris.svc.cluster.local:5432/polaris'
+              unset postgres_password
+            fi
+            for key in username password jdbcUrl; do
+              if ! kubectl -n polaris get secret polaris-persistence -o json \
+                | jq -e --arg key "$key" '.data[$key] | length > 0' >/dev/null; then
+                echo "Polaris persistence Secret is missing key: $key" >&2
+                exit 1
+              fi
+            done
+            application_credential="$(
+              kubectl -n stream2pretrain get secret stream2pretrain-polaris \
+                -o jsonpath='{.data.credential}' | base64 --decode
             )"
-            if [[ -z "$fetcher_pod" ]]; then
-              echo "Legacy fetcher checkpoint exists but no running Pod can read it." >&2
+            IFS=':' read -r bootstrap_client bootstrap_secret <<< "$application_credential"
+            if [[ -z "$bootstrap_client" || -z "$bootstrap_secret" ]]; then
+              echo "Polaris application credential must be client:secret" >&2
               exit 1
             fi
-            fetcher_cutover_env=(
-              S2P_STATE_DIR=/var/lib/s2p/checkpoint
-              S2P_KAFKA_START_OFFSET=stored
-              S2P_CUTOVER_COMPONENT=fetcher
-              S2P_CUTOVER_TOPIC=raw.fetched
-              S2P_CONSUMER_GROUP=s2p-fetcher
-              S2P_BYTEWAX_FLOW_NAME=s2p-fetcher-v2
-              S2P_BYTEWAX_RECOVERY_NAME=fetcher-v2
-              S2P_BYTEWAX_RECOVERY_PARTITIONS=4
-            )
-            set +e
-            kubectl -n stream2pretrain exec -i "$fetcher_pod" -- \
-              env "${fetcher_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=check \
-              python - < scripts/bytewax_cutover_marker.py
-            fetcher_marker_status=$?
-            set -e
-            if [[ "$fetcher_marker_status" -eq 0 ]]; then
-              echo "Fetcher cutover marker already exists; offset migration is complete."
-            elif [[ "$fetcher_marker_status" -eq 3 ]]; then
-              echo "Migrating legacy fetcher recovery offsets from $fetcher_pod"
-              kubectl -n stream2pretrain exec -i "$fetcher_pod" -- \
-                env \
-                  S2P_STATE_DIR=/var/lib/s2p/checkpoint \
-                  S2P_RAW_TOPIC=raw.fetched \
-                  S2P_CONSUMER_GROUP=s2p-fetcher \
-                  S2P_BYTEWAX_STEP_ID=s2p-fetcher.raw_fetched \
-                python - < scripts/migrate_fetcher_offsets.py
-              kubectl -n stream2pretrain exec -i "$fetcher_pod" -- \
-                env "${fetcher_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=ensure \
-                python - < scripts/bytewax_cutover_marker.py
-            else
-              echo "Fetcher cutover marker validation failed; refusing migration." >&2
-              exit "$fetcher_marker_status"
+            kubectl -n polaris create secret generic polaris-root-identity \
+              --from-literal=credentials="POLARIS,$bootstrap_client,$bootstrap_secret" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            unset bootstrap_client bootstrap_secret
+            unset application_credential
+
+            # Adopt the exact resources from the former manifest-based Polaris
+            # installation before the first official chart release. This keeps
+            # the stable Services in place while transferring lifecycle
+            # ownership to Helm; on later releases the operation is idempotent.
+            for resource in \
+              serviceaccount/polaris \
+              configmap/polaris \
+              service/polaris-mgmt \
+              service/polaris \
+              deployment/polaris; do
+              if kubectl -n polaris get "$resource" >/dev/null 2>&1; then
+                kubectl -n polaris label "$resource" \
+                  app.kubernetes.io/managed-by=Helm --overwrite
+                kubectl -n polaris annotate "$resource" \
+                  meta.helm.sh/release-name=polaris \
+                  meta.helm.sh/release-namespace=polaris --overwrite
+              fi
+            done
+
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=polaris-postgres \
+              sync \
+              --reset-values \
+              --wait \
+              --timeout 300 \
+              --suppress-secrets
+            kubectl -n polaris rollout status \
+              statefulset/polaris-postgres --timeout=300s
+
+            if ! helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=polaris-metastore-bootstrap \
+              sync \
+              --reset-values \
+              --wait \
+              --wait-for-jobs \
+              --timeout 300 \
+              --suppress-secrets; then
+              kubectl -n polaris get job,pod -o wide || true
+              kubectl -n polaris describe job/polaris-metastore-bootstrap || true
+              kubectl -n polaris describe pod \
+                -l job-name=polaris-metastore-bootstrap || true
+              kubectl -n polaris logs job/polaris-metastore-bootstrap \
+                --all-containers --prefix --timestamps --tail=400 || true
+              exit 1
             fi
-            kubectl -n redpanda exec statefulset/redpanda -- \
-              rpk group describe s2p-fetcher
+
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=polaris \
+              sync \
+              --reset-values \
+              --wait \
+              --timeout 300 \
+              --suppress-secrets
+            kubectl -n polaris rollout status deployment/polaris --timeout=300s
+            kubectl -n polaris get pvc,pod -l app.kubernetes.io/name=polaris-postgres
+            echo "::endgroup::"
+            finish_phase "Persistent Polaris metastore"
+          else
+            echo "Keeping the Polaris catalog tier unchanged."
           fi
 
-          # Advance the broker bridge to any legacy curator recovery progress
-          # before replacing the native consumer. Retaining the PVC preserves
-          # the global dedup index and deterministic decision cache.
-          curator_exists="$(
-            kubectl -n stream2pretrain get statefulset \
-              stream2pretrain-processor-curate -o name 2>/dev/null || true
-          )"
-          existing_curator_flow="$(
-            kubectl -n stream2pretrain get statefulset \
-              stream2pretrain-processor-curate -o json 2>/dev/null \
-              | jq -r '
-                  first(
-                    .spec.template.spec.containers[]?
-                    | select(.name == "curate")
-                    | .env[]?
-                    | select(.name == "S2P_BYTEWAX_FLOW_NAME")
-                    | .value
-                  ) // empty
-                ' \
-              || true
-          )"
-          curator_pod="$(
-            kubectl -n stream2pretrain get pod \
-              -l app.kubernetes.io/component=processor-curate \
-              -o json 2>/dev/null \
-              | jq -r '
-                  first(
-                    .items[]
-                    | select(.status.phase == "Running")
-                    | select(any(
-                        .status.containerStatuses[]?;
-                        .name == "curate" and .ready == true
-                      ))
-                    | .metadata.name
-                  ) // empty
-                ' \
-              || true
-          )"
-          if [[ "$existing_curator_flow" != "s2p-curate-v2" \
-             && -n "$curator_exists" \
-             && -z "$curator_pod" ]]; then
-            curator_claim="checkpoint-stream2pretrain-processor-curate-0"
-            if ! kubectl -n stream2pretrain get "pvc/$curator_claim" >/dev/null; then
-              echo "Legacy curator exists but its retained recovery PVC is missing." >&2
-              exit 1
-            fi
-            curator_migration_pod="s2p-curate-cutover-${GITHUB_RUN_ID}"
-            kubectl -n stream2pretrain delete "pod/$curator_migration_pod" \
-              --ignore-not-found --wait=true
-            kubectl -n stream2pretrain get \
-              statefulset/stream2pretrain-processor-curate -o json \
-              | jq \
-                --arg name "$curator_migration_pod" \
-                --arg claim "$curator_claim" '
-                  .spec.template as $template
-                  | {
-                      apiVersion: "v1",
-                      kind: "Pod",
-                      metadata: {
-                        name: $name,
-                        namespace: "stream2pretrain",
-                        labels: (
-                          $template.metadata.labels
-                          + {"app.kubernetes.io/component": "processor-curate-cutover"}
-                        )
-                      },
-                      spec: (
-                        $template.spec
-                        | .restartPolicy = "Never"
-                        | del(.initContainers)
-                        | .containers = [
-                            .containers[]
-                            | select(.name == "curate")
-                            | .name = "migration"
-                            | .command = ["sh", "-ec"]
-                            | .args = [
-                                "trap '\''exit 0'\'' TERM INT; while true; do sleep 30; done"
-                              ]
-                            | del(
-                                .ports,
-                                .startupProbe,
-                                .livenessProbe,
-                                .readinessProbe
-                              )
-                            | .resources = {
-                                requests: {cpu: "10m", memory: "128Mi"},
-                                limits: {cpu: "200m", memory: "256Mi"}
-                              }
-                          ]
-                        | .volumes = (
-                            [
-                              (.volumes // [])[]
-                              | select(.name != "checkpoint")
-                            ]
-                            + [{
-                                name: "checkpoint",
-                                persistentVolumeClaim: {claimName: $claim}
-                              }]
-                          )
-                      )
-                    }
-                ' \
-              | kubectl apply -f -
-            if ! kubectl -n stream2pretrain wait \
-              --for=condition=Ready "pod/$curator_migration_pod" --timeout=180s; then
-              kubectl -n stream2pretrain describe "pod/$curator_migration_pod" || true
-              kubectl -n stream2pretrain logs "pod/$curator_migration_pod" \
-                --all-containers --prefix || true
-              exit 1
-            fi
-            curator_pod="$curator_migration_pod"
-            echo "Mounted the scaled-zero curator recovery PVC in $curator_migration_pod."
-          fi
-          if [[ "$existing_curator_flow" == "s2p-curate-v2" ]]; then
-            echo "Curator already declares the stable Bytewax v2 identity."
-          elif [[ -n "$curator_pod" ]]; then
-            curator_cutover_env=(
-              S2P_STATE_DIR=/var/lib/s2p/checkpoint
-              S2P_KAFKA_START_OFFSET=stored
-              S2P_CUTOVER_COMPONENT=curate
-              S2P_CUTOVER_TOPIC=docs.normalized
-              S2P_CONSUMER_GROUP=s2p-curate
-              S2P_BYTEWAX_FLOW_NAME=s2p-curate-v2
-              S2P_BYTEWAX_RECOVERY_NAME=curate-v2
-              S2P_BYTEWAX_RECOVERY_PARTITIONS=4
-            )
-            set +e
-            kubectl -n stream2pretrain exec -i "$curator_pod" -- \
-              env "${curator_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=check \
-              python - < scripts/bytewax_cutover_marker.py
-            curator_marker_status=$?
-            set -e
-            if [[ "$curator_marker_status" -eq 0 ]]; then
-              echo "Curator cutover marker already exists; offset migration is complete."
-            elif [[ "$curator_marker_status" -eq 3 ]]; then
-              echo "Migrating legacy curator recovery offsets from $curator_pod"
-              kubectl -n stream2pretrain exec -i "$curator_pod" -- \
-                env \
-                  S2P_STATE_DIR=/var/lib/s2p/checkpoint \
-                  S2P_RAW_TOPIC=docs.normalized \
-                  S2P_CONSUMER_GROUP=s2p-curate \
-                  S2P_BYTEWAX_STEP_ID=s2p-curate.docs_normalized \
-                python - < scripts/migrate_fetcher_offsets.py
-              kubectl -n stream2pretrain exec -i "$curator_pod" -- \
-                env "${curator_cutover_env[@]}" S2P_CUTOVER_MARKER_MODE=ensure \
-                python - < scripts/bytewax_cutover_marker.py
-            else
-              echo "Curator cutover marker validation failed; refusing migration." >&2
-              exit "$curator_marker_status"
-            fi
-            kubectl -n redpanda exec statefulset/redpanda -- \
-              rpk group describe s2p-curate
-            if [[ -n "$curator_migration_pod" ]]; then
-              kubectl -n stream2pretrain delete "pod/$curator_migration_pod" --wait=true
-              curator_migration_pod=""
-            fi
-          elif [[ -z "$curator_exists" ]]; then
-            echo "No legacy curator exists; the first Bytewax execution will use OFFSET_STORED."
-          fi
+          # Artifact signing is an internal cluster identity, not an external
+          # provider credential. Create it once when absent and reuse it on
+          # every later release; malformed existing Secrets fail closed.
+          bash scripts/ensure_foundry_signing_secret.sh \
+            stream2pretrain stream2pretrain-foundry-signing
+          finish_phase "Foundry signing identity"
 
-          # Migrate the existing partition set before expanding it. Otherwise a
-          # producer could write a new partition that has neither a legacy
-          # recovery snapshot nor a broker commit, making the one-time bridge
-          # ambiguous. New partitions added here safely bootstrap at earliest.
-          # Four remains a bounded DHBW dev setting; prod is needs-measurement.
-          S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh
+          if [[ "$CORE_CHANGED" == "true" || "$SOURCES_CHANGED" == "true" ]]; then
+            S2P_CORE_TOPIC_PARTITIONS=4 bash scripts/reconcile_topic_partitions.sh
+          fi
+          finish_phase "Redpanda topic reconciliation"
 
           : "${IMAGE_DIGEST_INGEST_RSS:?Missing pinned ingest-rss digest}"
           : "${IMAGE_DIGEST_INGEST_OAIPMH:?Missing pinned ingest-oaipmh digest}"
-          : "${IMAGE_DIGEST_INGEST_SITEMAP:?Missing pinned ingest-sitemap digest}"
-          : "${IMAGE_DIGEST_INGEST_GITHUB_EVENTS:?Missing pinned GitHub events digest}"
-          : "${IMAGE_DIGEST_INGEST_GITHUB_RELEASES:?Missing pinned GitHub releases digest}"
           : "${IMAGE_DIGEST_INGEST_HF:?Missing pinned HF digest}"
           : "${IMAGE_DIGEST_INGEST_ARXIV_HTML:?Missing pinned arXiv HTML digest}"
-          : "${IMAGE_DIGEST_INGEST_GITHUB_TARBALL:?Missing pinned GitHub tarball digest}"
-          : "${IMAGE_DIGEST_INGEST_OPENREVIEW:?Missing pinned OpenReview digest}"
           : "${IMAGE_DIGEST_PROCESSOR:?Missing pinned processor digest}"
+          : "${IMAGE_DIGEST_PROCESSOR_FOUNDRY:?Missing pinned Foundry digest}"
           : "${IMAGE_DIGEST_PROCESSOR_QUALITY:?Missing pinned quality digest}"
-          : "${IMAGE_DIGEST_PROCESSOR_EMBEDDING:?Missing pinned embedding digest}"
           : "${IMAGE_DIGEST_PROCESSOR_KENLM:?Missing pinned KenLM digest}"
           : "${IMAGE_DIGEST_PROCESSOR_FETCHER:?Missing pinned fetcher digest}"
           : "${IMAGE_DIGEST_UI:?Missing pinned UI digest}"
@@ -2047,24 +2456,16 @@ jobs:
             --set "image.pullPolicy=IfNotPresent"
             --set "ingest.rss.image=stream2pretrain/ingest-rss@${IMAGE_DIGEST_INGEST_RSS}"
             --set "ingest.oaipmh.image=stream2pretrain/ingest-oaipmh@${IMAGE_DIGEST_INGEST_OAIPMH}"
-            --set "ingest.sitemap.image=stream2pretrain/ingest-sitemap@${IMAGE_DIGEST_INGEST_SITEMAP}"
-            --set "ingest.githubEvents.image=stream2pretrain/ingest-github-events@${IMAGE_DIGEST_INGEST_GITHUB_EVENTS}"
-            --set "ingest.githubReleases.image=stream2pretrain/ingest-github-releases@${IMAGE_DIGEST_INGEST_GITHUB_RELEASES}"
             --set "ingest.hf.image=stream2pretrain/ingest-hf@${IMAGE_DIGEST_INGEST_HF}"
             --set "ingest.arxivHtmlFetcher.image=stream2pretrain/ingest-arxiv-html@${IMAGE_DIGEST_INGEST_ARXIV_HTML}"
-            --set "ingest.githubTarballFetcher.image=stream2pretrain/ingest-github-tarball-fetcher@${IMAGE_DIGEST_INGEST_GITHUB_TARBALL}"
-            --set "ingest.openreview.image=stream2pretrain/ingest-openreview@${IMAGE_DIGEST_INGEST_OPENREVIEW}"
             --set "processor.fetcher.image=stream2pretrain/processor-fetcher-model@${IMAGE_DIGEST_PROCESSOR_FETCHER}"
             --set "processor.curate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.modelService.profiles.quality.image=stream2pretrain/processor-quality-model@${IMAGE_DIGEST_PROCESSOR_QUALITY}"
-            --set "processor.modelService.profiles.embedding.image=stream2pretrain/processor-embedding-model@${IMAGE_DIGEST_PROCESSOR_EMBEDDING}"
             --set "processor.modelService.profiles.kenlm.image=stream2pretrain/processor-kenlm-model@${IMAGE_DIGEST_PROCESSOR_KENLM}"
             --set "processor.iceberg.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "processor.duckdbApi.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "processor.deconGate.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "processor.foundry.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "mixtureController.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
-            --set "seedLoader.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
+            --set "processor.foundry.image=stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
+            --set "sourceController.image=stream2pretrain/processor@${IMAGE_DIGEST_PROCESSOR}"
             --set "ui.image=stream2pretrain/ui@${IMAGE_DIGEST_UI}"
           )
 
@@ -2083,13 +2484,43 @@ jobs:
             echo "GHCR_PULL_TOKEN is empty. The published images must be public."
           fi
 
-          # HPAs can preserve multiple old multi-GiB model Pods while Helm is
-          # replacing their images. Quiesce each stateless service at one Pod,
-          # remove failed/evicted remnants, and let Helm recreate the HPAs only
-          # after the replacement-style Deployment specifications are applied.
-          for profile in quality embedding kenlm; do
+          # Only quiesce a multi-GiB model service when its immutable image
+          # digest actually changes. Unchanged services keep their Pods, model
+          # memory, HPA state, and readiness throughout the release.
+          model_image_changed=false
+          for profile in quality kenlm; do
             model="stream2pretrain-processor-model-service-${profile}"
-            kubectl -n stream2pretrain delete "horizontalpodautoscaler/$model" \
+            case "$profile" in
+              quality) digest="$IMAGE_DIGEST_PROCESSOR_QUALITY" ;;
+              kenlm) digest="$IMAGE_DIGEST_PROCESSOR_KENLM" ;;
+            esac
+            case "$profile" in
+              quality) repository="processor-quality-model" ;;
+              *) repository="processor-${profile}-model" ;;
+            esac
+            target_image="${registry}/stream2pretrain/${repository}@${digest}"
+            current_image="$(
+              kubectl -n stream2pretrain get "deployment/$model" -o json 2>/dev/null \
+                | jq -r '
+                    first(
+                      .spec.template.spec.containers[]?
+                      | select(.name == "model-service")
+                      | .image
+                    ) // empty
+                  ' \
+                || true
+            )"
+            if [[ "$current_image" == "$target_image" ]]; then
+              echo "Keeping loaded ${profile} model Pod: image digest is unchanged."
+              continue
+            fi
+            echo "Quiescing ${profile} model service for an actual image change."
+            model_image_changed=true
+            kubectl -n stream2pretrain delete "scaledobject/$model" \
+              --ignore-not-found --wait=true
+            kubectl -n stream2pretrain delete \
+              "horizontalpodautoscaler/$model" \
+              "horizontalpodautoscaler/keda-hpa-$model" \
               --ignore-not-found --wait=true
             if kubectl -n stream2pretrain get "deployment/$model" >/dev/null 2>&1; then
               kubectl -n stream2pretrain scale "deployment/$model" --replicas=1
@@ -2110,9 +2541,23 @@ jobs:
               -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' \
               2>/dev/null || true
           )"
+          foundry_target_image="${registry}/stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
+          foundry_current_image="$(
+            kubectl -n stream2pretrain get statefulset stream2pretrain-foundry -o json \
+              2>/dev/null \
+              | jq -r '
+                  first(
+                    .spec.template.spec.containers[]?
+                    | select(.name == "worker")
+                    | .image
+                  ) // empty
+                ' \
+              || true
+          )"
           if kubectl -n stream2pretrain get statefulset stream2pretrain-foundry \
                >/dev/null 2>&1 \
-             && [[ "$foundry_ready" != "True" ]]; then
+             && [[ "$foundry_ready" != "True" ]] \
+             && [[ "$foundry_current_image" != "$foundry_target_image" ]]; then
             echo "Replacing unhealthy Foundry Pod while preserving its PVC."
             kubectl -n stream2pretrain scale \
               statefulset/stream2pretrain-foundry --replicas=0
@@ -2120,6 +2565,8 @@ jobs:
               pod/stream2pretrain-foundry-0 --timeout=180s \
               || ! kubectl -n stream2pretrain get pod stream2pretrain-foundry-0 \
                 >/dev/null 2>&1
+          elif [[ "$foundry_ready" != "True" ]]; then
+            echo "Leaving the unchanged Foundry Pod untouched; it cannot delay this release."
           fi
 
           # GitHub serialises this workflow, but a teammate can still start a
@@ -2130,6 +2577,13 @@ jobs:
           # fail-closed on the first attempt.
           release_applied=false
           helm_apply_log="$RUNNER_TEMP/stream2pretrain-helm-apply.log"
+          workloads_before="$RUNNER_TEMP/stream2pretrain-workloads-before.json"
+          kubectl -n stream2pretrain get deployment,statefulset -o json \
+            > "$workloads_before"
+          helm_timeout=120
+          if [[ "$model_image_changed" == "true" ]]; then
+            helm_timeout=600
+          fi
           for attempt in 1 2 3; do
             set +e
             helmfile \
@@ -2137,11 +2591,11 @@ jobs:
               --file helmfile.yaml \
               --environment dev \
               --selector name=stream2pretrain \
-              apply \
+              sync \
               --reset-values \
-              --wait \
-              --wait-for-jobs \
-              --timeout 600 \
+              --wait=false \
+              --wait-for-jobs=false \
+              --timeout "$helm_timeout" \
               --description "github-actions ${GITHUB_SHA}" \
               --suppress-secrets \
               "${helm_overrides[@]}" \
@@ -2166,82 +2620,161 @@ jobs:
             report_deploy_failure
             exit 1
           fi
+          finish_phase "Helm sync"
 
           kubectl -n stream2pretrain annotate scaledobject --all \
             autoscaling.keda.sh/paused- || true
 
-          while read -r workload; do
-            kubectl -n stream2pretrain rollout status "$workload" --timeout=600s
-          done < <(kubectl -n stream2pretrain get deployment,statefulset -o name)
-
-          # The running v2 workloads must persist a marker whose identity is
-          # derived from their effective environment. This closes the clean
-          # install path (where there was no legacy PVC to mark) and rejects a
-          # chart/workflow drift away from OFFSET_STORED or the stable names.
-          fetcher_ready_pod="$(
-            kubectl -n stream2pretrain get pod \
-              -l app.kubernetes.io/component=processor-fetcher -o json \
-              | jq -r '
-                  [
-                    .items[]
-                    | select(.metadata.deletionTimestamp == null)
-                    | select(.status.phase == "Running")
-                    | select(any(
-                        .status.conditions[]?;
-                        .type == "Ready" and .status == "True"
-                      ))
-                  ]
-                  | sort_by(.metadata.creationTimestamp)
-                  | last
-                  | .metadata.name // empty
+          # Wait only for resources whose generation this release changed.
+          # Helm's global --wait blocks on every historical workload in the
+          # release, including an unrelated unhealthy component. The parallel
+          # waits preserve fail-closed readiness without serial timeout cost.
+          mapfile -t changed_workloads < <(
+            kubectl -n stream2pretrain get deployment,statefulset -o json \
+              | jq -r --slurpfile before "$workloads_before" '
+                  .items[]
+                  | . as $current
+                  | (
+                      first(
+                        $before[0].items[]
+                        | select(
+                            .kind == $current.kind
+                            and .metadata.name == $current.metadata.name
+                          )
+                      ) // null
+                    ) as $previous
+                  | select(
+                      $previous == null
+                      or .metadata.generation > $previous.metadata.generation
+                    )
+                  | (.kind | ascii_downcase) + "/" + .metadata.name
                 '
-          )"
-          if [[ -z "$fetcher_ready_pod" ]]; then
-            echo "No Ready production fetcher Pod is available for cutover marking." >&2
+          )
+          rollout_pids=()
+          rollout_logs=()
+          rollout_workloads=()
+          for workload in "${changed_workloads[@]}"; do
+            [[ -n "$workload" ]] || continue
+            workload_timeout=60
+            if [[ "$workload" == deployment/stream2pretrain-duckdb ]]; then
+              # A new serving-index schema deliberately replays the retained
+              # monitoring topics before readiness. This is finite bootstrap
+              # work, not an unhealthy API, and must not be judged by the
+              # generic one-minute rollout bound.
+              workload_timeout=600
+            elif [[ "$workload" == deployment/stream2pretrain-processor-fetcher* ]]; then
+              # The fetcher image includes the full CPU scientific extraction
+              # stack and is about 1.7 GB. A cold node pull was measured at 48s,
+              # leaving no time for process startup under the old 60s bound.
+              workload_timeout=180
+            elif [[ "$workload" == deployment/stream2pretrain-processor-model-service-* ]]; then
+              workload_timeout=600
+            elif [[ "$workload" == statefulset/* ]]; then
+              # Stateful workers flush durable state before exiting. Foundry's
+              # declared termination grace alone is 120 seconds, so the old
+              # 60-second generic deadline could fail a healthy replacement.
+              workload_timeout=300
+            fi
+            log="$RUNNER_TEMP/rollout-${workload//\//-}.log"
+            (
+              kubectl -n stream2pretrain rollout status \
+                "$workload" --timeout="${workload_timeout}s"
+            ) >"$log" 2>&1 &
+            rollout_pids+=("$!")
+            rollout_logs+=("$log")
+            rollout_workloads+=("$workload")
+          done
+          rollout_failed=false
+          for index in "${!rollout_pids[@]}"; do
+            if ! wait "${rollout_pids[$index]}"; then
+              rollout_failed=true
+              echo "::error title=Rollout failed::${rollout_workloads[$index]} did not become ready before its deployment timeout"
+            fi
+            cat "${rollout_logs[$index]}"
+          done
+          if [[ "$rollout_failed" == "true" ]]; then
             report_deploy_failure
             exit 1
           fi
-          kubectl -n stream2pretrain exec -i \
-            "pod/$fetcher_ready_pod" -c fetcher -- \
-            env \
-              S2P_CUTOVER_COMPONENT=fetcher \
-              S2P_CUTOVER_TOPIC=raw.fetched \
-              S2P_CUTOVER_MARKER_MODE=ensure \
-            python - < scripts/bytewax_cutover_marker.py
-          kubectl -n stream2pretrain exec -i \
-            statefulset/stream2pretrain-processor-curate -c curate -- \
-            env \
-              S2P_CUTOVER_COMPONENT=curate \
-              S2P_CUTOVER_TOPIC=docs.normalized \
-              S2P_CUTOVER_MARKER_MODE=ensure \
-            python - < scripts/bytewax_cutover_marker.py
+          finish_phase "Changed workload readiness"
 
-          # SourceFeed CRs are durable runtime configuration, not Helm-owned
-          # templates. Reconcile the complete Phase-1 catalogue on every
-          # deployment so a rebuilt namespace cannot silently lose sources.
-          NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
-          for _ in $(seq 1 60); do
-            source_schedules="$(
-              kubectl -n stream2pretrain get cronjob \
-                -l stream2pretrain.io/source-feed \
-                -o name | wc -l
-            )"
-            [[ "$source_schedules" -ge 10 ]] && break
-            sleep 2
-          done
-          if [[ "$source_schedules" -lt 10 ]]; then
-            kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
-            kubectl -n stream2pretrain get cronjob -o wide || true
-            echo "The controller did not materialize all Phase-1 source schedules" >&2
-            exit 1
+          # Bronze bodies and Silver extraction artifacts are transient. Apply
+          # and read back the bucket-native one-day lifecycle from a Ready
+          # processor Pod, with visible logs and no opaque Helm-hook retries.
+          kubectl -n stream2pretrain exec -i \
+            deployment/stream2pretrain-duckdb -- \
+            s2p-entrypoint s2p-object-lifecycle --apply
+          finish_phase "Transient object retention"
+
+          if [[ "$MODEL_RUNTIME_CHANGED" == "true" ]]; then
+            for profile_and_family in \
+              "quality source-pretrain-quality"; do
+              read -r profile family <<< "$profile_and_family"
+              model="stream2pretrain-processor-model-service-${profile}"
+              expected_backends="$(
+                kubectl -n stream2pretrain get "deployment/$model" \
+                  -o jsonpath='{.status.readyReplicas}'
+              )"
+              if [[ -z "$expected_backends" || "$expected_backends" -lt 2 ]]; then
+                echo "$model did not expose both baseline classifier replicas." >&2
+                exit 1
+              fi
+              kubectl -n stream2pretrain exec -i \
+                statefulset/stream2pretrain-processor-curate -c curate -- \
+                python - \
+                  --base-url "http://${model}:8094" \
+                  --headless-host "${model}-headless" \
+                  --model-family "$family" \
+                  --expected-backends "$expected_backends" \
+                  --live-recovery-check \
+                  < scripts/benchmark_model_service.py
+            done
+          else
+            echo "Skipping model distribution benchmark: classifier runtime is unchanged."
           fi
+          finish_phase "Classifier distribution gate"
 
+          if [[ "$DNS_INFRA_CHANGED" == "true" ]]; then
+            kubectl -n stream2pretrain exec -i \
+              deployment/stream2pretrain-duckdb -- \
+              python - < scripts/validate_storage_dns.py
+          else
+            echo "Skipping repeated DNS/MinIO probe: CoreDNS infrastructure is unchanged."
+          fi
+          finish_phase "DNS and MinIO rollout gate"
+
+          # Source definitions are declarative; existing progress is retained.
+          if [[ "$SOURCES_CHANGED" == "true" ]]; then
+            NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
+            for _ in $(seq 1 60); do
+              source_schedules="$(
+                kubectl -n stream2pretrain get cronjob \
+                  -l stream2pretrain.io/source-feed \
+                  -o name | wc -l
+              )"
+              [[ "$source_schedules" -eq 5 ]] && break
+              sleep 2
+            done
+            if [[ "$source_schedules" -ne 5 ]]; then
+              kubectl -n stream2pretrain get sourcefeeds.stream2pretrain.io -o wide || true
+              kubectl -n stream2pretrain get cronjob -o wide || true
+              echo "The controller did not materialize exactly five arXiv discovery schedules" >&2
+              exit 1
+            fi
+          else
+            echo "Keeping existing SourceFeed schedules: source definitions are unchanged."
+          fi
+          finish_phase "SourceFeed reconciliation"
+
+          if [[ "$CORE_CHANGED" == "true" ]]; then
           # Clone the exact deployed curator Pod spec into a short-lived,
           # isolated consumer group. This gives the release canary its own
           # bounded execution lane without permanently reserving another GiB
           # of memory or letting production replay lag hide a broken release.
-          curator_canary_job="s2p-curate-smoke-${GITHUB_RUN_ID}"
-          curator_canary_group="s2p-curate-smoke-${GITHUB_RUN_ID}"
+          curator_canary_job="s2p-curate-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          curator_canary_group="$curator_canary_job"
+          kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
+            python - --prepare-curator "$curator_canary_group" < scripts/cluster_smoke.py
           kubectl -n stream2pretrain get \
             statefulset/stream2pretrain-processor-curate -o json \
             | jq \
@@ -2277,11 +2810,14 @@ jobs:
                               .containers[]
                               | select(.name == "curate")
                               | .name = "curate-canary"
-                              | del(
-                                  .startupProbe,
-                                  .livenessProbe,
-                                  .readinessProbe
-                                )
+                              # The one-record smoke lane uses the identical
+                              # curator and keeps the production burst limits,
+                              # but it must not reserve a second full steady-
+                              # state curator on this three-node cluster.
+                              | .resources.requests = {
+                                  cpu: "100m",
+                                  memory: "1Gi"
+                                }
                               | .env = (
                                   [
                                     .env[]
@@ -2291,6 +2827,7 @@ jobs:
                                         and .name != "S2P_CURATOR_INPUT_TOPIC"
                                         and .name != "S2P_CURATOR_DECISIONS_TOPIC"
                                         and .name != "S2P_CURATOR_CURATED_TOPIC"
+                                        and .name != "S2P_CURATOR_RETRY_TOPIC"
                                         and .name != "S2P_KAFKA_START_OFFSET"
                                         and .name != "S2P_BYTEWAX_FLOW_NAME"
                                         and .name != "S2P_BYTEWAX_RECOVERY_NAME"
@@ -2305,7 +2842,8 @@ jobs:
                                       {name: "S2P_CURATOR_INPUT_TOPIC", value: "docs.normalized.smoke"},
                                       {name: "S2P_CURATOR_DECISIONS_TOPIC", value: "curation.decisions.smoke"},
                                       {name: "S2P_CURATOR_CURATED_TOPIC", value: "docs.curated.smoke"},
-                                      {name: "S2P_KAFKA_START_OFFSET", value: "beginning"},
+                                      {name: "S2P_CURATOR_RETRY_TOPIC", value: "raw.smoke"},
+                                      {name: "S2P_KAFKA_START_OFFSET", value: "stored"},
                                       {name: "S2P_BYTEWAX_FLOW_NAME", value: "s2p-curate-smoke-v1"},
                                       {name: "S2P_BYTEWAX_RECOVERY_NAME", value: "curate-smoke-v1"},
                                       {name: "S2P_BYTEWAX_RECOVERY_PARTITIONS", value: "1"},
@@ -2331,13 +2869,86 @@ jobs:
               ' \
             | kubectl apply -f -
 
-          kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
-            python - < scripts/cluster_smoke.py
+          production_curator_limits="$(
+            kubectl -n stream2pretrain get \
+              statefulset/stream2pretrain-processor-curate -o json \
+              | jq -cS '
+                  first(
+                    .spec.template.spec.containers[]
+                    | select(.name == "curate")
+                    | .resources.limits
+                  )
+                '
+          )"
+          canary_curator_limits="$(
+            kubectl -n stream2pretrain get "job/$curator_canary_job" -o json \
+              | jq -cS '
+                  first(
+                    .spec.template.spec.containers[]
+                    | select(.name == "curate-canary")
+                    | .resources.limits
+                  )
+                '
+          )"
+          if [[ "$canary_curator_limits" != "$production_curator_limits" ]]; then
+            echo "Curator canary did not preserve production resource limits." >&2
+            exit 1
+          fi
+          kubectl -n stream2pretrain get "job/$curator_canary_job" -o json \
+            | jq -e '
+                first(
+                  .spec.template.spec.containers[]
+                  | select(.name == "curate-canary")
+                  | .resources.requests
+                )
+                == {cpu: "100m", memory: "1Gi"}
+              ' >/dev/null
+
+          if ! kubectl -n stream2pretrain wait \
+            --for=condition=PodScheduled \
+            "pod" \
+            -l "job-name=$curator_canary_job" \
+            --timeout=30s; then
+            kubectl -n stream2pretrain describe pod \
+              -l "job-name=$curator_canary_job" || true
+            exit 1
+          fi
+
+          # Production readiness includes model initialization and assigned
+          # input partitions. Only then does the record-level deadline begin.
+          if ! kubectl -n stream2pretrain wait \
+            --for=condition=Ready \
+            "pod" \
+            -l "job-name=$curator_canary_job" \
+            --timeout=300s; then
+            kubectl -n stream2pretrain describe "job/$curator_canary_job" || true
+            kubectl -n stream2pretrain describe pod \
+              -l "job-name=$curator_canary_job" || true
+            kubectl -n stream2pretrain logs "job/$curator_canary_job" \
+              --all-containers --prefix || true
+            exit 1
+          fi
+          if ! kubectl -n stream2pretrain exec -i \
+            deployment/stream2pretrain-duckdb -- \
+            python - < scripts/cluster_smoke.py; then
+            kubectl -n stream2pretrain describe "job/$curator_canary_job" || true
+            kubectl -n stream2pretrain describe pod \
+              -l "job-name=$curator_canary_job" || true
+            kubectl -n stream2pretrain logs "job/$curator_canary_job" \
+              --all-containers --prefix || true
+            exit 1
+          fi
           kubectl -n stream2pretrain logs "job/$curator_canary_job" \
             --all-containers --prefix || true
           kubectl -n stream2pretrain delete "job/$curator_canary_job" \
             --wait=true
           curator_canary_job=""
+          else
+            echo "Skipping the core curator canary: core pipeline inputs are unchanged."
+          fi
+          finish_phase "Core canary"
+          deploy_finished_at="$(date +%s)"
+          echo "::notice title=Deployment total::$((deploy_finished_at - deploy_started_at))s"
 
       - name: Upload rendered UI audit
         if: ${{ always() && inputs.mode == 'audit-ui' }}
@@ -2346,3 +2957,12 @@ jobs:
           name: stream2pretrain-ui-audit-${{ github.run_id }}
           path: ${{ runner.temp }}/ui-audit
           if-no-files-found: error
+
+      - name: Upload measurement evidence
+        if: ${{ always() && inputs.mode == 'capture-evidence' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: stream2pretrain-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/submission-evidence
+          if-no-files-found: error
+          retention-days: 7

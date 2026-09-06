@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import gzip
+import io
 import os
 import re
 import secrets
+import tarfile
 
 from aiohttp import web
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from processor.foundry.config import provider_configs
-from processor.foundry.inspection import ArtifactInspector
+from processor.foundry.inspection import ArtifactInspector, accepted_trajectories
 from processor.foundry.metrics import HUMAN_AUDITS
 from processor.foundry.quota import QuotaLedger
 from processor.foundry.store import FoundryStore
@@ -40,6 +43,12 @@ def build_app(
         payload["quotas"] = [value.model_dump(mode="json") for value in quota_ledger.states()]
         payload["models"] = control_store.model_snapshots()
         payload["daily_run_hour_utc"] = int(os.environ.get("S2P_FOUNDRY_DAILY_RUN_HOUR_UTC", "0"))
+        payload["daily_run_minute_utc"] = int(
+            os.environ.get("S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC", "0")
+        )
+        payload["daily_not_before_utc"] = (
+            os.environ.get("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC", "").strip() or None
+        )
         return web.json_response(payload)
 
     async def activity(request: web.Request) -> web.Response:
@@ -200,6 +209,63 @@ def build_app(
             },
         )
 
+    async def export_dataset(request: web.Request) -> web.Response:
+        denied = authorized(request)
+        if denied is not None:
+            return denied
+        kind = request.query.get("kind", "")
+        dataset_split = request.query.get("dataset_split")
+        try:
+            records = control_store.export_artifact_records(
+                kind=kind,
+                dataset_split=dataset_split,
+                date_from=request.query.get("date_from"),
+                date_to=request.query.get("date_to"),
+            )
+        except ValueError as exc:
+            return web.json_response({"detail": str(exc)}, status=400)
+        try:
+            packages = [
+                (
+                    record.artifact_id,
+                    inspector.package_bytes(str(record.package_uri)),
+                )
+                for record in records
+                if record.package_uri is not None
+            ]
+        except Exception:
+            return web.json_response({"detail": "artifact package is unavailable"}, status=502)
+        if len(packages) != len(records):
+            return web.json_response({"detail": "accepted artifact has no package"}, status=502)
+        if kind == "sft_trajectory":
+            import orjson
+
+            selected: list[dict[str, object]] = []
+            for artifact_id, content in packages:
+                trajectories = accepted_trajectories(content, trajectory_id=artifact_id)
+                if len(trajectories) != 1:
+                    return web.json_response(
+                        {"detail": "accepted SFT artifact does not match its immutable package"},
+                        status=502,
+                    )
+                selected.append(trajectories[0])
+            payload = b"".join(orjson.dumps(trajectory) + b"\n" for trajectory in selected)
+            return web.Response(
+                body=payload,
+                content_type="application/x-ndjson",
+                headers={"Content-Disposition": 'attachment; filename="stream2pretrain-sft.jsonl"'},
+            )
+        payload = _package_archive(packages)
+        return web.Response(
+            body=payload,
+            content_type="application/gzip",
+            headers={
+                "Content-Disposition": (
+                    'attachment; filename="stream2pretrain-rl-environments.tar.gz"'
+                )
+            },
+        )
+
     async def metrics(_: web.Request) -> web.Response:
         return web.Response(body=generate_latest(), headers={"Content-Type": CONTENT_TYPE_LATEST})
 
@@ -215,6 +281,7 @@ def build_app(
             web.get("/api/foundry/artifacts", artifacts),
             web.get("/api/foundry/artifacts/{artifact_id}/inspect", inspect_artifact),
             web.get("/api/foundry/artifacts/{artifact_id}/package", download_artifact),
+            web.get("/api/foundry/datasets/export", export_dataset),
             web.get("/api/foundry/quotas", quotas),
             web.get("/api/foundry/models", models),
             web.post("/api/foundry/runs/manual", manual_run),
@@ -222,6 +289,22 @@ def build_app(
         ]
     )
     return app
+
+
+def _package_archive(packages: list[tuple[str, bytes]]) -> bytes:
+    target = io.BytesIO()
+    with (
+        gzip.GzipFile(fileobj=target, mode="wb", mtime=0, filename="") as compressed,
+        tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive,
+    ):
+        for artifact_id, content in packages:
+            safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", artifact_id)
+            info = tarfile.TarInfo(f"rl_environments/{safe_id}.tar.gz")
+            info.size = len(content)
+            info.mode = 0o644
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(content))
+    return target.getvalue()
 
 
 def _s3_client() -> object:

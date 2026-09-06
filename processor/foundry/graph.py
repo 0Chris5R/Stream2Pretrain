@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Hashable
+from typing import TypeVar
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from processor.foundry.control import ProviderControlPlane
@@ -16,6 +19,11 @@ from schemas.foundry import (
     PaperEvidenceGraph,
     ProviderTrace,
 )
+
+_MAX_PATCH_NODES = 24
+_MAX_PATCH_EDGES = 40
+_MAX_PATCH_NOTES = 12
+_T = TypeVar("_T")
 
 
 class GraphPatch(BaseModel):
@@ -32,12 +40,12 @@ class GraphPatch(BaseModel):
 class BoundedGraphPatch(GraphPatch):
     """One prioritized incremental compiler delta sized for structured output."""
 
-    nodes: list[EvidenceNode] = Field(default_factory=list, max_length=24)
-    edges: list[EvidenceEdge] = Field(default_factory=list, max_length=40)
-    uncertainties: list[str] = Field(default_factory=list, max_length=12)
-    conflicts: list[str] = Field(default_factory=list, max_length=12)
-    remove_node_ids: list[str] = Field(default_factory=list, max_length=24)
-    remove_edges: list[EvidenceEdge] = Field(default_factory=list, max_length=40)
+    nodes: list[EvidenceNode] = Field(default_factory=list, max_length=_MAX_PATCH_NODES)
+    edges: list[EvidenceEdge] = Field(default_factory=list, max_length=_MAX_PATCH_EDGES)
+    uncertainties: list[str] = Field(default_factory=list, max_length=_MAX_PATCH_NOTES)
+    conflicts: list[str] = Field(default_factory=list, max_length=_MAX_PATCH_NOTES)
+    remove_node_ids: list[str] = Field(default_factory=list, max_length=_MAX_PATCH_NODES)
+    remove_edges: list[EvidenceEdge] = Field(default_factory=list, max_length=_MAX_PATCH_EDGES)
 
 
 class GraphCritique(BaseModel):
@@ -119,8 +127,24 @@ class EvidenceGraphCompiler:
                 max_output_tokens=8_000,
             )
             traces.append(trace)
-            patch = BoundedGraphPatch.model_validate(data)
-            graph = _merge_patch(graph, patch, pass_name, trace)
+            patch, bounding_findings, repair_trace = _normalize_or_repair_patch(
+                control=self.control,
+                data=data,
+                graph=graph,
+                bundle=bundle,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"graph_patch:{pass_name}",
+            )
+            if repair_trace is not None:
+                traces.append(repair_trace)
+            graph = _merge_patch(
+                graph,
+                patch,
+                pass_name,
+                trace,
+                findings=bounding_findings,
+            )
             validate_graph_against_bundle(graph, bundle)
 
         critique_data, critic_trace = self.control.call(
@@ -132,7 +156,15 @@ class EvidenceGraphCompiler:
             max_output_tokens=6_000,
         )
         traces.append(critic_trace)
-        critique = GraphCritique.model_validate(critique_data)
+        critique, critique_repair = _normalize_or_repair_critique(
+            control=self.control,
+            data=critique_data,
+            job_id=job_id,
+            paper_id=bundle.paper_id,
+            call_key="graph_critic:initial",
+        )
+        if critique_repair is not None:
+            traces.append(critique_repair)
         if critique.invalid_node_ids or critique.missing_evidence or critique.invalid_relations:
             critique = critique.model_copy(update={"accepted": False})
         graph = graph.model_copy(
@@ -150,7 +182,9 @@ class EvidenceGraphCompiler:
                 ]
             }
         )
-        if not critique.accepted:
+        repair_round = 0
+        while not critique.accepted and repair_round < 2:
+            repair_round += 1
             repaired_data, repair_trace = self.control.call(
                 job_id=job_id,
                 paper_id=bundle.paper_id,
@@ -158,15 +192,26 @@ class EvidenceGraphCompiler:
                 system=_repair_system_prompt(),
                 user=_repair_prompt(bundle, graph, critique, oracle_results or []),
                 max_output_tokens=6_000,
+                call_key=f"graph_repair:{repair_round}",
             )
             traces.append(repair_trace)
-            repaired = BoundedGraphPatch.model_validate(repaired_data)
+            repaired, bounding_findings, schema_repair_trace = _normalize_or_repair_patch(
+                control=self.control,
+                data=repaired_data,
+                graph=graph,
+                bundle=bundle,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"graph_repair:{repair_round}",
+            )
+            if schema_repair_trace is not None:
+                traces.append(schema_repair_trace)
             graph = _merge_patch(
                 graph,
                 repaired,
                 "repair",
                 repair_trace,
-                findings=critique.repair_instructions,
+                findings=[*critique.repair_instructions, *bounding_findings],
             )
             validate_graph_against_bundle(graph, bundle)
             recheck_data, recheck_trace = self.control.call(
@@ -176,20 +221,191 @@ class EvidenceGraphCompiler:
                 system=_critic_system_prompt(),
                 user=_critic_prompt(bundle, graph, oracle_results or []),
                 max_output_tokens=6_000,
-                call_key="graph_critic:post_repair",
+                call_key=f"graph_critic:post_repair:{repair_round}",
             )
             traces.append(recheck_trace)
-            recheck = GraphCritique.model_validate(recheck_data)
-            if (
-                not recheck.accepted
-                or recheck.invalid_node_ids
-                or recheck.missing_evidence
-                or recheck.invalid_relations
-            ):
-                raise ValueError("independent graph critic rejected the bounded repair")
+            recheck, recheck_repair = _normalize_or_repair_critique(
+                control=self.control,
+                data=recheck_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"graph_critic:post_repair:{repair_round}",
+            )
+            if recheck_repair is not None:
+                traces.append(recheck_repair)
+            if recheck.invalid_node_ids or recheck.missing_evidence or recheck.invalid_relations:
+                recheck = recheck.model_copy(update={"accepted": False})
+            critique = recheck
+        if not critique.accepted:
+            raise ValueError("independent graph critic rejected two bounded repairs")
         if not graph.nodes:
             raise ValueError("evidence compiler produced an empty graph")
         return graph, traces
+
+
+def _normalize_bounded_patch(
+    data: object,
+    graph: PaperEvidenceGraph,
+    bundle: PaperBundle | None = None,
+) -> tuple[BoundedGraphPatch, list[str]]:
+    """Validate, deduplicate, and bound a provider patch without inventing content.
+
+    The compiler prompt requires the provider to return entries in priority order. Some
+    providers do not enforce JSON Schema array limits during generation, so validate the
+    complete unbounded shape first and preserve that declared order while retaining the
+    bounded prefix. Edges that cannot resolve after the same bounded patch are skipped
+    before they consume the edge budget.
+    """
+
+    raw = GraphPatch.model_validate(data)
+    raw_nodes = _first_unique(raw.nodes, key=lambda node: node.id)
+    findings: list[str] = []
+    if bundle is not None:
+        span_ids = {span.span_id for span in bundle.stable_spans}
+        nodes = []
+        for node in raw_nodes:
+            supported = [span_id for span_id in node.supporting_spans if span_id in span_ids]
+            if supported != node.supporting_spans:
+                findings.append(f"removed unknown source spans from node {node.id}")
+            if node.type in {"claim", "finding", "limitation", "method_step"} and not supported:
+                findings.append(f"removed ungrounded node {node.id}")
+                continue
+            nodes.append(node.model_copy(update={"supporting_spans": supported}))
+    else:
+        nodes = raw_nodes
+    nodes = nodes[:_MAX_PATCH_NODES]
+    remove_node_ids = _first_unique(raw.remove_node_ids, key=lambda value: value)[:_MAX_PATCH_NODES]
+
+    node_ids = {node.id for node in graph.nodes}
+    node_ids.difference_update(remove_node_ids)
+    node_ids.update(node.id for node in nodes)
+    resolvable_edges = [
+        edge for edge in raw.edges if edge.source in node_ids and edge.target in node_ids
+    ]
+    edges = _first_unique(
+        resolvable_edges,
+        key=lambda edge: (edge.source, edge.relation, edge.target),
+    )[:_MAX_PATCH_EDGES]
+    remove_edges = _first_unique(
+        raw.remove_edges,
+        key=lambda edge: (edge.source, edge.relation, edge.target),
+    )[:_MAX_PATCH_EDGES]
+    uncertainties = _first_unique(raw.uncertainties, key=lambda value: value)[:_MAX_PATCH_NOTES]
+    conflicts = _first_unique(raw.conflicts, key=lambda value: value)[:_MAX_PATCH_NOTES]
+
+    patch = BoundedGraphPatch(
+        nodes=nodes,
+        edges=edges,
+        uncertainties=uncertainties,
+        conflicts=conflicts,
+        remove_node_ids=remove_node_ids,
+        remove_edges=remove_edges,
+    )
+    _record_bound(findings, "nodes", len(raw.nodes), len(nodes))
+    _record_bound(findings, "edges", len(raw.edges), len(edges))
+    _record_bound(findings, "uncertainties", len(raw.uncertainties), len(uncertainties))
+    _record_bound(findings, "conflicts", len(raw.conflicts), len(conflicts))
+    _record_bound(
+        findings,
+        "remove_node_ids",
+        len(raw.remove_node_ids),
+        len(remove_node_ids),
+    )
+    _record_bound(findings, "remove_edges", len(raw.remove_edges), len(remove_edges))
+    return patch, findings
+
+
+def _normalize_or_repair_patch(
+    *,
+    control: ProviderControlPlane,
+    data: object,
+    graph: PaperEvidenceGraph,
+    bundle: PaperBundle,
+    job_id: str,
+    paper_id: str,
+    call_key: str,
+) -> tuple[BoundedGraphPatch, list[str], ProviderTrace | None]:
+    try:
+        patch, findings = _normalize_bounded_patch(data, graph, bundle)
+        return patch, findings, None
+    except ValueError as initial_error:
+        repaired_data, repair_trace = control.call(
+            job_id=job_id,
+            paper_id=paper_id,
+            role="final_repair",
+            system=_patch_schema_repair_system(),
+            user=(
+                "Repair only the JSON shape and invalid identifiers reported below. Preserve "
+                "supported graph content, remove anything that cannot be represented truthfully, "
+                "and use only source span IDs present in the supplied bundle.\n"
+                f"VALIDATION_ERROR:\n{initial_error}\n"
+                f"INVALID_PATCH:\n{canonical_json(data).decode()}\n"
+                f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}"
+            ),
+            max_output_tokens=8_000,
+            call_key=f"schema_repair:{call_key}",
+        )
+        try:
+            patch, findings = _normalize_bounded_patch(repaired_data, graph, bundle)
+        except ValueError as repair_error:
+            raise ValueError(
+                f"graph patch remained invalid after bounded repair: {repair_error}"
+            ) from repair_error
+        return patch, ["provider graph patch required schema repair", *findings], repair_trace
+
+
+def _normalize_or_repair_critique(
+    *,
+    control: ProviderControlPlane,
+    data: object,
+    job_id: str,
+    paper_id: str,
+    call_key: str,
+) -> tuple[GraphCritique, ProviderTrace | None]:
+    try:
+        return GraphCritique.model_validate(data), None
+    except ValueError as initial_error:
+        repaired_data, repair_trace = control.call(
+            job_id=job_id,
+            paper_id=paper_id,
+            role="final_repair",
+            system=_critique_schema_repair_system(),
+            user=(
+                "Repair only the JSON shape. Preserve every critique finding and do not change a "
+                "negative decision into an accepted one.\n"
+                f"VALIDATION_ERROR:\n{initial_error}\n"
+                f"INVALID_CRITIQUE:\n{canonical_json(data).decode()}"
+            ),
+            max_output_tokens=6_000,
+            call_key=f"schema_repair:{call_key}",
+        )
+        return GraphCritique.model_validate(repaired_data), repair_trace
+
+
+def _first_unique(
+    values: list[_T],
+    *,
+    key: Callable[[_T], Hashable],
+) -> list[_T]:
+    """Return exact provider values in their declared priority order once each."""
+
+    seen: set[Hashable] = set()
+    unique: list[_T] = []
+    for value in values:
+        identity = key(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(value)
+    return unique
+
+
+def _record_bound(findings: list[str], field: str, returned: int, retained: int) -> None:
+    if returned != retained:
+        findings.append(
+            f"deterministically bounded provider patch {field}: retained {retained} "
+            f"of {returned} returned entries"
+        )
 
 
 def validate_graph_against_bundle(graph: PaperEvidenceGraph, bundle: PaperBundle) -> None:
@@ -281,12 +497,29 @@ REQUIRED_JSON_SCHEMA:
 {schema}"""
 
 
+def _patch_schema_repair_system() -> str:
+    schema = canonical_json(BoundedGraphPatch.model_json_schema()).decode()
+    return f"""Repair one model-authored graph patch so it validates exactly against the required
+JSON schema. Preserve supported content and identifiers, remove invalid or unresolved content, and
+do not introduce claims, evidence, calculations, or outside knowledge. Return only JSON.
+REQUIRED_JSON_SCHEMA:
+{schema}"""
+
+
 def _critic_system_prompt() -> str:
     schema = canonical_json(GraphCritique.model_json_schema()).decode()
     return f"""You are a fresh scientific grounding critic with no access to compiler reasoning.
 Return one JSON object that validates exactly against REQUIRED_JSON_SCHEMA. Check source-span
 grounding, atomicity, overclaims, missing qualifiers, equation dependencies, method order,
 conflicts, and suitability for deterministic verification.
+REQUIRED_JSON_SCHEMA:
+{schema}"""
+
+
+def _critique_schema_repair_system() -> str:
+    schema = canonical_json(GraphCritique.model_json_schema()).decode()
+    return f"""Repair one graph-critic response so it validates exactly against the required JSON
+schema. Preserve all findings and fail closed when a value is ambiguous. Return only JSON.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
 
@@ -298,9 +531,15 @@ def _pass_prompt(
     instruction: str,
     oracle_results: list[OracleResult],
 ) -> str:
+    role_focus = {
+        "claim": {"abstract", "introduction", "results", "discussion", "conclusion"},
+        "method": {"abstract", "methods", "results"},
+        "quantitative": {"methods", "results", "discussion", "other"},
+        "conflict": {"results", "discussion", "limitations", "conclusion"},
+    }.get(pass_name)
     return (
         f"PASS: {pass_name}\nINSTRUCTION: {instruction}\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, section_roles=role_focus).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"CURRENT_GRAPH:\n{canonical_json(graph).decode()}"
     )
@@ -311,8 +550,9 @@ def _critic_prompt(
     graph: PaperEvidenceGraph,
     oracle_results: list[OracleResult],
 ) -> str:
+    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"CANDIDATE_GRAPH:\n{canonical_json(graph).decode()}"
     )
@@ -324,10 +564,11 @@ def _repair_prompt(
     critique: GraphCritique,
     oracle_results: list[OracleResult],
 ) -> str:
+    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
         "Return only a bounded delta against GRAPH that resolves the CRITIQUE; do not restate "
         "unchanged graph content.\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"GRAPH:\n{canonical_json(graph).decode()}\n"
         f"CRITIQUE:\n{canonical_json(critique).decode()}"

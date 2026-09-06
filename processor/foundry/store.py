@@ -45,7 +45,13 @@ _PIPELINE_ACTIVITY_STATES = {
 
 
 class FoundryStore:
-    def __init__(self, path: str, *, recover_processing: bool = False) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        recover_processing: bool = False,
+        candidate_generation: str | None = None,
+    ) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -67,7 +73,8 @@ class FoundryStore:
               received_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               bundle_json BLOB,
-              graph_json BLOB
+              graph_json BLOB,
+              lakehouse_published_at TEXT
             );
             CREATE TABLE IF NOT EXISTS events (
               event_id TEXT PRIMARY KEY,
@@ -141,11 +148,16 @@ class FoundryStore:
               state TEXT NOT NULL,
               reasoning_score REAL NOT NULL DEFAULT 0,
               quality_score REAL NOT NULL DEFAULT 0,
-              benchmark_score REAL NOT NULL DEFAULT 0,
+              ranking_score REAL NOT NULL DEFAULT 0,
+              domain_key TEXT NOT NULL DEFAULT 'general_scientific',
               valid_from TEXT NOT NULL DEFAULT '',
               enqueue_ordinal INTEGER NOT NULL DEFAULT 0,
               enqueued_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              scientific_payload BLOB,
+              attempt_count INTEGER NOT NULL DEFAULT 0,
+              next_attempt_at TEXT,
+              last_error TEXT
             );
             CREATE TABLE IF NOT EXISTS daily_runs (
               run_date TEXT PRIMARY KEY,
@@ -157,6 +169,13 @@ class FoundryStore:
               candidate_count INTEGER NOT NULL,
               processed_count INTEGER NOT NULL DEFAULT 0,
               stop_reason TEXT
+            );
+            CREATE TABLE IF NOT EXISTS daily_run_candidates (
+              run_date TEXT NOT NULL REFERENCES daily_runs(run_date),
+              rank INTEGER NOT NULL,
+              doc_id TEXT NOT NULL,
+              PRIMARY KEY(run_date,doc_id),
+              UNIQUE(run_date,rank)
             );
             CREATE TABLE IF NOT EXISTS manual_runs (
               run_id TEXT PRIMARY KEY,
@@ -183,18 +202,69 @@ class FoundryStore:
               name TEXT PRIMARY KEY,
               value INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS candidate_control (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS candidate_admissions (
+              identity TEXT PRIMARY KEY, doc_id TEXT NOT NULL,
+              outcome TEXT NOT NULL, observed_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(state, updated_at DESC);
             CREATE INDEX IF NOT EXISTS artifacts_created_idx ON artifacts(created_at DESC);
             CREATE INDEX IF NOT EXISTS traces_provider_idx ON provider_traces(provider, completed_at DESC);
             """
         )
         self._ensure_candidate_queue_columns()
+        self._ensure_job_columns()
         self._ensure_daily_run_columns()
         self._ensure_manual_run_columns()
         self._ensure_pool_assignment_columns()
         self._initialize_candidate_sequence()
+        if candidate_generation is not None:
+            self.reset_pending_candidates(candidate_generation)
         if recover_processing:
             self._conn.execute("UPDATE candidate_queue SET state='queued' WHERE state='processing'")
+
+    def reset_pending_candidates(self, generation: str) -> int:
+        """One-time owner-approved reset. Preserve active work and all artifacts."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                current = self._conn.execute(
+                    "SELECT value FROM candidate_control WHERE key='generation'"
+                ).fetchone()
+                if current is not None and current["value"] == generation:
+                    self._conn.commit()
+                    return 0
+                removed = self._conn.execute(
+                    "DELETE FROM candidate_queue WHERE state='queued'"
+                ).rowcount
+                self._conn.execute(
+                    "DELETE FROM daily_run_candidates WHERE doc_id NOT IN (SELECT doc_id FROM candidate_queue)"
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO candidate_control VALUES ('generation', ?)",
+                    (generation,),
+                )
+                self._conn.commit()
+                return removed
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def candidate_admission_seen(self, identity: str) -> bool:
+        with self._lock:
+            return (
+                self._conn.execute(
+                    "SELECT 1 FROM candidate_admissions WHERE identity=?", (identity,)
+                ).fetchone()
+                is not None
+            )
+
+    def record_candidate_admission(self, identity: str, doc_id: str, outcome: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO candidate_admissions VALUES (?, ?, ?, ?)",
+                (identity, doc_id, outcome, datetime.now(UTC).isoformat()),
+            )
 
     def _ensure_candidate_queue_columns(self) -> None:
         existing = {
@@ -204,9 +274,14 @@ class FoundryStore:
         additions = {
             "reasoning_score": "REAL NOT NULL DEFAULT 0",
             "quality_score": "REAL NOT NULL DEFAULT 0",
-            "benchmark_score": "REAL NOT NULL DEFAULT 0",
+            "ranking_score": "REAL NOT NULL DEFAULT 0",
+            "domain_key": "TEXT NOT NULL DEFAULT 'general_scientific'",
             "valid_from": "TEXT NOT NULL DEFAULT ''",
             "enqueue_ordinal": "INTEGER NOT NULL DEFAULT 0",
+            "scientific_payload": "BLOB",
+            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "next_attempt_at": "TEXT",
+            "last_error": "TEXT",
         }
         for name, declaration in additions.items():
             if name not in existing:
@@ -215,6 +290,16 @@ class FoundryStore:
             "CREATE INDEX IF NOT EXISTS candidate_queue_snapshot_idx "
             "ON candidate_queue(state,enqueue_ordinal)"
         )
+
+    def _ensure_job_columns(self) -> None:
+        existing = {
+            str(row["name"]) for row in self._conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "lakehouse_published_at" not in existing:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN lakehouse_published_at TEXT")
+            self._conn.execute(
+                "UPDATE jobs SET lakehouse_published_at=updated_at WHERE lakehouse_published_at IS NULL"
+            )
 
     def _ensure_daily_run_columns(self) -> None:
         existing = {
@@ -410,7 +495,7 @@ class FoundryStore:
                 event = FoundryEvent.model_validate_json(existing["event_json"])
                 if update_job_state:
                     self._conn.execute(
-                        "UPDATE jobs SET state=?, reason=?, updated_at=? WHERE job_id=?",
+                        "UPDATE jobs SET state=?,reason=?,updated_at=? WHERE job_id=?",
                         (
                             event.state,
                             event.reason,
@@ -453,6 +538,9 @@ class FoundryStore:
                         "UPDATE jobs SET state=?, reason=?, updated_at=? WHERE job_id=?",
                         (state, reason, event.occurred_at.isoformat(), job_id),
                     )
+                self._conn.execute(
+                    "UPDATE jobs SET lakehouse_published_at=NULL WHERE job_id=?", (job_id,)
+                )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
@@ -543,21 +631,52 @@ class FoundryStore:
 
     def record_artifact(self, artifact: FoundryArtifactRecord) -> None:
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    artifact.artifact_id,
-                    artifact.job_id,
-                    artifact.paper_id,
-                    artifact.task_id,
-                    artifact.family,
-                    artifact.kind,
-                    artifact.status,
-                    artifact.created_at.isoformat(),
-                    canonical_json(artifact),
-                ),
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artifact.artifact_id,
+                        artifact.job_id,
+                        artifact.paper_id,
+                        artifact.task_id,
+                        artifact.family,
+                        artifact.kind,
+                        artifact.status,
+                        artifact.created_at.isoformat(),
+                        canonical_json(artifact),
+                    ),
+                )
+                self._conn.execute(
+                    "UPDATE jobs SET lakehouse_published_at=NULL WHERE job_id=?",
+                    (artifact.job_id,),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def pending_lakehouse_job_ids(self) -> list[str]:
+        rows = self._conn.execute(
+            """
+            SELECT job_id FROM jobs
+            WHERE lakehouse_published_at IS NULL
+              AND EXISTS (SELECT 1 FROM events WHERE events.job_id=jobs.job_id)
+            ORDER BY updated_at,job_id
+            """
+        ).fetchall()
+        return [str(row["job_id"]) for row in rows]
+
+    def mark_lakehouse_published(self, job_ids: set[str]) -> None:
+        if not job_ids:
+            return
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE jobs SET lakehouse_published_at=? WHERE job_id=?",
+                [(now, job_id) for job_id in sorted(job_ids)],
             )
 
     def audit_artifact(
@@ -630,6 +749,9 @@ class FoundryStore:
         reasoning_score: float,
         quality_score: float,
         valid_from: datetime,
+        scientific_payload: bytes | None = None,
+        ranking_score: float | None = None,
+        domain_key: str = "general_scientific",
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._lock:
@@ -646,29 +768,42 @@ class FoundryStore:
                 self._conn.execute(
                     """
                     INSERT INTO candidate_queue
-                    (doc_id,payload,state,reasoning_score,quality_score,benchmark_score,
-                     valid_from,enqueue_ordinal,enqueued_at,updated_at)
-                    VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?)
+                    (doc_id,payload,state,reasoning_score,quality_score,
+                     ranking_score,domain_key,valid_from,enqueue_ordinal,enqueued_at,updated_at,
+                     scientific_payload)
+                    VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(doc_id) DO UPDATE SET
                       payload=excluded.payload,
                       reasoning_score=excluded.reasoning_score,
                       quality_score=excluded.quality_score,
+                      ranking_score=excluded.ranking_score,
+                      domain_key=excluded.domain_key,
                       valid_from=excluded.valid_from,
                       enqueue_ordinal=excluded.enqueue_ordinal,
                       enqueued_at=excluded.enqueued_at,
-                      updated_at=excluded.updated_at
+                      updated_at=excluded.updated_at,
+                      scientific_payload=excluded.scientific_payload
                     WHERE candidate_queue.state='queued'
-                      AND candidate_queue.payload<>excluded.payload
+                      AND (
+                        candidate_queue.payload<>excluded.payload
+                        OR COALESCE(candidate_queue.scientific_payload, X'')<>
+                           COALESCE(excluded.scientific_payload, X'')
+                      )
                     """,
                     (
                         doc_id,
                         payload,
                         reasoning_score,
                         quality_score,
+                        ranking_score
+                        if ranking_score is not None
+                        else (reasoning_score + quality_score / 5.0) / 2.0,
+                        domain_key,
                         valid_from.isoformat(),
                         sequence,
                         now,
                         now,
+                        scientific_payload,
                     ),
                 )
                 self._conn.commit()
@@ -681,6 +816,7 @@ class FoundryStore:
         *,
         cutoff_at: datetime,
         cutoff_ordinal: int | None = None,
+        daily_run_date: date | None = None,
     ) -> tuple[str, bytes] | None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -689,16 +825,37 @@ class FoundryStore:
                 boundary_value: int | str = (
                     cutoff_ordinal if cutoff_ordinal is not None else cutoff_at.isoformat()
                 )
-                row = self._conn.execute(
-                    f"""
-                    SELECT doc_id,payload FROM candidate_queue
-                    WHERE state='queued' AND {boundary}
-                    ORDER BY reasoning_score DESC, quality_score DESC,
-                             valid_from DESC, doc_id ASC
-                    LIMIT 1
-                    """,
-                    (boundary_value,),
-                ).fetchone()
+                if daily_run_date is not None:
+                    row = self._conn.execute(
+                        f"""
+                        SELECT candidate_queue.doc_id,candidate_queue.payload
+                        FROM daily_run_candidates
+                        JOIN candidate_queue USING(doc_id)
+                        WHERE daily_run_candidates.run_date=?
+                          AND candidate_queue.state='queued' AND {boundary}
+                          AND (candidate_queue.next_attempt_at IS NULL
+                               OR candidate_queue.next_attempt_at<=?)
+                        ORDER BY daily_run_candidates.rank ASC
+                        LIMIT 1
+                        """,
+                        (
+                            daily_run_date.isoformat(),
+                            boundary_value,
+                            datetime.now(UTC).isoformat(),
+                        ),
+                    ).fetchone()
+                else:
+                    row = self._conn.execute(
+                        f"""
+                        SELECT doc_id,payload FROM candidate_queue
+                        WHERE state='queued' AND {boundary}
+                          AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                        ORDER BY ranking_score DESC, reasoning_score DESC,
+                                 quality_score DESC,valid_from DESC,doc_id ASC
+                        LIMIT 1
+                        """,
+                        (boundary_value, datetime.now(UTC).isoformat()),
+                    ).fetchone()
                 if row is None:
                     self._conn.rollback()
                     return None
@@ -712,8 +869,93 @@ class FoundryStore:
                 self._conn.rollback()
                 raise
 
-    def start_daily_run(self, day: date) -> dict[str, Any]:
+    def candidate_scientific_payload(
+        self,
+        doc_id: str,
+        *,
+        expected_gold_payload: bytes | None = None,
+    ) -> bytes | None:
+        row = self._conn.execute(
+            "SELECT payload,scientific_payload FROM candidate_queue WHERE doc_id=?",
+            (doc_id,),
+        ).fetchone()
+        if row is None or row["scientific_payload"] is None:
+            return None
+        if expected_gold_payload is not None and bytes(row["payload"]) != expected_gold_payload:
+            return None
+        return bytes(row["scientific_payload"])
+
+    def cache_candidate_scientific_payload(self, doc_id: str, payload: bytes) -> None:
+        """Persist the validated source projection before provider work begins."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE candidate_queue SET scientific_payload=?,updated_at=?
+                WHERE doc_id=? AND state='processing'
+                """,
+                (payload, datetime.now(UTC).isoformat(), doc_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"candidate is not processing: {doc_id}")
+
+    def interrupted_provider_calls(self) -> list[dict[str, Any]]:
+        """Return calls left without a terminal event by the prior worker."""
+        rows = self._conn.execute(
+            """
+            SELECT events.event_json FROM events
+            JOIN jobs ON jobs.job_id=events.job_id
+            WHERE jobs.state NOT IN ('ACCEPTED_SFT','ACCEPTED_RL','REJECTED','DEPRECATED')
+              AND events.state IN (
+              'CALL_PLANNED','CALL_STARTED','CALL_SUCCEEDED','CALL_FAILED','CALL_RATE_LIMITED'
+            )
+            ORDER BY events.job_id,events.sequence
+            """
+        ).fetchall()
+        planned: dict[tuple[str, int, str], FoundryEvent] = {}
+        started: set[tuple[str, int, str]] = set()
+        terminal: set[tuple[str, int, str]] = set()
+        for row in rows:
+            event = FoundryEvent.model_validate_json(row["event_json"])
+            role = str(event.metadata.get("role", "unknown"))
+            key = (event.job_id, event.attempt, role)
+            if event.state == "CALL_PLANNED":
+                planned[key] = event
+            elif event.state == "CALL_STARTED":
+                started.add(key)
+            else:
+                terminal.add(key)
+        result: list[dict[str, Any]] = []
+        for key, event in planned.items():
+            if key in terminal:
+                continue
+            result.append(
+                {
+                    "job_id": event.job_id,
+                    "paper_id": event.paper_id,
+                    "attempt": event.attempt,
+                    "role": key[2],
+                    "provider": str(event.metadata.get("provider", "unknown")),
+                    "was_started": key in started,
+                }
+            )
+        return result
+
+    def start_daily_run(
+        self,
+        day: date,
+        *,
+        boundary_at: datetime | None = None,
+        candidate_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Freeze the ranked cohort from the 24 hours ending at ``boundary_at``."""
+        if candidate_limit is not None and candidate_limit < 1:
+            raise ValueError("daily candidate limit must be positive")
         now = datetime.now(UTC)
+        cutoff_at = boundary_at or now
+        if cutoff_at.tzinfo is None:
+            raise ValueError("daily cohort boundary must be timezone-aware")
+        cutoff_at = cutoff_at.astimezone(UTC)
+        window_start = cutoff_at - timedelta(hours=24)
         day_text = day.isoformat()
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -730,45 +972,90 @@ class FoundryStore:
                 existing = self._conn.execute(
                     "SELECT * FROM daily_runs WHERE run_date=?", (day_text,)
                 ).fetchone()
-                if existing is not None:
+                if existing is not None and str(existing["cutoff_at"]) == cutoff_at.isoformat():
                     self._conn.commit()
                     return dict(existing)
-                candidate_count = int(
+                # A changed boundary rebuilds membership against its immutable
+                # cutoff while retaining the run's stable UTC date key.
+                if existing is not None:
                     self._conn.execute(
-                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
-                    ).fetchone()["n"]
-                )
+                        "DELETE FROM daily_run_candidates WHERE run_date=?", (day_text,)
+                    )
+                    self._conn.execute("DELETE FROM daily_runs WHERE run_date=?", (day_text,))
                 cutoff_ordinal = int(
                     self._conn.execute(
                         "SELECT value FROM control_sequences WHERE name='candidate_enqueue'"
                     ).fetchone()["value"]
                 )
-                if candidate_count == 0:
-                    self._conn.commit()
-                    return {
-                        "run_date": day_text,
-                        "state": "waiting",
-                        "cutoff_at": now.isoformat(),
-                        "cutoff_ordinal": cutoff_ordinal,
-                        "started_at": now.isoformat(),
-                        "completed_at": None,
-                        "candidate_count": 0,
-                        "processed_count": 0,
-                        "stop_reason": None,
-                    }
+                # The daily cohort is intentionally fresh-only. Unprocessed
+                # older rows are removed instead of accumulating a permanent
+                # backlog that can starve new research.
+                self._conn.execute(
+                    "DELETE FROM candidate_queue WHERE state='queued' AND enqueued_at<=?",
+                    (window_start.isoformat(),),
+                )
+                ranked_rows = self._conn.execute(
+                    """
+                    SELECT doc_id,ranking_score,reasoning_score,quality_score,
+                           valid_from,domain_key
+                    FROM candidate_queue
+                    WHERE state='queued' AND enqueue_ordinal<=?
+                      AND enqueued_at>? AND enqueued_at<=?
+                    ORDER BY ranking_score DESC,reasoning_score DESC,quality_score DESC,
+                             valid_from DESC,doc_id ASC
+                    LIMIT ?
+                    """,
+                    (
+                        cutoff_ordinal,
+                        window_start.isoformat(),
+                        cutoff_at.isoformat(),
+                        candidate_limit if candidate_limit is not None else -1,
+                    ),
+                ).fetchall()
+                selected_ids = [str(row["doc_id"]) for row in ranked_rows]
+                candidate_count = len(selected_ids)
+                state = "running" if candidate_count else "completed"
+                completed_at = None if candidate_count else now.isoformat()
+                stop_reason = None if candidate_count else "ranked 24-hour cohort is empty"
                 self._conn.execute(
                     """
                     INSERT OR IGNORE INTO daily_runs(
-                      run_date,state,cutoff_at,cutoff_ordinal,started_at,candidate_count
-                    ) VALUES (?, 'running', ?, ?, ?, ?)
+                      run_date,state,cutoff_at,cutoff_ordinal,started_at,completed_at,
+                      candidate_count,stop_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         day_text,
-                        now.isoformat(),
+                        state,
+                        cutoff_at.isoformat(),
                         cutoff_ordinal,
                         now.isoformat(),
+                        completed_at,
                         candidate_count,
+                        stop_reason,
                     ),
+                )
+                self._conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO daily_run_candidates(run_date,rank,doc_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(day_text, rank, doc_id) for rank, doc_id in enumerate(selected_ids, start=1)],
+                )
+                # The boundary is also the queue reset: candidates that were
+                # eligible for this snapshot but ranked below the configured
+                # cohort do not accumulate into an all-time backlog. Arrivals
+                # after the frozen ordinal remain queued for tomorrow.
+                self._conn.execute(
+                    """
+                    DELETE FROM candidate_queue
+                    WHERE state='queued' AND enqueue_ordinal<=?
+                      AND enqueued_at<=?
+                      AND doc_id NOT IN (
+                        SELECT doc_id FROM daily_run_candidates WHERE run_date=?
+                      )
+                    """,
+                    (cutoff_ordinal, cutoff_at.isoformat(), day_text),
                 )
                 row = self._conn.execute(
                     "SELECT * FROM daily_runs WHERE run_date=?", (day_text,)
@@ -779,6 +1066,19 @@ class FoundryStore:
                 raise
         assert row is not None
         return dict(row)
+
+    def expire_active_manual_runs(self, *, reason: str) -> int:
+        """Stop diagnostic snapshots when a scheduled daily boundary takes ownership."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE manual_runs
+                SET state='failed',completed_at=?,stop_reason=?
+                WHERE state IN ('pending','running')
+                """,
+                (datetime.now(UTC).isoformat(), reason),
+            )
+        return int(cursor.rowcount)
 
     def daily_run(self, day: date) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -815,10 +1115,16 @@ class FoundryStore:
     def request_manual_run(
         self, *, max_candidates: int | None = None
     ) -> tuple[dict[str, Any], bool]:
-        """Queue one ranked snapshot, coalescing concurrent button clicks."""
+        """Queue one ranked snapshot of the fresh 24-hour candidate cohort.
+
+        Manual operation follows the same freshness contract as the scheduled
+        run: old queued work is discarded and arrivals after the snapshot
+        boundary are deferred to the next cohort.
+        """
         if max_candidates is not None and max_candidates < 1:
             raise ValueError("max_candidates must be positive")
         now = datetime.now(UTC)
+        window_start = now - timedelta(hours=24)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -832,9 +1138,17 @@ class FoundryStore:
                 if active is not None:
                     self._conn.commit()
                     return dict(active), False
+                self._conn.execute(
+                    "DELETE FROM candidate_queue WHERE state='queued' AND enqueued_at<=?",
+                    (window_start.isoformat(),),
+                )
                 queued_count = int(
                     self._conn.execute(
-                        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
+                        """
+                        SELECT COUNT(*) AS n FROM candidate_queue
+                        WHERE state='queued' AND enqueued_at>? AND enqueued_at<=?
+                        """,
+                        (window_start.isoformat(), now.isoformat()),
                     ).fetchone()["n"]
                 )
                 cutoff_ordinal = int(
@@ -992,9 +1306,73 @@ class FoundryStore:
     def release_candidate(self, doc_id: str) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE candidate_queue SET state='queued',updated_at=? WHERE doc_id=?",
+                """
+                UPDATE candidate_queue
+                SET state='queued',updated_at=?,next_attempt_at=NULL,last_error=NULL
+                WHERE doc_id=?
+                """,
                 (datetime.now(UTC).isoformat(), doc_id),
             )
+
+    def defer_candidate(self, doc_id: str, *, reason: str) -> int:
+        """Defer a transiently failed paper so later ranked work can proceed."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT attempt_count FROM candidate_queue WHERE doc_id=?", (doc_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(doc_id)
+            attempt = int(row["attempt_count"]) + 1
+            delay_seconds = min(3600, 60 * (2 ** min(attempt - 1, 6)))
+            now = datetime.now(UTC)
+            self._conn.execute(
+                """
+                UPDATE candidate_queue
+                SET state='queued',attempt_count=?,next_attempt_at=?,last_error=?,updated_at=?
+                WHERE doc_id=?
+                """,
+                (
+                    attempt,
+                    (now + timedelta(seconds=delay_seconds)).isoformat(),
+                    reason[:2000],
+                    now.isoformat(),
+                    doc_id,
+                ),
+            )
+            return delay_seconds
+
+    def next_candidate_retry_delay(
+        self,
+        *,
+        cutoff_at: datetime,
+        cutoff_ordinal: int,
+        daily_run_date: date | None = None,
+    ) -> float | None:
+        now = datetime.now(UTC)
+        if daily_run_date is not None:
+            row = self._conn.execute(
+                """
+                SELECT MIN(candidate_queue.next_attempt_at) AS retry_at
+                FROM daily_run_candidates
+                JOIN candidate_queue USING(doc_id)
+                WHERE daily_run_candidates.run_date=?
+                  AND candidate_queue.state='queued'
+                  AND candidate_queue.enqueue_ordinal<=?
+                """,
+                (daily_run_date.isoformat(), cutoff_ordinal),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """
+                SELECT MIN(next_attempt_at) AS retry_at FROM candidate_queue
+                WHERE state='queued' AND enqueue_ordinal<=? AND enqueued_at<=?
+                """,
+                (cutoff_ordinal, cutoff_at.isoformat()),
+            ).fetchone()
+        retry_at = row["retry_at"] if row is not None else None
+        if retry_at is None:
+            return None
+        return max(0.0, (datetime.fromisoformat(str(retry_at)) - now).total_seconds())
 
     def queued_candidates(self) -> int:
         row = self._conn.execute(
@@ -1088,6 +1466,37 @@ class FoundryStore:
             value["human_audit_history"] = audits
             values.append(value)
         return values
+
+    def export_artifact_records(
+        self,
+        *,
+        kind: str,
+        dataset_split: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[FoundryArtifactRecord]:
+        """Return every accepted artifact selected for a dataset export."""
+        if kind not in {"sft_trajectory", "rl_environment"}:
+            raise ValueError("kind must be sft_trajectory or rl_environment")
+        if dataset_split not in {None, "train", "benchmark"}:
+            raise ValueError("dataset_split must be train or benchmark")
+        clauses = ["kind=?", "status='accepted'"]
+        params: list[Any] = [kind]
+        if date_from:
+            clauses.append("created_at>=?")
+            params.append(date_from)
+        if date_to:
+            clauses.append("created_at<=?")
+            params.append(date_to)
+        rows = self._conn.execute(
+            f"SELECT artifact_json FROM artifacts WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at,artifact_id",
+            params,
+        ).fetchall()
+        records = [FoundryArtifactRecord.model_validate_json(row["artifact_json"]) for row in rows]
+        if dataset_split:
+            records = [record for record in records if record.dataset_split == dataset_split]
+        return records
 
     def traces(self, *, job_id: str | None = None) -> list[dict[str, Any]]:
         if job_id:

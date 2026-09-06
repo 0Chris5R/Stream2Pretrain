@@ -2,17 +2,24 @@
 set -eu
 
 command_name="$(basename "$0")"
+if [ "$command_name" = "s2p-entrypoint" ]; then
+  if [ "$#" -eq 0 ]; then
+    echo "Missing Stream2Pretrain component selector" >&2
+    exit 64
+  fi
+  command_name="$1"
+  shift
+fi
 case "$command_name" in
   s2p-fetcher) module="processor.fetcher" ;;
   s2p-curate) module="processor.curate" ;;
   s2p-curator-model-service) module="processor.model_service" ;;
   s2p-iceberg-writer) module="processor.iceberg_writer" ;;
   s2p-iceberg-maintenance) module="processor.iceberg_maintenance" ;;
-  s2p-decon-api) module="processor.decon_api" ;;
+  s2p-object-lifecycle) module="processor.object_lifecycle" ;;
   s2p-duckdb-api) module="processor.duckdb_api" ;;
   s2p-local-sources-api) module="processor.local_sources_api" ;;
-  s2p-mixture-controller) module="processor.mixture_controller.controller" ;;
-  s2p-seed-loader) module="processor.seed_loader" ;;
+  s2p-source-controller) module="processor.source_controller" ;;
   s2p-foundry) module="processor.foundry.worker" ;;
   s2p-foundry-api) module="processor.foundry.api" ;;
   s2p-foundry-export-replay) module="processor.foundry.export_replay" ;;

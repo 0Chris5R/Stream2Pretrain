@@ -3,70 +3,157 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from contextlib import suppress
 from typing import Any
 
 from processor.foundry.util import canonical_json
-from processor.iceberg_catalog import load_runtime_catalog
+from processor.iceberg_catalog import (
+    ensure_iceberg_maintenance_properties,
+    iceberg_maintenance_properties,
+    load_runtime_catalog,
+)
 from schemas.foundry import FoundryArtifactRecord, FoundryEvent
 
 
+def _is_missing_catalog_table(exc: Exception) -> bool:
+    """Distinguish an absent table from a transient catalog/storage failure."""
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    return "nosuchtable" in name or "not found" in message or "does not exist" in message
+
+
 class FoundryLakehouseSink:
-    def __init__(self, *, batch_size: int = 50) -> None:
+    def __init__(self, *, batch_size: int = 5000, flush_interval_seconds: float = 3600) -> None:
         self._catalog = load_runtime_catalog()
+        self._lock = threading.RLock()
         self._batch_size = batch_size
+        self._flush_interval_seconds = flush_interval_seconds
+        self._last_flush = time.monotonic()
         self._events: list[FoundryEvent] = []
         self._artifacts: list[FoundryArtifactRecord] = []
         self._buffered_event_ids: set[str] = set()
         self._buffered_artifact_ids: set[str] = set()
         self._known_event_ids: set[str] | None = None
         self._known_artifact_ids: set[str] | None = None
+        self._buffered_job_ids: set[str] = set()
 
-    def add_event(self, event: FoundryEvent) -> None:
+    def add_event(self, event: FoundryEvent) -> set[str]:
+        with self._lock:
+            self._add_event(event)
+            if len(self._events) + len(self._artifacts) >= self._batch_size:
+                return self.flush(force=True)
+            return set()
+
+    def _add_event(self, event: FoundryEvent) -> None:
         if event.event_id in self._buffered_event_ids:
             return
         self._events.append(event)
         self._buffered_event_ids.add(event.event_id)
-        if len(self._events) >= self._batch_size:
-            self.flush_events()
+        if job_id := getattr(event, "job_id", None):
+            self._buffered_job_ids.add(str(job_id))
 
-    def add_artifact(self, artifact: FoundryArtifactRecord) -> None:
+    def add_artifact(self, artifact: FoundryArtifactRecord) -> set[str]:
+        with self._lock:
+            self._add_artifact(artifact)
+            if len(self._events) + len(self._artifacts) >= self._batch_size:
+                return self.flush(force=True)
+            return set()
+
+    def _add_artifact(self, artifact: FoundryArtifactRecord) -> None:
         if artifact.artifact_id in self._buffered_artifact_ids:
             return
         self._artifacts.append(artifact)
         self._buffered_artifact_ids.add(artifact.artifact_id)
-        if len(self._artifacts) >= self._batch_size:
-            self.flush_artifacts()
+        if job_id := getattr(artifact, "job_id", None):
+            self._buffered_job_ids.add(str(job_id))
 
-    def flush(self) -> None:
-        self.flush_events()
-        self.flush_artifacts()
+    def flush(self, *, force: bool = True) -> set[str]:
+        """Commit one cross-job batch and return jobs durably represented in Iceberg."""
+        with self._lock:
+            buffered = len(self._events) + len(self._artifacts)
+            due = time.monotonic() - self._last_flush >= self._flush_interval_seconds
+            if not force and buffered < self._batch_size and not due:
+                return set()
+            if not buffered:
+                self._last_flush = time.monotonic()
+                return set()
+            published = set(self._buffered_job_ids)
+            self._flush_events()
+            self._flush_artifacts()
+            self._buffered_job_ids.clear()
+            self._last_flush = time.monotonic()
+            return published
 
     def flush_events(self) -> None:
+        with self._lock:
+            self._flush_events()
+
+    def _flush_events(self) -> None:
         if not self._events:
             return
-        table = self._ensure_events_table()
-        self._known_event_ids = self._known_event_ids or _load_ids(table, "event_id")
-        pending = [value for value in self._events if value.event_id not in self._known_event_ids]
-        if pending:
-            table.append(_events_arrow(pending))
-            self._known_event_ids.update(value.event_id for value in pending)
+        self._known_event_ids = self._append_unique(
+            self._ensure_events_table,
+            self._events,
+            "event_id",
+            _events_arrow,
+            self._known_event_ids,
+        )
         self._events.clear()
         self._buffered_event_ids.clear()
 
     def flush_artifacts(self) -> None:
+        with self._lock:
+            self._flush_artifacts()
+
+    def _flush_artifacts(self) -> None:
         if not self._artifacts:
             return
-        table = self._ensure_artifacts_table()
-        self._known_artifact_ids = self._known_artifact_ids or _load_ids(table, "artifact_id")
-        pending = [
-            value for value in self._artifacts if value.artifact_id not in self._known_artifact_ids
-        ]
-        if pending:
-            table.append(_artifacts_arrow(pending))
-            self._known_artifact_ids.update(value.artifact_id for value in pending)
+        self._known_artifact_ids = self._append_unique(
+            self._ensure_artifacts_table,
+            self._artifacts,
+            "artifact_id",
+            _artifacts_arrow,
+            self._known_artifact_ids,
+        )
         self._artifacts.clear()
         self._buffered_artifact_ids.clear()
+
+    @staticmethod
+    def _append_unique(
+        load_table: Any,
+        values: list[Any],
+        id_column: str,
+        to_arrow: Any,
+        known: set[str] | None,
+    ) -> set[str]:
+        for attempt in range(8):
+            try:
+                table = load_table()
+                if known is None:
+                    known = _load_ids(table, id_column)
+                pending = [value for value in values if getattr(value, id_column) not in known]
+                if pending:
+                    table.append(to_arrow(pending))
+                    known.update(getattr(value, id_column) for value in pending)
+                return known
+            except Exception as exc:
+                # Maintenance and other writers can advance main between load
+                # and append. Refresh both snapshot and IDs, including when a
+                # commit succeeded but its acknowledgement was lost.
+                if (
+                    type(exc).__name__
+                    not in {
+                        "CommitFailedException",
+                        "CommitStateUnknownException",
+                    }
+                    or attempt == 7
+                ):
+                    raise
+                known = None
+                time.sleep(min(2, 0.1 * 2**attempt))
+        raise AssertionError("unreachable")
 
     def _ensure_events_table(self) -> Any:
         return self._ensure(
@@ -96,15 +183,24 @@ class FoundryLakehouseSink:
         )
         identifier = (namespace, table_name)
         try:
-            return self._catalog.load_table(identifier)
-        except Exception:
-            with suppress(Exception):
-                self._catalog.create_namespace((namespace,))
-            return self._catalog.create_table(
-                identifier=identifier,
-                schema=schema,
-                properties={"format-version": "2", "write.format.default": "parquet"},
-            )
+            table = self._catalog.load_table(identifier)
+        except Exception as exc:
+            if not _is_missing_catalog_table(exc):
+                raise
+        else:
+            ensure_iceberg_maintenance_properties(table)
+            return table
+        with suppress(Exception):
+            self._catalog.create_namespace((namespace,))
+        return self._catalog.create_table(
+            identifier=identifier,
+            schema=schema,
+            properties={
+                "format-version": "2",
+                "write.format.default": "parquet",
+                **iceberg_maintenance_properties(),
+            },
+        )
 
 
 def _schema_column_names(schema: Any) -> set[str]:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import io
 import json
+import sys
 import tarfile
 import threading
 from dataclasses import replace
@@ -15,16 +18,23 @@ from typing import Any
 import httpx
 import pytest
 
+from processor.foundry import lakehouse
+from processor.foundry.api import _package_archive
 from processor.foundry.config import FoundryConfig, ProviderConfig
 from processor.foundry.control import ProviderControlPlane
 from processor.foundry.graph import BoundedGraphPatch, EvidenceGraphCompiler
-from processor.foundry.inspection import ArtifactInspector, inspect_package
-from processor.foundry.lakehouse import _schema_column_names
+from processor.foundry.inspection import (
+    ArtifactInspector,
+    _uses_v2_content_policy,
+    accepted_trajectories,
+    inspect_package,
+)
+from processor.foundry.lakehouse import FoundryLakehouseSink, _schema_column_names
 from processor.foundry.oracle_build import tree_hash
 from processor.foundry.oracles import kubernetes_job_manifest
-from processor.foundry.packaging import EnvironmentPackager
+from processor.foundry.packaging import EnvironmentPackager, MinioPackageSink
 from processor.foundry.paper_adapter import bundle_json, bundle_prompt_json
-from processor.foundry.pipeline import _validate_sft
+from processor.foundry.pipeline import FoundryPipeline, PipelineResult, UnsolvedTask, _validate_sft
 from processor.foundry.providers import (
     OpenAICompatibleProvider,
     ProviderBudgetExhaustedError,
@@ -33,20 +43,41 @@ from processor.foundry.providers import (
 )
 from processor.foundry.quota import QuotaExceededError, QuotaLedger
 from processor.foundry.routing import ROLE_PROVIDER
+from processor.foundry.standalone_verifier import score_response
 from processor.foundry.store import FoundryStore
+from processor.foundry.symbolic import symbolically_equivalent
 from processor.foundry.tasking import (
     GroundingCritique,
     SolvedTask,
     SolverTurn,
+    TaskFactory,
+    TaskOutputError,
+    TrajectoryGroundingDecision,
+    _answerability_system,
+    _designer_system,
+    _grounding_system,
+    _machine_verifiable,
+    _normalize_expected_values,
     _normalize_solver_turn_data,
+    _select_diverse_tasks,
     _solution_contract_violations,
+    _solver_prompt,
+    _solver_system,
     _validate_or_repair,
+    grounding_decision_blocks,
+    validate_task,
 )
 from processor.foundry.tools import PaperRuntime, ToolError
 from processor.foundry.util import sha256
-from processor.foundry.validation import run_acceptance_suite, suite_passes
-from processor.foundry.verifier import VerifierCompiler, evaluate, normalize_spec
-from processor.foundry.worker import WorkerRuntime
+from processor.foundry.validation import run_acceptance_suite, sft_suite_passes, suite_passes
+from processor.foundry.verifier import (
+    VerifierCompiler,
+    deterministic_sft_verifier,
+    deterministic_verifier,
+    evaluate,
+    normalize_spec,
+)
+from processor.foundry.worker import WorkerRuntime, _daily_cohort_boundary
 from processor.sign import AttestationSigner, verify_signature
 from schemas.foundry import (
     AnswerManifest,
@@ -75,8 +106,62 @@ from schemas.foundry import (
     VerifierPredicate,
     VerifierSpec,
 )
+from schemas.gold import GoldRecord
+from schemas.scientific import ScientificDocument, ScientificParagraph, ScientificSection
 
 FIXED_TIME = datetime(2026, 8, 19, tzinfo=UTC)
+
+
+def _extract_test_archive(archive: tarfile.TarFile, target: Path) -> None:
+    if sys.version_info >= (3, 12):
+        archive.extractall(target, filter="data")
+    else:
+        archive.extractall(target)
+
+
+def test_foundry_reconciles_loaded_tables_to_scheduled_cleanup_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = object()
+    sink = object.__new__(FoundryLakehouseSink)
+    sink._catalog = SimpleNamespace(load_table=lambda _identifier: table)  # type: ignore[attr-defined]
+    reconciled: list[object] = []
+    monkeypatch.setattr(
+        lakehouse,
+        "ensure_iceberg_maintenance_properties",
+        reconciled.append,
+    )
+
+    assert sink._ensure("foundry_events", object()) is table
+    assert reconciled == [table]
+
+
+def test_foundry_does_not_treat_property_commit_failure_as_a_missing_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = object()
+
+    class _Catalog:
+        def load_table(self, _identifier: object) -> object:
+            return table
+
+        def create_table(self, **_kwargs: object) -> object:
+            raise AssertionError("must not create an already loaded table")
+
+    sink = object.__new__(FoundryLakehouseSink)
+    sink._catalog = _Catalog()  # type: ignore[attr-defined]
+
+    def fail_reconciliation(_table: object) -> None:
+        raise RuntimeError("transient catalog failure")
+
+    monkeypatch.setattr(
+        lakehouse,
+        "ensure_iceberg_maintenance_properties",
+        fail_reconciliation,
+    )
+
+    with pytest.raises(RuntimeError, match="transient catalog failure"):
+        sink._ensure("foundry_events", object())
 
 
 def _provider_config() -> ProviderConfig:
@@ -120,6 +205,65 @@ def _bundle() -> PaperBundle:
     )
 
 
+def _gold_candidate() -> GoldRecord:
+    doc_id = f"sha256:{'a' * 64}"
+    return GoldRecord(
+        doc_id=doc_id,
+        text="A retained scientific result with enough supporting body text.",
+        lang="en",
+        tokens=10,
+        quality_score=4.0,
+        source_quality_score=4.0,
+        reasoning_score=0.9,
+        route="posttrain_candidate",
+        eligible_routes=["posttrain_candidate"],
+        license="CC-BY-4.0",
+        license_source="manual",
+        risk_tier=1,
+        valid_from=FIXED_TIME,
+        scoring_version="test-v1",
+        classifier_revision="test-v1",
+        policy_revision="git:test",
+        trace_id="a" * 32,
+        source_feed="arxiv-html-fetcher",
+        source_format="html",
+        extraction_pipeline="arxiv-html-test",
+        training_word_count=10,
+        included_section_count=1,
+        scientific_artifact_s3_uri=(
+            f"s3://silver/scientific/{doc_id.removeprefix('sha256:')}/document.json"
+        ),
+    )
+
+
+def _scientific_document() -> ScientificDocument:
+    gold = _gold_candidate()
+    paragraph = ScientificParagraph(
+        paragraph_id="results.p1",
+        text="A retained result is supported by the measured scientific evidence.",
+    )
+    return ScientificDocument(
+        doc_id=gold.doc_id,
+        source_url="https://arxiv.org/html/2608.00001",
+        source_identifier="2608.00001v1",
+        text_sha256="a" * 64,
+        extraction_pipeline="arxiv-html-test",
+        training_word_count=10,
+        included_section_count=1,
+        sections=[
+            ScientificSection(
+                section_id="results",
+                level=2,
+                title="Results",
+                text=paragraph.text,
+                role="results",
+                word_count=10,
+                paragraphs=[paragraph],
+            )
+        ],
+    )
+
+
 def _task() -> TaskSpec:
     return TaskSpec(
         task_id="task:claim",
@@ -155,6 +299,58 @@ def _graph() -> PaperEvidenceGraph:
         ],
         edges=[],
     )
+
+
+def _deep_derivation() -> tuple[TaskSpec, PaperEvidenceGraph]:
+    edge = EvidenceEdge(source="equation:start", relation="derives", target="equation:result")
+    graph = PaperEvidenceGraph(
+        graph_id="graph:deep-derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:start",
+                type="equation",
+                canonical_text="The initial equality is y minus one equals x.",
+                latex="y-1=x",
+                canonical_symbolic_form="y-1=x",
+                supporting_spans=["section-1.span1"],
+            ),
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="Rearrangement gives y equals x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[edge],
+    )
+    task = TaskSpec(
+        schema_version="task-spec-v2",
+        content_policy_revision="scientific-reasoning-v2",
+        task_id="task:deep-derivation",
+        paper_id=_bundle().paper_id,
+        family="derivation_completion",
+        public_instruction=(
+            "Starting from the stated relation, derive the transformed expression and explain "
+            "which algebraic operation preserves equality."
+        ),
+        public_context_policy=PublicContextPolicy(
+            included_spans=["section-1.span1"],
+            tool_access=["open", "symbolic"],
+        ),
+        hidden_targets=HiddenTargets(
+            required_nodes=["equation:start", "equation:result"],
+            required_relations=[edge],
+            expected_values={"equation:result": "y=x+1"},
+        ),
+        verifier_class="symbolic_derivation_v2",
+        difficulty=Difficulty(estimated=4),
+        reasoning_operations=["substitution", "symbolic_rearrangement"],
+        route="rl",
+    )
+    return task, graph
 
 
 def _answer() -> FoundryAnswer:
@@ -277,6 +473,65 @@ def test_graph_pass_rejects_more_than_24_incremental_nodes() -> None:
 
     with pytest.raises(ValueError, match="at most 24 items"):
         BoundedGraphPatch(nodes=nodes)
+
+
+def test_bounded_graph_patch_keeps_hard_edge_contract() -> None:
+    edges = [
+        EvidenceEdge(source="entity:1", relation="supports", target=f"entity:{index}")
+        for index in range(41)
+    ]
+
+    with pytest.raises(ValueError, match="at most 40 items"):
+        BoundedGraphPatch(edges=edges)
+
+
+def test_graph_compiler_bounds_provider_edges_in_declared_priority_order() -> None:
+    nodes = [
+        {
+            "id": f"entity:{index}",
+            "type": "artifact",
+            "canonical_text": f"Entity {index}",
+        }
+        for index in range(7)
+    ]
+    edges = [
+        {"source": source, "relation": "supports", "target": target}
+        for source in (node["id"] for node in nodes)
+        for target in (node["id"] for node in nodes)
+        if source != target
+    ]
+    assert len(edges) == 42
+
+    class OverlongEdgeControl:
+        config = SimpleNamespace(prompt_version="test-v1")
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.calls.append(kwargs)
+            role = kwargs["role"]
+            if role == "structure_compiler":
+                data: dict[str, Any] = {"nodes": nodes}
+            elif role == "dependency_compiler":
+                data = {"edges": edges}
+            elif role == "graph_critic":
+                data = {"accepted": True}
+            else:
+                data = {}
+            return data, _trace(f"trace:{len(self.calls)}")
+
+    graph, _ = EvidenceGraphCompiler(OverlongEdgeControl()).compile(  # type: ignore[arg-type]
+        job_id="job:overlong-edges",
+        bundle=_bundle(),
+    )
+
+    assert len(graph.edges) == 40
+    assert graph.edges == [EvidenceEdge.model_validate(edge) for edge in edges[:40]]
+    dependency_run = next(run for run in graph.compiler_runs if run.pass_name == "dependency")
+    assert dependency_run.findings == [
+        "deterministically bounded provider patch edges: retained 40 of 42 returned entries"
+    ]
 
 
 def test_graph_repair_is_a_bounded_delta_that_preserves_valid_nodes() -> None:
@@ -436,11 +691,287 @@ def test_sft_validation_accepts_grounded_ids_alongside_readable_claim_text() -> 
         task=_task().model_copy(update={"route": "sft"}),
         trajectories=[trajectory],
         traces=[],
-        critic=GroundingCritique(accepted=True),
+        critic=GroundingCritique(
+            decisions=[
+                TrajectoryGroundingDecision(
+                    trajectory_id=trajectory.trajectory_id,
+                    scientifically_grounded=True,
+                )
+            ]
+        ),
     )
-    report, validated = _validate_sft(solved, _bundle(), _graph())
+    report, validated, cases = _validate_sft(solved, _bundle(), _graph())
     assert report.positive_pass
+    assert report.equivalent_pass
+    assert report.mutation_total > 0
+    assert report.metamorphic_pass
+    assert report.replay_pass
+    assert report.security_pass
+    assert sft_suite_passes(report)
+    assert cases["adversarial"]
     assert validated[0].accepted
+
+
+def test_sft_persists_good_trajectory_when_paired_solution_fails(tmp_path: Path) -> None:
+    task = _task().model_copy(update={"route": "sft"})
+    good = Trajectory(
+        trajectory_id="trajectory:good",
+        task_id=task.task_id,
+        provider_trace_id="trace:good",
+        answer=_answer(),
+        accepted=False,
+        reward=0,
+        validation={"solver": "good"},
+    )
+    good_independent = good.model_copy(
+        update={
+            "trajectory_id": "trajectory:good-independent",
+            "provider_trace_id": "trace:good-independent",
+            "provider_trace_ids": ["trace:good-independent"],
+            "validation": {"solver": "good-independent"},
+        }
+    )
+    bad = Trajectory(
+        trajectory_id="trajectory:bad",
+        task_id=task.task_id,
+        provider_trace_id="trace:bad",
+        answer=FoundryAnswer(
+            report="This answer has no supported commitment.",
+            answer_manifest=AnswerManifest(),
+        ),
+        accepted=False,
+        reward=0,
+        validation={"solver": "bad"},
+    )
+    solved = SolvedTask(
+        task=task,
+        trajectories=[good, good_independent, bad],
+        traces=[],
+        critic=GroundingCritique(
+            decisions=[
+                TrajectoryGroundingDecision(
+                    trajectory_id=value.trajectory_id,
+                    scientifically_grounded=True,
+                )
+                for value in (good, good_independent, bad)
+            ]
+        ),
+    )
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _created = store.start_job(
+        paper_id=_bundle().paper_id,
+        paper_hash=_bundle().paper_hash,
+        doc_id="doc:trajectory-isolation",
+        policy_version="posttrain-policy-v4",
+    )
+
+    class CapturingSink:
+        def __init__(self) -> None:
+            self.packages: list[Any] = []
+
+        def write(self, package: Any, **_: Any) -> str:
+            self.packages.append(package)
+            return "s3://posttrain/sft-package.tar.gz"
+
+    sink = CapturingSink()
+    pipeline = FoundryPipeline(
+        config=FoundryConfig(),
+        store=store,
+        control=object(),  # type: ignore[arg-type]
+        package_sink=sink,
+    )
+    artifacts = pipeline._validate_and_package(
+        job_id=job_id,
+        bundle=_bundle(),
+        graph=_graph(),
+        solved=[solved],
+        common_traces=[],
+        oracle_results=[],
+    )
+
+    accepted = [value for value in artifacts if value.status == "accepted"]
+    rejected = [value for value in artifacts if value.status == "rejected"]
+    assert [value.artifact_id for value in accepted] == [
+        "trajectory:good",
+        "trajectory:good-independent",
+    ]
+    assert len(rejected) == 1
+    assert rejected[0].validation.details["trajectory_id"] == "trajectory:bad"
+    assert accepted[0].package_uri == "s3://posttrain/sft-package.tar.gz"
+    assert rejected[0].package_uri is None
+    assert accepted[0].validation.details["trajectory_id"] == "trajectory:good"
+    persisted_rejection = store.artifact(rejected[0].artifact_id)
+    assert persisted_rejection is not None
+    assert persisted_rejection["validation"]["details"]["trajectory"]["answer"]["report"] == (
+        bad.answer.report
+    )
+    assert len(sink.packages) == 2
+    packaged_trajectory_ids = []
+    for package in sink.packages:
+        inspection = inspect_package(package.content)
+        assert len(inspection["trajectories"]) == 1
+        packaged_trajectory_ids.append(inspection["trajectories"][0]["trajectory_id"])
+        assert inspection["trajectories"][0]["validation"]["grounding_decision"][
+            "scientifically_grounded"
+        ]
+    assert packaged_trajectory_ids == ["trajectory:good", "trajectory:good-independent"]
+
+
+def test_routed_sft_with_no_valid_solution_is_persisted_with_exact_failure_traces(
+    tmp_path: Path,
+) -> None:
+    task = _task().model_copy(update={"route": "sft"})
+
+    class InvalidSolverControl:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.calls.append(kwargs)
+            role = str(kwargs["role"])
+            trace = _trace(f"trace:{len(self.calls)}").model_copy(update={"role": role})
+            if role == "final_repair":
+                return {"still": "invalid"}, trace
+            return {"status": "final", "report": None, "answer_manifest": None}, trace
+
+    control = InvalidSolverControl()
+    with pytest.raises(TaskOutputError) as raised:
+        TaskFactory(control).solve(  # type: ignore[arg-type]
+            job_id="job:unsolved-sft",
+            bundle=_bundle(),
+            graph=_graph(),
+            task=task,
+        )
+
+    failure = raised.value
+    assert [value.role for value in failure.solver_failures] == ["solver_a", "solver_b"]
+    assert [[trace.trace_id for trace in value.traces] for value in failure.solver_failures] == [
+        ["trace:1", "trace:2"],
+        ["trace:3", "trace:4"],
+    ]
+
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _created = store.start_job(
+        paper_id=_bundle().paper_id,
+        paper_hash=_bundle().paper_hash,
+        doc_id="doc:unsolved-sft",
+        policy_version="posttrain-policy-v4",
+    )
+    pipeline = FoundryPipeline(
+        config=FoundryConfig(),
+        store=store,
+        control=object(),  # type: ignore[arg-type]
+        package_sink=object(),  # type: ignore[arg-type]
+    )
+    artifacts = pipeline._validate_and_package(
+        job_id=job_id,
+        bundle=_bundle(),
+        graph=_graph(),
+        solved=[],
+        common_traces=[],
+        oracle_results=[],
+        unsolved_sft=[
+            UnsolvedTask(
+                task=task,
+                reason=str(failure),
+                traces=failure.traces,
+                solver_failures=failure.solver_failures,
+            )
+        ],
+    )
+
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact.status == "rejected"
+    assert artifact.kind == "sft_trajectory"
+    assert artifact.provider_trace_ids == ["trace:1", "trace:2", "trace:3", "trace:4"]
+    details = artifact.validation.details
+    assert details["task"]["public_instruction"] == task.public_instruction
+    assert [value["role"] for value in details["solver_failures"]] == [
+        "solver_a",
+        "solver_b",
+    ]
+    assert details["solver_failures"][0]["prompt_traces"][1]["prompt_version"] == "test-v1"
+    assert details["prompt_trace_ids"] == [
+        *task.construction_provenance,
+        "trace:1",
+        "trace:2",
+        "trace:3",
+        "trace:4",
+    ]
+    assert store.artifact(artifact.artifact_id) is not None
+
+
+def test_grounding_gate_ignores_only_proven_format_false_negative() -> None:
+    format_only = TrajectoryGroundingDecision(
+        trajectory_id="trajectory:format-only",
+        scientifically_grounded=False,
+        findings=["The scientific answer is correct but the manifest omits node IDs."],
+    )
+    substantive = TrajectoryGroundingDecision(
+        trajectory_id="trajectory:wrong",
+        scientifically_grounded=False,
+        findings=["The derived exponent has the wrong sign."],
+    )
+    explicit = substantive.model_copy(
+        update={"unsupported_claims": ["The claimed negative exponent contradicts the paper."]}
+    )
+
+    assert not grounding_decision_blocks(format_only)
+    assert grounding_decision_blocks(substantive)
+    assert grounding_decision_blocks(explicit)
+
+
+@pytest.mark.parametrize(
+    "error_field", ["unsupported_claims", "contradictory_claims", "missing_required_outputs"]
+)
+def test_grounding_scientific_errors_override_positive_summary(error_field: str) -> None:
+    decision = TrajectoryGroundingDecision.model_validate(
+        {
+            "trajectory_id": "trajectory:incomplete-table",
+            "scientifically_grounded": True,
+            error_field: ["The seven requested per-condition differences are not derived."],
+        }
+    )
+    assert grounding_decision_blocks(decision)
+
+
+def test_complete_grounded_trajectory_remains_eligible() -> None:
+    assert not grounding_decision_blocks(
+        TrajectoryGroundingDecision(
+            trajectory_id="trajectory:complete", scientifically_grounded=True
+        )
+    )
+
+
+def test_inspection_keeps_legacy_and_v2_prompt_revisions_separate() -> None:
+    assert not _uses_v2_content_policy("paper-foundry-prompts-v3")
+    assert _uses_v2_content_policy("paper-foundry-prompts-v4")
+    assert _uses_v2_content_policy("paper-foundry-prompts-v5")
+    assert not _uses_v2_content_policy("test-v1")
+
+
+def test_v2_prompts_encode_deep_task_and_per_trajectory_contracts() -> None:
+    designer = _designer_system()
+    answerability = _answerability_system()
+    solver = _solver_system()
+    grounding = _grounding_system()
+
+    assert "multi-step derivations" in designer
+    assert "single subtraction or percentage calculation" in designer
+    assert "internal-ID listing" in answerability
+    assert "difficulty 4-5" in answerability
+    assert "The readable report is the" in solver
+    assert "manifest is machine-readable provenance" in solver
+    assert "one decisions entry for every supplied trajectory_id" in grounding
+    assert "one bad solution must" in grounding
+    assert '"decisions"' in grounding
+    assert "learner-accessible paper context" in designer
+    assert "decorative numeric targets" in answerability
+    assert "per-condition results" in solver
+    assert "missing_required_outputs" in grounding
+    assert "An honest statement" in grounding
+    assert FoundryConfig().prompt_version == "paper-foundry-prompts-v6"
 
 
 def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> None:
@@ -505,15 +1036,617 @@ def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> 
         _graph(),
     )
     by_id = {predicate.id: predicate for predicate in normalized.predicates}
-    assert by_id["evidence"].allowed_spans == ["section-1.span1"]
-    assert by_id["evidence"].target is None
-    assert by_id["evidence"].targets == []
-    assert by_id["coverage"].config["accepted_sets"] == [["section-1.span1"]]
-    assert by_id["coverage"].target is None
+    assert "evidence" not in by_id
+    assert "coverage" not in by_id
     assert by_id["symbolic"].expected == "x + 1"
     assert by_id["numeric"].expected == 1.5
     assert by_id["report"].target is None
     assert by_id["report"].targets == []
+
+
+def test_numeric_string_targets_are_canonicalized_before_routing() -> None:
+    assert _normalize_expected_values(
+        {
+            "ratio": "2.395",
+            "scientific": "-1.25e-3",
+            "symbolic": "x + 1",
+            "quantity": "3 ms",
+        }
+    ) == {
+        "ratio": 2.395,
+        "scientific": -0.00125,
+        "symbolic": "x + 1",
+        "quantity": "3 ms",
+    }
+
+
+def test_report_consistency_accepts_more_precise_value_than_rounded_target() -> None:
+    task = _task().model_copy(
+        update={"hidden_targets": HiddenTargets(expected_values={"ratio": 2.395})}
+    )
+    spec = VerifierSpec(
+        verifier_id="report-rounding",
+        task_id=task.task_id,
+        version=2,
+        determinism_seed=1,
+        predicates=[
+            VerifierPredicate(
+                id="report",
+                type="report_manifest_consistency",
+                weight=1,
+            )
+        ],
+    )
+    answer = FoundryAnswer(
+        report="The recomputed ratio is 2.3953488372.",
+        answer_manifest=AnswerManifest(numeric_results=[NumericResult(id="ratio", value=2.395)]),
+    )
+
+    assert evaluate(spec, answer, task=task, graph=_graph(), bundle=_bundle()).passed
+
+
+def test_symbolic_verifier_accepts_expected_result_on_equality_rhs() -> None:
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "hidden_targets": HiddenTargets(expected_values={"choice": "b"}),
+        }
+    )
+    spec = VerifierSpec(
+        verifier_id="rhs-result",
+        task_id=task.task_id,
+        version=2,
+        determinism_seed=1,
+        predicates=[
+            VerifierPredicate(
+                id="choice",
+                type="symbolic_equivalence",
+                target="choice",
+                expected="b",
+                weight=1,
+            )
+        ],
+    )
+    answer = FoundryAnswer(
+        report="The maximizing choice is b.",
+        answer_manifest=AnswerManifest(
+            equations=[SubmittedEquation(id="choice", latex=r"\arg\max_a V(a)=b")]
+        ),
+    )
+
+    assert evaluate(spec, answer, task=task, graph=_graph(), bundle=_bundle()).passed
+
+
+def test_sft_verifier_keeps_outcomes_but_drops_rl_graph_serialization() -> None:
+    task, graph = _deep_derivation()
+    task = task.model_copy(update={"route": "sft"})
+    spec = deterministic_sft_verifier(task, _bundle(), graph)
+    predicate_types = {predicate.type for predicate in spec.predicates}
+
+    assert "symbolic_equivalence" in predicate_types
+    assert "report_manifest_consistency" in predicate_types
+    assert "required_nodes" not in predicate_types
+    assert "required_relations" not in predicate_types
+    assert "derivation_partial_order" not in predicate_types
+
+    answer = FoundryAnswer(
+        report="Rearranging y - 1 = x gives y = x + 1.",
+        answer_manifest=AnswerManifest(
+            equations=[SubmittedEquation(id="equation:result", latex="y=x+1")]
+        ),
+    )
+    assert evaluate(spec, answer, task=task, graph=graph, bundle=_bundle()).passed
+
+
+def test_derivation_solver_prompt_is_public_and_does_not_leak_hidden_targets() -> None:
+    graph = PaperEvidenceGraph(
+        graph_id="graph:derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="The result is x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "public_instruction": "Derive the final expression step by step.",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:result"],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"equation:result": "y=x+1"},
+            ),
+        }
+    )
+
+    prompt = _solver_prompt(_bundle(), graph, task, "independent derivation")
+
+    assert "hidden_targets" not in prompt
+    assert "CONSTRUCTION_TARGETS_FOR_REFERENCE_SOLVER_ONLY" not in prompt
+    assert '"y=x+1"' not in prompt
+    assert '"evidence_policy":"optional_internal_provenance"' in prompt
+    assert '"output_target_ids":["equation:result"]' in prompt
+
+
+def test_derivation_requires_checkable_expected_outcome_for_rl() -> None:
+    graph = PaperEvidenceGraph(
+        graph_id="graph:derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="The result is x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:result"],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"equation:result": "y=x+1"},
+            ),
+        }
+    )
+
+    assert _machine_verifiable(task, graph, _bundle())
+    assert not _machine_verifiable(
+        task.model_copy(
+            update={
+                "hidden_targets": task.hidden_targets.model_copy(update={"expected_values": {}})
+            }
+        ),
+        graph,
+        _bundle(),
+    )
+    assert not _machine_verifiable(
+        task.model_copy(
+            update={
+                "hidden_targets": task.hidden_targets.model_copy(
+                    update={"expected_values": {"equation:result": "x if condition else y"}}
+                )
+            }
+        ),
+        graph,
+        _bundle(),
+    )
+
+
+def test_v2_derivation_requires_deep_answer_facing_reasoning() -> None:
+    task, graph = _deep_derivation()
+    validate_task(task, _bundle(), graph)
+    assert _machine_verifiable(task, graph, _bundle())
+
+    shallow_graph = PaperEvidenceGraph(
+        graph_id="graph:shallow-numeric",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="metric:one",
+                type="metric",
+                canonical_text="The reported value is 80.",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    shallow = task.model_copy(
+        update={
+            "task_id": "task:shallow",
+            "family": "figure_table_reasoning",
+            "public_instruction": "Read the value and subtract ten.",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["metric:one"],
+                expected_values={"difference": 70.0},
+            ),
+            "difficulty": Difficulty(estimated=2),
+            "reasoning_operations": ["subtraction"],
+        }
+    )
+    with pytest.raises(ValueError, match="low value"):
+        validate_task(shallow, _bundle(), shallow_graph)
+
+
+def test_v2_report_must_expose_symbolic_result_not_hide_it_in_manifest(tmp_path: Path) -> None:
+    task, graph = _deep_derivation()
+    spec = deterministic_verifier(task, _bundle(), graph)
+    answer = FoundryAnswer(
+        report="Starting from y - 1 = x, add one to both sides to obtain y = x + 1.",
+        answer_manifest=AnswerManifest(
+            equations=[
+                SubmittedEquation(id="equation:start", latex="y-1=x"),
+                SubmittedEquation(id="equation:result", latex="y=x+1"),
+            ],
+            relations=task.hidden_targets.required_relations,
+        ),
+    )
+    hidden_result = answer.model_copy(
+        update={"report": "The checked result is recorded in the structured manifest."}
+    )
+
+    assert evaluate(spec, answer, task=task, graph=graph, bundle=_bundle()).passed
+    assert not evaluate(spec, hidden_result, task=task, graph=graph, bundle=_bundle()).passed
+    report, validated, cases = run_acceptance_suite(
+        task=task,
+        spec=spec,
+        bundle=_bundle(),
+        graph=graph,
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:deep",
+                task_id=task.task_id,
+                provider_trace_id="trace:deep",
+                answer=answer,
+                accepted=False,
+                reward=0,
+            )
+        ],
+    )
+    assert suite_passes(report)
+    weak_reward_report = report.model_copy(
+        update={"mutation_killed": max(0, report.mutation_total - 1)}
+    )
+    assert not suite_passes(weak_reward_report)
+    assert sft_suite_passes(weak_reward_report)
+    assert any(value.report == hidden_result.report for value in cases["mutations"])
+    package = EnvironmentPackager(signer=AttestationSigner()).build(
+        bundle=_bundle(),
+        graph=graph,
+        task=task,
+        trajectories=validated,
+        validation=report,
+        traces=[],
+        verifier=spec,
+        pool="rl",
+        dataset_split="train",
+        validation_cases=cases,
+    )
+    with tarfile.open(fileobj=io.BytesIO(package.content), mode="r:gz") as archive:
+        _extract_test_archive(archive, tmp_path)
+    environment_root = tmp_path / "paper_environment"
+    assert score_response(answer.model_dump_json(), environment_root) == 1.0
+    assert score_response(hidden_result.model_dump_json(), environment_root) == 0.0
+
+
+def test_v2_verifier_directly_enforces_every_scientific_contract_in_package(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle()
+    relation = EvidenceEdge(source="claim:1", relation="depends_on", target="fault:required")
+    graph = PaperEvidenceGraph(
+        graph_id="graph:hard-contract",
+        paper_id=bundle.paper_id,
+        nodes=[
+            *_graph().nodes,
+            EvidenceNode(
+                id="fault:required",
+                type="fault",
+                canonical_text="Removing the assumption causes the supported failure.",
+                supporting_spans=["section-1.span1"],
+            ),
+            EvidenceNode(
+                id="fault:forbidden",
+                type="fault",
+                canonical_text="This alternative failure is explicitly unsupported.",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[relation],
+    )
+    task = _task().model_copy(
+        update={
+            "content_policy_revision": "scientific-reasoning-v2",
+            "family": "assumption_consequence",
+            "route": "rl",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["claim:1", "fault:required"],
+                required_relations=[relation],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"failure_mode": "representation collapse"},
+                required_faults=["fault:required"],
+                forbidden_faults=["fault:forbidden"],
+            ),
+        }
+    )
+    spec = deterministic_verifier(task, bundle, graph)
+    predicates = {predicate.id: predicate for predicate in spec.predicates}
+    assert predicates["hard:required_relations"].config == {
+        "relations": [relation.model_dump(mode="json")]
+    }
+    assert predicates["hard:evidence_coverage"].config == {"accepted_sets": [["section-1.span1"]]}
+    assert predicates["hard:forbidden_faults"].targets == ["fault:forbidden"]
+    assert predicates["hard:expected:failure_mode"].config == {
+        "constraints": {"required_values": {"failure_mode": "representation collapse"}}
+    }
+
+    answer = FoundryAnswer(
+        report=(
+            "Removing the stated assumption propagates through the dependency and produces "
+            "representation collapse, while the alternative fault is unsupported."
+        ),
+        answer_manifest=AnswerManifest(
+            claims=["claim:1"],
+            evidence=["section-1.span1"],
+            faults=["fault:required"],
+            relations=[relation],
+            configuration={"failure_mode": "representation collapse"},
+        ),
+    )
+    variants = {
+        "valid": answer,
+        "wrong_expected_value": answer.model_copy(
+            update={
+                "answer_manifest": answer.answer_manifest.model_copy(
+                    update={"configuration": {"failure_mode": "stable representation"}}
+                )
+            }
+        ),
+        "forbidden_fault": answer.model_copy(
+            update={
+                "answer_manifest": answer.answer_manifest.model_copy(
+                    update={"faults": ["fault:required", "fault:forbidden"]}
+                )
+            }
+        ),
+        "missing_relation": answer.model_copy(
+            update={"answer_manifest": answer.answer_manifest.model_copy(update={"relations": []})}
+        ),
+        "missing_evidence": answer.model_copy(
+            update={"answer_manifest": answer.answer_manifest.model_copy(update={"evidence": []})}
+        ),
+        "hidden_expected_value": answer.model_copy(
+            update={"report": "The dependency produces the supported scientific outcome."}
+        ),
+    }
+    assert evaluate(spec, variants["valid"], task=task, graph=graph, bundle=bundle).passed
+    for name, variant in variants.items():
+        if name != "valid":
+            assert not evaluate(spec, variant, task=task, graph=graph, bundle=bundle).passed, name
+
+    report, trajectories, cases = run_acceptance_suite(
+        task=task,
+        spec=spec,
+        bundle=bundle,
+        graph=graph,
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:hard-contract",
+                task_id=task.task_id,
+                provider_trace_id="trace:hard-contract",
+                answer=answer,
+                accepted=False,
+                reward=0.0,
+            )
+        ],
+    )
+    assert suite_passes(report)
+    package = EnvironmentPackager(signer=AttestationSigner()).build(
+        bundle=bundle,
+        graph=graph,
+        task=task,
+        trajectories=trajectories,
+        validation=report,
+        traces=[],
+        verifier=spec,
+        pool="rl",
+        dataset_split="train",
+        validation_cases=cases,
+    )
+    with tarfile.open(fileobj=io.BytesIO(package.content), mode="r:gz") as archive:
+        _extract_test_archive(archive, tmp_path)
+    environment_root = tmp_path / "paper_environment"
+    for name, variant in variants.items():
+        expected_score = 1.0 if name == "valid" else 0.0
+        assert score_response(variant.model_dump_json(), environment_root) == expected_score, name
+
+
+def test_v2_verifier_contract_cannot_be_authored_by_provider() -> None:
+    task, graph = _deep_derivation()
+
+    class AuditOnlyControl:
+        def __init__(self) -> None:
+            self.roles: list[str] = []
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.roles.append(kwargs["role"])
+            return (
+                {
+                    "accepted": True,
+                    "findings": [],
+                    "false_positive_risks": [],
+                    "false_negative_risks": [],
+                    "repair_instructions": [],
+                },
+                _trace("trace:verifier-audit"),
+            )
+
+    control = AuditOnlyControl()
+    verifier, traces = VerifierCompiler(control).compile(  # type: ignore[arg-type]
+        job_id="job:v2",
+        bundle=_bundle(),
+        graph=graph,
+        task=task,
+    )
+
+    assert control.roles == ["verifier_critic"]
+    assert len(traces) == 1
+    assert verifier.version == 2
+    assert verifier.critic_audit[0]["action"] == "audit_only_no_contract_mutation"
+    assert {predicate.target for predicate in verifier.predicates if predicate.target} <= set(
+        [*task.hidden_targets.required_nodes, *task.hidden_targets.expected_values]
+    )
+
+
+def test_task_selection_prioritizes_deep_families_and_caps_repetition() -> None:
+    task, _graph_value = _deep_derivation()
+    derivations = [
+        task.model_copy(update={"task_id": f"task:derivation:{index}"}) for index in range(3)
+    ]
+    assumption = task.model_copy(
+        update={"task_id": "task:assumption", "family": "assumption_consequence"}
+    )
+    corruption = task.model_copy(
+        update={"task_id": "task:corruption", "family": "corruption_diagnosis"}
+    )
+
+    selected = _select_diverse_tasks(
+        [corruption, *derivations, assumption],
+        limit=4,
+    )
+
+    assert [value.family for value in selected] == [
+        "derivation_completion",
+        "derivation_completion",
+        "assumption_consequence",
+        "corruption_diagnosis",
+    ]
+
+
+def test_derivation_manifest_does_not_require_public_span_ids() -> None:
+    graph = PaperEvidenceGraph(
+        graph_id="graph:derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="The result is x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            )
+        ],
+        edges=[],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:result"],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"equation:result": "y=x+1"},
+            ),
+        }
+    )
+    manifest = AnswerManifest(equations=[SubmittedEquation(id="equation:result", latex="y=x+1")])
+
+    assert _solution_contract_violations(manifest, task, graph) == []
+    assert symbolically_equivalent("y=x+1", "x+1=y")
+
+
+def test_derivation_verifier_checks_equations_and_step_order() -> None:
+    edge = EvidenceEdge(source="equation:start", relation="derives", target="equation:result")
+    graph = PaperEvidenceGraph(
+        graph_id="graph:ordered-derivation",
+        paper_id=_bundle().paper_id,
+        nodes=[
+            EvidenceNode(
+                id="equation:start",
+                type="equation",
+                canonical_text="Start from y minus one equals x.",
+                latex="y-1=x",
+                canonical_symbolic_form="y-1=x",
+                supporting_spans=["section-1.span1"],
+            ),
+            EvidenceNode(
+                id="equation:result",
+                type="equation",
+                canonical_text="Rearrange to y equals x plus one.",
+                latex="y=x+1",
+                canonical_symbolic_form="y=x+1",
+                supporting_spans=["section-1.span1"],
+            ),
+        ],
+        edges=[edge],
+    )
+    task = _task().model_copy(
+        update={
+            "family": "derivation_completion",
+            "hidden_targets": HiddenTargets(
+                required_nodes=["equation:start", "equation:result"],
+                required_relations=[edge],
+                accepted_evidence_sets=[["section-1.span1"]],
+                expected_values={"final": "y=x+1"},
+            ),
+        }
+    )
+    spec = deterministic_verifier(task, _bundle(), graph)
+    correct = FoundryAnswer(
+        report="Starting from the first equality, add one to both sides to obtain the result.",
+        answer_manifest=AnswerManifest(
+            equations=[
+                SubmittedEquation(id="equation:start", latex="x=y-1"),
+                SubmittedEquation(id="equation:result", latex="x+1=y"),
+                SubmittedEquation(id="final", latex="y=x+1"),
+            ],
+            relations=[edge],
+        ),
+    )
+
+    assert evaluate(spec, correct, task=task, graph=graph, bundle=_bundle()).passed
+    claims_only = correct.model_copy(
+        update={
+            "answer_manifest": correct.answer_manifest.model_copy(
+                update={
+                    "claims": ["equation:start", "equation:result"],
+                    "equations": [SubmittedEquation(id="final", latex="y=x+1")],
+                }
+            )
+        }
+    )
+    reversed_steps = correct.model_copy(
+        update={
+            "answer_manifest": correct.answer_manifest.model_copy(
+                update={"equations": list(reversed(correct.answer_manifest.equations))}
+            )
+        }
+    )
+
+    assert not evaluate(spec, claims_only, task=task, graph=graph, bundle=_bundle()).passed
+    assert not evaluate(spec, reversed_steps, task=task, graph=graph, bundle=_bundle()).passed
+
+
+def test_irrelevant_numeric_output_does_not_create_a_false_adversary() -> None:
+    answer = _answer().model_copy(
+        update={
+            "answer_manifest": _answer().answer_manifest.model_copy(
+                update={"numeric_results": [NumericResult(id="incidental", value=3.0)]}
+            )
+        }
+    )
+    report, _validated, _cases = run_acceptance_suite(
+        task=_task(),
+        spec=_spec(),
+        bundle=_bundle(),
+        graph=_graph(),
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:incidental-numeric",
+                task_id=_task().task_id,
+                provider_trace_id="trace:incidental-numeric",
+                answer=answer,
+                accepted=False,
+                reward=0.0,
+            )
+        ],
+    )
+
+    assert report.adversarial_pass
+    assert report.false_positive_count == 0
+    assert suite_passes(report)
 
 
 def test_verifier_critic_can_accept_with_documented_residual_risks() -> None:
@@ -979,18 +2112,19 @@ def test_abandoned_reservation_is_conservatively_reconciled_after_restart(
     assert recovered.reconcile_abandoned_reservations() == 0
 
 
-def test_candidate_queue_ranks_snapshot_lexicographically(tmp_path: Path) -> None:
+def test_candidate_queue_ranks_snapshot_by_composite_score(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
-    for doc_id, reasoning, quality in (
-        ("low-reasoning", 0.7, 5.0),
-        ("high-reasoning", 0.9, 3.0),
-        ("quality-tie-break", 0.9, 4.0),
+    for doc_id, reasoning, quality, ranking in (
+        ("low-reasoning", 0.7, 5.0, 0.1),
+        ("high-reasoning", 0.9, 3.0, 0.2),
+        ("quality-tie-break", 0.9, 4.0, 0.3),
     ):
         store.enqueue_candidate(
             doc_id=doc_id,
             payload=doc_id.encode(),
             reasoning_score=reasoning,
             quality_score=quality,
+            ranking_score=ranking,
             valid_from=FIXED_TIME,
         )
 
@@ -1033,6 +2167,254 @@ def test_candidate_queue_updates_changed_payload_and_removes_only_waiting_rows(
     assert store.queued_candidates() == 0
 
 
+def test_candidate_queue_retains_validated_scientific_projection(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    scientific_payload = _scientific_document().model_dump_json().encode()
+    store.enqueue_candidate(
+        doc_id="paper",
+        payload=b"gold",
+        scientific_payload=scientific_payload,
+        reasoning_score=1.0,
+        quality_score=5.0,
+        valid_from=FIXED_TIME,
+    )
+
+    assert store.claim_candidate(cutoff_at=datetime.now(UTC) + timedelta(seconds=1)) == (
+        "paper",
+        b"gold",
+    )
+    assert store.candidate_scientific_payload("paper") == scientific_payload
+
+
+def test_transient_candidate_failure_defers_only_that_paper(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    for doc_id, ranking in (("highest", 1.0), ("next", 0.5)):
+        store.enqueue_candidate(
+            doc_id=doc_id,
+            payload=doc_id.encode(),
+            reasoning_score=ranking,
+            quality_score=5.0,
+            ranking_score=ranking,
+            valid_from=FIXED_TIME,
+        )
+    cutoff = datetime.now(UTC) + timedelta(seconds=1)
+    assert store.claim_candidate(cutoff_at=cutoff) == ("highest", b"highest")
+    assert store.defer_candidate("highest", reason="provider returned 503") == 60
+    assert store.claim_candidate(cutoff_at=cutoff) == ("next", b"next")
+
+
+def test_sqlite_job_outbox_tracks_unpublished_iceberg_work(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _ = store.start_job(
+        paper_id="paper",
+        paper_hash="hash",
+        doc_id="doc",
+        policy_version="v1",
+    )
+    store.append_event(job_id=job_id, paper_id="paper", state="RECEIVED")
+    assert store.pending_lakehouse_job_ids() == [job_id]
+    store.mark_lakehouse_published({job_id})
+    assert store.pending_lakehouse_job_ids() == []
+
+
+def test_missing_legacy_artifact_is_audited_and_does_not_pin_manual_run(
+    tmp_path: Path,
+) -> None:
+    class ObjectMissingError(Exception):
+        def __init__(self) -> None:
+            self.response = {"Error": {"Code": "NoSuchKey"}}
+
+    class MissingS3:
+        def get_object(self, **_: Any) -> None:
+            raise ObjectMissingError
+
+    class KafkaSink:
+        def __init__(self) -> None:
+            self.jobs: list[dict[str, Any]] = []
+
+        def event(self, _event: Any) -> None:
+            pass
+
+        def artifact(self, _artifact: Any) -> None:
+            pass
+
+        def job(self, value: dict[str, Any]) -> None:
+            self.jobs.append(value)
+
+        def flush(self) -> None:
+            pass
+
+    class LakehouseSink:
+        def add_event(self, _event: Any) -> None:
+            pass
+
+        def add_artifact(self, _artifact: Any) -> None:
+            pass
+
+        def flush(self) -> None:
+            pass
+
+    gold = _gold_candidate()
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    store.enqueue_candidate(
+        doc_id=gold.doc_id,
+        payload=gold.model_dump_json().encode(),
+        reasoning_score=gold.reasoning_score,
+        quality_score=gold.quality_score,
+        valid_from=gold.valid_from,
+    )
+    requested, _ = store.request_manual_run()
+    claimed_run = store.claim_manual_run()
+    assert claimed_run is not None
+
+    runtime = object.__new__(WorkerRuntime)
+    runtime.config = FoundryConfig(providers={}, queue_poll_seconds=5)
+    runtime.store = store
+    runtime.s3 = MissingS3()
+    runtime.kafka = KafkaSink()
+    runtime.lakehouse = LakehouseSink()
+    runtime.oracle_registry = SimpleNamespace(load=lambda _paper_id: [])
+    runtime.pipeline = SimpleNamespace(
+        process=lambda *_args, **_kwargs: PipelineResult(
+            job_id="unexpected",
+            paper_id="unexpected",
+            final_state="REJECTED",
+            artifacts=[],
+        )
+    )
+    runtime._drain_lock = threading.Lock()
+    runtime._drain_stop = threading.Event()
+    log = SimpleNamespace(info=lambda *_args, **_kwargs: None)
+
+    runtime._run_manual_snapshot(claimed_run, log)
+
+    run = next(item for item in store.manual_runs() if item["run_id"] == requested["run_id"])
+    assert run["state"] == "completed"
+    assert run["processed_count"] == 1
+    assert store.queued_candidates() == 0
+    assert runtime.kafka.jobs == []
+    assert store.jobs(state="REJECTED") == []
+    assert (
+        store._conn.execute("SELECT outcome FROM candidate_admissions")
+        .fetchone()[0]
+        .startswith("scientific artifact object is missing")
+    )
+
+
+def test_candidate_without_evidence_is_not_a_generated_quality_rejection(tmp_path: Path) -> None:
+    gold = _gold_candidate().model_copy(
+        update={
+            "scientific_artifact_s3_uri": None,
+            "quality_diagnostics": {"mode": "active", "passed": True},
+        }
+    )
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    published_jobs: list[dict[str, Any]] = []
+    runtime = object.__new__(WorkerRuntime)
+    runtime.config = FoundryConfig(providers={})
+    runtime.store = store
+    runtime.kafka = SimpleNamespace(
+        event=lambda _event: None,
+        artifact=lambda _artifact: None,
+        job=published_jobs.append,
+        flush=lambda: None,
+    )
+    runtime.lakehouse = SimpleNamespace(
+        add_event=lambda _event: None,
+        add_artifact=lambda _artifact: None,
+        flush=lambda: None,
+    )
+
+    result = runtime.process(gold.model_dump_json().encode())
+
+    assert result["status"] == "evidence_unavailable"
+    assert result["reason"].startswith("scientific artifact URI is absent")
+    assert store.jobs(state="REJECTED") == []
+    assert published_jobs == []
+    assert (
+        runtime.process(gold.model_dump_json().encode())["status"] == "already_observed_candidate"
+    )
+
+
+def test_nonpaper_posttrain_pool_row_is_not_sent_to_paper_foundry(tmp_path: Path) -> None:
+    gold = _gold_candidate().model_copy(
+        update={
+            "source_feed": "hf-models",
+            "source_format": "web",
+            "extraction_pipeline": "hf-model-card-markdown-v1",
+            "scientific_artifact_s3_uri": None,
+            "training_usage": "posttrain_transform_only",
+        }
+    )
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    published_jobs: list[dict[str, Any]] = []
+    runtime = object.__new__(WorkerRuntime)
+    runtime.config = FoundryConfig(providers={})
+    runtime.store = store
+    runtime.kafka = SimpleNamespace(
+        event=lambda _event: None,
+        artifact=lambda _artifact: None,
+        job=published_jobs.append,
+        flush=lambda: None,
+    )
+
+    result = runtime.process(gold.model_dump_json().encode())
+
+    assert result == {
+        "doc_id": gold.doc_id,
+        "status": "unsupported_posttrain_source",
+    }
+    assert store.queued_candidates() == 0
+    assert published_jobs == []
+
+
+def test_interrupted_provider_calls_are_identified_until_terminal(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _ = store.start_job(
+        paper_id="paper",
+        paper_hash=sha256("paper"),
+        doc_id=f"sha256:{'b' * 64}",
+        policy_version="v1",
+    )
+    metadata = {"provider": "hetzner", "role": "solver_a"}
+    store.append_event(
+        job_id=job_id,
+        paper_id="paper",
+        state="CALL_PLANNED",
+        metadata=metadata,
+        attempt=1,
+        idempotency_suffix="solver_a:CALL_PLANNED",
+    )
+    store.append_event(
+        job_id=job_id,
+        paper_id="paper",
+        state="CALL_STARTED",
+        metadata=metadata,
+        attempt=1,
+        idempotency_suffix="solver_a:CALL_STARTED",
+    )
+
+    assert store.interrupted_provider_calls() == [
+        {
+            "job_id": job_id,
+            "paper_id": "paper",
+            "attempt": 1,
+            "role": "solver_a",
+            "provider": "hetzner",
+            "was_started": True,
+        }
+    ]
+    store.append_event(
+        job_id=job_id,
+        paper_id="paper",
+        state="CALL_FAILED",
+        metadata=metadata,
+        attempt=1,
+        idempotency_suffix="restart-recovery:solver_a",
+    )
+    assert store.interrupted_provider_calls() == []
+
+
 def test_only_worker_startup_recovers_processing_candidates(tmp_path: Path) -> None:
     path = tmp_path / "control.sqlite3"
     worker = FoundryStore(str(path))
@@ -1057,10 +2439,13 @@ def test_only_worker_startup_recovers_processing_candidates(tmp_path: Path) -> N
     assert restarted_worker.claim_candidate(cutoff_at=cutoff) == ("paper", b"paper")
 
 
-def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> None:
+def test_daily_run_freezes_even_an_empty_24_hour_cohort(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     run_day = date(2026, 8, 19)
-    assert store.start_daily_run(run_day)["state"] == "waiting"
+    boundary = datetime.now(UTC)
+    empty = store.start_daily_run(run_day, boundary_at=boundary)
+    assert empty["state"] == "completed"
+    assert empty["candidate_count"] == 0
     store.enqueue_candidate(
         doc_id="first",
         payload=b"first",
@@ -1068,7 +2453,10 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
         quality_score=5.0,
         valid_from=FIXED_TIME,
     )
-    first = store.start_daily_run(run_day)
+    assert store.start_daily_run(run_day, boundary_at=boundary)["state"] == "completed"
+
+    next_day = run_day + timedelta(days=1)
+    first = store.start_daily_run(next_day, boundary_at=boundary + timedelta(days=1))
     assert first["state"] == "running"
     assert first["candidate_count"] == 1
     cutoff = datetime.fromisoformat(str(first["cutoff_at"]))
@@ -1086,7 +2474,7 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
     )
     assert store.claim_candidate(cutoff_at=cutoff, cutoff_ordinal=cutoff_ordinal) is None
     store.finish_candidate("first")
-    store.finish_daily_run(run_day, state="completed", reason="test")
+    store.finish_daily_run(next_day, state="completed", reason="test")
     store.enqueue_candidate(
         doc_id="later",
         payload=b"later",
@@ -1094,7 +2482,110 @@ def test_daily_run_is_created_only_with_work_and_only_once(tmp_path: Path) -> No
         quality_score=5.0,
         valid_from=FIXED_TIME,
     )
-    assert store.start_daily_run(run_day)["state"] == "completed"
+    assert (
+        store.start_daily_run(next_day, boundary_at=boundary + timedelta(days=1))["state"]
+        == "completed"
+    )
+
+
+def test_daily_run_keeps_only_ranked_limit_and_clears_frozen_queue(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    boundary = datetime.now(UTC) + timedelta(seconds=1)
+    for index in range(25):
+        store.enqueue_candidate(
+            doc_id=f"paper-{index:02d}",
+            payload=f"paper-{index:02d}".encode(),
+            reasoning_score=index / 25,
+            quality_score=5.0,
+            ranking_score=index / 25,
+            valid_from=FIXED_TIME,
+        )
+
+    run = store.start_daily_run(boundary.date(), boundary_at=boundary, candidate_limit=20)
+
+    assert run["candidate_count"] == 20
+    retained = {
+        str(row["doc_id"])
+        for row in store._conn.execute(
+            "SELECT doc_id FROM candidate_queue ORDER BY doc_id"
+        ).fetchall()
+    }
+    assert retained == {f"paper-{index:02d}" for index in range(5, 25)}
+    first = store.claim_candidate(
+        cutoff_at=boundary,
+        cutoff_ordinal=int(run["cutoff_ordinal"]),
+        daily_run_date=boundary.date(),
+    )
+    assert first == ("paper-24", b"paper-24")
+
+
+def test_daily_run_has_no_production_candidate_cap(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    boundary = datetime.now(UTC) + timedelta(seconds=1)
+    for index in range(25):
+        store.enqueue_candidate(
+            doc_id=f"paper-{index:02d}",
+            payload=f"paper-{index:02d}".encode(),
+            reasoning_score=index / 25,
+            quality_score=5.0,
+            ranking_score=index / 25,
+            valid_from=FIXED_TIME,
+        )
+
+    run = store.start_daily_run(boundary.date(), boundary_at=boundary)
+
+    assert run["candidate_count"] == 25
+    queued = store._conn.execute(
+        "SELECT COUNT(*) AS n FROM candidate_queue WHERE state='queued'"
+    ).fetchone()
+    assert queued is not None
+    assert int(queued["n"]) == 25
+
+
+def test_changed_daily_boundary_replaces_same_day_snapshot(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    moved_boundary = datetime.now(UTC) + timedelta(minutes=5)
+    original_boundary = moved_boundary - timedelta(minutes=10)
+    run_day = moved_boundary.date()
+    assert store.start_daily_run(run_day, boundary_at=original_boundary)["candidate_count"] == 0
+    store.enqueue_candidate(
+        doc_id="afternoon-paper",
+        payload=b"paper",
+        reasoning_score=1.0,
+        quality_score=5.0,
+        valid_from=FIXED_TIME,
+    )
+
+    moved = store.start_daily_run(
+        run_day,
+        boundary_at=moved_boundary,
+        candidate_limit=20,
+    )
+
+    assert moved["candidate_count"] == 1
+    assert moved["cutoff_at"] == moved_boundary.isoformat()
+
+
+def test_foundry_config_parses_daily_not_before_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC", "2026-08-27T14:00:00Z")
+    monkeypatch.setenv("S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC", "30")
+    config = FoundryConfig.from_env()
+    assert config.daily_not_before_utc == datetime(2026, 8, 27, 14, tzinfo=UTC)
+    assert config.daily_run_minute_utc == 30
+
+
+def test_daily_cohort_boundary_honors_minute() -> None:
+    before = datetime(2026, 8, 28, 8, 29, 59, tzinfo=UTC)
+    after = datetime(2026, 8, 28, 8, 30, 1, tzinfo=UTC)
+
+    assert _daily_cohort_boundary(before, 8, 30) == (
+        date(2026, 8, 27),
+        datetime(2026, 8, 27, 8, 30, tzinfo=UTC),
+    )
+    assert _daily_cohort_boundary(after, 8, 30) == (
+        date(2026, 8, 28),
+        datetime(2026, 8, 28, 8, 30, tzinfo=UTC),
+    )
 
 
 def test_manual_run_snapshots_queue_and_coalesces_clicks(tmp_path: Path) -> None:
@@ -1128,6 +2619,41 @@ def test_manual_run_snapshots_queue_and_coalesces_clicks(tmp_path: Path) -> None
     assert completed["state"] == "completed"
 
 
+def test_manual_run_discards_stale_candidates_and_freezes_fresh_cohort(
+    tmp_path: Path,
+) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    for doc_id in ("stale", "fresh"):
+        store.enqueue_candidate(
+            doc_id=doc_id,
+            payload=doc_id.encode(),
+            reasoning_score=1.0,
+            quality_score=5.0,
+            valid_from=FIXED_TIME,
+        )
+    store._conn.execute(
+        "UPDATE candidate_queue SET enqueued_at=? WHERE doc_id='stale'",
+        ((datetime.now(UTC) - timedelta(hours=25)).isoformat(),),
+    )
+    store._conn.commit()
+
+    requested, created = store.request_manual_run()
+
+    assert created
+    assert requested["candidate_count"] == 1
+    assert (
+        store._conn.execute("SELECT COUNT(*) FROM candidate_queue WHERE doc_id='stale'").fetchone()[
+            0
+        ]
+        == 0
+    )
+    claimed = store.claim_candidate(
+        cutoff_at=datetime.fromisoformat(str(requested["cutoff_at"])),
+        cutoff_ordinal=int(requested["cutoff_ordinal"]),
+    )
+    assert claimed == ("fresh", b"fresh")
+
+
 def test_manual_run_can_bound_the_validation_snapshot(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     for index in range(3):
@@ -1154,6 +2680,7 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
     runtime = object.__new__(WorkerRuntime)
     runtime.config = SimpleNamespace(queue_poll_seconds=0)
     runtime._drain_stop = threading.Event()
+    current = datetime.now(UTC)
     calls: list[str] = []
     manual = {
         "run_id": "manual-1",
@@ -1165,6 +2692,7 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
     claims = iter([manual, None])
     runtime.store = SimpleNamespace(
         claim_manual_run=lambda: next(claims),
+        daily_run=lambda _day: {"candidate_count": 1, "processed_count": 0},
         finish_daily_run=lambda *_args, **_kwargs: calls.append("daily-finished"),
     )
     runtime._run_manual_snapshot = lambda _run, _log: calls.append("manual")
@@ -1176,8 +2704,8 @@ def test_daily_snapshot_yields_to_a_pending_manual_run() -> None:
     runtime._drain_one = drain_one
 
     runtime._run_daily_snapshot(
-        FIXED_TIME.date(),
-        {"cutoff_at": FIXED_TIME.isoformat(), "cutoff_ordinal": 1},
+        current.date(),
+        {"cutoff_at": current.isoformat(), "cutoff_ordinal": 1},
         SimpleNamespace(),
     )
 
@@ -1282,6 +2810,104 @@ def test_artifact_human_audits_are_append_only_and_latest_is_inspectable(tmp_pat
     assert store.dashboard()["human_audits"] == {"rejected": 1}
 
 
+def test_dataset_export_selects_only_accepted_kind_split_and_dates(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _ = store.start_job(
+        paper_id="paper",
+        paper_hash=sha256("paper"),
+        doc_id="doc",
+        policy_version="v1",
+    )
+    validation = ValidationReport(
+        task_id="task",
+        positive_pass=True,
+        equivalent_pass=True,
+        adversarial_pass=True,
+        mutation_killed=1,
+        mutation_total=1,
+        metamorphic_pass=True,
+        replay_pass=True,
+        security_pass=True,
+        false_positive_count=0,
+        false_negative_count=0,
+    )
+
+    def artifact(
+        artifact_id: str,
+        *,
+        kind: str,
+        split: str,
+        status: str = "accepted",
+        created_at: datetime = FIXED_TIME,
+    ) -> FoundryArtifactRecord:
+        return FoundryArtifactRecord(
+            artifact_id=artifact_id,
+            job_id=job_id,
+            paper_id="paper",
+            task_id=f"task:{artifact_id}",
+            family="claim_evidence",
+            kind=kind,
+            pool="sft" if kind == "sft_trajectory" else "rl",
+            dataset_split=split,
+            status=status,
+            quality_label=(
+                "verified_automatic" if kind == "sft_trajectory" else "verified_adversarial"
+            ),
+            package_uri=f"s3://posttrain/{artifact_id}.tar.gz",
+            package_hash=sha256(f"package:{artifact_id}"),
+            environment_hash=sha256(f"environment:{artifact_id}"),
+            paper_hash=sha256("paper"),
+            provider_trace_ids=[],
+            constructor_family="qwen",
+            critic_family="qwen",
+            validation=validation,
+            created_at=created_at,
+        )
+
+    store.record_artifact(artifact("sft-train", kind="sft_trajectory", split="train"))
+    store.record_artifact(artifact("sft-benchmark", kind="sft_trajectory", split="benchmark"))
+    store.record_artifact(
+        artifact("sft-rejected", kind="sft_trajectory", split="train", status="rejected")
+    )
+    store.record_artifact(artifact("rl-train", kind="rl_environment", split="train"))
+    store.record_artifact(
+        artifact(
+            "sft-old",
+            kind="sft_trajectory",
+            split="train",
+            created_at=FIXED_TIME - timedelta(days=2),
+        )
+    )
+
+    selected = store.export_artifact_records(
+        kind="sft_trajectory",
+        dataset_split="train",
+        date_from=(FIXED_TIME - timedelta(days=1)).isoformat(),
+        date_to=(FIXED_TIME + timedelta(days=1)).isoformat(),
+    )
+
+    assert [record.artifact_id for record in selected] == ["sft-train"]
+
+
+def test_rl_dataset_archive_contains_each_immutable_environment() -> None:
+    payload = _package_archive(
+        [
+            ("artifact:one", b"first-environment"),
+            ("artifact/two", b"second-environment"),
+        ]
+    )
+
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        assert archive.getnames() == [
+            "rl_environments/artifact_one.tar.gz",
+            "rl_environments/artifact_two.tar.gz",
+        ]
+        first = archive.extractfile("rl_environments/artifact_one.tar.gz")
+        second = archive.extractfile("rl_environments/artifact_two.tar.gz")
+        assert first is not None and first.read() == b"first-environment"
+        assert second is not None and second.read() == b"second-environment"
+
+
 def test_pool_allocation_is_exact_per_five_and_retry_stable(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     sft = [
@@ -1322,7 +2948,7 @@ def test_every_foundry_role_uses_the_single_hetzner_route() -> None:
     assert set(ROLE_PROVIDER.values()) == {"hetzner"}
 
 
-def test_acceptance_suite_and_signed_package_are_reproducible() -> None:
+def test_acceptance_suite_and_signed_package_are_reproducible(tmp_path: Path) -> None:
     bundle = _bundle()
     task = _task()
     graph = _graph()
@@ -1389,6 +3015,89 @@ def test_acceptance_suite_and_signed_package_are_reproducible() -> None:
         assert mutation is not None and mutation.read().strip()
         assert taskset is not None and b"class PaperFoundryTools" in taskset.read()
         assert "paper_environment/hidden/verifier.py" in names
+
+        # The normal project test environment keeps the sizeable training
+        # framework optional. CI runs this same test once with the exact pin so
+        # the generated package must import, load, and execute its reward.
+        if importlib.util.find_spec("verifiers") is not None:
+            _extract_test_archive(archive, tmp_path)
+            environment_root = tmp_path / "paper_environment"
+            export_root = environment_root / "prime_verifiers"
+            sys.path[:0] = [str(environment_root), str(export_root)]
+            try:
+                from paper_foundry.taskset import PaperFoundryConfig, PaperFoundryTaskset
+
+                config = PaperFoundryConfig()
+                loaded = PaperFoundryTaskset(config).load()
+                assert len(loaded) == 1
+                assert loaded[0].data.network_allow == []
+                reward = asyncio.run(
+                    loaded[0].scientific_reward(
+                        SimpleNamespace(
+                            last_reply=validated[0].answer.model_dump_json(),
+                            tool_messages=[],
+                        )
+                    )
+                )
+                assert reward == 1.0
+            finally:
+                del sys.path[:2]
+                for module_name in tuple(sys.modules):
+                    if module_name == "paper_foundry" or module_name.startswith(
+                        ("paper_foundry.", "public_tools", "hidden")
+                    ):
+                        sys.modules.pop(module_name, None)
+
+
+def test_minio_package_paths_separate_content_policy_revisions() -> None:
+    task = _task().model_copy(
+        update={"content_policy_revision": "scientific-reasoning-v2", "route": "sft"}
+    )
+    report, validated, cases = run_acceptance_suite(
+        task=task,
+        spec=deterministic_verifier(task, _bundle(), _graph()),
+        bundle=_bundle(),
+        graph=_graph(),
+        trajectories=[
+            Trajectory(
+                trajectory_id="trajectory:revision",
+                task_id=task.task_id,
+                provider_trace_id="trace:revision",
+                answer=_answer(),
+                accepted=False,
+                reward=0,
+            )
+        ],
+    )
+    package = EnvironmentPackager(signer=AttestationSigner()).build(
+        bundle=_bundle(),
+        graph=_graph(),
+        task=task,
+        trajectories=validated,
+        validation=report,
+        traces=[],
+        verifier=None,
+        pool="sft",
+        dataset_split="train",
+        validation_cases=cases,
+    )
+
+    class S3:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        def put_object(self, **kwargs: Any) -> None:
+            self.keys.append(kwargs["Key"])
+
+    s3 = S3()
+    uri = MinioPackageSink(s3_client=s3, bucket="posttrain").write(
+        package,
+        paper_id=_bundle().paper_id,
+        task_id=task.task_id,
+    )
+
+    assert "/revisions/scientific-reasoning-v2/" in uri
+    assert len(s3.keys) == 2
 
 
 def test_relation_only_required_nodes_produce_effective_mutations() -> None:
@@ -1629,6 +3338,14 @@ def test_artifact_inspector_returns_the_exact_packaged_dataset(tmp_path: Path) -
     assert value["task"]["public_instruction"] == task.public_instruction
     assert value["trajectories"][0]["answer"]["report"] == _answer().report
     assert value["validation"]["mutations"]
+    assert [item["trajectory_id"] for item in accepted_trajectories(package.content)] == [
+        value["trajectories"][0]["trajectory_id"]
+    ]
+    assert accepted_trajectories(
+        package.content,
+        trajectory_id=value["trajectories"][0]["trajectory_id"],
+    ) == accepted_trajectories(package.content)
+    assert accepted_trajectories(package.content, trajectory_id="trajectory:missing") == []
 
 
 def test_frozen_tools_reject_code_execution_without_an_arbitrary_call_cap() -> None:
@@ -1638,6 +3355,48 @@ def test_frozen_tools_reject_code_execution_without_an_arbitrary_call_cap() -> N
         runtime.symbolic("simplify", "__import__('os').system('id')")
     assert runtime.search("evidence")
     assert runtime.search("evidence")
+
+
+def test_invalid_calculator_syntax_is_a_tool_error() -> None:
+    runtime = PaperRuntime(spans={"s1": "bounded paper evidence"})
+    with pytest.raises(ToolError, match="invalid calculator expression"):
+        runtime.calculator("\\frac{1}{2}")
+
+
+def test_solver_rejects_repeated_invalid_tool_request() -> None:
+    class RepeatingToolControl:
+        def call(self, **_: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            return (
+                {
+                    "status": "tool_request",
+                    "report": None,
+                    "answer_manifest": None,
+                    "tool_calls": [
+                        {
+                            "tool": "calculator",
+                            "arguments": {"expression": "\\frac{1}{2}"},
+                        }
+                    ],
+                },
+                _trace("trace:repeating-tool"),
+            )
+
+    task = _task().model_copy(
+        update={
+            "public_context_policy": _task().public_context_policy.model_copy(
+                update={"tool_access": ["calculator"]}
+            )
+        }
+    )
+    with pytest.raises(TaskOutputError, match="repeated the same invalid"):
+        TaskFactory(RepeatingToolControl())._solve_one(  # type: ignore[arg-type]
+            job_id="job",
+            bundle=_bundle(),
+            graph=_graph(),
+            task=task,
+            role="solver_a",
+            plan="test",
+        )
 
 
 def test_extended_environment_predicates_are_deterministic() -> None:

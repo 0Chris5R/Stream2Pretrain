@@ -22,6 +22,7 @@ dependencies = [
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp>=1.27",
     "httpx>=0.27",
+    "openai==3.6.0",
     "orjson>=3.10",
     "aiokafka>=0.11",
     "confluent-kafka>=2.5",
@@ -35,16 +36,14 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "types-PyYAML>=6.0",
+    # Iceberg writer unit doubles materialize Arrow tables. Production gets
+    # this from processor[runtime]; CI needs it explicitly as well.
+    "pyarrow>=16.0",
     "stream2pretrain-ingest-common",
     "stream2pretrain-rss-poller",
-    "stream2pretrain-sitemap-poller",
     "stream2pretrain-arxiv-html-fetcher",
-    "stream2pretrain-github-events",
-    "stream2pretrain-github-releases",
-    "stream2pretrain-github-release-tarball-fetcher",
     "stream2pretrain-hf-poller",
     "stream2pretrain-oaipmh-poller",
-    "stream2pretrain-openreview-poller",
     "stream2pretrain-processor",
     "stream2pretrain-tests",
 ]
@@ -71,14 +70,9 @@ packages = ["schemas"]
 members = [
     "ingest/common",
     "ingest/rss_poller",
-    "ingest/sitemap_poller",
-    "ingest/github_events",
-    "ingest/github_releases",
     "ingest/hf_poller",
     "ingest/oaipmh_poller",
     "ingest/arxiv_html_fetcher",
-    "ingest/github_release_tarball_fetcher",
-    "ingest/openreview_poller",
     "processor",
     "tests",
 ]
@@ -87,14 +81,9 @@ members = [
 stream2pretrain = { workspace = true }
 stream2pretrain-ingest-common = { workspace = true }
 stream2pretrain-rss-poller = { workspace = true }
-stream2pretrain-sitemap-poller = { workspace = true }
 stream2pretrain-arxiv-html-fetcher = { workspace = true }
-stream2pretrain-github-events = { workspace = true }
-stream2pretrain-github-releases = { workspace = true }
-stream2pretrain-github-release-tarball-fetcher = { workspace = true }
 stream2pretrain-hf-poller = { workspace = true }
 stream2pretrain-oaipmh-poller = { workspace = true }
-stream2pretrain-openreview-poller = { workspace = true }
 stream2pretrain-processor = { workspace = true }
 stream2pretrain-tests = { workspace = true }
 torch = [
@@ -156,7 +145,6 @@ module = [
     "kubernetes.*",
     "langdetect.*",
     "onnxruntime.*",
-    "openreview.*",
     "plyvel.*",
     "presidio_analyzer.*",
     "pygments.*",
@@ -190,7 +178,6 @@ disable_error_code = ["arg-type", "assignment", "attr-defined", "call-overload",
 module = [
     "processor.operators.*",
     "processor.tokenize",
-    "processor.decon_gate",
 ]
 disable_error_code = ["attr-defined", "no-any-return", "operator"]
 
@@ -202,15 +189,9 @@ module = [
     "ingest.common.logging",
     "ingest.common.otel",
     "processor.common",
-    "processor.seed.*",
-    "processor.seed_loader",
     "processor.iceberg_writer",
-    "processor.mixture_controller.controller",
+    "processor.source_controller",
     "ingest.oaipmh_poller.client",
-    "ingest.openreview_poller.*",
-    "ingest.github_releases.poller",
-    "ingest.github_release_tarball_fetcher.*",
-    "ingest.github_events.poller",
 ]
 disable_error_code = ["arg-type", "assignment", "attr-defined", "misc", "no-any-return", "type-arg", "union-attr", "untyped-decorator"]
 
@@ -220,14 +201,9 @@ testpaths = [
     "processor/tests",
     "ingest/common/tests",
     "ingest/rss_poller/tests",
-    "ingest/sitemap_poller/tests",
-    "ingest/github_events/tests",
-    "ingest/github_releases/tests",
     "ingest/hf_poller/tests",
     "ingest/oaipmh_poller/tests",
     "ingest/arxiv_html_fetcher/tests",
-    "ingest/github_release_tarball_fetcher/tests",
-    "ingest/openreview_poller/tests",
 ]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers --strict-config"

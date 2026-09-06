@@ -104,6 +104,7 @@ class EnvironmentPackager:
             manifest = EnvironmentManifest(
                 environment_id=stable_id("paper-environment", task.task_id, environment_hash),
                 task_id=task.task_id,
+                content_policy_revision=task.content_policy_revision,
                 paper_id=bundle.paper_id,
                 family=task.family,
                 pool=pool,
@@ -226,7 +227,11 @@ class EnvironmentPackager:
                     "report": "string",
                     "answer_manifest": {
                         "claims": ["node_id"],
-                        "evidence": ["span_id"],
+                        **(
+                            {"evidence": ["span_id"]}
+                            if task.family != "derivation_completion"
+                            else {}
+                        ),
                         "equations": [{"id": "node_id", "latex": "string"}],
                         "method_nodes": ["node_id"],
                         "faults": ["node_id"],
@@ -285,7 +290,7 @@ class EnvironmentPackager:
         )
         _write_text(
             root / "lock" / "requirements.lock",
-            "pydantic==2.12.5\nsympy==1.13.3\nverifiers==0.1.14\n",
+            "lark>=1.1,<2\npydantic==2.12.5\nsympy==1.13.3\nverifiers==0.3.1\n",
         )
         if verifier is not None:
             self._write_prime_export(root)
@@ -353,6 +358,7 @@ class MinioPackageSink:
     ) -> str:
         key = (
             f"{package.manifest.pool}/{package.manifest.dataset_split}/"
+            f"revisions/{normalize_identifier(package.manifest.content_policy_revision)}/"
             f"environments/{normalize_identifier(paper_id)}/"
             f"{normalize_identifier(task_id)}/{package.package_hash.removeprefix('sha256:')}.tar.gz"
         )
@@ -435,12 +441,15 @@ _PRIME_INIT = (
 _PRIME_TASKSET = r'''from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import verifiers.v1 as vf
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _runtime():
@@ -523,13 +532,18 @@ class PaperFoundryTaskset(vf.Taskset[PaperFoundryTask, PaperFoundryConfig]):
         )
         return [
             PaperFoundryTask(
-                PaperFoundryData(idx=0, prompt=instruction, root=str(ROOT)),
+                PaperFoundryData(
+                    idx=0,
+                    prompt=instruction,
+                    root=str(ROOT),
+                    network_allow=[],
+                ),
                 self.config.task,
             )
         ]
 '''
 
-_PRIME_PYPROJECT = """[project]\nname = \"stream2train-paper-foundry\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11,<3.14\"\ndependencies = [\"verifiers==0.1.14\", \"sympy==1.13.3\"]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"paper_foundry\"]\n"""
+_PRIME_PYPROJECT = """[project]\nname = \"stream2train-paper-foundry\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11,<3.14\"\ndependencies = [\"verifiers==0.3.1\", \"sympy==1.13.3\", \"lark>=1.1,<2\"]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.hatch.build.targets.wheel]\npackages = [\"paper_foundry\"]\n"""
 
 _PRIME_README = """# Paper Foundry environment\n\nThis export targets the current Verifiers v1 Taskset API. The reward reads only the frozen hidden state and runs without model APIs or network access. Run it in a network-disabled Docker runtime and mount hidden files read-only.\n"""
 

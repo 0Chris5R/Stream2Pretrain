@@ -12,7 +12,9 @@ COPY ingest/common                                      /app/ingest/common
 COPY processor/__init__.py                              /app/processor/__init__.py
 COPY processor/common.py                                /app/processor/common.py
 COPY processor/fetcher.py                               /app/processor/fetcher.py
+COPY processor/expired_inputs.py                        /app/processor/expired_inputs.py
 COPY processor/metrics.py                               /app/processor/metrics.py
+COPY processor/pdf_worker.py                            /app/processor/pdf_worker.py
 COPY processor/operators/__init__.py                    /app/processor/operators/__init__.py
 COPY processor/operators/extract.py                     /app/processor/operators/extract.py
 COPY processor/operators/langid.py                      /app/processor/operators/langid.py
@@ -20,13 +22,12 @@ COPY processor/operators/minhash.py                     /app/processor/operators
 COPY processor/operators/validity.py                    /app/processor/operators/validity.py
 COPY processor/probes.py                                /app/processor/probes.py
 COPY processor/scientific.py                             /app/processor/scientific.py
+COPY processor/scientific_handoff.py                     /app/processor/scientific_handoff.py
 COPY processor/source_policy.py                          /app/processor/source_policy.py
+COPY processor/work_cutoff.py                            /app/processor/work_cutoff.py
 COPY --chmod=0555 processor/container_entrypoint.sh     /usr/local/bin/s2p-entrypoint
-
-RUN ln -s /usr/local/bin/s2p-entrypoint /usr/local/bin/s2p-fetcher \
- && python -c "from processor.fetcher import main; assert callable(main)"
 
 WORKDIR /app
 USER nonroot
 
-ENTRYPOINT ["s2p-fetcher"]
+ENTRYPOINT ["s2p-entrypoint", "s2p-fetcher"]

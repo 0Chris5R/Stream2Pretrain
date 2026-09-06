@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -11,19 +12,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from processor.foundry.control import ProviderControlPlane
 from processor.foundry.paper_adapter import bundle_prompt_json
+from processor.foundry.symbolic import symbolic_expression_is_checkable
 from processor.foundry.tools import PaperRuntime, ToolError
 from processor.foundry.util import canonical_json, sha256, stable_id
 from schemas.foundry import (
     AnswerManifest,
-    Difficulty,
-    EvidenceEdge,
     FoundryAnswer,
-    HiddenTargets,
     OracleResult,
     PaperBundle,
     PaperEvidenceGraph,
     ProviderTrace,
-    PublicContextPolicy,
     TaskSpec,
     ToolCall,
     Trajectory,
@@ -77,16 +75,78 @@ class SolverTurn(BaseModel):
         return self
 
 
-class GroundingCritique(BaseModel):
+class TrajectoryGroundingDecision(BaseModel):
+    """A scientific-content audit for exactly one generated trajectory.
+
+    Manifest-shape and hidden-target checks deliberately do not belong here.
+    They are executable deterministic gates, while this decision is restricted
+    to unsupported or contradictory scientific content in the readable answer.
+    """
+
     model_config = ConfigDict(extra="forbid")
-    accepted: bool
+
+    trajectory_id: str
+    scientifically_grounded: bool
     findings: list[str] = Field(default_factory=list)
     unsupported_claims: list[str] = Field(default_factory=list)
     contradictory_claims: list[str] = Field(default_factory=list)
+    missing_required_outputs: list[str] = Field(default_factory=list)
+
+
+class GroundingCritique(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decisions: list[TrajectoryGroundingDecision]
+    findings: list[str] = Field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class SolverFailure:
+    """One failed solver attempt with the exact durable provider-call lineage."""
+
+    role: str
+    reason: str
+    traces: tuple[ProviderTrace, ...] = ()
+
+    def audit(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "reason": self.reason,
+            "provider_trace_ids": [trace.trace_id for trace in self.traces],
+            "prompt_traces": [
+                {
+                    "trace_id": trace.trace_id,
+                    "prompt_version": trace.prompt_version,
+                    "request_hash": trace.request_hash,
+                    "response_hash": trace.response_hash,
+                    "returned_model": trace.returned_model,
+                }
+                for trace in self.traces
+            ],
+        }
+
+
+def _dedupe_traces(traces: Sequence[ProviderTrace]) -> list[ProviderTrace]:
+    return list({trace.trace_id: trace for trace in traces}.values())
 
 
 class TaskOutputError(ValueError):
     """A model-authored task artifact remained invalid after one bounded repair."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        traces: Sequence[ProviderTrace] = (),
+        solver_failures: Sequence[SolverFailure] = (),
+    ) -> None:
+        super().__init__(message)
+        self.traces = tuple(_dedupe_traces(traces))
+        self.solver_failures = tuple(solver_failures)
+
+
+_MAX_SOLVER_TOOL_TURNS = 8
+CONTENT_POLICY_REVISION = "scientific-reasoning-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,10 +155,11 @@ class SolvedTask:
     trajectories: list[Trajectory]
     traces: list[ProviderTrace]
     critic: GroundingCritique
-    solution_failures: tuple[str, ...] = ()
+    solution_failures: tuple[SolverFailure, ...] = ()
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+_NUMERIC_LITERAL = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
 class TaskFactory:
@@ -136,32 +197,66 @@ class TaskFactory:
             call_key="task_designer",
             context="Preserve the proposed scientific tasks and repair only schema violations.",
         )
-        normalized = [
-            _normalize_task(task, bundle, graph, designer_trace, oracle_ids)
-            for task in batch.tasks[: self.control.config.tasks_per_paper]
+        proposal_traces = [
+            designer_trace,
+            *([proposal_repair] if proposal_repair is not None else []),
         ]
-        if not any(task.family == "corruption_diagnosis" for task in normalized):
-            corruption = _deterministic_corruption_task(
+        validated, validation_errors = _normalize_and_validate_tasks(
+            batch=batch,
+            bundle=bundle,
+            graph=graph,
+            trace=proposal_traces[-1],
+            oracle_ids=oracle_ids,
+            limit=self.control.config.tasks_per_paper,
+        )
+        if not validated:
+            repaired_data, semantic_repair_trace = self.control.call(
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                role="final_repair",
+                system=_designer_system(),
+                user=_task_semantic_repair_prompt(
+                    bundle=bundle,
+                    graph=graph,
+                    batch=batch,
+                    validation_errors=validation_errors,
+                    count=self.control.config.tasks_per_paper,
+                    oracle_ids=oracle_ids,
+                ),
+                max_output_tokens=12_000,
+                call_key="task_designer:deterministic_repair",
+            )
+            proposal_traces.append(semantic_repair_trace)
+            repaired_batch, repaired_schema_trace = _validate_or_repair(
+                control=self.control,
+                model=TaskBatch,
+                data=repaired_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key="task_designer:deterministic_repair",
+                context=(
+                    "Preserve supported high-value tasks and repair only the reported "
+                    "deterministic specification violations."
+                ),
+            )
+            if repaired_schema_trace is not None:
+                proposal_traces.append(repaired_schema_trace)
+            validated, repaired_errors = _normalize_and_validate_tasks(
+                batch=repaired_batch,
                 bundle=bundle,
                 graph=graph,
-                designer_trace=designer_trace,
+                trace=proposal_traces[-1],
+                oracle_ids=oracle_ids,
+                limit=self.control.config.tasks_per_paper,
             )
-            if corruption is not None:
-                normalized.append(corruption)
-        validated: list[TaskSpec] = []
-        for task in normalized:
-            try:
-                validate_task(
-                    task,
-                    bundle,
-                    graph,
-                    oracle_result_ids=oracle_ids,
+            if not validated:
+                reasons = repaired_errors or validation_errors
+                detail = "; ".join(reasons[:6])
+                raise TaskOutputError(
+                    "no proposed task passed deterministic specification checks"
+                    + (f": {detail}" if detail else ""),
+                    traces=proposal_traces,
                 )
-            except ValueError:
-                continue
-            validated.append(task)
-        if not validated:
-            raise ValueError("no proposed task passed deterministic specification checks")
         critique_data, critic_trace = self.control.call(
             job_id=job_id,
             paper_id=bundle.paper_id,
@@ -179,6 +274,46 @@ class TaskFactory:
             call_key="answerability_critic",
             context="Preserve each audit decision and repair only schema violations.",
         )
+        answerability_traces = [
+            critic_trace,
+            *([answerability_repair] if answerability_repair is not None else []),
+        ]
+        missing_task_ids = _missing_decision_ids(
+            [task.task_id for task in validated],
+            [decision.task_id for decision in decisions.decisions],
+        )
+        if missing_task_ids:
+            completed_data, completion_trace = self.control.call(
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                role="final_repair",
+                system=_answerability_system(),
+                user=_answerability_completion_prompt(
+                    bundle=bundle,
+                    graph=graph,
+                    tasks=validated,
+                    decisions=decisions,
+                    missing_task_ids=missing_task_ids,
+                ),
+                max_output_tokens=8_000,
+                call_key="answerability_critic:complete_missing",
+            )
+            answerability_traces.append(completion_trace)
+            completed, completion_schema_trace = _validate_or_repair(
+                control=self.control,
+                model=AnswerabilityBatch,
+                data=completed_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key="answerability_critic:complete_missing",
+                context=(
+                    "Preserve the supplied decisions and add one independent decision for "
+                    "every omitted task ID."
+                ),
+            )
+            if completion_schema_trace is not None:
+                answerability_traces.append(completion_schema_trace)
+            decisions = _merge_answerability_decisions(decisions, completed)
         by_id = {decision.task_id: decision for decision in decisions.decisions}
         accepted: list[TaskSpec] = []
         for task in validated:
@@ -195,7 +330,7 @@ class TaskFactory:
                         "ambiguity_risks": [*task.ambiguity_risks, *decision.findings],
                         "construction_provenance": [
                             *task.construction_provenance,
-                            critic_trace.trace_id,
+                            *(trace.trace_id for trace in answerability_traces),
                         ],
                     }
                 )
@@ -205,10 +340,8 @@ class TaskFactory:
             limit=self.control.config.accepted_tasks_per_paper,
         )
         return selected, [
-            designer_trace,
-            *([proposal_repair] if proposal_repair is not None else []),
-            critic_trace,
-            *([answerability_repair] if answerability_repair is not None else []),
+            *proposal_traces,
+            *answerability_traces,
         ]
 
     def solve(
@@ -221,7 +354,7 @@ class TaskFactory:
     ) -> SolvedTask:
         traces: list[ProviderTrace] = []
         trajectories: list[Trajectory] = []
-        solution_failures: list[str] = []
+        solution_failures: list[SolverFailure] = []
         for role, plan in (
             ("solver_a", "Use a direct constructive plan and verify every structured commitment."),
             (
@@ -239,7 +372,11 @@ class TaskFactory:
                     plan=plan,
                 )
             except TaskOutputError as exc:
-                solution_failures.append(f"{role}: {exc}")
+                failure_traces = list(exc.traces)
+                traces.extend(failure_traces)
+                solution_failures.append(
+                    SolverFailure(role=role, reason=str(exc), traces=tuple(failure_traces))
+                )
                 continue
             traces.extend(solver_traces)
             trace = solver_traces[-1]
@@ -263,7 +400,9 @@ class TaskFactory:
             )
         if not trajectories:
             raise TaskOutputError(
-                f"task {task.task_id} produced no valid solution after bounded repairs"
+                f"task {task.task_id} produced no valid solution after bounded repairs",
+                traces=traces,
+                solver_failures=solution_failures,
             )
         critic_data, critic_trace = self.control.call(
             job_id=job_id,
@@ -275,17 +414,62 @@ class TaskFactory:
             call_key=f"grounding_critic:{task.task_id}",
         )
         traces.append(critic_trace)
-        critique, repair_trace = _validate_or_repair(
-            control=self.control,
-            model=GroundingCritique,
-            data=critic_data,
-            job_id=job_id,
-            paper_id=bundle.paper_id,
-            call_key=f"grounding_critic:{task.task_id}",
-            context="Preserve the grounding audit and repair only schema violations.",
-        )
+        try:
+            critique, repair_trace = _validate_or_repair(
+                control=self.control,
+                model=GroundingCritique,
+                data=critic_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"grounding_critic:{task.task_id}",
+                context="Preserve the grounding audit and repair only schema violations.",
+            )
+        except TaskOutputError as exc:
+            raise TaskOutputError(
+                f"grounding critique failed: {exc}",
+                traces=[*traces, *exc.traces],
+                solver_failures=solution_failures,
+            ) from exc
         if repair_trace is not None:
             traces.append(repair_trace)
+        missing_trajectory_ids = _missing_decision_ids(
+            [trajectory.trajectory_id for trajectory in trajectories],
+            [decision.trajectory_id for decision in critique.decisions],
+        )
+        if missing_trajectory_ids:
+            completed_data, completion_trace = self.control.call(
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                role="final_repair",
+                system=_grounding_system(),
+                user=_grounding_completion_prompt(
+                    bundle=bundle,
+                    graph=graph,
+                    task=task,
+                    trajectories=trajectories,
+                    critique=critique,
+                    missing_trajectory_ids=missing_trajectory_ids,
+                ),
+                max_output_tokens=6_000,
+                call_key=f"grounding_critic:{task.task_id}:complete_missing",
+            )
+            traces.append(completion_trace)
+            completed, completion_schema_trace = _validate_or_repair(
+                control=self.control,
+                model=GroundingCritique,
+                data=completed_data,
+                job_id=job_id,
+                paper_id=bundle.paper_id,
+                call_key=f"grounding_critic:{task.task_id}:complete_missing",
+                context=(
+                    "Preserve the supplied scientific audits and add one independent decision "
+                    "for every omitted trajectory ID."
+                ),
+            )
+            if completion_schema_trace is not None:
+                traces.append(completion_schema_trace)
+            critique = _merge_grounding_decisions(critique, completed)
+        critique = _complete_grounding_decisions(critique, trajectories)
         return SolvedTask(
             task=task,
             trajectories=trajectories,
@@ -316,6 +500,7 @@ class TaskFactory:
         ]
         traces: list[ProviderTrace] = []
         executed: list[ToolCall] = []
+        failed_tool_requests: set[bytes] = set()
         turn_index = 0
         while True:
             data, trace = self.control.call(
@@ -328,19 +513,22 @@ class TaskFactory:
                 call_key=f"{role}:{task.task_id}:turn:{turn_index}",
             )
             traces.append(trace)
-            turn, repair_trace = _validate_or_repair(
-                control=self.control,
-                model=SolverTurn,
-                data=data,
-                job_id=job_id,
-                paper_id=bundle.paper_id,
-                call_key=f"{role}:{task.task_id}:turn:{turn_index}",
-                context=(
-                    "Preserve the scientific solution and tool intent. Omit symbolic or unknown "
-                    "quantities from numeric_results instead of assigning null."
-                ),
-                normalizer=_normalize_solver_turn_data,
-            )
+            try:
+                turn, repair_trace = _validate_or_repair(
+                    control=self.control,
+                    model=SolverTurn,
+                    data=data,
+                    job_id=job_id,
+                    paper_id=bundle.paper_id,
+                    call_key=f"{role}:{task.task_id}:turn:{turn_index}",
+                    context=(
+                        "Preserve the scientific solution and tool intent. Omit symbolic or unknown "
+                        "quantities from numeric_results instead of assigning null."
+                    ),
+                    normalizer=_normalize_solver_turn_data,
+                )
+            except TaskOutputError as exc:
+                raise TaskOutputError(str(exc), traces=[*traces, *exc.traces]) from exc
             if repair_trace is not None:
                 traces.append(repair_trace)
             turns.append(
@@ -351,15 +539,18 @@ class TaskFactory:
                 )
             )
             if turn.status == "final":
-                turn, contract_repair_trace = _ensure_solution_contract(
-                    control=self.control,
-                    turn=turn,
-                    job_id=job_id,
-                    paper_id=bundle.paper_id,
-                    role=role,
-                    task=task,
-                    graph=graph,
-                )
+                try:
+                    turn, contract_repair_trace = _ensure_solution_contract(
+                        control=self.control,
+                        turn=turn,
+                        job_id=job_id,
+                        paper_id=bundle.paper_id,
+                        role=role,
+                        task=task,
+                        graph=graph,
+                    )
+                except TaskOutputError as exc:
+                    raise TaskOutputError(str(exc), traces=[*traces, *exc.traces]) from exc
                 if contract_repair_trace is not None:
                     traces.append(contract_repair_trace)
                     turns.append(
@@ -382,6 +573,17 @@ class TaskFactory:
                     executed,
                 )
             observations = [_execute_tool(runtime, task, call) for call in turn.tool_calls]
+            for observation in observations:
+                if observation.error is None:
+                    continue
+                signature = canonical_json(
+                    {"tool": observation.tool, "arguments": observation.arguments}
+                )
+                if signature in failed_tool_requests:
+                    raise TaskOutputError(
+                        "solver repeated the same invalid frozen-tool request", traces=traces
+                    )
+                failed_tool_requests.add(signature)
             executed.extend(observations)
             tool_payload = [value.model_dump(mode="json") for value in observations]
             transcript.append(
@@ -391,7 +593,93 @@ class TaskFactory:
                 }
             )
             turn_index += 1
+            if turn_index >= _MAX_SOLVER_TOOL_TURNS:
+                raise TaskOutputError(
+                    "solver exceeded the bounded frozen-tool interaction budget", traces=traces
+                )
             turns.append(TrajectoryTurn(index=len(turns), role="tool", content=tool_payload))
+
+
+def _complete_grounding_decisions(
+    critique: GroundingCritique,
+    trajectories: list[Trajectory],
+) -> GroundingCritique:
+    """Fail closed for missing IDs while keeping every trajectory independently auditable."""
+    by_id = {decision.trajectory_id: decision for decision in critique.decisions}
+    completed = [
+        by_id.get(trajectory.trajectory_id)
+        or TrajectoryGroundingDecision(
+            trajectory_id=trajectory.trajectory_id,
+            scientifically_grounded=False,
+            findings=["grounding critic omitted this trajectory"],
+            unsupported_claims=["trajectory has no independent scientific grounding decision"],
+        )
+        for trajectory in trajectories
+    ]
+    return critique.model_copy(update={"decisions": completed})
+
+
+def _missing_decision_ids(expected: list[str], observed: list[str]) -> list[str]:
+    observed_ids = set(observed)
+    return [value for value in expected if value not in observed_ids]
+
+
+def _merge_answerability_decisions(
+    initial: AnswerabilityBatch,
+    completed: AnswerabilityBatch,
+) -> AnswerabilityBatch:
+    by_id = {decision.task_id: decision for decision in initial.decisions}
+    for decision in completed.decisions:
+        by_id.setdefault(decision.task_id, decision)
+    return AnswerabilityBatch(decisions=list(by_id.values()))
+
+
+def _merge_grounding_decisions(
+    initial: GroundingCritique,
+    completed: GroundingCritique,
+) -> GroundingCritique:
+    by_id = {decision.trajectory_id: decision for decision in initial.decisions}
+    for decision in completed.decisions:
+        by_id.setdefault(decision.trajectory_id, decision)
+    return initial.model_copy(
+        update={
+            "decisions": list(by_id.values()),
+            "findings": [*initial.findings, *completed.findings],
+        }
+    )
+
+
+def grounding_decision_blocks(decision: TrajectoryGroundingDecision) -> bool:
+    """Only substantive scientific errors block a trajectory.
+
+    Explicit scientific errors or missing deliverables take precedence over the
+    summary boolean. Format-only findings belong to executable validators;
+    empty or substantive negative findings fail closed.
+    """
+    if (
+        decision.unsupported_claims
+        or decision.contradictory_claims
+        or decision.missing_required_outputs
+    ):
+        return True
+    if decision.scientifically_grounded:
+        return False
+    if not decision.findings:
+        return True
+    format_object = (
+        r"(?:manifest|schema|node ids?|span ids?|evidence spans?|citations?|relation labels?|"
+        r"evidence order|configuration keys?|structured fields?|internal identifiers?)"
+    )
+    format_problem = r"(?:missing|omits?|absent|format(?:ting)?|schema|order(?:ing)?|requires?)"
+    format_only_patterns = (
+        re.compile(rf"\b{format_problem}\b.{{0,100}}\b{format_object}\b", re.IGNORECASE),
+        re.compile(rf"\b{format_object}\b.{{0,100}}\b{format_problem}\b", re.IGNORECASE),
+        re.compile(rf"\bscientifically correct\b.{{0,120}}\b{format_object}\b", re.IGNORECASE),
+    )
+    return not all(
+        any(pattern.search(finding) for pattern in format_only_patterns)
+        for finding in decision.findings
+    )
 
 
 def _validate_or_repair(
@@ -428,7 +716,8 @@ def _validate_or_repair(
             return model.model_validate(repaired), repair_trace
         except ValueError as repair_error:
             raise TaskOutputError(
-                f"{model.__name__} remained invalid after schema repair: {repair_error}"
+                f"{model.__name__} remained invalid after schema repair: {repair_error}",
+                traces=[repair_trace],
             ) from repair_error
 
 
@@ -525,13 +814,18 @@ def _ensure_solution_contract(
     try:
         repaired = SolverTurn.model_validate(_normalize_solver_turn_data(repair_data))
     except ValueError as exc:
-        raise TaskOutputError(f"solution-contract repair returned invalid JSON: {exc}") from exc
+        raise TaskOutputError(
+            f"solution-contract repair returned invalid JSON: {exc}", traces=[repair_trace]
+        ) from exc
     if repaired.status != "final" or repaired.answer_manifest is None:
-        raise TaskOutputError("solution-contract repair did not return a final answer")
+        raise TaskOutputError(
+            "solution-contract repair did not return a final answer", traces=[repair_trace]
+        )
     remaining = _solution_contract_violations(repaired.answer_manifest, task, graph)
     if remaining:
         raise TaskOutputError(
-            "solution-contract repair remained incomplete: " + ", ".join(remaining)
+            "solution-contract repair remained incomplete: " + ", ".join(remaining),
+            traces=[repair_trace],
         )
     return repaired, repair_trace
 
@@ -557,6 +851,18 @@ def _solution_contract_violations(
     missing_nodes = set(task.hidden_targets.required_nodes) - committed_nodes
     if missing_nodes:
         violations.append("missing required node IDs: " + ", ".join(sorted(missing_nodes)))
+    if task.family == "derivation_completion":
+        node_types = {node.id: node.type for node in graph.nodes}
+        submitted_equations = {equation.id for equation in manifest.equations}
+        missing_equations = {
+            node_id
+            for node_id in task.hidden_targets.required_nodes
+            if node_types.get(node_id) == "equation" and node_id not in submitted_equations
+        }
+        if missing_equations:
+            violations.append(
+                "missing required equation outputs: " + ", ".join(sorted(missing_equations))
+            )
     required_relations = {
         (edge.source, edge.relation, edge.target) for edge in task.hidden_targets.required_relations
     }
@@ -569,8 +875,10 @@ def _solution_contract_violations(
         *task.public_context_policy.same_paper_distractors,
     }
     evidence = set(manifest.evidence)
-    if not evidence or evidence - public_spans:
-        violations.append("evidence is empty or outside the public same-paper context")
+    if evidence - public_spans:
+        violations.append("evidence is outside the public same-paper context")
+    if _requires_explicit_evidence(task) and not evidence:
+        violations.append("evidence is empty")
 
     numeric_results = {value.id: value.value for value in manifest.numeric_results}
     equations = {value.id: value.latex for value in manifest.equations}
@@ -624,6 +932,9 @@ def validate_task(
     for evidence_set in task.hidden_targets.accepted_evidence_sets:
         if set(evidence_set) - span_ids:
             raise ValueError(f"task {task.task_id} has unresolved accepted evidence")
+    quality_violations = _task_quality_violations(task, graph)
+    if quality_violations:
+        raise ValueError(f"task {task.task_id} is low value: {'; '.join(quality_violations)}")
     if task.route == "rl" and not _machine_verifiable(
         task,
         graph,
@@ -633,6 +944,36 @@ def validate_task(
         raise ValueError(f"task {task.task_id} is not sufficiently specified for RL")
     if set(task.hidden_targets.required_faults) & set(task.hidden_targets.forbidden_faults):
         raise ValueError(f"task {task.task_id} requires and forbids the same fault")
+
+
+def _normalize_and_validate_tasks(
+    *,
+    batch: TaskBatch,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+    trace: ProviderTrace,
+    oracle_ids: set[str],
+    limit: int,
+) -> tuple[list[TaskSpec], list[str]]:
+    validated: list[TaskSpec] = []
+    errors: list[str] = []
+    if not batch.tasks:
+        errors.append("the response contained no tasks")
+    for index, proposed in enumerate(batch.tasks[:limit]):
+        task = _normalize_task(proposed, bundle, graph, trace, oracle_ids)
+        if task.route == "reject":
+            violations = _task_quality_violations(task, graph)
+            errors.append(
+                f"task {index} was low value: {'; '.join(violations) or 'unsupported route'}"
+            )
+            continue
+        try:
+            validate_task(task, bundle, graph, oracle_result_ids=oracle_ids)
+        except ValueError as exc:
+            errors.append(f"task {index}: {exc}")
+            continue
+        validated.append(task)
+    return validated, errors
 
 
 def _normalize_task(
@@ -648,10 +989,26 @@ def _normalize_task(
         task.family,
         sha256(task.public_instruction),
     )
-    route = "rl" if _machine_verifiable(task, graph, bundle, oracle_result_ids) else "sft"
-    if task.family == "grounded_explanation":
+    revised = task.model_copy(
+        update={
+            "schema_version": "task-spec-v2",
+            "content_policy_revision": CONTENT_POLICY_REVISION,
+            "hidden_targets": task.hidden_targets.model_copy(
+                update={
+                    "expected_values": _normalize_expected_values(
+                        task.hidden_targets.expected_values
+                    )
+                }
+            ),
+        }
+    )
+    if _task_quality_violations(revised, graph):
+        route = "reject"
+    else:
+        route = "rl" if _machine_verifiable(revised, graph, bundle, oracle_result_ids) else "sft"
+    if revised.family == "grounded_explanation":
         route = "sft"
-    return task.model_copy(
+    return revised.model_copy(
         update={
             "task_id": task_id,
             "paper_id": bundle.paper_id,
@@ -659,6 +1016,18 @@ def _normalize_task(
             "construction_provenance": [*task.construction_provenance, trace.trace_id],
         }
     )
+
+
+def _normalize_expected_values(values: dict[str, float | str]) -> dict[str, float | str]:
+    """Canonicalize JSON numeric literals without guessing about units or symbols."""
+    normalized: dict[str, float | str] = {}
+    for target, value in values.items():
+        if isinstance(value, str) and _NUMERIC_LITERAL.fullmatch(value.strip()):
+            numeric = float(value)
+            normalized[target] = numeric if math.isfinite(numeric) else value
+        else:
+            normalized[target] = value
+    return normalized
 
 
 def _machine_verifiable(
@@ -678,30 +1047,81 @@ def _machine_verifiable(
     ):
         return False
     nodes = {node.id: node for node in graph.nodes}
+    strict_reasoning = task.content_policy_revision == CONTENT_POLICY_REVISION
+    if strict_reasoning and task.difficulty.estimated < 4:
+        return False
     if task.family == "derivation_completion":
-        return any(
-            nodes.get(node_id) and nodes[node_id].type == "equation"
+        equation_nodes = [
+            node_id
             for node_id in targets.required_nodes
+            if nodes.get(node_id) and nodes[node_id].type == "equation"
+        ]
+        has_equation_node = bool(equation_nodes)
+        derivation_relations = [
+            edge
+            for edge in targets.required_relations
+            if edge.relation in {"derives", "depends_on", "uses", "produces", "enables"}
+            and nodes.get(edge.source)
+            and nodes.get(edge.target)
+            and nodes[edge.source].type == "equation"
+            and nodes[edge.target].type == "equation"
+        ]
+        if strict_reasoning and (len(equation_nodes) < 2 or not derivation_relations):
+            return False
+        expected_expressions = [
+            value for value in targets.expected_values.values() if isinstance(value, str)
+        ]
+        expected_numbers = [
+            value
+            for value in targets.expected_values.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        return bool(
+            has_equation_node
+            and (expected_numbers or expected_expressions)
+            and all(symbolic_expression_is_checkable(value) for value in expected_expressions)
         )
     if task.family == "method_dag":
-        return (
-            len(
-                [
-                    node_id
-                    for node_id in targets.required_nodes
-                    if nodes.get(node_id) and nodes[node_id].type == "method_step"
-                ]
+        method_nodes = [
+            node_id
+            for node_id in targets.required_nodes
+            if nodes.get(node_id) and nodes[node_id].type == "method_step"
+        ]
+        if strict_reasoning:
+            return bool(
+                len(method_nodes) >= 4
+                and len(targets.required_relations) >= 3
+                and (targets.expected_values or targets.configuration_constraints)
             )
-            >= 2
-        )
+        return len(method_nodes) >= 2
     if task.family == "figure_table_reasoning":
+        numeric_values = [
+            value
+            for value in targets.expected_values.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if strict_reasoning:
+            return bool(len(numeric_values) >= 2 and len(targets.required_nodes) >= 2)
         return bool(targets.expected_values) or any(
             nodes.get(node_id) and nodes[node_id].type in {"figure_value", "table_value", "metric"}
             for node_id in targets.required_nodes
         )
     if task.family == "corruption_diagnosis":
+        if strict_reasoning:
+            return bool(
+                targets.required_faults
+                and len(targets.required_relations) >= 2
+                and len(targets.required_nodes) >= 3
+                and (targets.expected_values or targets.configuration_constraints)
+            )
         return bool(targets.required_faults and targets.required_relations)
     if task.family == "assumption_consequence":
+        if strict_reasoning:
+            return bool(
+                len(targets.required_relations) >= 2
+                and len(targets.required_nodes) >= 3
+                and (targets.expected_values or targets.configuration_constraints)
+            )
         return bool(targets.required_relations and targets.required_nodes)
     if task.family == "single_paper_research":
         return bool(
@@ -727,101 +1147,167 @@ def _machine_verifiable(
                 for value in targets.expected_values.values()
             )
         )
+    if strict_reasoning:
+        return bool(
+            targets.accepted_evidence_sets
+            and len(targets.required_nodes) >= 2
+            and (targets.expected_values or targets.configuration_constraints)
+        )
     return bool(targets.accepted_evidence_sets or targets.required_nodes)
 
 
-def _deterministic_corruption_task(
-    *,
-    bundle: PaperBundle,
-    graph: PaperEvidenceGraph,
-    designer_trace: ProviderTrace,
-) -> TaskSpec | None:
+_INTERNAL_FORMAT_PATTERNS = (
+    re.compile(
+        r"\b(?:span|node|equation|method|fault|claim|table|figure|result)\s*ids?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\binternal identifiers?\b", re.IGNORECASE),
+    re.compile(r"\[fault:[^\]]+\]", re.IGNORECASE),
+    re.compile(r"\bstable paper evidence\b", re.IGNORECASE),
+    re.compile(r"\breconstruct the supported direction\b", re.IGNORECASE),
+)
+
+
+def _task_quality_violations(task: TaskSpec, graph: PaperEvidenceGraph) -> list[str]:
+    """Reject low-value v2 tasks before spending solver calls."""
+    if task.content_policy_revision != CONTENT_POLICY_REVISION:
+        return []
+    violations: list[str] = []
+    instruction = task.public_instruction.strip()
+    if task.difficulty.estimated < 3:
+        violations.append("difficulty below scientific post-training floor")
+    if len(set(task.reasoning_operations)) < 2:
+        violations.append("task does not require at least two distinct reasoning operations")
+    if any(pattern.search(instruction) for pattern in _INTERNAL_FORMAT_PATTERNS):
+        violations.append(
+            "public task asks for internal identifiers instead of scientific reasoning"
+        )
+
     nodes = {node.id: node for node in graph.nodes}
-    edge = next(
-        (
+    targets = task.hidden_targets
+    if task.family == "derivation_completion":
+        equation_nodes = [
+            node_id
+            for node_id in targets.required_nodes
+            if nodes.get(node_id) and nodes[node_id].type == "equation"
+        ]
+        if len(equation_nodes) < 2 or not targets.required_relations:
+            violations.append(
+                "derivation is direct formula lookup rather than a multi-step derivation"
+            )
+    elif task.family == "figure_table_reasoning":
+        numeric_targets = [
             value
-            for value in graph.edges
-            if value.relation in {"precedes", "derives", "depends_on", "enables"}
-            and value.source in nodes
-            and value.target in nodes
-        ),
-        None,
-    )
-    if edge is None:
-        return None
-    source = nodes[edge.source]
-    target = nodes[edge.target]
-    spans = list(dict.fromkeys([*source.supporting_spans, *target.supporting_spans]))
-    if not spans:
-        return None
-    fault_id = stable_id(
-        "fault",
-        bundle.paper_id,
-        edge.source,
-        edge.relation,
-        edge.target,
-    )
-    false_relation = EvidenceEdge(
-        source=edge.target,
-        relation=edge.relation,
-        target=edge.source,
-    )
-    instruction = (
-        f"The candidate relation [{fault_id}] asserts that {false_relation.source!r} "
-        f"{false_relation.relation} {false_relation.target!r}. Identify the planted fault, "
-        "reconstruct the supported direction, and cite the stable paper evidence."
-    )
-    return TaskSpec(
-        task_id=stable_id("paper-task", bundle.paper_id, "corruption_diagnosis", fault_id),
-        paper_id=bundle.paper_id,
-        family="corruption_diagnosis",
-        public_instruction=instruction,
-        public_context_policy=PublicContextPolicy(included_spans=spans),
-        hidden_targets=HiddenTargets(
-            required_nodes=[edge.source, edge.target],
-            required_relations=[edge],
-            accepted_evidence_sets=[spans],
-            required_faults=[fault_id],
-        ),
-        verifier_class="planted_relation_fault_v1",
-        difficulty=Difficulty(estimated=3, sources=["deterministic_relation_corruption"]),
-        reasoning_operations=["fault_identification", "relation_reconstruction"],
-        construction_provenance=[
-            designer_trace.trace_id,
-            "deterministic-corruption-v1",
-        ],
-        route="rl",
-    )
+            for value in targets.expected_values.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if len(numeric_targets) < 2 or len(targets.required_nodes) < 2:
+            violations.append("numeric task is a single lookup or one-step arithmetic exercise")
+    elif task.family == "method_dag":
+        method_nodes = [
+            node_id
+            for node_id in targets.required_nodes
+            if nodes.get(node_id) and nodes[node_id].type == "method_step"
+        ]
+        if len(method_nodes) < 3 or len(targets.required_relations) < 2:
+            violations.append("method task is simple node or edge listing")
+    elif task.family == "corruption_diagnosis":
+        if len(targets.required_nodes) < 3 or len(targets.required_relations) < 2:
+            violations.append("corruption task is simple graph-edge reversal")
+    return violations
 
 
 def _select_diverse_tasks(tasks: list[TaskSpec], *, limit: int) -> list[TaskSpec]:
+    family_priority = {
+        "derivation_completion": 0,
+        "assumption_consequence": 1,
+        "single_paper_research": 2,
+        "result_reproduction": 3,
+        "experiment_configuration": 4,
+        "figure_table_reasoning": 5,
+        "claim_evidence": 6,
+        "method_dag": 7,
+        "grounded_explanation": 7,
+        "corruption_diagnosis": 9,
+    }
+    family_limits = {
+        "derivation_completion": 2,
+        "assumption_consequence": 2,
+        "single_paper_research": 1,
+        "result_reproduction": 1,
+        "experiment_configuration": 1,
+        "figure_table_reasoning": 1,
+        "claim_evidence": 1,
+        "method_dag": 1,
+        "grounded_explanation": 1,
+        "corruption_diagnosis": 1,
+    }
+
+    def depth(task: TaskSpec) -> int:
+        targets = task.hidden_targets
+        return (
+            task.difficulty.estimated * 10
+            + len(set(task.reasoning_operations)) * 4
+            + len(targets.expected_values) * 3
+            + len(targets.required_relations) * 2
+            + len(targets.required_nodes)
+        )
+
+    ranked = sorted(
+        tasks,
+        key=lambda task: (
+            family_priority.get(task.family, len(family_priority)),
+            -depth(task),
+            task.task_id,
+        ),
+    )
     selected: list[TaskSpec] = []
-    seen_families: set[str] = set()
-    for task in tasks:
-        if task.family in seen_families:
+    family_counts: dict[str, int] = {}
+    for task in ranked:
+        if family_counts.get(task.family, 0) >= family_limits.get(task.family, 1):
             continue
         selected.append(task)
-        seen_families.add(task.family)
+        family_counts[task.family] = family_counts.get(task.family, 0) + 1
         if len(selected) >= limit:
             return selected
-    for task in tasks:
-        if task not in selected:
-            selected.append(task)
-        if len(selected) >= limit:
-            break
     return selected
 
 
 def _designer_system() -> str:
     schema = canonical_json(TaskBatch.model_json_schema()).decode()
-    return f"""Design high-value scientific post-training TaskSpecs from one hidden evidence graph.
-Return strict JSON {{"tasks": [...]}}. Use only supplied stable spans. Propose the requested mixture
-across claim/evidence, derivation, method DAG, figure/table, corruption diagnosis,
-assumption/consequence, long single-paper research, and grounded SFT reasoning where evidence
-permits. When audited official artifacts are present, also consider experiment configuration and
-result reproduction. Separate public context from hidden targets, add same-paper distractors only,
-avoid answer leakage, and reject underspecified families rather than inventing. The response must
-validate exactly against REQUIRED_JSON_SCHEMA.
+    return f"""Design frontier-model scientific reasoning TaskSpecs from one evidence graph.
+Return strict JSON {{"tasks": [...]}} and use only supplied paper evidence. Optimize first for:
+1. multi-step derivations in which at least two equations are transformed or composed;
+2. scaling-law inference that derives exponents, coefficients, regimes, or consequences;
+3. numerical synthesis across multiple rows, columns, figures, ablations, or conditions;
+4. assumption and failure-mode analysis that propagates a changed premise through several claims;
+5. algorithm analysis comparing complexity, convergence, invariants, or design tradeoffs.
+
+An RL proposal must be difficulty 4 or 5, require at least two distinct reasoning operations, expose a
+finite answer-facing numeric, symbolic, or discrete outcome in hidden_targets.expected_values or
+configuration_constraints, and support a deterministic verifier. A derivation must contain a parseable
+canonical expression and a genuine equation dependency chain. Public instructions must read like natural
+scientific questions. Never ask the learner to list node IDs, equation IDs, span IDs, reverse one graph edge,
+copy one value, identify the largest cell, or perform a single subtraction or percentage calculation. Do not
+manufacture complexity by demanding internal manifest fields. Route valuable open-ended synthesis to SFT;
+omit low-value or underspecified tasks entirely. Method DAG and corruption families are last-resort tasks and
+must involve a multi-step scientific failure or algorithmic chain, not schema reconstruction. Official-artifact
+configuration or reproduction tasks require audited oracle results. Keep answers hidden, context paper-local,
+and distractors same-paper only.
+
+Construct the scientific solution before proposing the task: identify the supplied inputs, linked reasoning
+steps, requested outputs, and independently checkable target values. Every necessary equation, table cell,
+assumption and definition must exist in the learner-accessible paper context or frozen tools, not just in the
+private graph. A caption or quoted aggregate is not a substitute for missing rows. Never ask for unavailable
+per-condition calculations and then use the paper's reported mean as the reference solution.
+For RL, the hidden numeric/symbolic outcome must depend on the reasoning, not be a decorative extra beside
+an edge reversal. Require consequences beyond the correction itself. Two unrelated arithmetic operations
+or extra graph identifiers do not make a deep task. Prefer, when supported, deriving a LoRA scaling relation
+and checking its limiting regime, composing affine log-score transformations, deriving a T-SVD factorization
+consequence, or analyzing a quasi-Newton approximation under changed assumptions. These are depth examples,
+not permission to introduce topics or mathematics absent from this paper. An empty task list is better than
+invented difficulty. SFT should explain a substantive paper-specific inference, not pad a trivial task.
+The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
 
@@ -858,13 +1344,44 @@ def _designer_prompt(
     count: int,
     oracle_result_ids: set[str],
 ) -> str:
+    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
-        f"Propose exactly {count} materially different TaskSpecs. Cover the strongest supported "
-        "families, including the five deterministic RL templates and a long paper-local tool task. "
-        "Configuration or result-reproduction tasks require an audited official artifact. Route "
-        "valuable but non-finite work to SFT.\n"
+        f"Propose up to {count} materially different TaskSpecs. Cover the strongest supported "
+        "scientific problems, prioritizing derivation, scaling-law or regime inference, multi-result "
+        "numerical synthesis, assumption consequences, and algorithm analysis. At least half of the "
+        "proposals should come from those high-value categories when the graph supports them. Do not "
+        "fill the count with low-value tasks: return fewer tasks when necessary. Configuration or "
+        "result-reproduction tasks require an audited official artifact. Route valuable but non-finite "
+        "work to SFT.\n"
+        f"{bundle.metadata.get('classifier_section_hints', '')}\n"
         f"AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:\n{canonical_json(sorted(oracle_result_ids)).decode()}\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
+        f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}"
+    )
+
+
+def _task_semantic_repair_prompt(
+    *,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+    batch: TaskBatch,
+    validation_errors: list[str],
+    count: int,
+    oracle_ids: set[str],
+) -> str:
+    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
+    return (
+        "The first proposal contained no usable task after deterministic validation. Repair the "
+        "existing supported ideas against the exact errors below. Do not relax the quality bar, "
+        "invent evidence, or manufacture a finite RL answer. If an idea is scientifically valuable "
+        "but not deterministically verifiable, route it to SFT. Do not return an empty list merely "
+        "because no RL task is possible: a paper-specific derivation explanation, comparison, "
+        "assumption analysis, or synthesis can still be valuable SFT. Return no more than "
+        f"{count} tasks, and return an empty list only when the paper truly supports none.\n"
+        f"DETERMINISTIC_ERRORS:\n{canonical_json(validation_errors).decode()}\n"
+        f"FIRST_PROPOSAL:\n{canonical_json(batch).decode()}\n"
+        f"AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:\n{canonical_json(sorted(oracle_ids)).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}"
     )
 
@@ -873,7 +1390,19 @@ def _answerability_system() -> str:
     schema = canonical_json(AnswerabilityBatch.model_json_schema()).decode()
     return f"""Independently audit scientific tasks using only the supplied paper. Return strict JSON
 with decisions. Reject tasks that require external knowledge, expose their answer, admit multiple
-incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier.
+incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier when
+proposed for RL. Valuable answerable open-ended SFT synthesis does not require a finite RL outcome.
+Also reject shallow tasks whose substance is one lookup, one arithmetic operation, internal-ID listing,
+simple edge reversal, or manifest-format compliance. Mark unique_enough_for_rl only for difficulty 4-5
+work requiring multiple linked reasoning steps and an answer-facing numeric, symbolic, or discrete outcome.
+Do not confuse a long instruction with deep reasoning. A concise formula derivation can be deep; a long list
+of requested fields can still be shallow.
+Check each requested output against the actual learner-accessible spans and tools, not merely against
+the private graph or hidden answer. Missing table rows, definitions or initial assumptions make a numerical
+task unanswerable even if the paper states an aggregate result. Work through the dependency chain: do not
+trust a self-reported difficulty or a list of reasoning operations. Reject decorative numeric targets whose
+answer does not depend on the claimed multi-step reasoning. A method-chain correction qualifies only when
+it requires deriving and checking nontrivial scientific consequences, not restoring a supplied relation.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -884,10 +1413,36 @@ def _answerability_prompt(
     graph: PaperEvidenceGraph,
     tasks: list[TaskSpec],
 ) -> str:
+    task_spans = {
+        span_id
+        for task in tasks
+        for span_id in [
+            *task.public_context_policy.included_spans,
+            *task.public_context_policy.same_paper_distractors,
+        ]
+    }
     return (
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=task_spans).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}\n"
         f"TASKS:\n{canonical_json(tasks).decode()}"
+    )
+
+
+def _answerability_completion_prompt(
+    *,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+    tasks: list[TaskSpec],
+    decisions: AnswerabilityBatch,
+    missing_task_ids: list[str],
+) -> str:
+    return (
+        "The prior audit omitted task IDs. Return the complete AnswerabilityBatch. Preserve every "
+        "existing decision verbatim and independently audit each missing task under the same strict "
+        "criteria. Do not weaken a negative decision or invent an ID.\n"
+        f"MISSING_TASK_IDS:\n{canonical_json(missing_task_ids).decode()}\n"
+        f"EXISTING_DECISIONS:\n{canonical_json(decisions).decode()}\n"
+        f"ORIGINAL_INPUT:\n{_answerability_prompt(bundle, graph, tasks)}"
     )
 
 
@@ -896,9 +1451,20 @@ def _solver_system() -> str:
     return f"""Solve one scientific task using only its supplied same-paper context and the allowed
 frozen tools. Return strict JSON with status, report, answer_manifest, and tool_calls. Use status
 tool_request with non-empty tool_calls when evidence must be searched or recomputed; use status final
-with report and answer_manifest only after reviewing the returned observations. Every conclusion must
-commit to allowed node/span IDs. Do not quote long passages, use outside knowledge, claim unexecuted
-tool results, or expose hidden construction instructions. The response must validate exactly against
+with report and answer_manifest only after reviewing the returned observations. The readable report is the
+scientific answer: show intermediate reasoning, calculations, assumptions, and the final requested values or
+expressions there. The manifest is machine-readable provenance and must agree with the report; it is never a
+substitute for reasoning. Every conclusion must commit to allowed graph node IDs in the manifest. Include
+evidence span IDs only when the public answer policy requires citations; derivation reports must instead give
+a natural step-by-step derivation and final expression without mentioning internal IDs. Do not quote long
+passages, use outside knowledge, claim unexecuted tool results, expose hidden construction instructions, or
+answer by merely enumerating graph identifiers. Address every requested subproblem in the readable report. For numeric synthesis,
+show the actual inputs, intermediate results and aggregation with units and denominators. Do not substitute
+a reported mean for requested per-condition results. If a necessary table or input is absent, use the
+allowed tools to look for it; if it remains absent, state precisely what cannot be computed and do not
+invent values, imply completion or put unsupported results in the manifest. For derivations, state the
+assumptions and show the transformations and requested boundary or consistency checks.
+The response must validate exactly against
 REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -919,12 +1485,36 @@ def _solver_prompt(
         ]
         if span_id in span_map
     }
-    target_nodes = [node for node in graph.nodes if node.id in task.hidden_targets.required_nodes]
+    public_span_ids = set(context)
+    allowed_nodes = [
+        {"id": node.id, "type": node.type}
+        for node in graph.nodes
+        if set(node.supporting_spans) & public_span_ids
+    ]
+    public_task = {
+        "task_id": task.task_id,
+        "paper_id": task.paper_id,
+        "family": task.family,
+        "instruction": task.public_instruction,
+        "answer_contract": task.answer_contract,
+        "allowed_tools": task.public_context_policy.tool_access,
+        "allowed_manifest_nodes": allowed_nodes,
+        "output_target_ids": sorted(task.hidden_targets.expected_values),
+        "evidence_policy": (
+            "optional_internal_provenance"
+            if not _requires_explicit_evidence(task)
+            else "cite_public_span_ids"
+        ),
+    }
     return (
-        f"PLAN_VARIATION: {plan}\nTASK:\n{canonical_json(task).decode()}\n"
-        f"PUBLIC_CONTEXT:\n{canonical_json(context).decode()}\n"
-        f"CONSTRUCTION_TARGETS_FOR_REFERENCE_SOLVER_ONLY:\n{canonical_json(target_nodes).decode()}"
+        f"PLAN_VARIATION: {plan}\nPUBLIC_TASK:\n{canonical_json(public_task).decode()}\n"
+        f"PUBLIC_CONTEXT:\n{canonical_json(context).decode()}"
     )
+
+
+def _requires_explicit_evidence(task: TaskSpec) -> bool:
+    """Citations are an answer skill, not a universal scientific-task tax."""
+    return task.family != "derivation_completion"
 
 
 def _solver_turn_prompt(
@@ -989,11 +1579,23 @@ def _execute_tool(runtime: PaperRuntime, task: TaskSpec, call: ToolCall) -> Tool
 
 def _grounding_system() -> str:
     schema = canonical_json(GroundingCritique.model_json_schema()).decode()
-    return f"""Audit the available independently generated reference solutions against one paper
-and task. Return strict
-JSON with accepted, findings, unsupported_claims, contradictory_claims. Check
-manifest/prose consistency, exact evidence support, calculations, completeness, and scientific value.
-Your vote cannot override deterministic checks. The response must validate exactly against
+    return f"""Audit each independently generated reference trajectory against one paper and task.
+Return one decisions entry for every supplied trajectory_id plus task-level findings. For each trajectory,
+set scientifically_grounded=false only when its readable scientific answer contains a specific unsupported
+claim, contradiction, wrong calculation, or materially incomplete conclusion, and list that concrete error
+under unsupported_claims, contradictory_claims or missing_required_outputs. Judge trajectories independently: one bad solution must
+never reject a good paired solution. Do not reject for missing node IDs, relation labels, evidence ordering,
+configuration keys, manifest shape, or other format concerns; executable deterministic validators own those
+checks. Do not require two solutions to agree. A correct but differently worded solution is grounded. Your
+vote cannot override deterministic security, replay, adversarial, mutation, symbolic, or numeric checks.
+Audit every requested scientific deliverable, not just the final scalar or the manifest. List each omitted
+calculation, condition, derivation step or conclusion in missing_required_outputs. An honest statement that
+the requested evidence is missing is not a completed training solution. Reject an answer that says a table
+is unavailable but supplies an aggregate without its required per-row derivation. Independently recompute
+numeric results from supplied values and check units, populations, denominators and limiting cases. Graph
+targets and agreement between two solvers are not independent proof. If any of these three error lists is
+non-empty, set scientifically_grounded=false. Do not put mere formatting or internal-ID issues in them.
+The response must validate exactly against
 REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -1005,20 +1607,48 @@ def _grounding_prompt(
     task: TaskSpec,
     trajectories: list[Trajectory],
 ) -> str:
+    task_spans = {
+        *task.public_context_policy.included_spans,
+        *task.public_context_policy.same_paper_distractors,
+    }
     return (
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=task_spans).decode()}\n"
         f"GRAPH:\n{canonical_json(graph).decode()}\nTASK:\n{canonical_json(task).decode()}\n"
         f"SOLUTIONS:\n{canonical_json(trajectories).decode()}"
     )
 
 
+def _grounding_completion_prompt(
+    *,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+    task: TaskSpec,
+    trajectories: list[Trajectory],
+    critique: GroundingCritique,
+    missing_trajectory_ids: list[str],
+) -> str:
+    return (
+        "The prior scientific grounding audit omitted trajectory IDs. Return the complete "
+        "GroundingCritique. Preserve every existing decision verbatim and independently audit each "
+        "missing trajectory under the same strict criteria. Do not infer correctness from another "
+        "trajectory and do not invent an ID.\n"
+        f"MISSING_TRAJECTORY_IDS:\n{canonical_json(missing_trajectory_ids).decode()}\n"
+        f"EXISTING_CRITIQUE:\n{canonical_json(critique).decode()}\n"
+        f"ORIGINAL_INPUT:\n{_grounding_prompt(bundle, graph, task, trajectories)}"
+    )
+
+
 __all__ = [
+    "CONTENT_POLICY_REVISION",
     "AnswerabilityBatch",
     "GroundingCritique",
     "SolutionPayload",
     "SolvedTask",
+    "SolverFailure",
     "TaskBatch",
     "TaskFactory",
     "TaskOutputError",
+    "TrajectoryGroundingDecision",
+    "grounding_decision_blocks",
     "validate_task",
 ]

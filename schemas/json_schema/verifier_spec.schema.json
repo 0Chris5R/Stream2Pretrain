@@ -83,7 +83,9 @@
             "symbolic_equivalence",
             "numeric_tolerance",
             "method_partial_order",
+            "derivation_partial_order",
             "fault_identification",
+            "forbidden_faults",
             "required_relations",
             "required_qualifications",
             "configuration_constraints",
@@ -110,6 +112,14 @@
   },
   "additionalProperties": false,
   "properties": {
+    "critic_audit": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Critic Audit",
+      "type": "array"
+    },
     "determinism_seed": {
       "minimum": 0,
       "title": "Determinism Seed",

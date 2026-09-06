@@ -1,69 +1,42 @@
 # Scientific Paper to SFT and RL Environment Foundry
 
-Status: implemented, local live-provider pilot in progress
-Contract date: 2026-08-19
-Scope owner: project team
+The Foundry converts curated scientific papers into grounded SFT trajectories
+and standalone verifier-backed RL environments. It generates data, not model
+weights. Its upstream input is an eligible Gold record and durable scientific
+evidence, not a second source fetch or extraction pipeline.
 
-This document is the binding implementation and operations contract for the
-post-training foundry added to Stream2Pretrain. It translates curated,
-licence-cleared scientific papers into grounded SFT trajectories and standalone
-RL-verifiable environments. It does not train a model. The project keeps the
-Stream2Pretrain name until a live pilot proves the complete
-path. A rename to Stream2Train is a later explicit decision.
+The design follows the parts of current open post-training systems that are
+applicable to a paper-grounded data foundry. Kimi K3 uses source-material-guided
+task synthesis, specialized generators, multiple verification stages, and human
+annotation before SFT; its verifiable RL tasks run in checkable environments.
+Kimi K2.5 likewise separates rule-verifiable tasks from open-ended work judged
+with rubrics. Tulu 3 separates SFT from reinforcement learning with verifiable
+rewards, while OpenThoughts combines deterministic math checking with independent
+model review. Stream2Pretrain applies that pattern locally: the paper is the
+source of truth, SFT and RL have different acceptance contracts, model judgments
+are never sufficient for RL, and named human review is an additional quality
+feature rather than a missing stage.
 
-## 1. Approved adaptations to the original architecture
+Primary references: [Kimi K3](https://arxiv.org/html/2607.24653),
+[Kimi K2.5](https://arxiv.org/html/2602.02276),
+[Kimi k1.5](https://github.com/MoonshotAI/Kimi-k1.5),
+[Tulu 3](https://github.com/allenai/open-instruct/blob/main/docs/tulu3.md), and
+[OpenThoughts](https://github.com/open-thoughts/open-thoughts).
 
-The supplied architecture assumed no knowledge of the existing repository. The
-implementation preserves its functional requirements with these explicit
-adaptations:
+## 1. Integration contract
 
-1. Hetzner Experiments Inference is the only model provider. Every
-   model-authored construction, solving, criticism, verifier, repair, and
-   adversarial role uses the exact `Qwen3.8-27B` route.
-2. `Qwen3.8-27B` has an exact Apache-2.0 model record. Authenticated `/models`
-   discovery is authoritative. A missing configured route prevents startup.
-   Returned route mismatches fail the call, while catalogue changes are
-   recorded for inspection without creating a separate approval workflow.
-3. The architecture's paper loader is an adapter over the existing
-   `GoldRecord` plus `ScientificDocument`. It does not add a second extractor or
-   duplicate curation. Existing stable sections, equations, tables, figures,
-   OCR decisions, quality signals, PII decisions, decontamination state, and
-   source provenance become an immutable `PaperBundle`.
-4. The former `reasoning_candidate` route is now `posttrain_candidate`.
-   Historical snapshots remain readable only through an explicit legacy flag.
-   The foundry consumes the new route by default.
-5. Post-training uses one ranked UTC-day snapshot rather than a fixed paper
-   cap. After the configured UTC hour, candidates are ordered by reasoning
-   evidence, composite quality, recency, and document ID.
-   They run serially until the snapshot is exhausted or a published provider
-   limit is reached. Unprocessed candidates remain durable and compete in
-   the next daily ranking. This spends the available API budget on the
-   strongest current candidates without inventing a paper limit.
-6. Redpanda, Bytewax, MinIO, Iceberg, Polaris, Prometheus, Grafana, and the
-   existing Next.js UI remain the control and data plane. A second workflow
-   engine and W&B are unnecessary for the required semantics.
-7. Prime Intellect Verifiers export uses its current v1 `Taskset`, `TaskData`,
-   reward, and `Toolset` interfaces. The generated environment is pinned to
-   `verifiers==0.1.14`. NeMo Gym remains a later export target, as in the
-   supplied plan.
-8. Official repositories, datasets, and checkpoints are optional inputs. They
-   run only when an audited manifest supplies a permissive licence, immutable
-   content hashes, and a digest-pinned oracle image. Paper-only tasks remain the
-   default.
-9. Local replay uses recorded real provider outputs. It is a deterministic
-   regression mode, never a source of production artifacts.
-10. Provider qualification benchmarks, availability heartbeats, threshold
-    gates, and provider approval records are intentionally absent. They do not
-    improve this once-daily student pipeline enough to justify their cost.
-11. Human review applies to generated SFT/RL artifacts, not providers. Each
-    approve or reject action records the reviewer, optional reason, and time as
-    an append-only audit record. It never rewrites the generated artifact.
-12. Copy-ratio, shared-word, and minimum-answer-length limits are not part of
-    construction, validation, diagnostics, or logging. Grounding is determined
-    from structured evidence and deterministic task/verifier checks.
-
-These are integration choices, not reduced task, validation, provenance, or
-security requirements.
+- All model-authored roles use Hetzner Experiments Inference and exact
+  `Qwen3.8-27B`, with authenticated catalogue discovery and returned-model logs.
+- The existing Gold record and scientific artifact form an immutable PaperBundle.
+- The daily scheduler freezes all candidates received in the preceding 24 hours
+  and processes them in rank order, without a fixed daily paper cap.
+- The task designer receives the complete existing paper input. High
+  classifier section scores add optional hints, not context replacement.
+- Validation decisions apply to individual SFT trajectories and RL environments.
+  A named human audit is a separate append-only record.
+- Generated Prime Intellect packages use `verifiers==0.3.1` interfaces.
+- Official-artifact oracles are optional, isolated and disabled in the current
+  deployment. Recorded-provider replay is an explicit deterministic test mode.
 
 ## 2. End-to-end data flow
 
@@ -109,21 +82,38 @@ These conditions rely on the upstream guarantee that only licence-admitted
 Gold records reach `docs.curated`. There is no post-training licence stage,
 licence hash, licence ledger, or second legal decision.
 
-At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC`, a one-replica scheduler freezes the day's
-candidate cutoff and ranks that snapshot lexicographically by
-`reasoning_score DESC`, `quality_score DESC`, `valid_from DESC`, and
-`doc_id ASC`. Lexicographic ordering avoids an
-unvalidated weighted score. Papers run one after another. Daily quota
-exhaustion closes the run; minute-window exhaustion pauses it until capacity
-resets. New arrivals after the cutoff wait for the next day. If no candidate
-exists at the scheduled time, no empty run is committed and the first later
-arrival may start that day's snapshot.
+At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC` and
+`S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC`, a one-replica scheduler commits exactly one
+cohort, including an empty cohort. It first drops unprocessed entries at or
+before the prior 24-hour boundary, then freezes all queued candidates received
+after that boundary and no later than the current boundary. Papers are ranked
+by token-weighted mean `arxiv-posttrain-suitability` score divided by five.
+Ties use reasoning, composite quality, recency and document ID. API cost and
+context length are not ranking inputs. The structural fallback for records
+without an active learned score is defined in `processor/foundry/worker.py`.
+
+The production schedule is 08:30 UTC, corresponding to 10:30 Europe/Berlin
+while daylight-saving time is active. The deployment is anchored by
+`S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC=2026-08-28T08:30:00Z`, so changing the run
+hour cannot accidentally back-run the preceding day's cohort. The worker processes the entire frozen rank order serially until the next boundary. A provider-capacity stop
+does not admit older papers at the next boundary: any unfinished cohort members
+are removed, and only the newly completed 24-hour arrival window may compete.
+New arrivals after the cutoff wait for the next cohort. An authenticated
+control API remains available for operator diagnostics, but the monitoring UI
+does not expose pipeline-control actions.
 
 The control store resets interrupted `processing` rows to `queued` after
 restart and resumes the same daily cutoff. A serialized background drain loop
 rechecks independently of source arrivals. Its 60-second poll interval and the
 00:00 UTC run-hour default are operational starting values marked
 `needs-measurement`; neither is a throughput claim.
+
+Candidate admission reads and validates the exact structured scientific JSON
+referenced by Gold, then snapshots those bytes beside the Gold payload in the
+durable queue. Provider work therefore does not depend on later MinIO reads of
+an artifact that was already acknowledged at admission. Unavailable source evidence prevents candidate generation; transient object-store
+failures remain retryable. Missing historical evidence does not become a
+fabricated content-quality rejection or a reconstructed paper from flat text.
 
 Every accepted paper-family package is assigned independently within its SFT
 or RL pool. Four consecutive paper packages go to `train` and the fifth goes
@@ -136,37 +126,6 @@ full-feed pretraining policy, its source paper may still be present in the
 pretraining corpus, so it is a post-training holdout rather than a guaranteed
 pretraining-unseen benchmark. Pretraining itself does not assign a benchmark
 route or split.
-
-### 3.1 Measured arXiv licence policy
-
-On 2026-08-19, a deduplicated observation of the official `cs.AI`, `cs.CL`,
-`cs.LG`, and `cs.CV` RSS feeds found 629 unique announced arXiv papers, of
-which 385 were new submissions or cross-lists. Their `dc:rights` distribution
-was:
-
-| Licence | Papers |
-| --- | ---: |
-| arXiv non-exclusive distribution licence | 276 |
-| CC BY 4.0 | 274 |
-| CC BY-SA 4.0 | 7 |
-| CC0 1.0 | 5 |
-| CC BY-NC-ND 4.0 | 33 |
-| CC BY-NC-SA 4.0 | 34 |
-
-The strict commercial-derivative allowlist (`CC BY`, `CC BY-SA`, and `CC0`)
-retained 286 of 629 announcements (45.47 percent) and 169 of 385 new or
-cross-listed papers (43.90 percent). It would therefore remove 54.53 percent
-of the full observed feed, not almost all of it.
-
-The deployment policy records an immutable decision before body retrieval.
-Only the 286 permissively licensed announcements in this observed sample would
-enter verbatim pretraining. Reviewed arXiv non-exclusive and CC BY-NC/NC-SA
-items may be fetched only for derived post-training generation. Missing,
-unknown, wrapper-only, and no-derivatives records remain quarantined and never
-reach extraction or classifiers. This is an engineering policy and provenance
-control, not a legal conclusion. Sources:
-`https://info.arxiv.org/help/license/index.html` and
-`https://info.arxiv.org/help/api/tou.html`.
 
 The current defaults propose six task specifications and retain at most three
 accepted tasks per paper. They are scheduling configuration, not claims about
@@ -245,10 +204,18 @@ Every possible transport attempt is reserved up front. Successful calls
 reconcile their exact attempt count and reported usage; failed calls or
 missing usage reconcile conservatively at the reserved maximum.
 Transport retry keeps the same route and semantic request. Provider errors and
-minute-quota exhaustion leave the paper and daily run resumable. Daily quota
-exhaustion closes the run while keeping the current paper and remaining
-candidates queued for the next UTC day. Semantic or legal failures produce
-explicit rejection states.
+minute-window exhaustion leave the current cohort resumable while it is still
+current. If provider capacity prevents completion before the next cohort
+boundary, unfinished papers expire with the old cohort rather than competing
+against newly arrived research. Semantic failures produce explicit rejection
+states.
+
+On worker restart, abandoned quota reservations are charged conservatively.
+Every prior `CALL_PLANNED` or `CALL_STARTED` event without a matching terminal
+call event is then closed with an auditable restart-recovery `CALL_FAILED`
+event before the queue resumes. Cached complete provider results remain
+idempotent, while an actually interrupted request receives a new call attempt;
+the UI no longer presents the prior process's call as live indefinitely.
 
 The API client performs real SSE streaming and saves reconstructable partial
 text hashes. It rejects invalid JSON, an unapproved exact returned route, a
@@ -271,9 +238,9 @@ Each pass is a prioritized incremental delta of at most 24 nodes and 40 edges.
 This keeps structured JSON inside the output window on unusually dense papers
 without collapsing the six distinct extraction objectives into one prompt.
 
-Qwen3.8 critiques the merged graph under a dedicated critic prompt. A bounded
-repair pass may add, replace, or remove nodes and edges before a second critic
-pass. References to nonexistent spans or objects, dangling edges, invalid
+Qwen3.8 critiques the merged graph under a dedicated critic prompt. Up to two
+bounded repair passes may add, replace, or remove nodes and edges, each followed
+by a fresh critic pass. References to nonexistent spans or objects, dangling edges, invalid
 paper identity, and unsupported graph regions fail before task generation.
 Official oracle results remain construction-private and never leak into public
 task context.
@@ -293,10 +260,32 @@ The implemented task families are:
 - official-artifact experiment configuration;
 - official-artifact result reproduction.
 
-Task proposal uses graph evidence and stable IDs. An independent answerability
-audit rejects missing targets, unresolved public context, oracle-only answers,
-and tasks that cannot be checked from the packaged environment. Selection is
-deterministic and balances accepted families within each paper.
+Task proposal uses graph evidence and stable IDs. Content policy
+`scientific-reasoning-v2` prioritizes, in order, multi-step derivations,
+scaling-law or regime inference, multi-result numerical synthesis, assumption
+consequences, and algorithm analysis. Derivation and assumption families are
+capped at two tasks each; every other family is capped at one. Within a family,
+difficulty, distinct reasoning operations, answer-facing values, relations,
+and graph nodes determine priority. Corruption diagnosis is last. The selector
+does not backfill unused slots with shallow tasks.
+
+An independent answerability audit rejects missing targets, unresolved public
+context, oracle-only answers, external knowledge, answer leakage, ambiguous
+outcomes, and tasks that cannot be checked from the packaged environment. Both
+proposal and answerability prompts explicitly reject one-value lookup, one
+arithmetic operation, internal-ID listing, simple edge reversal, and
+manifest-format compliance. RL requires difficulty 4 or 5, at least two linked
+reasoning operations, and an answer-facing numeric, symbolic, or discrete
+outcome. Valuable open-ended synthesis remains SFT. A public task never becomes
+hard merely by demanding more schema fields.
+
+If a task batch is structurally valid but every proposal fails deterministic
+specification checks, one bounded repair receives the exact failures and the
+original paper evidence. If an answerability or grounding response omits an ID,
+one bounded completion pass audits only the missing items while preserving all
+existing decisions. A still-missing item fails closed. These repairs address
+provider formatting and omission errors without lowering any scientific or
+executable acceptance threshold.
 
 Each selected task receives bounded multi-turn solutions from separate Qwen3.8
 solver calls and prompts. The agents can request only frozen paper-local tools. Tool requests
@@ -304,6 +293,35 @@ are executed before the final answer and all turns are retained. Tool result
 turns are explicitly loss-masked for SFT. The final answer separates readable
 report text from an exact machine-checkable manifest of claims, evidence,
 equations, numeric results, qualifications, and tool use.
+
+The solver receives only the public instruction, public paper context, allowed
+node types, and output identifiers. Hidden targets and canonical answers never
+enter an SFT prompt. Its prompt says that the readable report is the scientific
+answer and must show intermediate reasoning, calculations, assumptions, and
+the final requested values or expressions. It says that the manifest is
+machine-readable provenance, not a substitute for reasoning. Derivation tasks
+ask for an ordinary step-by-step mathematical argument and final expression;
+they do not require the learner to return evidence-span citations or internal
+IDs. The hidden evidence links remain provenance for construction and audit.
+
+The grounding critic returns exactly one decision per trajectory. It may reject
+only a concrete unsupported claim, contradiction, wrong calculation, or
+materially incomplete scientific conclusion. Manifest shape, node IDs,
+relation labels, ordering, and configuration keys are owned by executable
+checks. A proven format-only negative vote does not discard a scientifically
+sound trajectory; an empty or scientifically substantive negative vote still
+fails closed. Every trajectory then runs the complete deterministic suite
+independently. A good SFT trajectory is retained even if its paired solution
+fails, and accepted packages contain only accepted trajectories. Rejected
+siblings remain separate inspectable artifact records with their trajectory ID,
+critic decision, validation report, and provider-trace links.
+
+The exact versioned prompt text is generated by `_designer_system`,
+`_answerability_system`, `_solver_system`, and `_grounding_system` in
+`processor/foundry/tasking.py`; each function appends the live strict JSON
+Schema to the literal policy above. Prompt version
+`paper-foundry-prompts-v4` invalidates the prior provider-call cache, so no v3
+response can be reused under this contract.
 
 ## 9. Frozen tools and verifier construction
 
@@ -317,19 +335,39 @@ Packaged tools have no network access and operate only on bundled public data:
 
 Tool count, result size, and expression structure are bounded. Imports, file
 access, attribute traversal, arbitrary Python execution, and shell execution
-are rejected.
+are rejected. Malformed tool arguments are returned as tool errors, and a
+repeated identical invalid request or eight tool-request turns rejects that
+solver trajectory rather than pinning the paper or daily queue.
 
-A model-authored rubric is compiled into an allowlisted `VerifierSpec`, not
-executed as generated Python. Predicate types cover required nodes, evidence
+For `scientific-reasoning-v2`, the authoritative `VerifierSpec` is compiled
+locally from the reviewed `TaskSpec` hidden targets. Qwen3.8 performs an
+audit-only critique and cannot add qualifications, targets, predicate types, or
+schema fields. The verifier can only enforce requirements in the reviewed task.
+The v1 package reader retains its bounded model-rubric contract for inspection
+of persisted artifacts. Predicate types cover required nodes, evidence
 membership and coverage, exact equations, numeric tolerances, required
 qualifications, contradiction flags, report-manifest consistency, and tool
-budget. Qwen3.8 criticizes the rubric, can perform one bounded repair, and then
-rechecks it under the critic prompt. The standalone verifier is copied into every package
-and imports neither network clients nor model SDKs.
+budget. The standalone verifier is copied into every package and imports
+neither network clients nor model SDKs.
+
+A derivation enters the RL route only when its target is a bounded numeric value
+or a canonical LaTeX expression that the packaged symbolic runtime can parse.
+Under v2 it must also bind at least two equation nodes through a real equation
+dependency. The verifier checks submitted target-specific intermediate and
+final equations for symbolic equivalence, checks required derivation order,
+and requires the readable report itself to expose the checked final expression.
+Numeric and required configuration outcomes must likewise appear in the
+readable report, not only in the hidden manifest. A report that merely lists
+internal IDs or says the answer is in the manifest fails. The packaged
+standalone reward implements the same checks as the construction-time suite and
+is regression-tested against the signed archive. A
+valuable derivation without such a deterministic oracle remains eligible for
+SFT but cannot be mislabeled as a machine-verifiable RL environment.
 
 ## 10. Acceptance suite
 
-No SFT or RL artifact is accepted from model consensus alone. The suite runs:
+No SFT or RL artifact is accepted from model consensus alone. The suite runs
+separately for each generated trajectory:
 
 - positive tests against independent trajectories;
 - equivalent-answer tests;
@@ -340,9 +378,23 @@ No SFT or RL artifact is accepted from model consensus alone. The suite runs:
 - security tests for tool budget and code-execution attempts.
 
 The package includes the actual test-case and mutation JSONL, not a summary
-placeholder. Validation reports retain false-positive and false-negative
-counts, every hard gate, mutation totals, and details. A failed gate rejects the
-artifact rather than weakening the verifier.
+placeholder. V2 mutations also remove answer-facing scientific results from
+the readable report while leaving the manifest intact. Validation reports
+retain false-positive and false-negative counts, every check, mutation totals,
+per-trajectory critic decisions, and details. SFT acceptance requires an
+independently grounded answer plus positive and equivalent execution of its
+answer-facing report, numeric, symbolic and configuration checks, metamorphic
+consistency, deterministic replay, security, and no false negatives. Graph
+ordering, relation serialization, adversarial and mutation results remain
+diagnostics for SFT because they measure an RL reward rather than the quality of
+the supervised response. RL requires the complete suite, including every graph
+contract, adversarial check and mutation kill. A failed applicable gate rejects
+only that trajectory rather than discarding a sound sibling. An RL environment is accepted when at least one
+independently grounded reference trajectory passes every gate; only those
+passing references enter its package.
+
+Task, prompt, verifier and policy revisions are retained in every package so
+outputs from different configurations remain distinguishable.
 
 ## 11. Official-artifact oracles
 
@@ -380,7 +432,9 @@ and does not force a proxy oracle.
 Accepted artifacts are deterministic gzip/tar archives in MinIO. Timestamps,
 member order, permissions, and gzip metadata are normalized before hashing.
 Each archive is stored under
-`s3://posttrain/<sft|rl>/<train|benchmark>/environments/...`. Each archive
+`s3://posttrain/<sft|rl>/<train|benchmark>/revisions/<content-policy>/environments/...`.
+The revision segment is mandatory, and the signed manifest repeats the same
+revision. Each archive
 contains:
 
 ```text
@@ -441,9 +495,12 @@ mechanical tests, which is never a production identity.
 ## 13. Storage, API, UI, and observability
 
 Redpanda adds `foundry.jobs`, `foundry.events`, and `foundry.artifacts`.
-MinIO adds the `posttrain` bucket. Iceberg adds append-only event and artifact
-tables. The local SQL catalogue and cloud Polaris catalogue use the same record
-contracts.
+MinIO adds the `posttrain` bucket. Iceberg adds event and artifact tables. The
+Foundry buffers records across jobs and commits after 5,000 records or one hour.
+Its persistent SQLite state is an outbox, so Kafka or Iceberg publication can be
+replayed idempotently after a worker or storage failure without regenerating an
+artifact. The local SQL catalogue and cloud Polaris catalogue use the same
+record contracts.
 
 The foundry API exposes dashboard, jobs, job detail, artifacts, quotas, model
 catalogues, health, and Prometheus metrics plus authenticated manual-run,
@@ -479,13 +536,14 @@ store is designed and measured. Provider work is naturally expensive and is
 serialized against shared quotas. Horizontal generation can later shard by paper family only
 after idempotency and quota ownership move to a shared transactional backend.
 The current CPU and memory requests and the 5 GiB control PVC are
-`needs-measurement` for the first cloud pilot.
+`needs-measurement` for sustained cloud operation.
 
 Required externally managed Secrets are:
 
 - `stream2pretrain-foundry-providers` with
   `HETZNER_INFERENCE_API_KEY` and a random `controlToken`;
-- `stream2pretrain-decon-signing` with `ed25519.key` and `ed25519.crt`;
+- `stream2pretrain-foundry-signing` with `ed25519.key` and `ed25519.crt`,
+  created once by deployment bootstrap unless it was pre-provisioned;
 - the existing MinIO and Polaris Secrets.
 
 The worker starts after `Qwen3.8-27B` is visible through authenticated model
@@ -513,12 +571,10 @@ export HETZNER_INFERENCE_API_KEY='...'
 ./scripts/foundry_local.sh logs
 ```
 
-Open `http://localhost:3100/post-training`. `Run now` freezes the same ranked
-candidate queue as the daily scheduler and the worker processes it serially
-until that snapshot is empty or the provider budget gate closes it. It does not
-bypass licence, quota, or validation gates. Generated artifacts can then be
-approved or rejected in the UI by entering the current reviewer name and an
-optional reason. Every action is retained. The script does not delete images,
+Open `http://localhost:3100/post-training` to monitor the scheduled queue and
+inspect artifacts. Generated artifacts can be approved or rejected in the UI
+by entering the current reviewer name and an optional reason. Every action is
+retained. The script does not delete images,
 volumes, lakehouse data, provider traces, or credentials. `down` stops only the
 foundry worker and API while preserving state.
 

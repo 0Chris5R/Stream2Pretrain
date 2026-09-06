@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from processor import common
 from processor.foundry.config import FoundryConfig
@@ -32,13 +33,18 @@ from processor.foundry.metrics import (
 )
 from processor.foundry.oracles import S3OracleRegistry, build_oracle_coordinator
 from processor.foundry.packaging import MinioPackageSink
-from processor.foundry.paper_adapter import load_scientific_artifact
+from processor.foundry.paper_adapter import (
+    ScientificArtifactUnavailableError,
+    load_scientific_artifact_payload,
+    validate_scientific_artifact_payload,
+)
 from processor.foundry.pipeline import FoundryPipeline
-from processor.foundry.providers import ProviderBudgetExhaustedError, build_providers
+from processor.foundry.providers import ProviderBudgetExhaustedError, ProviderError, build_providers
 from processor.foundry.quota import QuotaExceededError, QuotaLedger
 from processor.foundry.store import FoundryStore
-from processor.foundry.util import canonical_json
+from processor.foundry.util import canonical_json, sha256
 from processor.probes import start_probe_server
+from processor.source_policy import resolve_source_policy
 from schemas.foundry import FoundryArtifactRecord, FoundryEvent
 from schemas.gold import GoldRecord
 from schemas.topics import FOUNDRY_ARTIFACTS, FOUNDRY_EVENTS, FOUNDRY_JOBS
@@ -107,13 +113,15 @@ class WorkerRuntime:
         # Only the single-writer worker owns crash recovery. Read-only API
         # sidecars must never requeue a candidate that this worker is handling.
         self.store = FoundryStore(
-            os.path.join(state_dir, "control.sqlite3"), recover_processing=True
+            os.path.join(state_dir, "control.sqlite3"),
+            recover_processing=True,
+            candidate_generation="source-gates-v1",
         )
         self.quota = QuotaLedger(
             os.path.join(state_dir, "quota.sqlite3"),
             self.config.providers,
         )
-        self.quota.reconcile_abandoned_reservations()
+        abandoned_reservations = self.quota.reconcile_abandoned_reservations()
         self.providers = build_providers(
             self.config.providers,
             mode=self.config.provider_mode,
@@ -141,7 +149,10 @@ class WorkerRuntime:
             PROVIDER_AVAILABLE.labels(provider=name).set(1.0)
         self.kafka = KafkaPublisher(cfg.redpanda_brokers.split(","))
         self.lakehouse = FoundryLakehouseSink(
-            batch_size=int(os.environ.get("S2P_FOUNDRY_ICEBERG_BATCH_SIZE", "50"))
+            batch_size=int(os.environ.get("S2P_FOUNDRY_ICEBERG_BATCH_SIZE", "5000")),
+            flush_interval_seconds=float(
+                os.environ.get("S2P_FOUNDRY_ICEBERG_FLUSH_INTERVAL_SECONDS", "3600")
+            ),
         )
         self.s3 = _s3_client(cfg)
         _require_bucket(self.s3, self.config.minio_bucket)
@@ -164,6 +175,8 @@ class WorkerRuntime:
                 else None
             ),
         )
+        self._recover_interrupted_calls(abandoned_reservations)
+        self._recover_lakehouse_outbox()
         self._drain_lock = threading.Lock()
         self._drain_stop = threading.Event()
         self._drain_thread = threading.Thread(
@@ -174,27 +187,82 @@ class WorkerRuntime:
         self._drain_thread.start()
 
     def process(self, payload: bytes) -> dict[str, Any]:
-        incoming = GoldRecord.model_validate_json(payload)
+        incoming = common.gold_loads(payload)
         accepted_routes = {"posttrain_candidate"}
         if os.environ.get("S2P_FOUNDRY_ACCEPT_LEGACY_REASONING") == "1":
             accepted_routes.add("reasoning_candidate")
         if not accepted_routes.intersection({incoming.route, *incoming.eligible_routes}):
             self.store.remove_queued_candidate(incoming.doc_id)
             return {"doc_id": incoming.doc_id, "status": "not_posttrain_candidate"}
-        if not incoming.scientific_artifact_s3_uri or incoming.training_word_count < 1:
+        source_policy = resolve_source_policy(
+            source_feed=incoming.source_feed,
+            source_format=incoming.source_format,
+            extraction_pipeline=incoming.extraction_pipeline,
+        )
+        if source_policy.family != "scientific_paper":
             self.store.remove_queued_candidate(incoming.doc_id)
-            return {
+            return {"doc_id": incoming.doc_id, "status": "unsupported_posttrain_source"}
+        quality = incoming.quality_diagnostics or {}
+        # A historical Kafka replay is not a newly eligible paper. Do this
+        # before any S3 fetch or preflight job, so reset queues stay reset.
+        if quality.get("mode") != "active" or not quality.get("passed", False):
+            return {"doc_id": incoming.doc_id, "status": "outside_active_candidate_generation"}
+        admission_identity = sha256(
+            {
                 "doc_id": incoming.doc_id,
-                "status": "posttrain_preflight_rejected",
-                "reason": "structured scientific body is unavailable",
+                "evidence": incoming.scientific_artifact_s3_uri,
+                "classifier": incoming.classifier_revision,
+                "generation": "source-gates-v1",
             }
+        )
+        if self.store.candidate_admission_seen(admission_identity):
+            return {"doc_id": incoming.doc_id, "status": "already_observed_candidate"}
+        if not incoming.scientific_artifact_s3_uri or incoming.training_word_count < 1:
+            parsed_artifact_uri = urlparse(incoming.scientific_artifact_s3_uri or "")
+            exc = ScientificArtifactUnavailableError(
+                uri=incoming.scientific_artifact_s3_uri or "",
+                bucket=parsed_artifact_uri.netloc or "unknown",
+                key=parsed_artifact_uri.path.lstrip("/") or "unknown",
+                reason=(
+                    "URI is absent"
+                    if not incoming.scientific_artifact_s3_uri
+                    else "Gold has no retained scientific body"
+                ),
+            )
+            self.store.record_candidate_admission(admission_identity, incoming.doc_id, str(exc))
+            self.store.remove_queued_candidate(incoming.doc_id)
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            return {"doc_id": incoming.doc_id, "status": "evidence_unavailable", "reason": str(exc)}
+        try:
+            scientific_payload = self.store.candidate_scientific_payload(
+                incoming.doc_id,
+                expected_gold_payload=payload,
+            )
+            if scientific_payload is None:
+                _, scientific_payload = load_scientific_artifact_payload(
+                    incoming,
+                    s3_client=self.s3,
+                )
+            else:
+                validate_scientific_artifact_payload(incoming, scientific_payload)
+        except ScientificArtifactUnavailableError as exc:
+            self.store.record_candidate_admission(admission_identity, incoming.doc_id, str(exc))
+            self.store.remove_queued_candidate(incoming.doc_id)
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            return {"doc_id": incoming.doc_id, "status": "evidence_unavailable", "reason": str(exc)}
         self.store.enqueue_candidate(
             doc_id=incoming.doc_id,
             payload=payload,
             reasoning_score=incoming.reasoning_score,
             quality_score=incoming.quality_score,
             valid_from=incoming.valid_from,
+            scientific_payload=scientific_payload,
+            ranking_score=_candidate_ranking_score(incoming),
+            domain_key=(
+                incoming.content_tags[0] if incoming.content_tags else "general_scientific"
+            ),
         )
+        self.store.record_candidate_admission(admission_identity, incoming.doc_id, "queued")
         QUEUED_CANDIDATES.set(self.store.queued_candidates())
         return {
             "doc_id": incoming.doc_id,
@@ -232,13 +300,39 @@ class WorkerRuntime:
         claimed = self.store.claim_candidate(
             cutoff_at=cutoff_at,
             cutoff_ordinal=cutoff_ordinal,
+            daily_run_date=run_day,
         )
         if claimed is None:
+            retry_after = self.store.next_candidate_retry_delay(
+                cutoff_at=cutoff_at,
+                cutoff_ordinal=cutoff_ordinal,
+                daily_run_date=run_day,
+            )
+            if retry_after is not None:
+                return {
+                    "doc_id": fallback_doc_id,
+                    "status": "queue_waiting",
+                    "retry_after_seconds": retry_after,
+                }
             return {"doc_id": fallback_doc_id, "status": "queue_empty"}
         claimed_doc_id, claimed_payload = claimed
         try:
-            gold = GoldRecord.model_validate_json(claimed_payload)
-            scientific = load_scientific_artifact(gold, s3_client=self.s3)
+            gold = common.gold_loads(claimed_payload)
+            scientific_payload = self.store.candidate_scientific_payload(claimed_doc_id)
+            if scientific_payload is None:
+                scientific, scientific_payload = load_scientific_artifact_payload(
+                    gold,
+                    s3_client=self.s3,
+                )
+                self.store.cache_candidate_scientific_payload(
+                    claimed_doc_id,
+                    scientific_payload,
+                )
+            else:
+                scientific, _ = validate_scientific_artifact_payload(
+                    gold,
+                    scientific_payload,
+                )
             official_artifacts = self.oracle_registry.load(
                 scientific.source_identifier or gold.doc_id
             )
@@ -247,14 +341,6 @@ class WorkerRuntime:
                 scientific,
                 official_artifacts=official_artifacts,
             )
-            # SQLite is the durable outbox. Restage all job outputs so a worker
-            # restart after a sink failure cannot strand an accepted artifact.
-            for event in self.store.event_records(result.job_id):
-                self.kafka.event(event)
-                self.lakehouse.add_event(event)
-            for artifact in self.store.artifact_records(result.job_id):
-                self.kafka.artifact(artifact)
-                self.lakehouse.add_artifact(artifact)
             job_result = {
                 "job_id": result.job_id,
                 "paper_id": result.paper_id,
@@ -263,9 +349,41 @@ class WorkerRuntime:
                 "rejection_reason": result.rejection_reason,
                 "queued_candidates": self.store.queued_candidates(),
             }
-            self.kafka.job(job_result)
-            self.lakehouse.flush()
-            self.kafka.flush()
+        except ScientificArtifactUnavailableError as exc:
+            gold = common.gold_loads(claimed_payload)
+            self.store.record_candidate_admission(
+                sha256({"doc_id": gold.doc_id, "evidence": gold.scientific_artifact_s3_uri}),
+                gold.doc_id,
+                str(exc),
+            )
+            job_result = {
+                "doc_id": gold.doc_id,
+                "status": "evidence_unavailable",
+                "reason": str(exc),
+            }
+        except ProviderBudgetExhaustedError:
+            self.store.release_candidate(claimed_doc_id)
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            raise
+        except ProviderError as exc:
+            retry_after = self.store.defer_candidate(claimed_doc_id, reason=str(exc))
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            return {
+                "doc_id": claimed_doc_id,
+                "status": "provider_retry_deferred",
+                "reason": str(exc),
+                "retry_after_seconds": retry_after,
+            }
+        except Exception:
+            self.store.release_candidate(claimed_doc_id)
+            QUEUED_CANDIDATES.set(self.store.queued_candidates())
+            raise
+        # SQLite is the durable outbox. Restage all job outputs so a worker
+        # restart after a sink failure cannot strand an accepted artifact or
+        # an auditable terminal candidate preflight rejection.
+        try:
+            if "job_id" in job_result:
+                self._flush_job_outbox(job_result)
         except Exception:
             self.store.release_candidate(claimed_doc_id)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
@@ -278,26 +396,100 @@ class WorkerRuntime:
         if manual_run_id is not None:
             self.store.record_manual_processed(manual_run_id)
         QUEUED_CANDIDATES.set(self.store.queued_candidates())
-        JOBS.labels(state=result.final_state).inc()
+        if "state" in job_result:
+            JOBS.labels(state=str(job_result["state"])).inc()
         return {**job_result, "queued_candidates": self.store.queued_candidates()}
+
+    def _flush_job_outbox(self, job_result: dict[str, Any]) -> None:
+        job_id = str(job_result["job_id"])
+        for event in self.store.event_records(job_id):
+            self.kafka.event(event)
+            self.store.mark_lakehouse_published(self.lakehouse.add_event(event))
+        for artifact in self.store.artifact_records(job_id):
+            self.kafka.artifact(artifact)
+            self.store.mark_lakehouse_published(self.lakehouse.add_artifact(artifact))
+        self.kafka.job(job_result)
+        self.kafka.flush()
+        self.store.mark_lakehouse_published(self.lakehouse.flush(force=False))
+
+    def _recover_lakehouse_outbox(self) -> None:
+        for job_id in self.store.pending_lakehouse_job_ids():
+            for event in self.store.event_records(job_id):
+                self.store.mark_lakehouse_published(self.lakehouse.add_event(event))
+            for artifact in self.store.artifact_records(job_id):
+                self.store.mark_lakehouse_published(self.lakehouse.add_artifact(artifact))
+        self.store.mark_lakehouse_published(self.lakehouse.flush(force=True))
+
+    def _recover_interrupted_calls(self, abandoned_reservations: int) -> None:
+        """Close prior-process call events before the queue resumes them."""
+        recovered = self.store.interrupted_provider_calls()
+        for call in recovered:
+            event = self.store.append_event(
+                job_id=str(call["job_id"]),
+                paper_id=str(call["paper_id"]),
+                state="CALL_FAILED",
+                reason="worker restarted before the provider call reached a terminal state",
+                metadata={
+                    "provider": call["provider"],
+                    "role": call["role"],
+                    "restart_recovery": True,
+                    "was_started": call["was_started"],
+                    "abandoned_reservations_reconciled": abandoned_reservations,
+                },
+                attempt=int(call["attempt"]),
+                idempotency_suffix=f"restart-recovery:{call['role']}",
+            )
+            self._event(event)
+        if recovered:
+            self.kafka.flush()
 
     def _queue_loop(self) -> None:
         import structlog
 
         log = structlog.get_logger(component="foundry-queue")
         while not self._drain_stop.wait(self.config.queue_poll_seconds):
-            if self._run_pending_manual(log):
-                continue
+            try:
+                self.store.mark_lakehouse_published(self.lakehouse.flush(force=False))
+            except Exception as exc:
+                log.warning("foundry_lakehouse_flush_pending", reason=str(exc))
             now = datetime.now(UTC)
-            if now.hour < self.config.daily_run_hour_utc:
+            if (
+                self.config.daily_not_before_utc is not None
+                and now < self.config.daily_not_before_utc
+            ):
+                # A schedule migration must not back-run the preceding day's
+                # cohort before its explicitly chosen first boundary.
+                self.store.expire_active_manual_runs(
+                    reason="superseded by scheduled 24-hour cohort"
+                )
                 continue
-            run_day = now.date()
-            run = self.store.start_daily_run(run_day)
-            if run["state"] == "waiting":
+            run_day, boundary_at = _daily_cohort_boundary(
+                now,
+                self.config.daily_run_hour_utc,
+                self.config.daily_run_minute_utc,
+            )
+            existing = self.store.daily_run(run_day)
+            boundary_changed = (
+                existing is None or str(existing["cutoff_at"]) != boundary_at.isoformat()
+            )
+            if boundary_changed:
+                expired = self.store.expire_active_manual_runs(
+                    reason="superseded by scheduled 24-hour cohort"
+                )
+                if expired:
+                    log.info(
+                        "foundry_manual_runs_superseded",
+                        count=expired,
+                        run_date=run_day.isoformat(),
+                    )
+            run = self.store.start_daily_run(
+                run_day,
+                boundary_at=boundary_at,
+            )
+            if run["state"] not in {"completed", "quota_exhausted"}:
+                self._run_daily_snapshot(run_day, run, log)
                 continue
-            if run["state"] in {"completed", "quota_exhausted"}:
-                continue
-            self._run_daily_snapshot(run_day, run, log)
+            self._run_pending_manual(log)
 
     def _run_pending_manual(self, log: Any) -> bool:
         """Run an active control-plane snapshot at the next safe paper boundary."""
@@ -311,6 +503,26 @@ class WorkerRuntime:
         cutoff_at = datetime.fromisoformat(str(run["cutoff_at"]))
         cutoff_ordinal = int(run["cutoff_ordinal"])
         while not self._drain_stop.is_set():
+            current_day, _ = _daily_cohort_boundary(
+                datetime.now(UTC),
+                getattr(self.config, "daily_run_hour_utc", 0),
+                getattr(self.config, "daily_run_minute_utc", 0),
+            )
+            if current_day > run_day:
+                self.store.finish_daily_run(
+                    run_day,
+                    state="completed",
+                    reason="replaced at the next 24-hour cohort boundary",
+                )
+                return
+            current = self.store.daily_run(run_day) or run
+            if int(current["processed_count"]) >= int(current["candidate_count"]):
+                self.store.finish_daily_run(
+                    run_day,
+                    state="completed",
+                    reason="ranked 24-hour candidate cohort completed",
+                )
+                return
             # Provider calls are not interrupted, but a bounded manual run must
             # not wait behind the rest of a potentially large daily snapshot.
             if self._run_pending_manual(log):
@@ -364,6 +576,13 @@ class WorkerRuntime:
                     reason="ranked snapshot exhausted",
                 )
                 return
+            if result.get("status") in {"queue_waiting", "provider_retry_deferred"}:
+                delay = min(
+                    float(result.get("retry_after_seconds", self.config.queue_poll_seconds)),
+                    float(self.config.queue_poll_seconds),
+                )
+                if self._drain_stop.wait(max(1.0, delay)):
+                    return
 
     def _run_manual_snapshot(self, run: dict[str, Any], log: Any) -> None:
         run_id = str(run["run_id"])
@@ -424,11 +643,18 @@ class WorkerRuntime:
                     reason="ranked snapshot exhausted",
                 )
                 return
+            if result.get("status") in {"queue_waiting", "provider_retry_deferred"}:
+                delay = min(
+                    float(result.get("retry_after_seconds", self.config.queue_poll_seconds)),
+                    float(self.config.queue_poll_seconds),
+                )
+                if self._drain_stop.wait(max(1.0, delay)):
+                    return
 
     def close(self) -> None:
         self._drain_stop.set()
         self._drain_thread.join(timeout=5)
-        self.lakehouse.flush()
+        self.store.mark_lakehouse_published(self.lakehouse.flush(force=True))
         self.kafka.flush()
         self.store.close()
         self.quota.close()
@@ -442,7 +668,7 @@ class WorkerRuntime:
 
     def _event(self, event: FoundryEvent) -> None:
         self.kafka.event(event)
-        self.lakehouse.add_event(event)
+        self.store.mark_lakehouse_published(self.lakehouse.add_event(event))
         STAGES.labels(state=event.state).inc()
         if event.state in {"CALL_SUCCEEDED", "CALL_FAILED", "CALL_RATE_LIMITED"}:
             provider = str(event.metadata.get("provider", "unknown"))
@@ -484,7 +710,7 @@ class WorkerRuntime:
 
     def _artifact(self, artifact: FoundryArtifactRecord) -> None:
         self.kafka.artifact(artifact)
-        self.lakehouse.add_artifact(artifact)
+        self.store.mark_lakehouse_published(self.lakehouse.add_artifact(artifact))
         ARTIFACTS.labels(
             kind=artifact.kind,
             family=artifact.family,
@@ -504,6 +730,41 @@ class WorkerRuntime:
             MUTATION_KILL_RATE.labels(task_family=artifact.family).observe(
                 validation.mutation_killed / validation.mutation_total
             )
+
+
+def _candidate_ranking_score(record: GoldRecord) -> float:
+    """Learned mean suitability ranks fresh papers, never API cost or length."""
+    diagnostics = record.quality_diagnostics or {}
+    suitability = diagnostics.get("classifiers", {}).get("arxiv-posttrain-suitability")
+    if diagnostics.get("mode") == "active" and suitability is not None:
+        return float(suitability["weighted_mean"]) / 5.0
+    evidence_richness = (
+        sum(count > 0 for count in (record.equation_count, record.table_count, record.figure_count))
+        / 3.0
+    )
+    signals = [
+        record.quality_score / 5.0,
+        record.structural_quality_score / 5.0,
+        record.extraction_completeness,
+        record.reasoning_score,
+        evidence_richness,
+    ]
+    if not record.quality_diagnostics or record.quality_diagnostics.get("mode") != "diagnostic":
+        signals.append(record.source_quality_score / 5.0)
+    return sum(signals) / len(signals)
+
+
+def _daily_cohort_boundary(
+    now: datetime, hour_utc: int, minute_utc: int = 0
+) -> tuple[date, datetime]:
+    """Return the most recent configured UTC cohort boundary."""
+    if now.tzinfo is None:
+        raise ValueError("daily cohort clock must be timezone-aware")
+    utc_now = now.astimezone(UTC)
+    boundary = utc_now.replace(hour=hour_utc, minute=minute_utc, second=0, microsecond=0)
+    if utc_now < boundary:
+        boundary -= timedelta(days=1)
+    return boundary.date(), boundary
 
 
 def build_dataflow(cfg: common.ProcessorConfig | None = None) -> object:

@@ -280,6 +280,7 @@ class Difficulty(FrozenModel):
 
 class TaskSpec(FrozenModel):
     schema_version: str = "task-spec-v1"
+    content_policy_revision: str = "scientific-reasoning-v1"
     task_id: str
     paper_id: str
     family: TaskFamily
@@ -306,7 +307,9 @@ PredicateType = Literal[
     "symbolic_equivalence",
     "numeric_tolerance",
     "method_partial_order",
+    "derivation_partial_order",
     "fault_identification",
+    "forbidden_faults",
     "required_relations",
     "required_qualifications",
     "configuration_constraints",
@@ -337,6 +340,7 @@ class VerifierSpec(FrozenModel):
     runtime_dependencies: list[str] = Field(default_factory=list)
     network_required: Literal[False] = False
     determinism_seed: int = Field(..., ge=0)
+    critic_audit: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SubmittedEquation(FrozenModel):
@@ -510,6 +514,7 @@ class EnvironmentManifest(FrozenModel):
     schema_version: str = "paper-environment-v2"
     environment_id: str
     task_id: str
+    content_policy_revision: str = "scientific-reasoning-v1"
     paper_id: str
     family: TaskFamily
     pool: PosttrainPool

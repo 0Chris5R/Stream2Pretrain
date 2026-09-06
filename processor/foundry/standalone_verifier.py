@@ -84,8 +84,15 @@ def _predicate(
         passed = bool(committed or evidence or numbers or relations or configuration)
         return passed, float(passed)
     if kind in {"required_nodes", "required_dependency_nodes"}:
-        overlap = targets & committed
-        return targets <= committed, len(overlap) / len(targets) if targets else 1.0
+        resolved = targets & committed
+        if task.get("family") == "derivation_completion":
+            node_types = {str(node["id"]): str(node["type"]) for node in graph["nodes"]}
+            submitted_equations = {str(item.get("id")) for item in equations}
+            equation_targets = {
+                target for target in targets if node_types.get(target) == "equation"
+            }
+            resolved = (resolved - equation_targets) | (equation_targets & submitted_equations)
+        return targets <= resolved, len(resolved) / len(targets) if targets else 1.0
     if kind == "forbidden_nodes":
         passed = not bool(targets & committed)
         return passed, float(passed)
@@ -115,6 +122,7 @@ def _predicate(
         passed = bool(expected) and any(
             _symbolically_equivalent(str(item.get("latex", "")), str(expected))
             for item in equations
+            if not predicate.get("target") or item.get("id") == predicate.get("target")
         )
         return passed, float(passed)
     if kind == "numeric_tolerance":
@@ -138,6 +146,17 @@ def _predicate(
             for left, right in config.get("precedes", [])
         ]
         return bool(checks) and all(checks), sum(checks) / len(checks) if checks else 0.0
+    if kind == "derivation_partial_order":
+        positions = {
+            str(item.get("id")): index
+            for index, item in enumerate(equations)
+            if isinstance(item, dict)
+        }
+        checks = [
+            left in positions and right in positions and positions[left] < positions[right]
+            for left, right in config.get("precedes", [])
+        ]
+        return bool(checks) and all(checks), sum(checks) / len(checks) if checks else 0.0
     if kind == "fault_identification":
         submitted = set(faults)
         forbidden = set(config.get("forbidden", []))
@@ -146,10 +165,17 @@ def _predicate(
             len(targets & submitted) / len(targets | submitted) if targets | submitted else 0.0
         )
         return passed, partial
+    if kind == "forbidden_faults":
+        submitted = set(faults)
+        overlap = targets & submitted
+        passed = not overlap
+        return passed, float(passed)
     if kind == "required_relations":
         required_relations = {
             (str(edge["source"]), str(edge["relation"]), str(edge["target"]))
-            for edge in task.get("hidden_targets", {}).get("required_relations", [])
+            for edge in config.get("relations", [])
+            if isinstance(edge, dict)
+            and all(key in edge for key in ("source", "relation", "target"))
         }
         submitted_relations = {
             (str(edge["source"]), str(edge["relation"]), str(edge["target"]))
@@ -182,9 +208,110 @@ def _predicate(
         )
         return _configuration_constraints(configuration, constraints)
     if kind == "report_manifest_consistency":
-        passed = bool(report.strip()) and bool(committed | set(evidence))
+        present = bool(report.strip()) and bool(committed | set(evidence))
+        if present and task.get("content_policy_revision") == "scientific-reasoning-v2":
+            passed = _scientific_report_consistency(report, task, committed)
+        else:
+            passed = present
         return passed, float(passed)
     return False, 0.0
+
+
+_REPORT_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_])([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)(\s*%)?"
+)
+_MATH_SEGMENT = re.compile(r"(?:\$+|\\\(|\\\[)?([^\n;]+=[^\n;]+?)(?:\$+|\\\)|\\\])?(?:$|[.;])")
+_INTERNAL_ID_TOKEN = re.compile(
+    r"^(?:eq|equation|node|span|claim|method|fault|table|figure|fig|result)[-_:.]?\d+$",
+    re.IGNORECASE,
+)
+
+
+def _scientific_report_consistency(
+    report: str,
+    task: dict[str, Any],
+    committed: set[str],
+) -> bool:
+    if _report_is_internal_id_listing(report, committed):
+        return False
+    hidden = task.get("hidden_targets", {})
+    for expected in hidden.get("expected_values", {}).values():
+        if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+            if not _numeric_value_appears(
+                report,
+                float(expected),
+                _report_numeric_tolerance(float(expected)),
+            ):
+                return False
+        elif (
+            isinstance(expected, str)
+            and task.get("family") == "derivation_completion"
+            and not _symbolic_value_appears(report, expected)
+        ) or (
+            isinstance(expected, str)
+            and task.get("family") != "derivation_completion"
+            and expected.casefold() not in report.casefold()
+        ):
+            return False
+    constraints = hidden.get("configuration_constraints", {})
+    required_values = (
+        constraints.get("required_values", {}) if isinstance(constraints, dict) else {}
+    )
+    if isinstance(required_values, dict):
+        for expected in required_values.values():
+            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                if not _numeric_value_appears(
+                    report,
+                    float(expected),
+                    _report_numeric_tolerance(float(expected)),
+                ):
+                    return False
+            elif isinstance(expected, str) and expected.casefold() not in report.casefold():
+                return False
+    return True
+
+
+def _numeric_value_appears(report: str, expected: float, tolerance: float) -> bool:
+    for raw, percent in _REPORT_NUMBER.findall(report.replace(",", "")):
+        try:
+            value = float(raw)
+            candidates = (value, value / 100.0) if percent else (value,)
+            if any(abs(candidate - expected) <= tolerance for candidate in candidates):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _report_numeric_tolerance(expected: float) -> float:
+    return max(1e-9, abs(expected) * 1e-4, 1e-8)
+
+
+def _symbolic_value_appears(report: str, expected: str) -> bool:
+    compact_expected = re.sub(r"\s+", "", expected).strip("$\\()[]")
+    compact_report = re.sub(r"\s+", "", report)
+    if compact_expected and compact_expected in compact_report:
+        return True
+    for candidate in _MATH_SEGMENT.findall(report):
+        cleaned = candidate.strip().strip("$\\()[] .")
+        if _symbolically_equivalent(cleaned, expected):
+            return True
+    return False
+
+
+def _report_is_internal_id_listing(report: str, committed: set[str]) -> bool:
+    tokens = [token for token in re.split(r"[\s,;|]+", report.strip()) if token]
+    if not tokens:
+        return True
+    normalized_committed = {value.casefold().strip(".,:;()[]{}") for value in committed}
+    substantive = [
+        token
+        for token in tokens
+        if token.casefold().strip(".,:;()[]{}") not in normalized_committed
+        and not _INTERNAL_ID_TOKEN.fullmatch(token.strip(".,:;()[]{}"))
+        and any(character.isalpha() for character in token)
+    ]
+    return not substantive
 
 
 def _parse_response(response: str) -> dict[str, Any]:
@@ -235,13 +362,22 @@ def _configuration_constraints(
 def _symbolically_equivalent(left: str, right: str) -> bool:
     try:
         import sympy
+        from sympy.core.relational import Equality
         from sympy.parsing.latex import parse_latex
 
         if len(left) > 2_000 or len(right) > 2_000:
             return False
-        a = parse_latex(left.strip("$"))
-        b = parse_latex(right.strip("$"))
-        return bool(sympy.simplify(a - b) == 0)
+        a = parse_latex(left.strip("$"), backend="lark")
+        b = parse_latex(right.strip("$"), backend="lark")
+        a_is_equation = isinstance(a, Equality)
+        b_is_equation = isinstance(b, Equality)
+        if a_is_equation != b_is_equation:
+            return False
+        a_residual = a.lhs - a.rhs if a_is_equation else a
+        b_residual = b.lhs - b.rhs if b_is_equation else b
+        if sympy.simplify(a_residual - b_residual) == 0:
+            return True
+        return bool(a_is_equation and sympy.simplify(a_residual + b_residual) == 0)
     except Exception:
 
         def normalize(value: str) -> str:

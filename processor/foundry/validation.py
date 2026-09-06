@@ -48,6 +48,7 @@ def run_acceptance_suite(
                 "accepted": result.passed,
                 "reward": result.reward,
                 "validation": {
+                    **trajectory.validation,
                     "predicates": [asdict(value) for value in result.predicates],
                 },
             }
@@ -67,7 +68,7 @@ def run_acceptance_suite(
         if trajectories
         else FoundryAnswer(report="", answer_manifest=AnswerManifest())
     )
-    adversarial_answers = list(_adversarial_answers(base))
+    adversarial_answers = list(_adversarial_answers(base, spec))
     adversarial_results = [
         evaluate(spec, answer, task=task, graph=graph, bundle=bundle)
         for answer in adversarial_answers
@@ -144,6 +145,24 @@ def suite_passes(report: ValidationReport) -> bool:
     )
 
 
+def sft_suite_passes(report: ValidationReport) -> bool:
+    """Accept a grounded SFT trajectory under the supervised-data contract.
+
+    Mutation and adversarial rejection measure verifier strength for an RL
+    environment. They remain in every SFT validation report for audit, but a
+    scientifically correct supervised target is not discarded because its
+    deterministic verifier is insufficiently discriminative for reward use.
+    """
+    return (
+        report.positive_pass
+        and report.equivalent_pass
+        and report.metamorphic_pass
+        and report.replay_pass
+        and report.security_pass
+        and report.false_negative_count == 0
+    )
+
+
 def _equivalent_variant(answer: FoundryAnswer) -> FoundryAnswer:
     manifest = answer.answer_manifest
     return answer.model_copy(
@@ -161,16 +180,21 @@ def _equivalent_variant(answer: FoundryAnswer) -> FoundryAnswer:
     )
 
 
-def _adversarial_answers(valid: FoundryAnswer) -> Iterable[FoundryAnswer]:
+def _adversarial_answers(
+    valid: FoundryAnswer,
+    spec: VerifierSpec,
+) -> Iterable[FoundryAnswer]:
     yield FoundryAnswer(report="", answer_manifest=AnswerManifest())
     yield FoundryAnswer(report=valid.report, answer_manifest=AnswerManifest())
-    yield valid.model_copy(
-        update={
-            "answer_manifest": valid.answer_manifest.model_copy(
-                update={"evidence": ["external:invented-span"]}
-            )
-        }
-    )
+    predicate_types = {predicate.type for predicate in spec.predicates}
+    if predicate_types & {"evidence_membership", "evidence_coverage"}:
+        yield valid.model_copy(
+            update={
+                "answer_manifest": valid.answer_manifest.model_copy(
+                    update={"evidence": ["external:invented-span"]}
+                )
+            }
+        )
     yield valid.model_copy(
         update={
             "answer_manifest": valid.answer_manifest.model_copy(
@@ -186,9 +210,19 @@ def _adversarial_answers(valid: FoundryAnswer) -> Iterable[FoundryAnswer]:
             )
         }
     )
-    if valid.answer_manifest.numeric_results:
+    numeric_targets = {
+        predicate.target
+        for predicate in spec.predicates
+        if predicate.type == "numeric_tolerance" and predicate.target
+    }
+    targeted_numeric = [
+        result for result in valid.answer_manifest.numeric_results if result.id in numeric_targets
+    ]
+    if targeted_numeric:
         values = [
             result.model_copy(update={"value": -result.value})
+            if result.id in numeric_targets
+            else result
             for result in valid.answer_manifest.numeric_results
         ]
         yield valid.model_copy(
@@ -220,6 +254,13 @@ def _mutation_candidates(
     spec: VerifierSpec,
 ) -> Iterable[FoundryAnswer]:
     manifest = valid.answer_manifest
+    if task.content_policy_revision == "scientific-reasoning-v2" and (
+        task.hidden_targets.expected_values
+        or task.hidden_targets.configuration_constraints.get("required_values")
+    ):
+        yield valid.model_copy(
+            update={"report": "The checked result is recorded in the structured manifest."}
+        )
     required = sorted(set(task.hidden_targets.required_nodes))
     for node_id in required:
         yield valid.model_copy(
@@ -255,6 +296,14 @@ def _mutation_candidates(
                 )
             }
         )
+    for fault_id in sorted(set(task.hidden_targets.forbidden_faults)):
+        yield valid.model_copy(
+            update={
+                "answer_manifest": manifest.model_copy(
+                    update={"faults": [*manifest.faults, fault_id]}
+                )
+            }
+        )
     predicate_types = {predicate.type for predicate in spec.predicates}
     if manifest.evidence and predicate_types & {"evidence_membership", "evidence_coverage"}:
         yield valid.model_copy(
@@ -272,7 +321,20 @@ def _mutation_candidates(
                 )
             }
         )
-    for value in manifest.numeric_results if "numeric_tolerance" in predicate_types else []:
+    if len(manifest.equations) >= 2 and "derivation_partial_order" in predicate_types:
+        yield valid.model_copy(
+            update={
+                "answer_manifest": manifest.model_copy(
+                    update={"equations": list(reversed(manifest.equations))}
+                )
+            }
+        )
+    numeric_targets = {
+        predicate.target
+        for predicate in spec.predicates
+        if predicate.type == "numeric_tolerance" and predicate.target
+    }
+    for value in (item for item in manifest.numeric_results if item.id in numeric_targets):
         yield valid.model_copy(
             update={
                 "answer_manifest": manifest.model_copy(
@@ -289,7 +351,12 @@ def _mutation_candidates(
                 )
             }
         )
-    for equation in manifest.equations if "symbolic_equivalence" in predicate_types else []:
+    symbolic_targets = {
+        predicate.target
+        for predicate in spec.predicates
+        if predicate.type == "symbolic_equivalence" and predicate.target
+    }
+    for equation in (item for item in manifest.equations if item.id in symbolic_targets):
         yield valid.model_copy(
             update={
                 "answer_manifest": manifest.model_copy(
@@ -305,23 +372,62 @@ def _mutation_candidates(
             }
         )
     if manifest.relations and "required_relations" in predicate_types:
-        yield valid.model_copy(
-            update={
-                "answer_manifest": manifest.model_copy(
-                    update={"relations": manifest.relations[:-1]}
-                )
-            }
+        required_relation_triples = {
+            (edge.source, edge.relation, edge.target)
+            for edge in task.hidden_targets.required_relations
+        }
+        relation_to_remove = next(
+            (
+                edge
+                for edge in manifest.relations
+                if (edge.source, edge.relation, edge.target) in required_relation_triples
+            ),
+            None,
         )
+        if relation_to_remove is not None:
+            yield valid.model_copy(
+                update={
+                    "answer_manifest": manifest.model_copy(
+                        update={
+                            "relations": [
+                                edge for edge in manifest.relations if edge != relation_to_remove
+                            ]
+                        }
+                    )
+                }
+            )
     if manifest.qualifications and "required_qualifications" in predicate_types:
-        yield valid.model_copy(
-            update={
-                "answer_manifest": manifest.model_copy(
-                    update={"qualifications": manifest.qualifications[:-1]}
-                )
-            }
+        required_qualifications = set(task.hidden_targets.required_qualifications)
+        qualification_to_remove = next(
+            (value for value in manifest.qualifications if value in required_qualifications), None
         )
+        if qualification_to_remove is not None:
+            yield valid.model_copy(
+                update={
+                    "answer_manifest": manifest.model_copy(
+                        update={
+                            "qualifications": [
+                                value
+                                for value in manifest.qualifications
+                                if value != qualification_to_remove
+                            ]
+                        }
+                    )
+                }
+            )
     if "configuration_constraints" in predicate_types:
-        constraints = task.hidden_targets.configuration_constraints
+        constraints = dict(task.hidden_targets.configuration_constraints)
+        required_values = dict(constraints.get("required_values", {}))
+        for predicate in spec.predicates:
+            if predicate.type != "configuration_constraints":
+                continue
+            predicate_constraints = predicate.config.get("constraints", {})
+            if isinstance(predicate_constraints, dict) and isinstance(
+                predicate_constraints.get("required_values"), dict
+            ):
+                required_values.update(predicate_constraints["required_values"])
+        if required_values:
+            constraints["required_values"] = required_values
         mutated_configuration = dict(manifest.configuration)
         constrained_keys = [
             *(
@@ -410,4 +516,4 @@ def _wire_reward(result: RewardResult) -> dict[str, object]:
     }
 
 
-__all__ = ["run_acceptance_suite", "suite_passes"]
+__all__ = ["run_acceptance_suite", "sft_suite_passes", "suite_passes"]
