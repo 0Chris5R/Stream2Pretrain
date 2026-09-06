@@ -101,7 +101,7 @@
       "type": "integer"
     },
     "doc_id": {
-      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "description": "Stable document-revision id. Usually the sha256 of the canonical URL; exact content projections may bind an immutable source object.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Doc Id",
       "type": "string"
@@ -132,7 +132,7 @@
     },
     "extraction_pipeline": {
       "default": "resiliparse-0.14",
-      "description": "Operator-chain identifier of the extractor that produced ``text``. Distinct from ``extracted_with`` so a single extractor binary can ship multiple named pipelines (e.g. 'arxiv-html-2026-06' vs 'fineweb-edu-html').",
+      "description": "Operator-chain identifier of the extractor that produced ``text``. Distinct from ``extracted_with`` so a single extractor binary can ship multiple named pipelines.",
       "maxLength": 128,
       "minLength": 1,
       "title": "Extraction Pipeline",
@@ -218,6 +218,20 @@
       "title": "Projection Version",
       "type": "string"
     },
+    "raw_html_s3_uri": {
+      "anyOf": [
+        {
+          "pattern": "^s3://[^/]+/.+",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Original admitted Bronze body used only for bounded extraction retry.",
+      "title": "Raw Html S3 Uri"
+    },
     "scientific_artifact_s3_uri": {
       "anyOf": [
         {
@@ -232,12 +246,31 @@
       "description": "Structured sections/tables/equations/figures JSON artifact.",
       "title": "Scientific Artifact S3 Uri"
     },
+    "scientific_evidence_gzip": {
+      "anyOf": [
+        {
+          "format": "base64url",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Lossless extracted scientific JSON for durable Kafka handoff, not images.",
+      "title": "Scientific Evidence Gzip"
+    },
     "segments": {
       "items": {
         "$ref": "#/$defs/SilverSegment"
       },
       "title": "Segments",
       "type": "array"
+    },
+    "source_content_type": {
+      "default": "application/octet-stream",
+      "title": "Source Content Type",
+      "type": "string"
     },
     "source_feed": {
       "default": "unknown",
@@ -247,6 +280,19 @@
       "title": "Source Feed",
       "type": "string"
     },
+    "source_fetched_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Fetched At"
+    },
     "source_format": {
       "default": "html",
       "description": "Wire shape carried forward from the Bronze record.",
@@ -255,13 +301,31 @@
         "pdf",
         "latex",
         "markdown",
-        "code",
         "web",
-        "metadata",
-        "review"
+        "metadata"
       ],
       "title": "Source Format",
       "type": "string"
+    },
+    "source_http_last_modified": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Http Last Modified"
+    },
+    "source_http_status": {
+      "default": 200,
+      "maximum": 599,
+      "minimum": 100,
+      "title": "Source Http Status",
+      "type": "integer"
     },
     "source_metadata_text": {
       "default": "",
@@ -287,22 +351,19 @@
         }
       ],
       "default": null,
-      "description": "OSI-list verified SPDX id, or None if not attached.",
+      "description": "Item-level licence identifier, or None if not attached.",
       "title": "Spdx License"
     },
     "spdx_license_source": {
       "default": "unknown",
       "description": "Where the SPDX id was read from.",
       "enum": [
-        "github_api",
         "file_header",
         "http_link",
         "html_meta",
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
-        "openreview_note",
-        "openreview_terms",
         "hf_card",
         "archived_page",
         "source_terms",

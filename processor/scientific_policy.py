@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from processor.source_policy import resolve_source_policy
 from schemas.gold import CorpusRoute, SegmentScore
-from schemas.silver import SilverRecord, SilverSegment
+from schemas.silver import SilverRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +20,6 @@ class ScientificScores:
     extraction_completeness: float
     structural_quality_score: float
     reasoning_score: float
-    benchmark_score: float
     content_tags: list[str]
 
 
@@ -31,76 +30,33 @@ class RouteDecision:
     reasons: list[str]
 
 
-def representative_segments(
-    segments: list[SilverSegment], *, limit: int = 8
-) -> list[SilverSegment]:
-    """Select a bounded, deterministic, role-stratified inference sample.
-
-    One representative is reserved for each scientific role family before
-    spare capacity is filled by the longest remaining sections. This prevents
-    repeated methods/results subsections from excluding the rest of a paper.
-    """
-    if limit <= 0:
-        return []
-    if len(segments) <= limit:
-        return list(segments)
-
-    role_families = (
-        ("abstract",),
-        ("introduction", "background"),
-        ("methods",),
-        ("results", "discussion"),
-        ("conclusion", "limitations"),
-        ("other", "appendix"),
-    )
-    indexed = list(enumerate(segments))
-    chosen_indexes: set[int] = set()
-    for family in role_families:
-        candidates = [
-            pair for pair in indexed if pair[1].role in family and pair[0] not in chosen_indexes
-        ]
-        if not candidates:
-            continue
-        index, _ = min(candidates, key=lambda pair: (-pair[1].word_count, pair[0]))
-        chosen_indexes.add(index)
-        if len(chosen_indexes) == limit:
-            break
-
-    if len(chosen_indexes) < limit:
-        remaining = sorted(
-            (pair for pair in indexed if pair[0] not in chosen_indexes),
-            key=lambda pair: (-pair[1].word_count, pair[0]),
-        )
-        chosen_indexes.update(index for index, _ in remaining[: limit - len(chosen_indexes)])
-
-    return [segments[index] for index in sorted(chosen_indexes)]
-
-
 def aggregate_segment_scores(scores: list[SegmentScore]) -> tuple[float, float, str]:
     """Return weighted source quality, weighted-median KenLM, and bucket."""
     quality_measured = [
-        (score, score.edu_score)
+        (score, score.source_quality_score)
         for score in scores
-        if score.decision == "included" and score.edu_score is not None
+        if score.decision == "included" and score.source_quality_score is not None
     ]
-    if not quality_measured:
-        return 0.0, 0.0, "tail"
     weights = [max(1, min(score.word_count, 512)) for score, _ in quality_measured]
     total = sum(weights)
-    edu = (
+    source_quality = (
         sum(
-            edu_score * weight
-            for (_, edu_score), weight in zip(quality_measured, weights, strict=True)
+            source_quality_score * weight
+            for (_, source_quality_score), weight in zip(quality_measured, weights, strict=True)
         )
         / total
+        if total
+        else 0.0
     )
     measured = [
         (score.perplexity, score.perplexity_bucket, max(1, min(score.word_count, 512)))
-        for score, _ in quality_measured
-        if score.perplexity is not None and score.perplexity_bucket is not None
+        for score in scores
+        if score.decision == "included"
+        and score.perplexity is not None
+        and score.perplexity_bucket is not None
     ]
     if not measured:
-        return edu, 0.0, "middle"
+        return source_quality, 0.0, "middle"
     total = sum(weight for _, _, weight in measured)
     ordered = sorted(measured, key=lambda item: item[0])
     halfway = total / 2
@@ -112,10 +68,12 @@ def aggregate_segment_scores(scores: list[SegmentScore]) -> tuple[float, float, 
             median_perplexity = perplexity
             median_bucket = bucket
             break
-    return edu, median_perplexity, median_bucket
+    return source_quality, median_perplexity, median_bucket
 
 
-def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificScores:
+def scientific_scores(
+    silver: SilverRecord, *, source_quality_score: float, quality_applicable: bool = True
+) -> ScientificScores:
     roles = {segment.role for segment in silver.segments}
     has_abstract = "abstract" in roles
     has_methods = "methods" in roles
@@ -152,7 +110,7 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
         + 0.12 * float(silver.table_count > 0)
         + 0.08 * float(silver.figure_count > 0)
         + 0.10 * (structural / 5.0)
-        + 0.10 * (edu_score / 5.0)
+        + (0.10 * (source_quality_score / 5.0) if quality_applicable else 0.0)
     )
     reasoning = max(0.0, min(1.0, reasoning))
 
@@ -161,14 +119,13 @@ def scientific_scores(silver: SilverRecord, *, edu_score: float) -> ScientificSc
         extraction_completeness=completeness,
         structural_quality_score=structural,
         reasoning_score=reasoning,
-        # Benchmark allocation is a post-training artifact decision. The
-        # pretraining curator deliberately does not estimate it.
-        benchmark_score=0.0,
         content_tags=tags,
     )
 
 
-def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificScores:
+def source_scores(
+    silver: SilverRecord, *, quality_score: float, quality_applicable: bool = True
+) -> ScientificScores:
     """Dispatch structural/evidence signals without applying paper assumptions universally."""
     source_policy = resolve_source_policy(
         source_feed=silver.source_feed,
@@ -176,7 +133,11 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         extraction_pipeline=silver.extraction_pipeline,
     )
     if source_policy.family == "scientific_paper":
-        return scientific_scores(silver, edu_score=quality_score)
+        return scientific_scores(
+            silver,
+            source_quality_score=quality_score,
+            quality_applicable=quality_applicable,
+        )
     word_count = len((silver.model_text or silver.text).split())
     completeness = min(
         1.0,
@@ -186,72 +147,43 @@ def source_scores(silver: SilverRecord, *, quality_score: float) -> ScientificSc
         + 0.10 * float(bool(silver.text.strip())),
     )
     structural = max(0.0, min(5.0, 5.0 * completeness))
-    if source_policy.family == "source_code":
-        text = silver.model_text or silver.text
-        reasoning = min(
-            1.0,
-            0.15
-            + 0.15 * float("def " in text or "function " in text)
-            + 0.15 * float("class " in text)
-            + 0.10 * float("test" in (silver.title or "").lower())
-            + 0.15 * (quality_score / 5.0),
-        )
-        tags = ["systems_implementation", "methods_procedures"]
-        return ScientificScores(completeness, structural, reasoning, 0.0, tags)
-    if source_policy.family == "peer_review":
-        # Review eligibility is categorical and based on the source schema in
-        # route_document. Do not infer review quality from sentiment keywords.
-        reasoning = min(1.0, quality_score / 5.0)
-        return ScientificScores(
-            completeness,
-            structural,
-            reasoning,
-            0.0,
-            ["peer_review", "critique_and_feedback"],
-        )
     if not source_policy.training_text:
         return ScientificScores(
             completeness,
             structural,
             0.0,
-            0.0,
             ["discovery_metadata"],
         )
-    reasoning = min(0.45, 0.10 + 0.15 * (quality_score / 5.0) + 0.20 * completeness)
+    reasoning = min(
+        0.45,
+        0.10 + (0.15 * (quality_score / 5.0) if quality_applicable else 0.0) + 0.20 * completeness,
+    )
+    content_tag = {
+        "hf_model_card": "hf_model_documentation",
+        "hf_dataset_card": "hf_dataset_documentation",
+    }.get(source_policy.family, "educational_web")
     return ScientificScores(
         completeness,
         structural,
         reasoning,
-        0.0,
-        ["educational_web"],
+        [content_tag],
     )
 
 
 def composite_quality_score(
     *,
-    edu_score: float,
+    source_quality_score: float,
     structural_quality_score: float,
     lang_score: float,
-    gopher_pass: bool,
-    c4_pass: bool,
-    perplexity_bucket: str,
     language_applicable: bool = True,
-    web_heuristics_applicable: bool = True,
-    perplexity_applicable: bool = True,
+    quality_applicable: bool = True,
 ) -> float:
-    """Explainable 0..5 convenience score built only from applicable signals."""
-    typicality = {"head": 1.0, "middle": 0.72, "tail": 0.25}.get(perplexity_bucket, 0.0)
-    heuristic = (float(gopher_pass) + float(c4_pass)) / 2
-    weighted = [
-        (0.35, edu_score / 5.0),
-        (0.25, structural_quality_score / 5.0),
-    ]
+    """Classifier-dominant 0..5 convenience score from applicable signals."""
+    weighted = [(0.20, structural_quality_score / 5.0)]
+    if quality_applicable:
+        weighted.append((0.70, source_quality_score / 5.0))
     if language_applicable:
-        weighted.append((0.15, lang_score))
-    if web_heuristics_applicable:
-        weighted.append((0.15, heuristic))
-    if perplexity_applicable:
-        weighted.append((0.10, typicality))
+        weighted.append((0.10, lang_score))
     total_weight = sum(weight for weight, _ in weighted)
     normalized = sum(weight * value for weight, value in weighted) / total_weight
     return max(0.0, min(5.0, 5.0 * normalized))
@@ -279,14 +211,36 @@ def route_document(
             reasons=["scientific extraction is incomplete; retry the full artifact"],
         )
     eligible: list[CorpusRoute] = ["pretrain"]
-    reasons = ["clean body projection passed privacy, quality, dedup, and decontamination gates"]
-    if reasoning_score >= 0.55:
+    reasons = ["clean body projection passed privacy, quality, and deduplication gates"]
+    posttrain_ready = posttrain_candidate_eligible(silver)
+    if reasoning_score >= 0.55 and posttrain_ready:
         eligible.append("posttrain_candidate")
         reasons.append("methods/results and structured evidence support post-training use")
 
-    if reasoning_score >= 0.55:
+    if reasoning_score >= 0.55 and posttrain_ready:
         return RouteDecision("posttrain_candidate", eligible, reasons)
     return RouteDecision("pretrain", eligible, reasons)
+
+
+def posttrain_candidate_eligible(silver: SilverRecord) -> bool:
+    """Return whether the current paper Foundry can consume this record.
+
+    The current Foundry contract is deliberately paper-specific. Its durable
+    input must name a successfully persisted ``ScientificDocument`` and expose
+    at least one stable retained section. Web prose, cards, reviews, code, and
+    scientific rows without that artifact remain valid pretraining
+    material, but cannot be mislabeled as runnable paper environments.
+    """
+    policy = resolve_source_policy(
+        source_feed=silver.source_feed,
+        source_format=silver.source_format,
+        extraction_pipeline=silver.extraction_pipeline,
+    )
+    return (
+        policy.family == "scientific_paper"
+        and silver.scientific_artifact_s3_uri is not None
+        and any(segment.text.strip() for segment in silver.segments)
+    )
 
 
 def _content_tags(silver: SilverRecord, roles: Set[str]) -> list[str]:

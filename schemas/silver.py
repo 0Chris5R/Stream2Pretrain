@@ -5,10 +5,8 @@ heuristic taggers (Gopher / C4), and MinHash signature compute. Near-dup
 cluster membership is filled in by the LSHBloom operator downstream and may
 be ``None`` for the first occurrence in a band.
 
-v0.2.0 propagates ``source_format``, ``extraction_pipeline``, ``spdx_license``,
-and ``spdx_license_source`` from the Bronze record so the silver consumer no
-longer has to join back to bronze to know which extractor produced the text
-or which license the source attached.
+Source format, extraction provenance and item-level licence evidence propagate
+from Bronze, so consumers can interpret the record without fetching raw bytes.
 """
 
 from __future__ import annotations
@@ -144,7 +142,7 @@ class SilverRecord(BaseModel):
         description="SourceFeed CRD name propagated from Bronze.",
     )
 
-    # v0.2.0 classifier columns (mirrored from Bronze; kept on Silver so
+    # Source provenance (mirrored from Bronze; kept on Silver so
     # downstream Iceberg writers do not need to re-join with the bronze topic).
     source_format: SourceFormat = Field(
         default="html",
@@ -157,14 +155,13 @@ class SilverRecord(BaseModel):
         description=(
             "Operator-chain identifier of the extractor that produced ``text``. "
             "Distinct from ``extracted_with`` so a single extractor binary can "
-            "ship multiple named pipelines (e.g. 'arxiv-html-2026-06' vs "
-            "'fineweb-edu-html')."
+            "ship multiple named pipelines."
         ),
     )
     spdx_license: str | None = Field(
         default=None,
         max_length=128,
-        description="OSI-list verified SPDX id, or None if not attached.",
+        description="Item-level licence identifier, or None if not attached.",
     )
     spdx_license_source: SpdxLicenseSource = Field(
         default="unknown",
@@ -174,6 +171,15 @@ class SilverRecord(BaseModel):
         default="pretrain_and_posttrain",
         description="Purpose boundary propagated from the pre-fetch licence decision.",
     )
+    raw_html_s3_uri: str | None = Field(
+        default=None,
+        pattern=r"^s3://[^/]+/.+",
+        description="Original admitted Bronze body used only for bounded extraction retry.",
+    )
+    source_content_type: str = "application/octet-stream"
+    source_http_status: int = Field(default=200, ge=100, le=599)
+    source_fetched_at: datetime | None = None
+    source_http_last_modified: datetime | None = None
 
     # Structured scientific artifact. The full nested object remains in
     # MinIO; compact counts and its pointer travel with every downstream row.
@@ -181,6 +187,10 @@ class SilverRecord(BaseModel):
         default=None,
         pattern=r"^s3://[^/]+/.+",
         description="Structured sections/tables/equations/figures JSON artifact.",
+    )
+    scientific_evidence_gzip: bytes | None = Field(
+        default=None,
+        description="Lossless extracted scientific JSON for durable Kafka handoff, not images.",
     )
     figure_count: int = Field(default=0, ge=0)
     table_count: int = Field(default=0, ge=0)

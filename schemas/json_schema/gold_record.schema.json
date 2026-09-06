@@ -9,18 +9,6 @@
           "title": "C4 Pass",
           "type": "boolean"
         },
-        "comparison_classifier_revision": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Comparison Classifier Revision"
-        },
         "decision": {
           "default": "included",
           "enum": [
@@ -30,55 +18,12 @@
           "title": "Decision",
           "type": "string"
         },
-        "edu_score": {
-          "anyOf": [
-            {
-              "maximum": 5.0,
-              "minimum": 0.0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Primary source-aware educational-quality model output.",
-          "title": "Edu Score"
-        },
         "exclusion_reasons": {
           "items": {
             "type": "string"
           },
           "title": "Exclusion Reasons",
           "type": "array"
-        },
-        "finepdfs_edu_score": {
-          "anyOf": [
-            {
-              "maximum": 5.0,
-              "minimum": 0.0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Finepdfs Edu Score"
-        },
-        "fineweb_edu_score": {
-          "anyOf": [
-            {
-              "maximum": 5.0,
-              "minimum": 0.0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Fineweb Edu Score"
         },
         "perplexity": {
           "anyOf": [
@@ -117,9 +62,11 @@
               "phone",
               "ssn",
               "credit_card",
+              "iban",
               "ipv4",
               "ipv6",
-              "passport"
+              "passport",
+              "secret"
             ],
             "type": "string"
           },
@@ -145,6 +92,21 @@
         "segment_id": {
           "title": "Segment Id",
           "type": "string"
+        },
+        "source_quality_score": {
+          "anyOf": [
+            {
+              "maximum": 5.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Primary source-aware learned quality output.",
+          "title": "Source Quality Score"
         },
         "title": {
           "title": "Title",
@@ -183,18 +145,6 @@
       "description": "Reserved row-lineage id; null in the current Iceberg V2 writer.",
       "title": "Row Id"
     },
-    "benchmark_score": {
-      "default": 0.0,
-      "maximum": 1.0,
-      "minimum": 0.0,
-      "title": "Benchmark Score",
-      "type": "number"
-    },
-    "benchmark_set_version": {
-      "default": "unknown",
-      "title": "Benchmark Set Version",
-      "type": "string"
-    },
     "c4_curly_brace_pass": {
       "default": true,
       "title": "C4 Curly Brace Pass",
@@ -232,14 +182,6 @@
       "title": "Classifier Revision",
       "type": "string"
     },
-    "contaminated_with": {
-      "description": "Benchmark identifiers this doc overlapped with, e.g. ['MMLU'].",
-      "items": {
-        "type": "string"
-      },
-      "title": "Contaminated With",
-      "type": "array"
-    },
     "content_tags": {
       "items": {
         "type": "string"
@@ -247,50 +189,11 @@
       "title": "Content Tags",
       "type": "array"
     },
-    "decon_embedding_revision": {
-      "default": "unknown",
-      "title": "Decon Embedding Revision",
-      "type": "string"
-    },
-    "decon_exact_matches": {
-      "items": {
-        "type": "string"
-      },
-      "title": "Decon Exact Matches",
-      "type": "array"
-    },
-    "decon_max_similarity": {
-      "default": 0.0,
-      "maximum": 1.0,
-      "minimum": -1.0,
-      "title": "Decon Max Similarity",
-      "type": "number"
-    },
-    "decon_ngram_size": {
-      "default": 13,
-      "minimum": 1,
-      "title": "Decon Ngram Size",
-      "type": "integer"
-    },
-    "decon_semantic_matches": {
-      "items": {
-        "type": "string"
-      },
-      "title": "Decon Semantic Matches",
-      "type": "array"
-    },
     "doc_id": {
-      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "description": "Stable document-revision id. Usually the sha256 of the canonical URL; exact content projections may bind an immutable source object.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Doc Id",
       "type": "string"
-    },
-    "edu_score": {
-      "description": "Primary source-aware educational-quality output. Scientific PDF/HTML uses FinePDFs Edu v2; general web content uses FineWeb-Edu.",
-      "maximum": 5.0,
-      "minimum": 0.0,
-      "title": "Edu Score",
-      "type": "number"
     },
     "eligible_routes": {
       "items": {
@@ -299,7 +202,6 @@
           "broad_pretraining",
           "posttrain_candidate",
           "reasoning_candidate",
-          "benchmark_candidate",
           "quarantine",
           "retry"
         ],
@@ -460,9 +362,11 @@
           "phone",
           "ssn",
           "credit_card",
+          "iban",
           "ipv4",
           "ipv6",
-          "passport"
+          "passport",
+          "secret"
         ],
         "type": "string"
       },
@@ -523,6 +427,7 @@
       "enum": [
         "none",
         "metadata_removed",
+        "body_redacted",
         "segments_removed",
         "body_quarantine"
       ],
@@ -536,9 +441,11 @@
           "phone",
           "ssn",
           "credit_card",
+          "iban",
           "ipv4",
           "ipv6",
-          "passport"
+          "passport",
+          "secret"
         ],
         "type": "string"
       },
@@ -559,6 +466,20 @@
       "default": "document-v1",
       "title": "Projection Version",
       "type": "string"
+    },
+    "quality_diagnostics": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Exact section scores, confidence, model digest and diagnostic-only mode.",
+      "title": "Quality Diagnostics"
     },
     "quality_score": {
       "description": "Explainable composite corpus-quality score; not a model output.",
@@ -586,15 +507,13 @@
           "high_perplexity",
           "pii_detected",
           "license_excluded",
-          "decontamination_hit",
           "validity_interval_invalid",
           "minhash_backend_mismatch",
           "insufficient_body",
-          "insubstantial_review",
           "insufficient_scientific_body",
-          "code_quality_filter",
-          "secret_detected",
-          "incomplete_scientific_extraction"
+          "incomplete_scientific_extraction",
+          "document_template",
+          "hf_card_quality_filter"
         ],
         "type": "string"
       },
@@ -608,9 +527,11 @@
           "phone",
           "ssn",
           "credit_card",
+          "iban",
           "ipv4",
           "ipv6",
-          "passport"
+          "passport",
+          "secret"
         ],
         "type": "string"
       },
@@ -633,7 +554,6 @@
         "broad_pretraining",
         "posttrain_candidate",
         "reasoning_candidate",
-        "benchmark_candidate",
         "quarantine",
         "retry"
       ],
@@ -701,13 +621,18 @@
         "pdf",
         "latex",
         "markdown",
-        "code",
         "web",
-        "metadata",
-        "review"
+        "metadata"
       ],
       "title": "Source Format",
       "type": "string"
+    },
+    "source_quality_score": {
+      "description": "Source-specific learned pretraining quality, 0-5.",
+      "maximum": 5.0,
+      "minimum": 0.0,
+      "title": "Source Quality Score",
+      "type": "number"
     },
     "source_word_count": {
       "default": 0,
@@ -726,22 +651,19 @@
         }
       ],
       "default": null,
-      "description": "OSI-list verified SPDX id; the canonical license column for Apache-2.0-release filtering. Mirrors ``license`` for v0.1 writers; new writers populate this directly.",
+      "description": "Canonical item-level licence identifier used for purpose-aware routing. May be an SPDX id or a documented source-terms identifier.",
       "title": "Spdx License"
     },
     "spdx_license_source": {
       "default": "unknown",
       "description": "Where the SPDX id was read from.",
       "enum": [
-        "github_api",
         "file_header",
         "http_link",
         "html_meta",
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
-        "openreview_note",
-        "openreview_terms",
         "hf_card",
         "archived_page",
         "source_terms",
@@ -750,16 +672,6 @@
         "unknown"
       ],
       "title": "Spdx License Source",
-      "type": "string"
-    },
-    "training_usage": {
-      "default": "pretrain_and_posttrain",
-      "description": "Purpose boundary inherited from the pre-fetch item licence decision.",
-      "enum": [
-        "pretrain_and_posttrain",
-        "posttrain_transform_only"
-      ],
-      "title": "Training Usage",
       "type": "string"
     },
     "structural_quality_score": {
@@ -785,7 +697,7 @@
       "type": "string"
     },
     "tokens": {
-      "description": "GPT-2-tokenizer token count.",
+      "description": "Token count from tokenizer_revision.",
       "minimum": 0,
       "title": "Tokens",
       "type": "integer"
@@ -794,6 +706,16 @@
       "description": "W3C trace-id (lowercase hex, 32 chars).",
       "pattern": "^[0-9a-f]{32}$",
       "title": "Trace Id",
+      "type": "string"
+    },
+    "training_usage": {
+      "default": "pretrain_and_posttrain",
+      "description": "Purpose boundary inherited from the pre-fetch item licence decision.",
+      "enum": [
+        "pretrain_and_posttrain",
+        "posttrain_transform_only"
+      ],
+      "title": "Training Usage",
       "type": "string"
     },
     "training_word_count": {
@@ -827,7 +749,7 @@
     "lang",
     "tokens",
     "quality_score",
-    "edu_score",
+    "source_quality_score",
     "license",
     "license_source",
     "risk_tier",

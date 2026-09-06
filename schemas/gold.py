@@ -1,4 +1,4 @@
-"""Gold-tier record: the curated, mixture-ready data passport.
+"""Gold-tier record: the curated, training-ready data passport.
 
 This is the canonical training-shard row. Every field is intended to survive
 all the way into the Iceberg ``gold`` table and be queryable by DuckDB. The
@@ -6,11 +6,9 @@ all the way into the Iceberg ``gold`` table and be queryable by DuckDB. The
 on commit and may be ``None`` while the record is still in-flight on the
 ``docs.curated`` Redpanda topic.
 
-v0.2.0 propagates ``source_format``, ``extraction_pipeline``, ``spdx_license``,
-``spdx_license_source`` from the Silver record. The ``license`` and
-``license_source`` columns from v0.1 stay for backwards compatibility, but
-new writers SHOULD populate ``spdx_license`` (the canonical OSI-validated id)
-and let the legacy fields mirror it on commit.
+Source format, extraction provenance and item-level licence evidence propagate
+from Silver. The canonical ``spdx_license`` identifier and its provenance
+remain available alongside the route's resolved ``license`` field.
 """
 
 from __future__ import annotations
@@ -22,13 +20,23 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from schemas.bronze import DocId, SourceFormat, SpdxLicenseSource, TraceId, TrainingUsage
 
-# Risk-tier follows the MixtureVitae / Common Pile convention:
+# Risk-tier follows the Common Pile convention:
 #   1 = trainable under current policy (explicit allowlisted content licence,
-#       low PII, and low contamination)
+#       low PII)
 #   2 = caution (heuristic uncertainty, restricted licence, partial PII)
-#   3 = drop (explicit dirty signal; should not enter training mixture)
+#   3 = drop (explicit dirty signal; should not enter training data)
 RiskTier = Literal[1, 2, 3]
-PiiFlag = Literal["email", "phone", "ssn", "credit_card", "ipv4", "ipv6", "passport"]
+PiiFlag = Literal[
+    "email",
+    "phone",
+    "ssn",
+    "credit_card",
+    "iban",
+    "ipv4",
+    "ipv6",
+    "passport",
+    "secret",
+]
 CorpusRoute = Literal[
     "pretrain",
     # Read compatibility for snapshots written before the route was renamed.
@@ -36,8 +44,6 @@ CorpusRoute = Literal[
     "posttrain_candidate",
     # Read compatibility for snapshots written before the foundry landed.
     "reasoning_candidate",
-    # Read compatibility for the removed upstream benchmark-candidate route.
-    "benchmark_candidate",
     "quarantine",
     "retry",
 ]
@@ -51,15 +57,13 @@ RejectReason = Literal[
     "high_perplexity",
     "pii_detected",
     "license_excluded",
-    "decontamination_hit",
     "validity_interval_invalid",
     "minhash_backend_mismatch",
     "insufficient_body",
-    "insubstantial_review",
     "insufficient_scientific_body",
-    "code_quality_filter",
-    "secret_detected",
     "incomplete_scientific_extraction",
+    "document_template",
+    "hf_card_quality_filter",
 ]
 
 
@@ -72,16 +76,13 @@ class SegmentScore(BaseModel):
     title: str
     role: str
     word_count: int = Field(..., ge=0)
-    edu_score: float | None = Field(
+    source_quality_score: float | None = Field(
         default=None,
         ge=0.0,
         le=5.0,
-        description="Primary source-aware educational-quality model output.",
+        description="Primary source-aware learned quality output.",
     )
-    finepdfs_edu_score: float | None = Field(default=None, ge=0.0, le=5.0)
-    fineweb_edu_score: float | None = Field(default=None, ge=0.0, le=5.0)
     quality_classifier_revision: str | None = None
-    comparison_classifier_revision: str | None = None
     perplexity: float | None = Field(default=None, ge=0.0)
     perplexity_bucket: Literal["head", "middle", "tail"] | None = None
     c4_pass: bool = True
@@ -98,7 +99,7 @@ class GoldRecord(BaseModel):
     doc_id: DocId
     text: str
     lang: str = Field(..., min_length=2, max_length=8)
-    tokens: int = Field(..., ge=0, description="GPT-2-tokenizer token count.")
+    tokens: int = Field(..., ge=0, description="Token count from tokenizer_revision.")
 
     # Quality signals.
     quality_score: float = Field(
@@ -107,19 +108,19 @@ class GoldRecord(BaseModel):
         le=5.0,
         description="Explainable composite corpus-quality score; not a model output.",
     )
-    edu_score: float = Field(
+    source_quality_score: float = Field(
         ...,
         ge=0.0,
         le=5.0,
-        description=(
-            "Primary source-aware educational-quality output. Scientific PDF/HTML uses "
-            "FinePDFs Edu v2; general web content uses FineWeb-Edu."
-        ),
+        description="Source-specific learned pretraining quality, 0-5.",
+    )
+    quality_diagnostics: dict[str, object] | None = Field(
+        default=None,
+        description="Exact section scores, confidence, model digest and diagnostic-only mode.",
     )
     structural_quality_score: float = Field(default=0.0, ge=0.0, le=5.0)
     extraction_completeness: float = Field(default=0.0, ge=0.0, le=1.0)
     reasoning_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    benchmark_score: float = Field(default=0.0, ge=0.0, le=1.0)
     route: CorpusRoute = "quarantine"
     eligible_routes: list[CorpusRoute] = Field(default_factory=list)
     route_reasons: list[str] = Field(default_factory=list)
@@ -164,20 +165,14 @@ class GoldRecord(BaseModel):
     pii_flags: list[PiiFlag] = Field(default_factory=list)
     metadata_pii_flags: list[PiiFlag] = Field(default_factory=list)
     removed_body_pii_flags: list[PiiFlag] = Field(default_factory=list)
-    pii_action: Literal["none", "metadata_removed", "segments_removed", "body_quarantine"] = "none"
+    pii_action: Literal[
+        "none",
+        "metadata_removed",
+        "body_redacted",
+        "segments_removed",
+        "body_quarantine",
+    ] = "none"
     pii_scanner_revision: str = "regex-only"
-
-    # Decontamination.
-    contaminated_with: list[str] = Field(
-        default_factory=list,
-        description="Benchmark identifiers this doc overlapped with, e.g. ['MMLU'].",
-    )
-    decon_exact_matches: list[str] = Field(default_factory=list)
-    decon_semantic_matches: list[str] = Field(default_factory=list)
-    decon_max_similarity: float = Field(default=0.0, ge=-1.0, le=1.0)
-    decon_ngram_size: int = Field(default=13, ge=1)
-    decon_embedding_revision: str = "unknown"
-    benchmark_set_version: str = "unknown"
 
     # Temporal validity.
     valid_from: datetime
@@ -210,7 +205,7 @@ class GoldRecord(BaseModel):
         description="SourceFeed CRD name propagated from Bronze/Silver.",
     )
 
-    # v0.2.0 classifier columns. Mirrored forward from Silver so a single
+    # Source provenance. Mirrored forward from Silver so a single
     # ``SELECT * FROM gold`` carries the full provenance chain without joins.
     source_format: SourceFormat = Field(
         default="html",
@@ -226,9 +221,8 @@ class GoldRecord(BaseModel):
         default=None,
         max_length=128,
         description=(
-            "OSI-list verified SPDX id; the canonical license column for "
-            "Apache-2.0-release filtering. Mirrors ``license`` for v0.1 "
-            "writers; new writers populate this directly."
+            "Canonical item-level licence identifier used for purpose-aware routing. "
+            "May be an SPDX id or a documented source-terms identifier."
         ),
     )
     spdx_license_source: SpdxLicenseSource = Field(

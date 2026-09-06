@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 from processor.operators.pii import PiiScanner, is_valid_ipv4, luhn_ok
 
 
@@ -30,6 +33,16 @@ def test_credit_card_with_luhn() -> None:
     assert "credit_card" in flags
 
 
+def test_iban_is_a_high_risk_financial_identifier() -> None:
+    scanner = PiiScanner(use_presidio=False)
+    value = "DE89370400440532013000"
+
+    result = scanner.sanitize(f"Transfer to {value} only.")
+
+    assert result.text == "Transfer to [IBAN] only."
+    assert result.blocking_flags == ("iban",)
+
+
 def test_ssn_detection() -> None:
     flags = PiiScanner().flags("My SSN is 123-45-6789, please don't share.")
     assert "ssn" in flags
@@ -50,7 +63,18 @@ def test_scientific_tensor_shape_is_not_a_phone_number() -> None:
 def test_explicit_international_phone_number_is_blocking() -> None:
     scanner = PiiScanner(use_presidio=False)
 
-    assert "phone" in scanner.blocking_flags("Telephone: +49 30 1234 5678")
+    result = scanner.sanitize("Telephone: +49 30 1234 5678")
+    assert result.text == "Telephone: [PHONE]"
+    assert result.blocking_flags == ()
+
+
+def test_secret_is_redacted_and_blocks_the_artifact() -> None:
+    scanner = PiiScanner(use_presidio=False)
+
+    result = scanner.sanitize("api_key = abcdefghijklmnopqrstuvwxyz123456")
+
+    assert "abcdefghijklmnopqrstuvwxyz" not in result.text
+    assert result.blocking_flags == ("secret",)
 
 
 def test_clean_text_has_no_flags(long_english_text: str) -> None:
@@ -61,3 +85,70 @@ def test_clean_text_has_no_flags(long_english_text: str) -> None:
 def test_credit_card_invalid_luhn_not_flagged() -> None:
     flags = PiiScanner().flags("number 1234 5678 9012 3456 is just text")
     assert "credit_card" not in flags
+
+
+def test_presidio_loads_only_the_entities_mapped_by_the_scanner(monkeypatch) -> None:
+    recognizer_names = [
+        "CreditCardRecognizer",
+        "EmailRecognizer",
+        "IpRecognizer",
+        "PhoneRecognizer",
+        "UsPassportRecognizer",
+        "UsSsnRecognizer",
+    ]
+    recognizers = ModuleType("presidio_analyzer.predefined_recognizers")
+    for name in recognizer_names:
+        setattr(recognizers, name, type(name, (), {}))
+
+    captured: dict[str, object] = {}
+
+    class FakeRegistry:
+        def __init__(self, **kwargs: object) -> None:
+            captured["registry"] = kwargs
+
+    class FakeAnalyzer:
+        def __init__(self, **kwargs: object) -> None:
+            captured["analyzer"] = kwargs
+
+    class FakeProvider:
+        def __init__(self, **kwargs: object) -> None:
+            captured["provider"] = kwargs
+
+        def create_engine(self) -> object:
+            return SimpleNamespace(name="spacy")
+
+    presidio = ModuleType("presidio_analyzer")
+    presidio.AnalyzerEngine = FakeAnalyzer  # type: ignore[attr-defined]
+    presidio.RecognizerRegistry = FakeRegistry  # type: ignore[attr-defined]
+    nlp_engine = ModuleType("presidio_analyzer.nlp_engine")
+    nlp_engine.NlpEngineProvider = FakeProvider  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "presidio_analyzer", presidio)
+    monkeypatch.setitem(sys.modules, "presidio_analyzer.nlp_engine", nlp_engine)
+    monkeypatch.setitem(sys.modules, "presidio_analyzer.predefined_recognizers", recognizers)
+
+    scanner = PiiScanner(use_presidio=True)
+
+    assert scanner.is_presidio_loaded
+    registry_args = captured["registry"]
+    assert isinstance(registry_args, dict)
+    assert [type(item).__name__ for item in registry_args["recognizers"]] == recognizer_names
+    assert registry_args["supported_languages"] == ["en"]
+
+
+def test_presidio_scans_large_text_in_bounded_complete_chunks() -> None:
+    scanner = PiiScanner(use_presidio=False, presidio_chunk_chars=16)
+    observed: list[str] = []
+
+    class FakeAnalyzer:
+        def analyze(self, *, text: str, language: str) -> list[object]:
+            assert language == "en"
+            observed.append(text)
+            return []
+
+    scanner._presidio = FakeAnalyzer()  # type: ignore[attr-defined]
+    source = "alpha beta gamma delta epsilon zeta eta theta"
+
+    assert scanner.flags(source) == []
+    assert observed
+    assert all(len(chunk) <= 16 for chunk in observed)
+    assert "".join(observed) == source

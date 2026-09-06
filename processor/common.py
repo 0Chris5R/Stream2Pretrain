@@ -17,7 +17,6 @@ Public API
 - :func:`bronze_loads`           - decode wire bytes into a dict
 - :func:`silver_dumps` / :func:`silver_loads` - SilverRecord serde
 - :func:`gold_dumps`   / :func:`gold_loads`   - GoldRecord serde
-- :func:`decon_dumps`  / :func:`decon_loads`  - DeconAttestation serde
 - :func:`new_trace_id` - W3C 32-char hex when there is no upstream trace
 """
 
@@ -43,7 +42,6 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from structlog.types import EventDict, WrappedLogger
 
 from schemas.bronze import BronzeRecord
-from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
 from schemas.silver import SilverRecord
 
@@ -99,7 +97,6 @@ class ProcessorConfig:
     normalized_topic: str
     curated_topic: str
     decisions_topic: str
-    decon_attest_topic: str
 
     minio_endpoint: str
     minio_access_key: str
@@ -107,7 +104,6 @@ class ProcessorConfig:
     bronze_bucket: str
     silver_bucket: str
     gold_bucket: str
-    decon_bucket: str
 
     polaris_uri: str
     polaris_warehouse: str
@@ -123,14 +119,6 @@ class ProcessorConfig:
     state_dir: str
     models_dir: str
 
-    # Decon-Gate
-    benchmark_set_version: str
-    benchmark_corpus_path: str | None
-
-    # Mixture Controller
-    proxy_lm_window_minutes: int
-    promotion_threshold: float
-    promotion_required_windows: int
     license_admissions_topic: str = "license.admissions"
 
     @property
@@ -306,14 +294,12 @@ def load_config() -> ProcessorConfig:
         normalized_topic=_env("S2P_NORMALIZED_TOPIC", "docs.normalized"),
         curated_topic=_env("S2P_CURATED_TOPIC", "docs.curated"),
         decisions_topic=_env("S2P_DECISIONS_TOPIC", "curation.decisions"),
-        decon_attest_topic=_env("S2P_DECON_TOPIC", "decon.attest"),
         minio_endpoint=_env("MINIO_ENDPOINT", "http://localhost:9000"),
         minio_access_key=_env("MINIO_ACCESS_KEY", "minioadmin"),
         minio_secret_key=_env("MINIO_SECRET_KEY", "minioadmin"),
         bronze_bucket=_env("MINIO_BRONZE_BUCKET", "bronze"),
         silver_bucket=_env("MINIO_SILVER_BUCKET", "silver"),
         gold_bucket=_env("MINIO_GOLD_BUCKET", "gold"),
-        decon_bucket=_env("MINIO_DECON_BUCKET", "decon"),
         polaris_uri=_env("POLARIS_URI", "http://polaris:8181/api/catalog"),
         polaris_warehouse=_env("POLARIS_WAREHOUSE", "stream2pretrain"),
         polaris_token=_env_optional("POLARIS_TOKEN"),
@@ -327,11 +313,6 @@ def load_config() -> ProcessorConfig:
         http_max_retries=_env_int("S2P_HTTP_MAX_RETRIES", 4),
         state_dir=_env("S2P_STATE_DIR", "/var/lib/s2p"),
         models_dir=_env("S2P_MODELS_DIR", "/opt/models"),
-        benchmark_set_version=_env("S2P_BENCH_SET_VERSION", "v2026-06-01"),
-        benchmark_corpus_path=_env_optional("S2P_BENCH_CORPUS_PATH"),
-        proxy_lm_window_minutes=_env_int("S2P_PROXY_LM_WINDOW_MIN", 10),
-        promotion_threshold=_env_float("S2P_PROMOTION_THRESHOLD", 0.05),
-        promotion_required_windows=_env_int("S2P_PROMOTION_REQUIRED_WINDOWS", 3),
         license_admissions_topic=_env("S2P_LICENSE_ADMISSIONS_TOPIC", "license.admissions"),
     )
 
@@ -388,6 +369,20 @@ def kafka_payload_max_bytes() -> int:
     return configured
 
 
+def kafka_source_batch_size() -> int:
+    """Return the bounded per-partition Bytewax input batch size.
+
+    Processor work can include PDF parsing, OCR, classifier calls, and durable
+    deduplication. Bytewax's 1,000-record connector default allows hours of
+    computed work to accumulate before sinks and recovery advance, so these
+    flows default to one record per partition and require a positive override.
+    """
+    batch_size = _env_int("S2P_BYTEWAX_SOURCE_BATCH_SIZE", 1)
+    if batch_size <= 0:
+        raise RuntimeError("S2P_BYTEWAX_SOURCE_BATCH_SIZE must be positive")
+    return batch_size
+
+
 def tracked_kafka_source(
     *,
     runtime_status: BytewaxRuntimeStatus | None,
@@ -396,9 +391,13 @@ def tracked_kafka_source(
     topics: list[str],
     starting_offset: int,
     add_config: dict[str, str],
+    batch_size: int,
 ) -> object:
     """Build a KafkaSource that reports real partition assignment readiness."""
     from bytewax.connectors.kafka import KafkaSource
+
+    if batch_size <= 0:
+        raise RuntimeError("Kafka source batch_size must be positive")
 
     if runtime_status is None:
         return KafkaSource(
@@ -406,6 +405,7 @@ def tracked_kafka_source(
             topics=topics,
             starting_offset=starting_offset,
             add_config=add_config,
+            batch_size=batch_size,
         )
     runtime_status.register_source(source_name)
 
@@ -420,6 +420,7 @@ def tracked_kafka_source(
         topics=topics,
         starting_offset=starting_offset,
         add_config=add_config,
+        batch_size=batch_size,
     )
 
 
@@ -610,20 +611,56 @@ def gold_dumps(record: GoldRecord) -> bytes:
     return record.model_dump_json(by_alias=True).encode("utf-8")
 
 
+def _migrate_gold_value(value: dict[str, Any]) -> dict[str, Any]:
+    """Return a current-schema value from a persisted Gold representation."""
+    value = dict(value)
+    previous_edu_score = value.pop("edu_score", None)
+    previous_pdf_score = value.pop("finepdfs_edu_score", None)
+    if "source_quality_score" not in value:
+        previous_score = previous_edu_score
+        if previous_score is None:
+            previous_score = previous_pdf_score
+        if previous_score is None:
+            previous_score = value.get("quality_score", 0.0)
+        value["source_quality_score"] = previous_score
+    if "row_id" in value and "_row_id" not in value:
+        value["_row_id"] = value.pop("row_id")
+    segment_scores = value.get("segment_scores")
+    if isinstance(segment_scores, list):
+        migrated_segments: list[object] = []
+        for original_segment in segment_scores:
+            segment = (
+                dict(original_segment.__dict__)
+                if hasattr(original_segment, "__dict__")
+                else original_segment
+            )
+            if not isinstance(segment, dict):
+                migrated_segments.append(segment)
+                continue
+            previous_edu_score = segment.pop("edu_score", None)
+            previous_pdf_score = segment.pop("finepdfs_edu_score", None)
+            if "source_quality_score" not in segment:
+                previous_score = previous_edu_score
+                if previous_score is None:
+                    previous_score = previous_pdf_score
+                segment["source_quality_score"] = previous_score
+            migrated_segments.append(segment)
+        value["segment_scores"] = migrated_segments
+    return value
+
+
+def upgrade_gold_record(record: GoldRecord) -> GoldRecord:
+    """Revalidate records restored from Bytewax snapshots against the current schema."""
+    return GoldRecord.model_validate(_migrate_gold_value(dict(record.__dict__)))
+
+
 def gold_loads(payload: bytes) -> GoldRecord:
-    """Parse a GoldRecord from JSON bytes."""
-    return GoldRecord.model_validate_json(payload)
-
-
-def decon_dumps(record: DeconAttestation) -> bytes:
-    """Serialize a DeconAttestation to canonical JSON bytes (sorted keys)."""
-    obj = record.model_dump(mode="json")
-    return orjson.dumps(obj, option=orjson.OPT_SORT_KEYS)
-
-
-def decon_loads(payload: bytes) -> DeconAttestation:
-    """Parse a DeconAttestation from JSON bytes."""
-    return DeconAttestation.model_validate_json(payload)
+    """Parse current and already-persisted Gold payloads into the current schema."""
+    value = orjson.loads(payload)
+    if not isinstance(value, dict):
+        raise ValueError("Gold payload must be a JSON object")
+    value = _migrate_gold_value(value)
+    return GoldRecord.model_validate(value)
 
 
 __all__ = [
@@ -635,8 +672,6 @@ __all__ = [
     "bronze_loads_dict",
     "configure_logging",
     "current_trace_id_hex",
-    "decon_dumps",
-    "decon_loads",
     "get_logger",
     "gold_dumps",
     "gold_loads",
@@ -649,4 +684,5 @@ __all__ = [
     "silver_dumps",
     "silver_loads",
     "tracked_kafka_source",
+    "upgrade_gold_record",
 ]
