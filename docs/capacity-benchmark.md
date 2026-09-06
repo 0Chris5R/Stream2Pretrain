@@ -1,142 +1,58 @@
-# Capacity Benchmark Runbook
+# Capacity measurement
 
-PRD-013 cannot be closed from a laptop. It requires measurements from the
-target DHBWCloud k3s cluster after the platform dependencies and the
-Stream2Pretrain chart are installed. Do not replace missing measurements with
-estimates. Keep `needs-measurement` until the command output exists.
+Use the deployed cluster, not laptop estimates. A healthy Pod does not prove
+that the pipeline keeps up.
 
-## Capacity evidence already available from the lecture repository
+## Read-only snapshot
 
-The course material provides two concrete deployment references, but only one
-has numeric capacity:
-
-- `lecture_slides/04a - Architecture and Core Concepts.md` starts the local
-  Minikube environment with 6 CPUs and 7,000 MB RAM.
-- The same handout selects the DHBW Cloud flavor `m1.xlarge`, but does not
-  publish that flavor's CPU, RAM, ephemeral-disk, or quota values.
-
-The first number is a development recommendation, not evidence for the remote
-cluster. The second is only a flavor name. Consequently the chart uses one
-strict curator replica and conservative KEDA maxima by default. The larger
-`values-prod.yaml` maxima are generic production examples and must not be used
-for the course cluster until the probe below records allocatable resources.
-FinePDFs v2 plus FineWeb-Edu comparison inference also makes the curator
-materially larger than the older FineWeb-only configuration.
-
-## Preconditions
-
-- `kubectl` points at the target k3s cluster.
-- The `stream2pretrain`, `redpanda`, and `minio` namespaces exist, or their
-  namespace overrides are known.
-- Metrics Server is installed if you want live `kubectl top` values. The
-  capacity report does not require it.
-- The seed-loader benchmark must run as a small-scale smoke first. Only the
-  scale parameter changes for the full run.
-
-## One-Shot Capacity Report
-
-Run:
-
-```sh
-uv run python scripts/capacity_probe.py \
-  --namespace stream2pretrain \
-  --redpanda-namespace redpanda \
-  --minio-namespace minio \
-  --json-out docs/capacity-report.generated.json \
-  --out docs/capacity-report.generated.md
+```bash
+gh workflow run deploy-main.yml --ref main -f mode=check-pipeline
 ```
 
-The generated JSON is the evidence artifact. The generated Markdown is the
-human-readable report to attach to PRD-013. Commit the generated report only
-after it was collected from the real target cluster.
+Use `mode=capture-evidence` for matched measurement snapshots. The workflow
+uploads counters, broker frontiers, object-store sizes and resource state as
+a seven-day Actions artifact without changing offsets or queues. Compare two
+captures from the same deployed configuration and report their actual interval.
 
-The report covers:
+The compact check records core readiness, serving totals, worker counters,
+classifier decisions, queued evidence and recent Foundry events. It creates no
+provider calls and does not mutate queues.
 
-- Node allocatable CPU and memory from `kubectl get nodes -o json`.
-- Stream2Pretrain pod requests and limits from rendered live Pods.
-- PVC requests/capacity, including seed-loader/HF cache claims when present.
-- Redpanda topic metadata for `raw.fetched`, `docs.normalized`,
-  `docs.curated`, and `decon.attest` when `rpk` is reachable inside a broker
-  Pod.
-- MinIO pod discovery. Throughput remains `needs-measurement` until a MinIO
-  benchmark such as `warp` is run against the target tenant.
+For resource sizing, `scripts/capacity_probe.py` collects node, Pod, PVC,
+Redpanda and storage observations using an explicitly configured cluster
+context. `scripts/benchmark_model_service.py` measures complete model requests
+and therefore consumes inference compute; run it only as an intentional test.
 
-Immediately after gaining access, also capture the flavor and quota surface:
+## Measurement protocol
 
-```sh
-kubectl get nodes -o wide
-kubectl describe nodes
-kubectl get resourcequota,limitrange -A
-kubectl get storageclass
-kubectl top nodes
-```
+1. Record start/end times, image digests, model manifest, replicas, CPU/RAM limits
+   and policy generation.
+2. Measure a representative fresh-input interval after rollouts. Include an
+   arXiv announcement burst and distinguish weekday from weekend arrivals.
+3. Count unique discovered content, licence-admitted content, normalized output,
+   decided records and durable training exports separately for each source.
+4. Separate replay from new intake. A worker counter increments per processing
+   event; latest-per-document corpus totals need not increase after replay.
+5. Record queue age and backlog change alongside stage throughput. Increasing
+   backlog proves that the measured configuration is not keeping up.
+6. Measure classifier seconds, tokens and windows by head. Include all four
+   models under the two-stage policy, not quality-only throughput.
+7. Measure object bytes by bucket/prefix and current Iceberg references.
+   Distinguish the one-day transient working set from durable daily growth.
+8. Record peak memory, OOMs, CPU throttling, pending Pods and disk headroom.
+   Request more capacity when measured demand exceeds resources.
+9. For Foundry, report completed papers, accepted/rejected SFT trajectories and
+   RL environments, calls, tokens and provider-capacity stops. Separate content
+   rejection from parsing, transport and execution failures.
 
-## Seed Loader Smoke
+Never remove quality checks, skip sections or substitute classifiers to make a
+capacity benchmark pass. Sustained rate, daily storage growth and accepted
+artifact yield remain `needs-measurement` until this protocol has a recorded
+representative interval.
 
-Validate the seed-loader path with a sub-minute run first:
+## Scaling boundary
 
-```sh
-bash scripts/seed_corpus.sh \
-  --namespace stream2pretrain \
-  --components=pes2o \
-  --max-docs=10
-```
-
-Record:
-
-- Job wall-clock duration from `kubectl get job` and Pod timestamps.
-- Peak Pod CPU/memory from `kubectl top pod` or Prometheus.
-- HF cache PVC used bytes from the storage backend or CSI metrics.
-- Documents emitted to `docs.normalized`.
-
-After the smoke passes, scale only `--max-docs` or the component list. Do not
-change code, images, resource requests, or topic settings between smoke and
-the larger run unless the smoke found a defect and the run is restarted from
-the beginning.
-
-## Redpanda Partition Decision
-
-Keep `schemas/topics.py` production partition counts as `needs-measurement`
-until the target report includes:
-
-- Measured producer throughput into `raw.fetched`.
-- Measured consumer lag drain rate for fetcher, curate, and Iceberg writer.
-- Per-broker CPU and memory headroom during the drain.
-- The partition count used for the run.
-
-Only update topic partition defaults after those four values are recorded.
-
-For fetcher, curator, and Iceberg writer, record the `s2p_*_total` Prometheus
-counters, durable recovery frontier, partition assignment, processing-failure
-objects, and per-Pod CPU/memory. Their broker groups bootstrap a clean v2
-recovery through `OFFSET_STORED`, but broker commits are not the steady-state
-Bytewax frontier. Core worker count, recovery partition count, input topic
-partition count, and CPU allocation must be changed and validated together.
-The arXiv HTML worker remains fixed at one replica because shared
-`raw.fetched` lag is self-amplifying; only a source-specific backlog metric can
-justify enabling its scaler.
-
-## MinIO Throughput Decision
-
-The capacity report discovers MinIO pods but does not invent throughput. Run a
-MinIO-native benchmark, for example `warp`, against the target tenant and add
-the command output to the generated report. The required evidence is:
-
-- Object size and concurrency used by the benchmark.
-- Write throughput.
-- Read throughput.
-- p95/p99 operation latency.
-- MinIO Pod CPU/memory during the run.
-
-## Closing PRD-013
-
-PRD-013 can move from `needs-measurement` to `done` only when
-`docs/capacity-report.generated.md` contains measured values for:
-
-- Redpanda partitions and drain behavior.
-- Worker CPU/RAM headroom for fetcher, curate, Iceberg writer, DuckDB API, and
-  seed-loader.
-- MinIO read/write throughput.
-- Seed-loader PVC sizing for the selected demo seed mixture.
-
-If any field remains `needs-measurement`, keep PRD-013 open.
+Stateless classifier replicas scale with demand within declared limits.
+Bytewax fetcher and curator each own coordinated recovery state; independent
+replicas must not fork that state. Rescale through a reviewed coordinated
+restart. Iceberg commits and the Foundry queue currently have single writers.

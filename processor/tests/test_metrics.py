@@ -6,16 +6,26 @@ from processor.metrics import ProcessorMetrics
 def test_processor_metrics_render_dashboard_contract() -> None:
     metrics = ProcessorMetrics(namespace="stream2pretrain")
 
+    metrics.record_received(source_feed="arxiv-rss")
     metrics.record_normalized(source_feed="arxiv-rss")
-    metrics.record_curated(source_feed="arxiv-rss", quality_score=3.25, edu_score=4.0)
-    metrics.record_dropped(reasons=["license_excluded"], quality_score=0.75, edu_score=1.0)
+    metrics.record_curated(source_feed="arxiv-rss", quality_score=3.25, source_quality_score=4.0)
+    metrics.record_dropped(
+        reasons=["license_excluded"], quality_score=0.75, source_quality_score=1.0
+    )
     metrics.record_route(route="reasoning_candidate")
     metrics.record_failure(stage="normalize", reason="payload_too_large")
-    metrics.record_decon_scan(benchmarks=["MMLU"])
-    metrics.record_iceberg_flush(rows=2, decisions=3, benchmark_candidates=1, seconds=0.12)
+    metrics.record_work_expired(
+        stage="curate", source_feed="arxiv-html-fetcher", reason="age_exceeded"
+    )
+    metrics.record_pdf_processing(outcome="success", seconds=203.95)
+    metrics.record_pdf_worker_restart(reason="timeout")
+    metrics.record_iceberg_flush(rows=2, decisions=3, seconds=0.12)
 
     body = metrics.render_prometheus().decode("utf-8")
 
+    assert (
+        's2p_processor_received_total{namespace="stream2pretrain",source="arxiv-rss"} 1.0' in body
+    )
     assert (
         's2p_processor_ingested_total{namespace="stream2pretrain",source="arxiv-rss"} 1.0' in body
     )
@@ -27,14 +37,8 @@ def test_processor_metrics_render_dashboard_contract() -> None:
     assert 's2p_documents_emitted_total{namespace="stream2pretrain",stage="normalize"} 1.0' in body
     assert 's2p_documents_emitted_total{namespace="stream2pretrain",stage="curate"} 1.0' in body
     assert 's2p_documents_emitted_total{namespace="stream2pretrain",stage="iceberg"} 2.0' in body
-    assert (
-        's2p_documents_emitted_total{namespace="stream2pretrain",stage="benchmark_reserve"} 1.0'
-        in body
-    )
-    assert 's2p_decon_checked_total{namespace="stream2pretrain"} 1.0' in body
-    assert 's2p_decon_flagged_total{benchmark="MMLU",namespace="stream2pretrain"} 1.0' in body
     assert "s2p_quality_score_bucket" in body
-    assert "s2p_fineweb_edu_score_bucket" in body
+    assert "s2p_source_quality_score_bucket" in body
     assert (
         's2p_processor_routed_total{namespace="stream2pretrain",route="reasoning_candidate"} 1.0'
         in body
@@ -44,3 +48,12 @@ def test_processor_metrics_render_dashboard_contract() -> None:
         's2p_processor_failures_total{namespace="stream2pretrain",reason="payload_too_large",stage="normalize"} 1.0'
         in body
     )
+    assert (
+        's2p_processor_work_expired_total{namespace="stream2pretrain",reason="age_exceeded",source="arxiv-html-fetcher",stage="curate"} 1.0'
+        in body
+    )
+    assert (
+        's2p_pdf_processing_seconds_count{namespace="stream2pretrain",outcome="success"} 1.0'
+        in body
+    )
+    assert 's2p_pdf_worker_restarts_total{namespace="stream2pretrain",reason="timeout"} 1.0' in body

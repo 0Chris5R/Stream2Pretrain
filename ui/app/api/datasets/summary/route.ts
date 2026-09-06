@@ -14,8 +14,6 @@ export async function GET(req: Request): Promise<NextResponse> {
     'route',
     'source',
     'source_format',
-    'tag',
-    'min_edu',
     'min_quality',
     'include_structured',
   ]);

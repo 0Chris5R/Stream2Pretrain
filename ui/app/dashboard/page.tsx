@@ -47,7 +47,10 @@ export default function DashboardPage() {
   });
   const data = dashboard.data;
   const scored =
-    data?.quality_histogram.edu_buckets.reduce((sum, bucket) => sum + bucket.count, 0) ?? 0;
+    data?.quality_histogram.source_quality_buckets.reduce(
+      (sum, bucket) => sum + bucket.count,
+      0,
+    ) ?? 0;
 
   return (
     <div className="space-y-5">
@@ -90,7 +93,10 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             {data ? (
-              <QualityHistogramChart data={data.quality_histogram} series="edu_buckets" />
+              <QualityHistogramChart
+                data={data.quality_histogram}
+                series="source_quality_buckets"
+              />
             ) : (
               <Skeleton />
             )}
@@ -144,7 +150,9 @@ export default function DashboardPage() {
                   <TableCell className="text-right font-mono">
                     {formatInt(row.training_words)}
                   </TableCell>
-                  <TableCell className="text-right font-mono">{row.mean_edu.toFixed(2)}</TableCell>
+                  <TableCell className="text-right font-mono">
+                    {row.mean_source_quality.toFixed(2)}
+                  </TableCell>
                   <TableCell className="text-right font-mono">
                     {row.mean_quality.toFixed(2)}
                   </TableCell>
@@ -217,7 +225,6 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-
       {dashboard.error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
           {(dashboard.error as Error).message}
@@ -275,18 +282,10 @@ function SummaryValue({ label, value }: { label: string; value: string }) {
 function RouteBadge({ route }: { route: string }) {
   return (
     <Badge
-      variant={
-        route === 'quarantine'
-          ? 'destructive'
-          : route === 'retry' || route === 'benchmark_candidate'
-            ? 'warning'
-            : 'success'
-      }
+      variant={route === 'quarantine' ? 'destructive' : route === 'retry' ? 'warning' : 'success'}
     >
       {route === 'posttrain_candidate' || route === 'reasoning_candidate'
         ? 'Post-training'
-        : route === 'benchmark_candidate'
-          ? 'Legacy benchmark'
         : humanize(route)}
     </Badge>
   );

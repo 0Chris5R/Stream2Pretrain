@@ -6,8 +6,6 @@ import {
   Activity,
   BookOpen,
   Database,
-  FileSignature,
-  Layers,
   ListChecks,
   Radio,
   FlaskConical,
@@ -19,10 +17,8 @@ const items = [
   { href: '/dashboard', label: 'Dashboard', icon: Activity },
   { href: '/documents', label: 'Documents', icon: BookOpen },
   { href: '/sources', label: 'Sources', icon: ListChecks },
-  { href: '/decon', label: 'Benchmark Safety', icon: FileSignature },
   { href: '/datasets', label: 'Datasets', icon: Database },
   { href: '/post-training', label: 'Post-training', icon: FlaskConical },
-  { href: '/mixture', label: 'Mixture', icon: Layers },
 ] as const;
 
 export function TopNav() {

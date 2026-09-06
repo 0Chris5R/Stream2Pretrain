@@ -1,7 +1,7 @@
 /**
  * GET /api/as-of?ts=<ISO-8601>
  *
- * Returns the per-source mixture (document + token counts) of the gold
+ * Returns per-source document and token counts from the Gold corpus
  * Iceberg table valid at `ts`. Implements novelty pillar N2: typed
  * `[valid_from, valid_to)` validity intervals propagated end-to-end with
  * an `as_of(timestamp)` view.
@@ -9,18 +9,19 @@
  * The route forwards the timestamp to the in-cluster duckdb-server,
  * which runs the half-open-interval predicate
  *   `valid_from <= ts AND (valid_to IS NULL OR valid_to > ts)`
- * against the Iceberg gold table.
+ * against the retained serving projection of the Iceberg corpus. This is
+ * source-validity time, not an Iceberg snapshot/processing-time query.
  */
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { AsOfMixtureRowSchema } from '@/lib/schemas';
+import { AsOfSourceRowSchema } from '@/lib/schemas';
 import { UPSTREAM, upstreamError } from '@/lib/upstream';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const RowsSchema = z.array(AsOfMixtureRowSchema);
+const RowsSchema = z.array(AsOfSourceRowSchema);
 
 export async function GET(req: Request): Promise<NextResponse> {
   const url = new URL(req.url);
@@ -35,7 +36,7 @@ export async function GET(req: Request): Promise<NextResponse> {
   try {
     const resp = await fetch(
       `${UPSTREAM.duckdb}/as-of?ts=${encodeURIComponent(parsedDate.toISOString())}`,
-      { cache: 'no-store' },
+      { cache: 'no-store', signal: AbortSignal.timeout(25_000) },
     );
     if (!resp.ok) {
       return NextResponse.json(upstreamError(`duckdb_status_${resp.status}`), { status: 502 });

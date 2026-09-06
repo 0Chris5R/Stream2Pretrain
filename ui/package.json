@@ -2,7 +2,7 @@
   "name": "stream2pretrain-ui",
   "version": "0.1.0",
   "private": true,
-  "description": "Stream2Pretrain cockpit - Next.js 16 App Router with shadcn/ui + TanStack Query + DuckDB-WASM.",
+  "description": "Stream2Pretrain cockpit - Next.js 16 App Router with shadcn/ui + TanStack Query + server-side DuckDB.",
   "scripts": {
     "dev": "next dev --webpack",
     "build": "next build --webpack",
@@ -12,7 +12,6 @@
     "format": "prettier --write ."
   },
   "dependencies": {
-    "@duckdb/duckdb-wasm": "1.29.0",
     "@radix-ui/react-dialog": "^1.1.17",
     "@radix-ui/react-label": "^2.1.10",
     "@radix-ui/react-slot": "^1.3.0",
@@ -23,7 +22,6 @@
     "lucide-react": "^1.20.0",
     "next": "^16.2.9",
     "react": "^19.2.7",
-    "react-day-picker": "^10.0.1",
     "react-dom": "^19.2.7",
     "recharts": "^3.8.1",
     "tailwind-merge": "^3.6.0",

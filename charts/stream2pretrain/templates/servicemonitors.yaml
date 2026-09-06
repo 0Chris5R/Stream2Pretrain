@@ -1,6 +1,7 @@
 {{- if .Values.observability.serviceMonitor.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
-{{- range $component := list "ingest-github-events" "ingest-github-tarball-fetcher" "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "decon-gate" "mixture-controller" "foundry" }}
+{{- $components := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "foundry" }}
+{{- range $component := $components }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -24,5 +25,35 @@ spec:
       interval: {{ $.Values.observability.serviceMonitor.interval }}
       scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout }}
       path: /metrics
+{{- end }}
+{{- $root := . }}
+{{- if .Values.processor.modelService.enabled }}
+{{- range $profile, $service := .Values.processor.modelService.profiles }}
+{{- if not (and (hasKey $service "enabled") (eq $service.enabled false)) }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullName }}-processor-model-service-{{ $profile }}
+  namespace: {{ $root.Values.observability.serviceMonitor.namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" $root "component" (printf "processor-model-service-%s" $profile)) | nindent 4 }}
+    {{- with $root.Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ $root.Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $root "component" (printf "processor-model-service-%s" $profile)) | nindent 6 }}
+  endpoints:
+    - port: http
+      interval: {{ $root.Values.observability.serviceMonitor.interval }}
+      scrapeTimeout: {{ $root.Values.observability.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

@@ -8,9 +8,9 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: Request): Promise<NextResponse> {
   const url = new URL(req.url);
   const allowed = new Set([
-    'page', 'page_size', 'search', 'route', 'source', 'source_format', 'date_from', 'date_to',
+    'page', 'page_size', 'cursor', 'search', 'route', 'source', 'source_format', 'date_from', 'date_to',
     'tag', 'rejection_reason', 'has_figures', 'has_tables', 'has_equations', 'include_fixtures',
-    'min_edu', 'max_edu', 'min_quality', 'max_quality', 'sort',
+    'min_source_quality', 'max_source_quality', 'min_quality', 'max_quality', 'sort',
   ]);
   const query = new URLSearchParams();
   for (const [key, value] of url.searchParams.entries()) {

@@ -14,6 +14,7 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 
 QUALITY_BUCKETS = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
 FLUSH_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
+PDF_PROCESSING_BUCKETS = (1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0, 600.0)
 
 
 class ProcessorMetrics:
@@ -33,6 +34,12 @@ class ProcessorMetrics:
             "s2p_documents_emitted_total",
             "Documents emitted by processor stage.",
             ["namespace", "stage"],
+            registry=self.registry,
+        )
+        self._processor_received = Counter(
+            "s2p_processor_received_total",
+            "Content-bearing Bronze documents selected for normalization.",
+            ["namespace", "source"],
             registry=self.registry,
         )
         self._processor_ingested = Counter(
@@ -59,6 +66,12 @@ class ProcessorMetrics:
             ["namespace", "stage", "reason"],
             registry=self.registry,
         )
+        self._work_expired = Counter(
+            "s2p_processor_work_expired_total",
+            "Unfinished queue records skipped by intake age, not quality rejections or unique documents.",
+            ["namespace", "stage", "source", "reason"],
+            registry=self.registry,
+        )
         self._processor_routed = Counter(
             "s2p_processor_routed_total",
             "Documents assigned to each final corpus route.",
@@ -72,23 +85,11 @@ class ProcessorMetrics:
             buckets=QUALITY_BUCKETS,
             registry=self.registry,
         )
-        self._edu_score = Histogram(
-            "s2p_fineweb_edu_score",
-            "Official FineWeb-Edu model score distribution.",
+        self._source_quality_score = Histogram(
+            "s2p_source_quality_score",
+            "Source-specific ModernBERT diagnostic quality distribution.",
             ["namespace"],
             buckets=QUALITY_BUCKETS,
-            registry=self.registry,
-        )
-        self._decon_checked = Counter(
-            "s2p_decon_checked_total",
-            "Documents checked by Decon-Gate.",
-            ["namespace"],
-            registry=self.registry,
-        )
-        self._decon_flagged = Counter(
-            "s2p_decon_flagged_total",
-            "Decon-Gate benchmark hits.",
-            ["namespace", "benchmark"],
             registry=self.registry,
         )
         self._iceberg_flush_seconds = Histogram(
@@ -96,6 +97,19 @@ class ProcessorMetrics:
             "Iceberg micro-batch flush duration.",
             ["namespace"],
             buckets=FLUSH_BUCKETS,
+            registry=self.registry,
+        )
+        self._pdf_processing_seconds = Histogram(
+            "s2p_pdf_processing_seconds",
+            "End-to-end isolated PDF processing duration by outcome.",
+            ["namespace", "outcome"],
+            buckets=PDF_PROCESSING_BUCKETS,
+            registry=self.registry,
+        )
+        self._pdf_worker_restarts = Counter(
+            "s2p_pdf_worker_restarts_total",
+            "Isolated PDF worker replacements after an unsafe outcome.",
+            ["namespace", "reason"],
             registry=self.registry,
         )
         self._process_up.labels(self._namespace).inc()
@@ -109,26 +123,38 @@ class ProcessorMetrics:
             self._processor_ingested.labels(self._namespace, source_feed).inc()
             self._documents_emitted.labels(self._namespace, "normalize").inc()
 
+    def record_received(self, *, source_feed: str) -> None:
+        with self._lock:
+            self._processor_received.labels(self._namespace, source_feed).inc()
+
     def record_curated(
-        self, *, source_feed: str, quality_score: float, edu_score: float | None = None
+        self,
+        *,
+        source_feed: str,
+        quality_score: float,
+        source_quality_score: float | None = None,
     ) -> None:
         with self._lock:
             self._processor_curated.labels(self._namespace, source_feed).inc()
             self._documents_emitted.labels(self._namespace, "curate").inc()
             self._quality_score.labels(self._namespace).observe(quality_score)
-            if edu_score is not None:
-                self._edu_score.labels(self._namespace).observe(edu_score)
+            if source_quality_score is not None:
+                self._source_quality_score.labels(self._namespace).observe(source_quality_score)
 
     def record_dropped(
-        self, *, reasons: Iterable[str], quality_score: float, edu_score: float | None = None
+        self,
+        *,
+        reasons: Iterable[str],
+        quality_score: float,
+        source_quality_score: float | None = None,
     ) -> None:
         reasons_list = list(reasons) or ["unknown"]
         with self._lock:
             for reason in reasons_list:
                 self._processor_dropped.labels(self._namespace, reason).inc()
             self._quality_score.labels(self._namespace).observe(quality_score)
-            if edu_score is not None:
-                self._edu_score.labels(self._namespace).observe(edu_score)
+            if source_quality_score is not None:
+                self._source_quality_score.labels(self._namespace).observe(source_quality_score)
 
     def record_route(self, *, route: str) -> None:
         with self._lock:
@@ -138,12 +164,17 @@ class ProcessorMetrics:
         with self._lock:
             self._processor_failures.labels(self._namespace, stage, reason).inc()
 
-    def record_decon_scan(self, *, benchmarks: Iterable[str]) -> None:
-        hits = list(benchmarks)
+    def record_work_expired(self, *, stage: str, source_feed: str, reason: str) -> None:
         with self._lock:
-            self._decon_checked.labels(self._namespace).inc()
-            for benchmark in hits:
-                self._decon_flagged.labels(self._namespace, benchmark).inc()
+            self._work_expired.labels(self._namespace, stage, source_feed, reason).inc()
+
+    def record_pdf_processing(self, *, outcome: str, seconds: float) -> None:
+        with self._lock:
+            self._pdf_processing_seconds.labels(self._namespace, outcome).observe(max(0.0, seconds))
+
+    def record_pdf_worker_restart(self, *, reason: str) -> None:
+        with self._lock:
+            self._pdf_worker_restarts.labels(self._namespace, reason).inc()
 
     def record_iceberg_flush(
         self,
@@ -151,15 +182,11 @@ class ProcessorMetrics:
         rows: int,
         seconds: float,
         decisions: int | None = None,
-        benchmark_candidates: int = 0,
     ) -> None:
         with self._lock:
             self._documents_emitted.labels(self._namespace, "iceberg").inc(max(0, rows))
             self._documents_emitted.labels(self._namespace, "decision").inc(
                 max(0, rows if decisions is None else decisions)
-            )
-            self._documents_emitted.labels(self._namespace, "benchmark_reserve").inc(
-                max(0, benchmark_candidates)
             )
             self._iceberg_flush_seconds.labels(self._namespace).observe(max(0.0, seconds))
 

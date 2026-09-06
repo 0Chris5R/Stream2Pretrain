@@ -7,6 +7,8 @@ read-only ``SELECT`` statements; dashboards should prefer the typed endpoints.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 import time
@@ -17,12 +19,86 @@ from functools import partial
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
-from ingest.common.license_admission import PERMISSIVE_TRAINING_LICENSES
+from ingest.common.license_admission import LICENSE_POLICY_REVISION, PERMISSIVE_TRAINING_LICENSES
 
 _RELATION_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 _TRAINING_LICENSE_SQL = ", ".join(
     f"'{value.replace(chr(39), chr(39) * 2)}'" for value in sorted(PERMISSIVE_TRAINING_LICENSES)
 )
+_LICENSE_POLICY_SQL = LICENSE_POLICY_REVISION.replace("'", "''")
+_REMOVED_CORPUS_SOURCES = (
+    "github-events",
+    "github-releases",
+    "github-release-tarballs",
+    "hf-daily-papers",
+    "oai-arxiv-cs",
+    "rss-openai-news",
+    "rss-deepmind-blog",
+    "rss-hf-blog",
+    "rss-bair-blog",
+    "rss-eleuther-blog",
+)
+_LEGACY_DISPLAY_REJECTIONS = (
+    "metadata_only",
+    "c4_nopunc_filter",
+    "gopher_filter",
+)
+_TRAINABLE_DECISION_SQL = (
+    "risk_tier = 1 AND route IN ('pretrain', 'broad_pretraining', "
+    "'posttrain_candidate', 'reasoning_candidate') "
+    "AND ARRAY_LENGTH(reject_reasons) = 0 AND ARRAY_LENGTH(pii_flags) = 0"
+)
+
+
+def _visible_source_predicate(
+    column: str = "source_feed", *, include_fixtures: bool = False
+) -> str:
+    """Exclude fixtures, internal discovery, removed sources, and backfills."""
+    removed = ", ".join(f"'{value}'" for value in _REMOVED_CORPUS_SOURCES)
+    clauses: list[str] = []
+    if not include_fixtures:
+        clauses.extend(
+            (
+                f"{column} NOT LIKE 'local-%'",
+                f"{column} <> 'cluster-smoke'",
+            )
+        )
+    clauses.extend(
+        (
+            f"{column} NOT LIKE 'rss-arxiv-%'",
+            f"{column} NOT LIKE 'seed:%'",
+            f"{column} NOT IN ({removed})",
+        )
+    )
+    return " AND ".join(clauses)
+
+
+def _dashboard_decision_predicate(
+    source_column: str = "source_feed",
+    reject_column: str = "reject_reasons",
+    *,
+    include_fixtures: bool = False,
+) -> str:
+    """Select visible corpus rows without restricting their processing version."""
+    historical = " OR ".join(
+        f"LIST_CONTAINS({reject_column}, '{reason}')" for reason in _LEGACY_DISPLAY_REJECTIONS
+    )
+    return (
+        f"{_visible_source_predicate(source_column, include_fixtures=include_fixtures)} "
+        f"AND NOT ({historical})"
+    )
+
+
+def _overview_total(rows: Sequence[dict[str, Any]]) -> int:
+    return sum(int(row["count"]) for row in rows if row.get("kind") == "total")
+
+
+def _overview_counts(rows: Sequence[dict[str, Any]], *, kind: str) -> dict[str, int]:
+    return {
+        str(row["key"]): int(row["count"])
+        for row in rows
+        if row.get("kind") == kind and row.get("key") is not None
+    }
 
 
 class DuckDBConnection(Protocol):
@@ -45,6 +121,7 @@ class DuckDBQueryService:
         refresh_iceberg: bool = False,
         catalog_refresh_seconds: float = 30.0,
         artifact_store: ScientificArtifactStore | None = None,
+        overview_relation: str | None = None,
     ) -> None:
         if not _RELATION_RE.fullmatch(gold_relation):
             raise ValueError("gold_relation must be a simple DuckDB relation name")
@@ -60,6 +137,9 @@ class DuckDBQueryService:
         self._catalog_refresh_seconds = max(0.0, catalog_refresh_seconds)
         self._relation_refreshed_at: dict[str, float] = {}
         self._artifact_store = artifact_store
+        if overview_relation is not None and not _RELATION_RE.fullmatch(overview_relation):
+            raise ValueError("overview_relation must be a simple relation name")
+        self._overview_relation = overview_relation
 
     @classmethod
     def from_env(cls) -> DuckDBQueryService:
@@ -71,7 +151,7 @@ class DuckDBQueryService:
         license_admissions_relation = os.environ.get(
             "S2P_DUCKDB_LICENSE_ADMISSIONS_RELATION", "license_admissions"
         )
-        conn = duckdb.connect(db_path, read_only=False)
+        conn: Any = duckdb.connect(db_path, read_only=False)
         _load_extensions(conn)
         if os.environ.get("S2P_DUCKDB_UNSAFE_VERSION_GUESSING") == "1":
             # The laptop profile uses a single PyIceberg SQLite-catalog writer,
@@ -93,51 +173,99 @@ class DuckDBQueryService:
 
     def as_of(self, ts: str) -> list[dict[str, Any]]:
         sql = f"""
+        WITH valid_decisions AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._decisions}
+          WHERE valid_from <= CAST(? AS TIMESTAMP)
+            AND (valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP))
+        )
         SELECT
           source_feed,
           CAST(COALESCE(SUM(tokens), 0) AS BIGINT) AS tokens,
           CAST(COUNT(*) AS BIGINT) AS documents
-        FROM {self._gold}
-        WHERE valid_from <= CAST(? AS TIMESTAMP)
-          AND (valid_to IS NULL OR valid_to > CAST(? AS TIMESTAMP))
+        FROM valid_decisions
+        WHERE revision_rank = 1
+          AND {_dashboard_decision_predicate()}
+          AND {_TRAINABLE_DECISION_SQL}
         GROUP BY source_feed
         ORDER BY tokens DESC, source_feed ASC
         """
-        return self._rows(sql, [ts, ts], relation=self._gold)
+        return self._rows(sql, [ts, ts], relation=self._decisions)
 
     def quality_histogram(self) -> dict[str, list[dict[str, Any]]]:
         composite_sql = f"""
+        WITH latest AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._decisions}
+        )
         SELECT
           CAST(FLOOR(quality_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
-        FROM {self._gold}
+        FROM latest
+        WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+          AND {_TRAINABLE_DECISION_SQL}
         GROUP BY score
         ORDER BY score ASC
         """
-        edu_sql = f"""
+        source_quality_sql = f"""
+        WITH latest AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._decisions}
+        )
         SELECT
-          CAST(FLOOR(edu_score * 2) / 2 AS DOUBLE) AS score,
+          CAST(FLOOR(source_quality_score * 2) / 2 AS DOUBLE) AS score,
           CAST(COUNT(*) AS BIGINT) AS count
-        FROM {self._gold}
+        FROM latest
+        WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+          AND {_TRAINABLE_DECISION_SQL}
         GROUP BY score
         ORDER BY score ASC
         """
         return {
-            "buckets": self._rows(composite_sql, [], relation=self._gold),
-            "edu_buckets": self._rows(edu_sql, [], relation=self._gold),
+            "buckets": self._rows(composite_sql, [], relation=self._decisions),
+            "source_quality_buckets": self._rows(source_quality_sql, [], relation=self._decisions),
         }
 
     def curation_summary(self) -> list[dict[str, Any]]:
         """Aggregate the durable decision stream by final corpus route."""
         sql = f"""
+        WITH latest AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY doc_id
+            ORDER BY valid_from DESC, scoring_version DESC,
+                     policy_revision DESC, trace_id ASC
+          ) AS revision_rank
+          FROM {self._decisions}
+        ), canonical AS (
+          SELECT * EXCLUDE (route),
+                 CASE
+                   WHEN route = 'broad_pretraining' THEN 'pretrain'
+                   WHEN route = 'reasoning_candidate' THEN 'posttrain_candidate'
+                   ELSE route
+                 END AS route
+          FROM latest
+          WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+        )
         SELECT
           route,
           CAST(COUNT(*) AS BIGINT) AS documents,
           CAST(COALESCE(SUM(source_word_count), 0) AS BIGINT) AS source_words,
           CAST(COALESCE(SUM(training_word_count), 0) AS BIGINT) AS training_words,
           CAST(COALESCE(AVG(quality_score), 0) AS DOUBLE) AS mean_quality,
-          CAST(COALESCE(AVG(edu_score), 0) AS DOUBLE) AS mean_edu
-        FROM {self._decisions}
+          CAST(COALESCE(AVG(source_quality_score), 0) AS DOUBLE) AS mean_source_quality
+        FROM canonical
         GROUP BY route
         ORDER BY documents DESC, route ASC
         """
@@ -147,6 +275,9 @@ class DuckDBQueryService:
             SELECT CAST(COUNT(*) AS BIGINT) AS documents
             FROM {self._license_admissions} AS admission
             WHERE admission.status = 'quarantined'
+              AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND admission.source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate("admission.source_feed")}
               AND NOT EXISTS (
                 SELECT 1 FROM {self._decisions} AS decision
                 WHERE decision.doc_id = admission.doc_id
@@ -166,7 +297,7 @@ class DuckDBQueryService:
                         "source_words": 0,
                         "training_words": 0,
                         "mean_quality": 0.0,
-                        "mean_edu": 0.0,
+                        "mean_source_quality": 0.0,
                     }
                 )
             else:
@@ -179,94 +310,118 @@ class DuckDBQueryService:
 
         Prometheus process counters correctly describe activity since a worker
         started, but they cannot describe the current corpus after recovery.
-        Dashboard totals therefore come from the decision and Gold tables.
+        Dashboard totals therefore select the latest durable decision for every
+        unique document across all processing versions. All three Iceberg
+        relations are materialized in one statement so a dashboard refresh
+        reads each de-duplicated history once. In particular, the early-license
+        anti-join reuses the decisions materialization instead of starting a
+        second remote scan.
         """
-        decision_totals = self._rows(
+        if self._overview_relation is not None:
+            rows = self._rows(f"SELECT payload FROM {self._overview_relation}", [])
+            if len(rows) != 1:
+                raise RuntimeError("serving overview is not initialized")
+            return dict(json.loads(rows[0]["payload"]))
+        if self._refresh_iceberg:
+            self._prepare_relation(self._decisions)
+            self._prepare_relation(self._gold)
+            self._prepare_relation(self._license_admissions)
+        overview_rows = self._rows(
             f"""
-            SELECT CAST(COUNT(*) AS BIGINT) AS durable_decisions
-            FROM {self._decisions}
-            """,
-            [],
-            relation=self._decisions,
-        )
-        training_totals = self._rows(
-            f"""
-            SELECT CAST(COUNT(*) AS BIGINT) AS training_export_documents
-            FROM {self._gold}
-            """,
-            [],
-            relation=self._gold,
-        )
-        reasons = self._rows(
-            f"""
-            SELECT reason, CAST(COUNT(*) AS BIGINT) AS count
-            FROM {self._decisions}, UNNEST(reject_reasons) AS rejected(reason)
-            GROUP BY 1
-            ORDER BY count DESC, reason ASC
-            """,
-            [],
-            relation=self._decisions,
-        )
-        decision_sources = self._rows(
-            f"""
-            SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
-            FROM {self._decisions}
+            WITH all_decisions AS MATERIALIZED (
+              SELECT doc_id, source_feed, reject_reasons, scoring_version,
+                     classifier_revision, policy_revision, trace_id, valid_from
+              FROM {self._decisions}
+            ),
+            latest_decisions AS MATERIALIZED (
+              SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY doc_id
+                ORDER BY valid_from DESC, scoring_version DESC,
+                         policy_revision DESC, trace_id ASC
+              ) AS revision_rank
+              FROM all_decisions
+            ),
+            overall_decisions AS MATERIALIZED (
+              SELECT *
+              FROM latest_decisions
+              WHERE revision_rank = 1 AND {_dashboard_decision_predicate()}
+            ),
+            overall_gold AS MATERIALIZED (
+              SELECT gold.source_feed
+              FROM {self._gold} AS gold
+              INNER JOIN overall_decisions AS decision
+                ON gold.doc_id = decision.doc_id
+               AND gold.scoring_version = decision.scoring_version
+               AND gold.classifier_revision = decision.classifier_revision
+               AND gold.policy_revision = decision.policy_revision
+               AND gold.trace_id = decision.trace_id
+            ),
+            early_license AS MATERIALIZED (
+              SELECT
+                admission.source_feed,
+                CASE WHEN admission.license_id = 'unknown'
+                     THEN 'license_missing'
+                     ELSE 'license_not_permitted'
+                END AS reason
+              FROM {self._license_admissions} AS admission
+              WHERE admission.status = 'quarantined'
+                AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+                AND admission.source_format IS DISTINCT FROM 'metadata'
+                AND {_visible_source_predicate("admission.source_feed")}
+                AND NOT EXISTS (
+                  SELECT 1 FROM all_decisions AS decision
+                  WHERE decision.doc_id = admission.doc_id
+                )
+            )
+            SELECT 'decision' AS scope, 'total' AS kind, '' AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM overall_decisions
+            UNION ALL
+            SELECT 'decision' AS scope, 'source' AS kind, source_feed AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM overall_decisions
             GROUP BY source_feed
-            ORDER BY source_feed ASC
-            """,
-            [],
-            relation=self._decisions,
-        )
-        accepted_sources = self._rows(
-            f"""
-            SELECT source_feed AS source, CAST(COUNT(*) AS BIGINT) AS accepted
-            FROM {self._gold}
+            UNION ALL
+            SELECT 'decision' AS scope, 'reason' AS kind, reason AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM overall_decisions, UNNEST(reject_reasons) AS rejected(reason)
+            GROUP BY reason
+            UNION ALL
+            SELECT 'gold' AS scope, 'total' AS kind, '' AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM overall_gold
+            UNION ALL
+            SELECT 'gold' AS scope, 'source' AS kind, source_feed AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM overall_gold
             GROUP BY source_feed
-            ORDER BY source_feed ASC
+            UNION ALL
+            SELECT 'license' AS scope, 'total' AS kind, '' AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM early_license
+            UNION ALL
+            SELECT 'license' AS scope, 'source' AS kind, source_feed AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM early_license
+            GROUP BY source_feed
+            UNION ALL
+            SELECT 'license' AS scope, 'reason' AS kind, reason AS key,
+                   CAST(COUNT(*) AS BIGINT) AS count
+            FROM early_license
+            GROUP BY reason
             """,
             [],
-            relation=self._gold,
+            relation=None,
         )
-        early_license_reasons = self._rows(
-            f"""
-            SELECT
-              CASE WHEN admission.license_id = 'unknown'
-                   THEN 'license_missing'
-                   ELSE 'license_not_permitted'
-              END AS reason,
-              CAST(COUNT(*) AS BIGINT) AS count
-            FROM {self._license_admissions} AS admission
-            WHERE admission.status = 'quarantined'
-              AND NOT EXISTS (
-                SELECT 1 FROM {self._decisions} AS decision
-                WHERE decision.doc_id = admission.doc_id
-              )
-            GROUP BY 1
-            ORDER BY count DESC, reason ASC
-            """,
-            [],
-            relation=self._license_admissions,
-        )
-        early_license_sources = self._rows(
-            f"""
-            SELECT admission.source_feed AS source, CAST(COUNT(*) AS BIGINT) AS total
-            FROM {self._license_admissions} AS admission
-            WHERE admission.status = 'quarantined'
-              AND NOT EXISTS (
-                SELECT 1 FROM {self._decisions} AS decision
-                WHERE decision.doc_id = admission.doc_id
-              )
-            GROUP BY admission.source_feed
-            ORDER BY admission.source_feed ASC
-            """,
-            [],
-            relation=self._license_admissions,
-        )
-        accepted_by_source = {str(row["source"]): int(row["accepted"]) for row in accepted_sources}
-        totals_by_source = {str(row["source"]): int(row["total"]) for row in decision_sources}
-        for row in early_license_sources:
-            source = str(row["source"])
-            totals_by_source[source] = totals_by_source.get(source, 0) + int(row["total"])
+        decision_rows = [row for row in overview_rows if row.get("scope") == "decision"]
+        gold_rows = [row for row in overview_rows if row.get("scope") == "gold"]
+        early_license_rows = [row for row in overview_rows if row.get("scope") == "license"]
+        durable_decisions = _overview_total(decision_rows)
+        training_documents = _overview_total(gold_rows)
+        accepted_by_source = _overview_counts(gold_rows, kind="source")
+        totals_by_source = _overview_counts(decision_rows, kind="source")
+        for source, count in _overview_counts(early_license_rows, kind="source").items():
+            totals_by_source[source] = totals_by_source.get(source, 0) + count
         per_source = [
             {
                 "source": source,
@@ -275,14 +430,13 @@ class DuckDBQueryService:
             }
             for source, total in sorted(totals_by_source.items())
         ]
-        rejection_counts = {str(row["reason"]): int(row["count"]) for row in reasons}
-        for row in early_license_reasons:
-            reason = str(row["reason"])
-            rejection_counts[reason] = rejection_counts.get(reason, 0) + int(row["count"])
-        early_total = sum(int(row["count"]) for row in early_license_reasons)
+        rejection_counts = _overview_counts(decision_rows, kind="reason")
+        for reason, count in _overview_counts(early_license_rows, kind="reason").items():
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + count
+        early_total = _overview_total(early_license_rows)
         return {
-            "durable_decisions": int(decision_totals[0]["durable_decisions"]) + early_total,
-            "training_export_documents": int(training_totals[0]["training_export_documents"]),
+            "durable_decisions": durable_decisions + early_total,
+            "training_export_documents": training_documents,
             "rejected_by_reason": rejection_counts,
             "per_source_acceptance": per_source,
         }
@@ -293,6 +447,9 @@ class DuckDBQueryService:
             f"""
             SELECT status, CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
+            WHERE policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY status
             ORDER BY status
             """,
@@ -303,6 +460,9 @@ class DuckDBQueryService:
             f"""
             SELECT license_id, status, CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
+            WHERE policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY license_id, status
             ORDER BY count DESC, license_id
             """,
@@ -316,6 +476,9 @@ class DuckDBQueryService:
                    status, license_id, license_source, reason,
                    content_fetch_started
             FROM {self._license_admissions}
+            WHERE policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             ORDER BY observed_at DESC, decision_id
             LIMIT ?
             """,
@@ -351,6 +514,9 @@ class DuckDBQueryService:
               CAST(MAX(observed_at) AS VARCHAR) AS last_observed_at
             FROM {self._license_admissions}
             WHERE observed_at >= CAST(? AS TIMESTAMP)
+              AND policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY 1
             ORDER BY source_feed
             """,
@@ -369,6 +535,9 @@ class DuckDBQueryService:
               CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
             WHERE observed_at >= CAST(? AS TIMESTAMP)
+              AND policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY 1, license_id, status
             ORDER BY source_feed, count DESC, license_id, status
             """,
@@ -386,6 +555,9 @@ class DuckDBQueryService:
               CAST(COUNT(*) AS BIGINT) AS count
             FROM {self._license_admissions}
             WHERE observed_at >= CAST(? AS TIMESTAMP)
+              AND policy_revision = '{_LICENSE_POLICY_SQL}'
+              AND source_format IS DISTINCT FROM 'metadata'
+              AND {_visible_source_predicate()}
             GROUP BY 1, license_source
             ORDER BY source_feed, count DESC, license_source
             """,
@@ -422,6 +594,7 @@ class DuckDBQueryService:
         *,
         page: int = 1,
         page_size: int = 25,
+        cursor: str | None = None,
         search: str | None = None,
         routes: Sequence[str] = (),
         sources: Sequence[str] = (),
@@ -434,13 +607,13 @@ class DuckDBQueryService:
         has_tables: bool | None = None,
         has_equations: bool | None = None,
         include_fixtures: bool = False,
-        min_edu: float | None = None,
-        max_edu: float | None = None,
+        min_source_quality: float | None = None,
+        max_source_quality: float | None = None,
         min_quality: float | None = None,
         max_quality: float | None = None,
         sort: str = "newest",
     ) -> dict[str, Any]:
-        """Return a paginated, server-filtered collection of durable decisions."""
+        """Return a cursor-paginated collection from the current serving view."""
         bounded_page = max(1, page)
         bounded_size = max(1, min(page_size, 100))
         where, params = self._document_where(
@@ -456,31 +629,81 @@ class DuckDBQueryService:
             has_tables=has_tables,
             has_equations=has_equations,
             include_fixtures=include_fixtures,
-            min_edu=min_edu,
-            max_edu=max_edu,
+            min_source_quality=min_source_quality,
+            max_source_quality=max_source_quality,
             min_quality=min_quality,
             max_quality=max_quality,
         )
         order_by = {
             "newest": "valid_from DESC, doc_id ASC",
             "oldest": "valid_from ASC, doc_id ASC",
-            "quality_desc": "quality_score DESC, valid_from DESC",
-            "edu_desc": "edu_score DESC, valid_from DESC",
-            "perplexity_asc": "perplexity ASC, valid_from DESC",
+            "quality_desc": "quality_score DESC, valid_from DESC, doc_id ASC",
+            "source_quality_desc": ("source_quality_score DESC, valid_from DESC, doc_id ASC"),
+            "perplexity_asc": "perplexity ASC, valid_from DESC, doc_id ASC",
         }.get(sort, "valid_from DESC, doc_id ASC")
+        cursor_values = _decode_document_cursor(cursor) if cursor else None
+        cursor_sql = ""
+        cursor_params: list[Any] = []
+        if cursor_values is not None:
+            if cursor_values["sort"] != sort:
+                raise ValueError("document cursor sort does not match request")
+            cursor_valid_from = str(cursor_values["valid_from"])
+            cursor_doc_id = str(cursor_values["doc_id"])
+            if sort == "oldest":
+                cursor_sql = (
+                    "AND (valid_from > CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))"
+                )
+                cursor_params = [cursor_valid_from, cursor_valid_from, cursor_doc_id]
+            elif sort in {"quality_desc", "source_quality_desc"}:
+                column = "quality_score" if sort == "quality_desc" else "source_quality_score"
+                score = float(cursor_values["score"])
+                cursor_sql = (
+                    f"AND ({column} < ? OR ({column} = ? AND "
+                    "(valid_from < CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))))"
+                )
+                cursor_params = [
+                    score,
+                    score,
+                    cursor_valid_from,
+                    cursor_valid_from,
+                    cursor_doc_id,
+                ]
+            elif sort == "perplexity_asc":
+                score = float(cursor_values["score"])
+                cursor_sql = (
+                    "AND (perplexity > ? OR (perplexity = ? AND "
+                    "(valid_from < CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))))"
+                )
+                cursor_params = [
+                    score,
+                    score,
+                    cursor_valid_from,
+                    cursor_valid_from,
+                    cursor_doc_id,
+                ]
+            else:
+                cursor_sql = (
+                    "AND (valid_from < CAST(? AS TIMESTAMP) OR "
+                    "(valid_from = CAST(? AS TIMESTAMP) AND doc_id > ?))"
+                )
+                cursor_params = [cursor_valid_from, cursor_valid_from, cursor_doc_id]
         sql = f"""
         WITH document_rows AS (
           SELECT
             doc_id, text, source_feed, source_format, lang, valid_from,
-            quality_score, edu_score, structural_quality_score, reasoning_score,
-            benchmark_score, perplexity, risk_tier, route,
+            quality_score, source_quality_score, structural_quality_score, reasoning_score,
+            perplexity, risk_tier, route,
             COALESCE(training_usage, 'pretrain_and_posttrain') AS training_usage,
             content_tags, reject_reasons, source_word_count, training_word_count,
             included_section_count, excluded_section_count, figure_count,
             table_count, equation_count, citation_count,
             scientific_artifact_s3_uri,
             FALSE AS admission_only
-          FROM {self._decisions}
+          FROM {self._latest_decisions_relation()}
+          WHERE {_dashboard_decision_predicate()}
           UNION ALL
           SELECT
             admission.doc_id,
@@ -490,10 +713,9 @@ class DuckDBQueryService:
             'not_applicable' AS lang,
             admission.observed_at AS valid_from,
             0.0 AS quality_score,
-            0.0 AS edu_score,
+            0.0 AS source_quality_score,
             0.0 AS structural_quality_score,
             0.0 AS reasoning_score,
-            0.0 AS benchmark_score,
             0.0 AS perplexity,
             3 AS risk_tier,
             'quarantine' AS route,
@@ -515,6 +737,9 @@ class DuckDBQueryService:
             TRUE AS admission_only
           FROM {self._license_admissions} AS admission
           WHERE admission.status = 'quarantined'
+            AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+            AND admission.source_format IS DISTINCT FROM 'metadata'
+            AND {_visible_source_predicate("admission.source_feed")}
             AND NOT EXISTS (
               SELECT 1 FROM {self._decisions} AS decision
               WHERE decision.doc_id = admission.doc_id
@@ -528,10 +753,9 @@ class DuckDBQueryService:
           lang,
           CAST(valid_from AS VARCHAR) AS valid_from,
           quality_score,
-          edu_score,
+          source_quality_score,
           structural_quality_score,
           reasoning_score,
-          benchmark_score,
           perplexity,
           risk_tier,
           route,
@@ -548,28 +772,48 @@ class DuckDBQueryService:
           citation_count,
           scientific_artifact_s3_uri,
           admission_only,
-          SUBSTR(text, 1, 320) AS text_preview,
-          CAST(COUNT(*) OVER () AS BIGINT) AS _total
+          SUBSTR(text, 1, 320) AS text_preview
         FROM document_rows
         {where}
+        {cursor_sql}
         ORDER BY {order_by}
-        LIMIT ? OFFSET ?
+        LIMIT ?
         """
         if self._refresh_iceberg:
             self._prepare_relation(self._decisions)
             self._prepare_relation(self._license_admissions)
         rows = self._rows(
             sql,
-            [*params, bounded_size, (bounded_page - 1) * bounded_size],
+            [*params, *cursor_params, bounded_size + 1],
             relation=None,
         )
-        total = int(rows[0].pop("_total")) if rows else 0
+        has_more = len(rows) > bounded_size
+        rows = rows[:bounded_size]
+        next_cursor = None
+        if has_more and rows:
+            tail = rows[-1]
+            next_cursor = _encode_document_cursor(tail, sort=sort)
+        # The serving index retains policy revisions for audit. The ranked
+        # relation above collapses them to one authoritative document before
+        # this exact filtered count is evaluated.
+        count_query = sql.rsplit("ORDER BY", 1)[0]
+        if cursor_sql:
+            count_query = count_query.replace(cursor_sql, "", 1)
+        total = int(
+            self._rows(
+                f"SELECT CAST(COUNT(*) AS BIGINT) AS count FROM ({count_query}) AS counted",
+                params,
+                relation=None,
+            )[0]["count"]
+        )
         return {
             "items": rows,
             "total": total,
             "page": bounded_page,
             "page_size": bounded_size,
             "pages": (total + bounded_size - 1) // bounded_size,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
         }
 
     def document_facets(self, *, include_fixtures: bool = False) -> dict[str, list[str]]:
@@ -577,7 +821,9 @@ class DuckDBQueryService:
         if self._refresh_iceberg:
             self._prepare_relation(self._decisions)
             self._prepare_relation(self._license_admissions)
-        fixture_clause = "" if include_fixtures else "WHERE source_feed NOT LIKE 'local-%'"
+        fixture_clause = f"WHERE {_visible_source_predicate(include_fixtures=include_fixtures)}"
+        visible_decisions = _dashboard_decision_predicate(include_fixtures=include_fixtures)
+        latest_decisions = self._latest_decisions_relation()
         admission_rows = f"""
           SELECT admission.source_feed,
                  COALESCE(admission.source_format, 'unfetched') AS source_format,
@@ -585,6 +831,9 @@ class DuckDBQueryService:
                       THEN 'license_missing' ELSE 'license_not_permitted' END AS reason
           FROM {self._license_admissions} AS admission
           WHERE admission.status = 'quarantined'
+            AND admission.policy_revision = '{_LICENSE_POLICY_SQL}'
+            AND admission.source_format IS DISTINCT FROM 'metadata'
+            AND {_visible_source_predicate("admission.source_feed")}
             AND NOT EXISTS (
               SELECT 1 FROM {self._decisions} AS decision
               WHERE decision.doc_id = admission.doc_id
@@ -594,7 +843,7 @@ class DuckDBQueryService:
             f"""
             SELECT DISTINCT source_feed AS value
             FROM (
-              SELECT source_feed FROM {self._decisions}
+              SELECT source_feed FROM {latest_decisions} WHERE {visible_decisions}
               UNION ALL
               SELECT source_feed FROM ({admission_rows}) AS early
             ) AS source_rows
@@ -608,7 +857,8 @@ class DuckDBQueryService:
             f"""
             SELECT DISTINCT source_format AS value
             FROM (
-              SELECT source_feed, source_format FROM {self._decisions}
+              SELECT source_feed, source_format FROM {latest_decisions}
+              WHERE {visible_decisions}
               UNION ALL
               SELECT source_feed, source_format FROM ({admission_rows}) AS early
             ) AS format_rows
@@ -620,9 +870,9 @@ class DuckDBQueryService:
         )
         conjunction = "WHERE" if not fixture_clause else "AND"
         tags = self._rows(
-            f"SELECT DISTINCT tag AS value FROM {self._decisions}, "
-            f"UNNEST(content_tags) AS values(tag) {fixture_clause} "
-            f"{conjunction} tag IS NOT NULL ORDER BY value",
+            f"SELECT DISTINCT tag AS value FROM {latest_decisions}, "
+            f"UNNEST(content_tags) AS values(tag) WHERE {visible_decisions} "
+            f"AND tag IS NOT NULL ORDER BY value",
             [],
             relation=self._decisions,
         )
@@ -631,7 +881,8 @@ class DuckDBQueryService:
             SELECT DISTINCT reason AS value
             FROM (
               SELECT source_feed, reason
-              FROM {self._decisions}, UNNEST(reject_reasons) AS values(reason)
+              FROM {latest_decisions}, UNNEST(reject_reasons) AS values(reason)
+              WHERE {visible_decisions}
               UNION ALL
               SELECT source_feed, reason FROM ({admission_rows}) AS early
             ) AS reason_rows
@@ -657,40 +908,35 @@ class DuckDBQueryService:
         routes: Sequence[str],
         sources: Sequence[str] = (),
         source_formats: Sequence[str] = (),
-        tags: Sequence[str] = (),
-        min_edu: float | None = None,
         min_quality: float | None = None,
         include_structured: bool = True,
-        limit: int = 5_000,
     ) -> list[dict[str, Any]]:
-        """Return a bounded, reproducible JSONL-ready training export."""
+        """Return the complete filtered, reproducible training export."""
         where, params = self._document_where(
             routes=routes,
             sources=sources,
             source_formats=source_formats,
             date_from=date_from,
             date_to=date_to,
-            tags=tags,
-            min_edu=min_edu,
             min_quality=min_quality,
             include_fixtures=False,
         )
+        decisions = self._latest_decisions_relation()
         sql = f"""
         SELECT
           doc_id, text, source_feed, source_format, CAST(valid_from AS VARCHAR) AS valid_from,
-          route, content_tags, quality_score, edu_score, structural_quality_score,
-          reasoning_score, benchmark_score, tokens, policy_revision, scoring_version,
+          route, content_tags, quality_score, source_quality_score, structural_quality_score,
+          reasoning_score, tokens, policy_revision, scoring_version,
           classifier_revision, projection_version, scientific_artifact_s3_uri
           , spdx_license, spdx_license_source
-        FROM {self._decisions}
+        FROM {decisions}
         {where}
           AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
           AND risk_tier = 1
           AND ARRAY_LENGTH(reject_reasons) = 0
         ORDER BY valid_from ASC, doc_id ASC
-        LIMIT ?
         """
-        rows = self._rows(sql, [*params, max(1, min(limit, 5_000))], relation=self._decisions)
+        rows = self._rows(sql, params, relation=self._decisions)
         if not include_structured:
             for row in rows:
                 row["text"] = _without_structured_surrogates(str(row["text"]))
@@ -704,8 +950,6 @@ class DuckDBQueryService:
         routes: Sequence[str],
         sources: Sequence[str] = (),
         source_formats: Sequence[str] = (),
-        tags: Sequence[str] = (),
-        min_edu: float | None = None,
         min_quality: float | None = None,
         include_structured: bool = True,
     ) -> dict[str, Any]:
@@ -716,11 +960,10 @@ class DuckDBQueryService:
             source_formats=source_formats,
             date_from=date_from,
             date_to=date_to,
-            tags=tags,
-            min_edu=min_edu,
             min_quality=min_quality,
             include_fixtures=False,
         )
+        decisions = self._latest_decisions_relation()
         rows = self._rows(
             f"""
             SELECT
@@ -729,7 +972,7 @@ class DuckDBQueryService:
               CAST(COALESCE(SUM(source_word_count), 0) AS BIGINT) AS source_words,
               CAST(COALESCE(SUM(training_word_count), 0) AS BIGINT) AS projection_words,
               CAST(COUNT(DISTINCT source_feed) AS BIGINT) AS source_count
-            FROM {self._decisions}
+            FROM {decisions}
             {where}
               AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
               AND risk_tier = 1
@@ -742,10 +985,9 @@ class DuckDBQueryService:
             f"""
             SELECT DISTINCT
               policy_revision, scoring_version, classifier_revision, classifier_backend,
-              projection_version, extraction_pipeline, benchmark_set_version,
-              decon_embedding_revision, pii_scanner_revision, lang_detector_revision,
+              projection_version, extraction_pipeline, pii_scanner_revision, lang_detector_revision,
               tokenizer_revision, perplexity_scorer, minhash_backend, lsh_backend
-            FROM {self._decisions}
+            FROM {decisions}
             {where}
               AND COALESCE(spdx_license, license) IN ({_TRAINING_LICENSE_SQL})
               AND risk_tier = 1
@@ -762,8 +1004,6 @@ class DuckDBQueryService:
             "classifier_backend",
             "projection_version",
             "extraction_pipeline",
-            "benchmark_set_version",
-            "decon_embedding_revision",
             "pii_scanner_revision",
             "lang_detector_revision",
             "tokenizer_revision",
@@ -780,8 +1020,6 @@ class DuckDBQueryService:
                 "routes": list(routes),
                 "sources": list(sources),
                 "source_formats": list(source_formats),
-                "content_tags": list(tags),
-                "min_edu": min_edu,
                 "min_quality": min_quality,
                 "include_structured": include_structured,
                 "license_policy": "strict_allowlist",
@@ -796,7 +1034,6 @@ class DuckDBQueryService:
                     for key in revision_keys
                 },
                 "decision_table": _table_snapshot_manifest(decisions_table),
-                "export_limit": 5_000,
             },
         }
 
@@ -815,15 +1052,13 @@ class DuckDBQueryService:
         has_tables: bool | None = None,
         has_equations: bool | None = None,
         include_fixtures: bool = False,
-        min_edu: float | None = None,
-        max_edu: float | None = None,
+        min_source_quality: float | None = None,
+        max_source_quality: float | None = None,
         min_quality: float | None = None,
         max_quality: float | None = None,
     ) -> tuple[str, list[Any]]:
-        clauses: list[str] = []
+        clauses: list[str] = [_dashboard_decision_predicate(include_fixtures=include_fixtures)]
         params: list[Any] = []
-        if not include_fixtures:
-            clauses.append("source_feed NOT LIKE 'local-%'")
         if search and search.strip():
             clauses.append(
                 "(LOWER(text) LIKE ? OR LOWER(doc_id) LIKE ? OR LOWER(source_feed) LIKE ?)"
@@ -858,8 +1093,8 @@ class DuckDBQueryService:
             if present is not None:
                 clauses.append(f"{presence_column} {'>' if present else '='} 0")
         for score_column, threshold_operator, threshold in (
-            ("edu_score", ">=", min_edu),
-            ("edu_score", "<=", max_edu),
+            ("source_quality_score", ">=", min_source_quality),
+            ("source_quality_score", "<=", max_source_quality),
             ("quality_score", ">=", min_quality),
             ("quality_score", "<=", max_quality),
         ):
@@ -868,14 +1103,32 @@ class DuckDBQueryService:
                 params.append(threshold)
         return ("WHERE " + " AND ".join(clauses) if clauses else "", params)
 
+    def _latest_decisions_relation(self) -> str:
+        """Return one authoritative latest decision per document across policy versions."""
+        return f"""(
+          SELECT * EXCLUDE (revision_rank)
+          FROM (
+            SELECT *, ROW_NUMBER() OVER (
+              PARTITION BY doc_id
+              ORDER BY valid_from DESC, scoring_version DESC,
+                       policy_revision DESC, trace_id ASC
+            ) AS revision_rank
+            FROM {self._decisions}
+          ) AS ranked_decisions
+          WHERE revision_rank = 1
+        ) AS latest_decisions"""
+
     def document(self, doc_id: str) -> dict[str, Any] | None:
         """Return one full decision with its structured scientific artifact."""
+        if self._refresh_iceberg:
+            self._prepare_relation(self._decisions)
+            self._prepare_relation(self._license_admissions)
         sql = f"""
         SELECT
           doc_id, TRIM(LEADING '# ' FROM SPLIT_PART(text, '\n', 1)) AS title,
           text, source_feed, source_format, lang, CAST(valid_from AS VARCHAR) AS valid_from,
-          quality_score, edu_score, risk_tier, reject_reasons, pii_flags,
-          contaminated_with, extraction_pipeline, classifier_revision, classifier_backend,
+          quality_score, source_quality_score, risk_tier, reject_reasons, pii_flags,
+          extraction_pipeline, classifier_revision, classifier_backend,
           scoring_version, policy_revision, license, license_source,
           spdx_license, spdx_license_source,
           COALESCE(training_usage, 'pretrain_and_posttrain') AS training_usage,
@@ -886,23 +1139,21 @@ class DuckDBQueryService:
           perplexity_scorer, near_duplicate, near_dup_cluster_id,
           minhash_backend, minhash_num_perms, lsh_backend,
           structural_quality_score, extraction_completeness, reasoning_score,
-          benchmark_score, route, eligible_routes, route_reasons, content_tags,
+          route, eligible_routes, route_reasons, content_tags,
           segment_scores_json, projection_version, source_word_count,
+          json_extract_string(to_json(latest_decisions), '$.quality_diagnostics_json') AS quality_diagnostics_json,
           training_word_count, included_section_count, excluded_section_count,
           excluded_sections, metadata_pii_flags, removed_body_pii_flags,
           pii_action, pii_scanner_revision, lang_detector_revision,
           tokenizer_revision, gopher_word_count, gopher_mean_word_len,
           gopher_stopword_ratio, gopher_bullet_line_ratio,
           gopher_ellipsis_line_ratio, gopher_symbol_word_ratio,
-          gopher_alpha_word_ratio, decon_exact_matches,
-          decon_semantic_matches, decon_max_similarity, decon_ngram_size,
-          decon_embedding_revision, benchmark_set_version
-        FROM {self._decisions}
-        WHERE doc_id = ?
-        ORDER BY valid_from DESC
+          gopher_alpha_word_ratio
+        FROM {self._latest_decisions_relation()}
+        WHERE doc_id = ? AND {_dashboard_decision_predicate()}
         LIMIT 1
         """
-        rows = self._rows(sql, [doc_id], relation=self._decisions)
+        rows = self._rows(sql, [doc_id], relation=None)
         if not rows:
             admission_only = self._rows(
                 f"""
@@ -989,8 +1240,29 @@ class DuckDBQueryService:
 
             parsed_scores = orjson.loads(str(row.pop("segment_scores_json", "[]")))
             row["segment_scores"] = parsed_scores if isinstance(parsed_scores, list) else []
+            for score in row["segment_scores"]:
+                if "source_quality_score" not in score and "edu_score" in score:
+                    score["source_quality_score"] = score.pop("edu_score")
+                score.pop("finepdfs_edu_score", None)
         except Exception:
             row["segment_scores"] = []
+        try:
+            diagnostics = orjson.loads(row.pop("quality_diagnostics_json", None) or "null")
+            row["quality_diagnostics"] = diagnostics
+            if isinstance(diagnostics, dict):
+                from processor.operators.classifier_input import parse_sections
+
+                _, sections = parse_sections(str(row["text"]), source=str(row["source_feed"]))
+                by_id = {section.section_id: section for section in sections}
+                for score in diagnostics.get("sections", []):
+                    for classifier in score.get("classifiers", {}).values():
+                        if "score" not in classifier and "edu_score" in classifier:
+                            classifier["score"] = classifier.pop("edu_score")
+                    section = by_id.get(score["section_id"])
+                    if section is not None:
+                        score["text"] = section.text
+        except (ValueError, TypeError, KeyError):
+            row["quality_diagnostics"] = None
         uri = row.get("scientific_artifact_s3_uri")
         row["scientific_artifact"] = (
             self._artifact_store.read_json(str(uri))
@@ -1111,6 +1383,7 @@ def _configure_runtime_limits(conn: DuckDBConnection) -> None:
     os.makedirs(settings["temp_directory"], exist_ok=True)
     for key, value in settings.items():
         conn.execute(f"SET {key}={_sql_string(value)}")
+    conn.execute("SET preserve_insertion_order=false")
 
 
 def _register_gold_relation(conn: DuckDBConnection, relation: str) -> None:
@@ -1275,12 +1548,11 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           CAST(NULL AS VARCHAR) AS lang,
           CAST(NULL AS INTEGER) AS tokens,
           CAST(NULL AS DOUBLE) AS quality_score,
-          CAST(NULL AS DOUBLE) AS edu_score,
+          CAST(NULL AS DOUBLE) AS source_quality_score,
           CAST(NULL AS VARCHAR) AS license,
           CAST(NULL AS VARCHAR) AS license_source,
           CAST(NULL AS INTEGER) AS risk_tier,
           CAST([] AS VARCHAR[]) AS pii_flags,
-          CAST([] AS VARCHAR[]) AS contaminated_with,
           CAST(NULL AS TIMESTAMP) AS valid_from,
           CAST(NULL AS TIMESTAMP) AS valid_to,
           CAST([] AS VARCHAR[]) AS reject_reasons,
@@ -1317,12 +1589,12 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           , CAST(0 AS DOUBLE) AS structural_quality_score
           , CAST(0 AS DOUBLE) AS extraction_completeness
           , CAST(0 AS DOUBLE) AS reasoning_score
-          , CAST(0 AS DOUBLE) AS benchmark_score
           , CAST('quarantine' AS VARCHAR) AS route
           , CAST([] AS VARCHAR[]) AS eligible_routes
           , CAST([] AS VARCHAR[]) AS route_reasons
           , CAST([] AS VARCHAR[]) AS content_tags
           , CAST('[]' AS VARCHAR) AS segment_scores_json
+          , CAST(NULL AS VARCHAR) AS quality_diagnostics_json
           , CAST('document-v1' AS VARCHAR) AS projection_version
           , CAST(0 AS INTEGER) AS source_word_count
           , CAST(0 AS INTEGER) AS training_word_count
@@ -1342,12 +1614,6 @@ def _create_empty_gold_relation(conn: DuckDBConnection, relation: str) -> None:
           , CAST(0 AS DOUBLE) AS gopher_ellipsis_line_ratio
           , CAST(0 AS DOUBLE) AS gopher_symbol_word_ratio
           , CAST(0 AS DOUBLE) AS gopher_alpha_word_ratio
-          , CAST([] AS VARCHAR[]) AS decon_exact_matches
-          , CAST([] AS VARCHAR[]) AS decon_semantic_matches
-          , CAST(0 AS DOUBLE) AS decon_max_similarity
-          , CAST(13 AS INTEGER) AS decon_ngram_size
-          , CAST('unknown' AS VARCHAR) AS decon_embedding_revision
-          , CAST('unknown' AS VARCHAR) AS benchmark_set_version
           , CAST('unknown' AS VARCHAR) AS classifier_backend
           , CAST('pretrain_and_posttrain' AS VARCHAR) AS training_usage
         WHERE FALSE
@@ -1380,6 +1646,10 @@ class ScientificArtifactStore:
     def read_json(self, uri: str) -> dict[str, Any] | None:
         try:
             payload, _ = self.read_bytes(uri)
+            import gzip
+
+            if payload.startswith(b"\x1f\x8b"):
+                payload = gzip.decompress(payload)
             import orjson
 
             value = orjson.loads(payload)
@@ -1406,21 +1676,45 @@ def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
+async def serve(
+    service: DuckDBQueryService,
+    *,
+    port: int = 8090,
+    historical_service: DuckDBQueryService | None = None,
+    serving_index: Any | None = None,
+) -> None:
     import asyncio
 
     from aiohttp import web  # type: ignore[import-untyped]
 
-    query_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="duckdb-query")
+    query_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="serving-query")
+    historical_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-query")
 
     async def run_query(function: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(query_executor, partial(function, *args, **kwargs))
 
+    async def run_historical(function: Any, /, *args: Any, **kwargs: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(historical_executor, partial(function, *args, **kwargs))
+
     async def stop_query_executor(_: web.Application) -> None:
         query_executor.shutdown(wait=False, cancel_futures=True)
+        historical_executor.shutdown(wait=False, cancel_futures=True)
+        if serving_index is not None:
+            serving_index.close()
 
     async def probe(_: web.Request) -> web.Response:
+        return web.Response(text="ok\n", content_type="text/plain")
+
+    async def alive(_: web.Request) -> web.Response:
+        if serving_index is not None and not serving_index.running:
+            return web.Response(text="serving index consumer unavailable\n", status=503)
+        return web.Response(text="ok\n", content_type="text/plain")
+
+    async def ready(_: web.Request) -> web.Response:
+        if serving_index is not None and not serving_index.ready:
+            return web.Response(text="serving index catching up\n", status=503)
         return web.Response(text="ok\n", content_type="text/plain")
 
     async def as_of(request: web.Request) -> web.Response:
@@ -1483,6 +1777,7 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
                     service.documents,
                     page=int(request.query.get("page", "1")),
                     page_size=int(request.query.get("page_size", "25")),
+                    cursor=request.query.get("cursor"),
                     search=request.query.get("search"),
                     routes=request.query.getall("route", []),
                     sources=request.query.getall("source", []),
@@ -1495,8 +1790,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
                     has_tables=_optional_bool(request.query.get("has_tables")),
                     has_equations=_optional_bool(request.query.get("has_equations")),
                     include_fixtures=_optional_bool(request.query.get("include_fixtures")) is True,
-                    min_edu=_optional_float(request.query.get("min_edu")),
-                    max_edu=_optional_float(request.query.get("max_edu")),
+                    min_source_quality=_optional_float(request.query.get("min_source_quality")),
+                    max_source_quality=_optional_float(request.query.get("max_source_quality")),
                     min_quality=_optional_float(request.query.get("min_quality")),
                     max_quality=_optional_float(request.query.get("max_quality")),
                     sort=request.query.get("sort", "newest"),
@@ -1532,12 +1827,9 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
                 routes=routes,
                 sources=request.query.getall("source", []),
                 source_formats=request.query.getall("source_format", []),
-                tags=request.query.getall("tag", []),
-                min_edu=_optional_float(request.query.get("min_edu")),
                 min_quality=_optional_float(request.query.get("min_quality")),
                 include_structured=_optional_bool(request.query.get("include_structured"))
                 is not False,
-                limit=int(request.query.get("limit", "5000")),
             )
             output_format = request.query.get("format", "jsonl")
             if output_format == "parquet":
@@ -1587,8 +1879,6 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
                     routes=routes,
                     sources=request.query.getall("source", []),
                     source_formats=request.query.getall("source_format", []),
-                    tags=request.query.getall("tag", []),
-                    min_edu=_optional_float(request.query.get("min_edu")),
                     min_quality=_optional_float(request.query.get("min_quality")),
                     include_structured=_optional_bool(request.query.get("include_structured"))
                     is not False,
@@ -1624,8 +1914,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
         body = await request.json()
         try:
             return web.json_response(
-                await run_query(
-                    service.safe_query,
+                await run_historical(
+                    (historical_service or service).safe_query,
                     str(body.get("sql", "")),
                     body.get("params", []),
                 )
@@ -1636,8 +1926,8 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
             return web.json_response({"detail": str(exc)}, status=503)
 
     app = web.Application()
-    app.router.add_get("/healthz", probe)
-    app.router.add_get("/readyz", probe)
+    app.router.add_get("/healthz", alive if serving_index is not None else probe)
+    app.router.add_get("/readyz", ready)
     app.router.add_get("/as-of", as_of)
     app.router.add_get("/quality-histogram", quality)
     app.router.add_get("/curation-summary", curation_summary)
@@ -1663,8 +1953,29 @@ async def serve(service: DuckDBQueryService, *, port: int = 8090) -> None:
 def main() -> None:
     import asyncio
 
-    service = DuckDBQueryService.from_env()
-    asyncio.run(serve(service, port=int(os.environ.get("S2P_DUCKDB_API_PORT", "8090"))))
+    historical_service = DuckDBQueryService.from_env()
+    if os.environ.get("S2P_SERVING_INDEX_ENABLED", "0") == "1":
+        from processor.serving_index import ServingIndex, wait_until_running
+
+        index = ServingIndex.from_env()
+        index.start()
+        wait_until_running(index)
+        service = index.query_service()
+        asyncio.run(
+            serve(
+                service,
+                port=int(os.environ.get("S2P_DUCKDB_API_PORT", "8090")),
+                historical_service=historical_service,
+                serving_index=index,
+            )
+        )
+        return
+    asyncio.run(
+        serve(
+            historical_service,
+            port=int(os.environ.get("S2P_DUCKDB_API_PORT", "8090")),
+        )
+    )
 
 
 def _optional_bool(value: str | None) -> bool | None:
@@ -1676,6 +1987,42 @@ def _optional_bool(value: str | None) -> bool | None:
     if normalized in {"0", "false", "no"}:
         return False
     raise ValueError("expected a boolean")
+
+
+def _encode_document_cursor(row: dict[str, Any], *, sort: str) -> str:
+    score = None
+    if sort == "quality_desc":
+        score = float(row["quality_score"])
+    elif sort == "source_quality_desc":
+        score = float(row["source_quality_score"])
+    elif sort == "perplexity_asc":
+        score = float(row["perplexity"])
+    payload = json.dumps(
+        {
+            "sort": sort,
+            "valid_from": str(row["valid_from"]),
+            "doc_id": str(row["doc_id"]),
+            "score": score,
+        },
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_document_cursor(value: str) -> dict[str, Any]:
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(value + padding))
+    except Exception as exc:
+        raise ValueError("invalid document cursor") from exc
+    if (
+        not isinstance(decoded, dict)
+        or not isinstance(decoded.get("sort"), str)
+        or not isinstance(decoded.get("valid_from"), str)
+        or not isinstance(decoded.get("doc_id"), str)
+    ):
+        raise ValueError("invalid document cursor")
+    return decoded
 
 
 def _optional_float(value: str | None) -> float | None:

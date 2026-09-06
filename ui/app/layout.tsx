@@ -6,8 +6,7 @@ import { TopNav } from '@/components/nav';
 
 export const metadata: Metadata = {
   title: 'Stream2Pretrain Cockpit',
-  description:
-    'Streaming-first LLM pretraining data curator: ingest, decontaminate, classify, mixture.',
+  description: 'Streaming-first LLM pretraining data curator: ingest, classify, and export.',
 };
 
 interface RootLayoutProps {

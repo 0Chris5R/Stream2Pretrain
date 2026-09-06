@@ -1,10 +1,8 @@
 'use client';
 
 import { useDeferredValue, useEffect, useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import {
-  ArrowLeft,
-  ArrowRight,
   Check,
   ChevronRight,
   ExternalLink,
@@ -17,6 +15,13 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   Table,
   TableBody,
@@ -57,7 +62,7 @@ interface Filters {
   hasTables: boolean;
   hasEquations: boolean;
   includeFixtures: boolean;
-  minEdu: string;
+  minSourceQuality: string;
   minQuality: string;
   sort: string;
 }
@@ -75,7 +80,7 @@ const EMPTY_FILTERS: Filters = {
   hasTables: false,
   hasEquations: false,
   includeFixtures: false,
-  minEdu: '',
+  minSourceQuality: '',
   minQuality: '',
   sort: 'newest',
 };
@@ -97,26 +102,26 @@ async function fetchDocument(docId: string): Promise<DocumentDetail> {
 
 export default function DocumentsPage() {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState('');
   const deferredSearch = useDeferredValue(filters.search);
   const query = useMemo(
-    () => buildQuery({ ...filters, search: deferredSearch }, page),
-    [filters, deferredSearch, page],
+    () => buildQuery({ ...filters, search: deferredSearch }),
+    [filters, deferredSearch],
   );
-  const list = useQuery({
+  const list = useInfiniteQuery({
     queryKey: queryKeys.documents(query),
-    queryFn: () => fetchDocuments(query),
+    queryFn: ({ pageParam }) =>
+      fetchDocuments(pageParam ? `${query}&cursor=${encodeURIComponent(pageParam)}` : query),
+    initialPageParam: '',
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more && lastPage.next_cursor ? lastPage.next_cursor : undefined,
     refetchInterval: 10_000,
   });
   const facets = useQuery({
     queryKey: queryKeys.documentFacets(filters.includeFixtures),
     queryFn: () => fetchFacets(filters.includeFixtures),
   });
-  const selectedId = useMemo(() => {
-    const items = list.data?.items ?? [];
-    return items.some((item) => item.doc_id === selected) ? selected : (items[0]?.doc_id ?? '');
-  }, [list.data, selected]);
+  const selectedId = selected;
   const detail = useQuery({
     queryKey: queryKeys.document(selectedId),
     queryFn: () => fetchDocument(selectedId),
@@ -125,8 +130,14 @@ export default function DocumentsPage() {
 
   function update(patch: Partial<Filters>) {
     setFilters((current) => ({ ...current, ...patch }));
-    setPage(1);
   }
+
+  const items = Array.from(
+    new Map(
+      (list.data?.pages.flatMap((value) => value.items) ?? []).map((item) => [item.doc_id, item]),
+    ).values(),
+  );
+  const total = list.data?.pages[0]?.total;
 
   const activeFilters = countActiveFilters(filters);
 
@@ -141,7 +152,6 @@ export default function DocumentsPage() {
         rejectionReason: values.get('rejection_reason') ?? '',
         includeFixtures: values.get('include_fixtures') === 'true',
       }));
-      setPage(1);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -151,7 +161,7 @@ export default function DocumentsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">Documents</h1>
         <div className="text-sm tabular-nums text-muted-foreground">
-          {list.data ? `${formatInt(list.data.total)} results` : 'Loading'}
+          {total !== undefined ? `${formatInt(total)} results` : 'Loading'}
         </div>
       </div>
 
@@ -207,41 +217,38 @@ export default function DocumentsPage() {
 
       {list.error ? <ErrorBox error={list.error} /> : null}
 
-      <div className="grid min-w-0 items-start gap-5 2xl:grid-cols-[minmax(38rem,1fr)_minmax(32rem,0.9fr)]">
-        <DocumentTable
-          page={list.data}
-          loading={list.isLoading}
-          selected={selectedId}
-          select={setSelected}
-        />
-        <div className="2xl:sticky 2xl:top-20">
-          {detail.data ? <DocumentPanel document={detail.data} /> : null}
-          {detail.isLoading ? <PanelLoading /> : null}
-          {detail.error ? <ErrorBox error={detail.error} /> : null}
-          {!selectedId && !list.isLoading ? <EmptyPanel /> : null}
-        </div>
-      </div>
+      <DocumentTable
+        items={items}
+        loading={list.isLoading}
+        selected={selectedId}
+        select={setSelected}
+      />
 
-      {list.data && list.data.pages > 1 ? (
-        <div className="flex items-center justify-between rounded-lg border bg-card px-3 py-2">
+      <Dialog open={Boolean(selectedId)} onOpenChange={(open) => !open && setSelected('')}>
+        <DialogContent className="max-h-[92vh] max-w-6xl overflow-y-auto p-0">
+          <DialogHeader className="border-b px-6 py-4">
+            <DialogTitle>Document details</DialogTitle>
+            <DialogDescription>
+              Training projection, evidence, and processing audit.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="p-5">
+            {detail.data ? <DocumentPanel document={detail.data} /> : null}
+            {detail.isLoading ? <PanelLoading /> : null}
+            {detail.error ? <ErrorBox error={detail.error} /> : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {list.hasNextPage ? (
+        <div className="flex justify-center">
           <Button
             variant="outline"
             size="sm"
-            disabled={page === 1}
-            onClick={() => setPage(page - 1)}
+            disabled={list.isFetchingNextPage}
+            onClick={() => list.fetchNextPage()}
           >
-            <ArrowLeft className="mr-1 h-4 w-4" /> Previous
-          </Button>
-          <span className="text-sm tabular-nums">
-            Page {page} of {list.data.pages}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={page >= list.data.pages}
-            onClick={() => setPage(page + 1)}
-          >
-            Next <ArrowRight className="ml-1 h-4 w-4" />
+            {list.isFetchingNextPage ? 'Loading' : 'Show more'}
           </Button>
         </div>
       ) : null}
@@ -250,12 +257,12 @@ export default function DocumentsPage() {
 }
 
 function DocumentTable({
-  page,
+  items,
   loading,
   selected,
   select,
 }: {
-  page?: DocumentPage;
+  items: DocumentPage['items'];
   loading: boolean;
   selected: string;
   select: (docId: string) => void;
@@ -275,7 +282,7 @@ function DocumentTable({
         </TableHeader>
         <TableBody>
           {loading ? <LoadingRows /> : null}
-          {page?.items.map((item) => (
+          {items.map((item) => (
             <TableRow
               key={item.doc_id}
               data-state={selected === item.doc_id ? 'selected' : undefined}
@@ -294,7 +301,7 @@ function DocumentTable({
                 <RouteBadge route={item.route} />
               </TableCell>
               <TableCell className="text-right font-mono">
-                {item.admission_only ? '-' : item.edu_score.toFixed(2)}
+                {item.admission_only ? '-' : item.source_quality_score.toFixed(2)}
               </TableCell>
               <TableCell className="text-right font-mono">
                 {item.admission_only ? '-' : item.quality_score.toFixed(2)}
@@ -309,7 +316,7 @@ function DocumentTable({
               </TableCell>
             </TableRow>
           ))}
-          {!loading && page?.items.length === 0 ? (
+          {!loading && items.length === 0 ? (
             <TableRow>
               <TableCell colSpan={6} className="h-40 text-center text-muted-foreground">
                 No documents match these filters.
@@ -325,11 +332,11 @@ function DocumentTable({
 function DocumentPanel({ document }: { document: DocumentDetail }) {
   if (document.admission_only) return <AdmissionOnlyPanel document={document} />;
   const artifact = document.scientific_artifact;
-  const classifier = document.classifier_revision.includes('finepdfs')
-    ? 'FinePDFs Edu v2'
-    : document.source_format === 'code'
-      ? 'Code quality'
-      : 'FineWeb-Edu';
+  const classifier = document.quality_diagnostics
+    ? (document.source_feed === 'arxiv-html-fetcher' ? 'arXiv quality' : 'HF quality')
+    : document.classifier_revision.startsWith('not-run:')
+      ? 'Not run'
+      : 'Quality score';
   return (
     <Card className="overflow-hidden shadow-sm">
       <div className={`h-1 ${routeColor(document.route)}`} />
@@ -340,6 +347,7 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
               <div className="mb-2 flex flex-wrap gap-2">
                 <RouteBadge route={document.route} />
                 <Badge variant="outline">{document.source_format.toUpperCase()}</Badge>
+                {document.quality_diagnostics?.mode === 'diagnostic' ? <Badge variant="outline">Diagnostic scoring</Badge> : null}
               </div>
               <h2 className="text-xl font-semibold leading-tight">
                 {artifact?.title ?? document.title}
@@ -354,10 +362,23 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
             ) : null}
           </div>
           <div className="grid grid-cols-3 gap-2">
-            <Score label={classifier} value={document.edu_score.toFixed(2)} />
-            <Score label="Composite" value={document.quality_score.toFixed(2)} />
+            <Score label={classifier} value={document.source_quality_score.toFixed(2)} />
+            <Score label="Structure" value={document.structural_quality_score.toFixed(2)} />
             <Score label="Reasoning evidence" value={percent(document.reasoning_score)} />
           </div>
+          {Object.keys(document.quality_diagnostics?.classifiers ?? {}).length > 0 ? (
+            <div className="grid grid-cols-2 gap-2">
+              {Object.entries(document.quality_diagnostics!.classifiers).map(([task, result]) => (
+                <div key={task} className="rounded-lg border p-3 text-sm">
+                  <div className="font-medium">{classifierLabel(task)}</div>
+                  <div>Max {result.score.toFixed(2)} · Mean {result.weighted_mean.toFixed(2)}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {document.quality_diagnostics?.confidence != null ? (
+            <div className="text-sm">Model confidence {percent(document.quality_diagnostics.confidence)}</div>
+          ) : null}
           <div className="flex flex-wrap gap-1.5">
             {document.content_tags.map((tag) => (
               <Badge key={tag} variant="secondary">
@@ -375,7 +396,7 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
             <TabsTrigger value="assets">Assets</TabsTrigger>
           </TabsList>
           <TabsContent value="sections" className="mt-4">
-            <SectionView document={document} />
+            {document.quality_diagnostics ? <ClassifierSections document={document} /> : <SectionView document={document} />}
           </TabsContent>
           <TabsContent value="projection" className="mt-4">
             <ProjectionView document={document} />
@@ -396,7 +417,42 @@ function DocumentPanel({ document }: { document: DocumentDetail }) {
   );
 }
 
-function AdmissionOnlyPanel({ document }: { document: Extract<DocumentDetail, { admission_only: true }> }) {
+function classifierLabel(task: string) {
+  return task === 'arxiv-math-reasoning' ? 'Math reasoning' : 'Post-training fit';
+}
+
+function ClassifierSections({ document }: { document: CuratedDocumentDetail }) {
+  return <div className="space-y-2">
+    {document.quality_diagnostics?.sections.map((section) => (
+      <details key={section.section_id} className="rounded-lg border">
+        <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5">
+          <span className="min-w-0 font-medium">{section.title}</span>
+          <span className="flex shrink-0 gap-2">
+            <Badge variant="outline">{section.score.toFixed(2)} / 5</Badge>
+            {section.confidence != null ? <Badge variant="secondary">{percent(section.confidence)}</Badge> : null}
+          </span>
+        </summary>
+        <div className="space-y-3 border-t px-3 py-3 text-sm">
+          <div className="text-muted-foreground">{humanize(section.section_type)} · {formatInt(section.tokens)} tokens · {section.chunks} chunks</div>
+          {Object.entries(section.classifiers).map(([task, result]) => (
+            <div key={task} className="flex items-center gap-2">
+              <span>{classifierLabel(task)}</span>
+              <Badge variant="outline">{result.score.toFixed(2)} / 5</Badge>
+              {result.confidence != null ? <Badge variant="secondary">{percent(result.confidence)}</Badge> : null}
+            </div>
+          ))}
+          <p className="whitespace-pre-wrap leading-relaxed">{section.text}</p>
+        </div>
+      </details>
+    ))}
+  </div>;
+}
+
+function AdmissionOnlyPanel({
+  document,
+}: {
+  document: Extract<DocumentDetail, { admission_only: true }>;
+}) {
   const admission = document.license_admission;
   return (
     <Card className="overflow-hidden shadow-sm">
@@ -483,11 +539,8 @@ function SectionView({ document }: { document: CuratedDocumentDetail }) {
                 <span className="ml-2 text-xs text-muted-foreground">{humanize(section.role)}</span>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {score?.finepdfs_edu_score != null ? (
-                  <Badge variant="outline">FP {score.finepdfs_edu_score.toFixed(2)}</Badge>
-                ) : null}
-                {score?.fineweb_edu_score != null ? (
-                  <Badge variant="outline">FW {score.fineweb_edu_score.toFixed(2)}</Badge>
+                {score?.source_quality_score != null ? (
+                  <Badge variant="outline">Quality {score.source_quality_score.toFixed(2)}</Badge>
                 ) : null}
                 <Badge variant={section.include_in_training ? 'success' : 'destructive'}>
                   {section.include_in_training ? 'kept' : 'removed'}
@@ -607,10 +660,6 @@ function AuditView({ document }: { document: CuratedDocumentDetail }) {
       `${document.near_duplicate ? 'near duplicate' : 'unique'} · ${document.minhash_backend} + ${document.lsh_backend}`,
     ],
     [
-      'Decontamination',
-      `${document.contaminated_with.length ? document.contaminated_with.join(', ') : 'clean'} · ${document.benchmark_set_version}`,
-    ],
-    [
       'Licence',
       `${document.spdx_license ?? document.license} · ${document.spdx_license_source || document.license_source}`,
     ],
@@ -668,8 +717,8 @@ function AdvancedFilters({
             min="0"
             max="5"
             step="0.1"
-            value={filters.minEdu}
-            onChange={(event) => update({ minEdu: event.target.value })}
+            value={filters.minSourceQuality}
+            onChange={(event) => update({ minSourceQuality: event.target.value })}
           />
         </Field>
         <Field label="Min composite">
@@ -728,7 +777,7 @@ function AdvancedFilters({
           <option value="newest">Newest</option>
           <option value="oldest">Oldest</option>
           <option value="quality_desc">Composite quality</option>
-          <option value="edu_desc">Source quality</option>
+          <option value="source_quality_desc">Source quality</option>
           <option value="perplexity_asc">Lowest perplexity</option>
         </select>
       </Field>
@@ -848,28 +897,23 @@ function Score({ label, value }: { label: string; value: string }) {
 
 function RouteBadge({ route }: { route: CorpusRoute }) {
   const variant =
-    route === 'quarantine'
-      ? 'destructive'
-      : route === 'retry' || route === 'benchmark_candidate'
-        ? 'warning'
-        : 'success';
+    route === 'quarantine' ? 'destructive' : route === 'retry' ? 'warning' : 'success';
   return <Badge variant={variant}>{routeLabel(route)}</Badge>;
 }
 
 function routeLabel(route: CorpusRoute): string {
   if (route === 'posttrain_candidate' || route === 'reasoning_candidate') return 'Post-training';
-  if (route === 'benchmark_candidate') return 'Legacy benchmark';
   return humanize(route);
 }
 
 function routeColor(route: CorpusRoute): string {
   if (route === 'quarantine') return 'bg-red-500';
-  if (route === 'retry' || route === 'benchmark_candidate') return 'bg-amber-500';
+  if (route === 'retry') return 'bg-amber-500';
   return 'bg-emerald-500';
 }
 
-function buildQuery(filters: Filters, page: number): string {
-  const query = new URLSearchParams({ page: String(page), page_size: '25', sort: filters.sort });
+function buildQuery(filters: Filters): string {
+  const query = new URLSearchParams({ page_size: '50', sort: filters.sort });
   if (filters.search.trim()) query.set('search', filters.search.trim());
   filters.routes.forEach((value) => query.append('route', value));
   filters.tags.forEach((value) => query.append('tag', value));
@@ -883,7 +927,9 @@ function buildQuery(filters: Filters, page: number): string {
   if (filters.hasTables) query.set('has_tables', 'true');
   if (filters.hasEquations) query.set('has_equations', 'true');
   if (filters.includeFixtures) query.set('include_fixtures', 'true');
-  if (filters.minEdu) query.set('min_edu', filters.minEdu);
+  if (filters.minSourceQuality) {
+    query.set('min_source_quality', filters.minSourceQuality);
+  }
   if (filters.minQuality) query.set('min_quality', filters.minQuality);
   return query.toString();
 }
@@ -898,7 +944,7 @@ function countActiveFilters(filters: Filters): number {
       filters.rejectionReason,
       filters.dateFrom,
       filters.dateTo,
-      filters.minEdu,
+      filters.minSourceQuality,
       filters.minQuality,
     ].filter(Boolean).length +
     [filters.hasFigures, filters.hasTables, filters.hasEquations, filters.includeFixtures].filter(

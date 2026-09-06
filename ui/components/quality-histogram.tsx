@@ -14,7 +14,7 @@ import type { QualityHistogram } from '@/lib/schemas';
 interface Props {
   data: QualityHistogram;
   height?: number;
-  series?: 'buckets' | 'edu_buckets';
+  series?: 'buckets' | 'source_quality_buckets';
 }
 
 /**

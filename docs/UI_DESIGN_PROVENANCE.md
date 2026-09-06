@@ -40,8 +40,8 @@ runtime dependencies.
 - Inspected pattern: server-side rows, bounded pages, typed facets, search,
   stable slices, assets, and export-oriented dataset inspection.
 - Stream2Pretrain adaptation: Documents uses server-side filtering and
-  pagination rather than loading the corpus into the browser. Datasets builds a
-  reproducible selection and exports bounded JSONL or Parquet. Scientific
+  pagination rather than loading the corpus into the browser. Datasets is an
+  export-only workspace for pretraining, SFT, and RL outputs. Scientific
   assets have a dedicated inspector rather than being flattened into table
   strings.
 

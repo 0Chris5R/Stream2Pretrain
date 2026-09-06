@@ -9,6 +9,5 @@ export async function GET(): Promise<NextResponse> {
     status: 'ok',
     local_mode: localMode,
     source_control_plane: localMode ? 'local-sourcefeed-scheduler' : 'kubernetes',
-    mixture_backend: localMode ? 'future-work' : 'controller',
   });
 }

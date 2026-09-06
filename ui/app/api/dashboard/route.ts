@@ -17,7 +17,9 @@ export const dynamic = 'force-dynamic';
 
 const QualityHistogramRespSchema = z.object({
   buckets: z.array(z.object({ score: z.number(), count: z.number().int().nonnegative() })),
-  edu_buckets: z.array(z.object({ score: z.number(), count: z.number().int().nonnegative() })),
+  source_quality_buckets: z.array(
+    z.object({ score: z.number(), count: z.number().int().nonnegative() }),
+  ),
 });
 
 const RouteSummarySchema = z.array(
@@ -27,7 +29,7 @@ const RouteSummarySchema = z.array(
     source_words: z.number().int().nonnegative(),
     training_words: z.number().int().nonnegative(),
     mean_quality: z.number(),
-    mean_edu: z.number(),
+    mean_source_quality: z.number(),
   }),
 );
 
@@ -46,15 +48,15 @@ const CorpusOverviewSchema = z.object({
 
 async function fetchQualityHistogram(): Promise<{
   buckets: Array<{ score: number; count: number }>;
-  edu_buckets: Array<{ score: number; count: number }>;
+  source_quality_buckets: Array<{ score: number; count: number }>;
 }> {
   try {
     const resp = await fetch(`${UPSTREAM.duckdb}/quality-histogram`, { cache: 'no-store' });
-    if (!resp.ok) return { buckets: [], edu_buckets: [] };
+    if (!resp.ok) return { buckets: [], source_quality_buckets: [] };
     const parsed = QualityHistogramRespSchema.safeParse(await resp.json());
-    return parsed.success ? parsed.data : { buckets: [], edu_buckets: [] };
+    return parsed.success ? parsed.data : { buckets: [], source_quality_buckets: [] };
   } catch {
-    return { buckets: [], edu_buckets: [] };
+    return { buckets: [], source_quality_buckets: [] };
   }
 }
 

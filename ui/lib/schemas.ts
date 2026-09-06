@@ -22,19 +22,10 @@ export const SourceFeedRateLimitSchema = z.object({
 
 /**
  * Protocol enum mirrors `schemas/sourcefeed.py::SourceFeedProtocol` and the
- * generated `schemas/json_schema/source_feed_spec.schema.json`. The wire
- * uses kebab-case (`oai-pmh`, `rest-json`); the legacy underscore variants
- * (`oai_pmh`, `rest_json`) are NOT accepted by the Gatekeeper admission
- * policy. Keep in sync.
+ * generated `schemas/json_schema/source_feed_spec.schema.json`.
+ * Gatekeeper admits the exact kebab-case wire values.
  */
-export const SourceFeedProtocols = [
-  'rss',
-  'atom',
-  'oai-pmh',
-  'rest-json',
-  'sitemap',
-  'manual',
-] as const;
+export const SourceFeedProtocols = ['rss', 'atom', 'oai-pmh', 'rest-json', 'manual'] as const;
 
 export const SourceFeedSpecSchema = z.object({
   name: z.string().min(1).max(63),
@@ -93,61 +84,9 @@ export const RuntimeProfileSchema = z.object({
   status: z.literal('ok'),
   local_mode: z.boolean(),
   source_control_plane: z.enum(['kubernetes', 'local-sourcefeed-scheduler']),
-  mixture_backend: z.enum(['controller', 'future-work']),
 });
 
 export type RuntimeProfile = z.infer<typeof RuntimeProfileSchema>;
-
-export const DeconAttestationSchema = z.object({
-  snapshot_id: z.string().regex(/^\d+$/),
-  committed_at: z.string(),
-  benchmark_set_version: z.string(),
-  benchmarks: z.array(z.enum(['MMLU', 'GSM8K', 'HumanEval', 'MATH', 'GPQA'])),
-  per_benchmark_hits: z.record(z.string(), z.number().int().nonnegative()),
-  rejected_doc_hashes: z.array(z.string()),
-  tokens_scanned: z.number().int().nonnegative(),
-  tokens_flagged: z.number().int().nonnegative(),
-  signature: z.string(),
-  signer_cert: z.string(),
-});
-
-export type DeconAttestation = z.infer<typeof DeconAttestationSchema>;
-
-export const BenchmarkCoverageSchema = z.object({
-  benchmark_set_version: z.string(),
-  manifest_sha256: z.string(),
-  corpus_kind: z.enum(['demo_canaries', 'synthetic_canary', 'restricted_reserve']),
-  item_count: z.number().int().nonnegative(),
-  per_benchmark_items: z.record(z.string(), z.number().int().nonnegative()),
-  non_empty_benchmarks: z.array(z.string()),
-  latest_snapshot_id: z.string().nullable(),
-  last_successful_scan: z.string().nullable(),
-  tokens_scanned: z.number().int().nonnegative(),
-  tokens_flagged: z.number().int().nonnegative(),
-});
-
-export type BenchmarkCoverage = z.infer<typeof BenchmarkCoverageSchema>;
-
-export const MixtureSourceWeightSchema = z.object({
-  // Field name mirrors Pydantic `MixtureSourceWeight.source_feed`. The
-  // SourceFeed REST API has `extra='forbid'` so the legacy `source` key is
-  // rejected on the wire. Always send `source_feed`.
-  source_feed: z.string(),
-  weight: z.number().gt(0).max(1),
-});
-
-export const MixtureRecipeSpecSchema = z.object({
-  name: z.string().min(1).max(63),
-  branch: z.string().min(1).max(63),
-  sources: z.array(MixtureSourceWeightSchema).min(1),
-  min_quality_score: z.number().min(0).max(5).default(2),
-  min_edu_score: z.number().min(0).max(5).default(2),
-  max_risk_tier: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(2),
-  languages: z.array(z.string()).default([]),
-  target_tokens_per_hour: z.number().int().nonnegative().nullable().optional(),
-});
-
-export type MixtureRecipeSpec = z.infer<typeof MixtureRecipeSpecSchema>;
 
 export const ThroughputPointSchema = z.object({
   ts: z.string(),
@@ -193,7 +132,7 @@ export const QualityHistogramSchema = z.object({
       count: z.number().int().nonnegative(),
     }),
   ),
-  edu_buckets: z.array(
+  source_quality_buckets: z.array(
     z.object({
       score: z.number(),
       count: z.number().int().nonnegative(),
@@ -222,7 +161,7 @@ export const DashboardSummarySchema = z.object({
       source_words: z.number().int().nonnegative(),
       training_words: z.number().int().nonnegative(),
       mean_quality: z.number(),
-      mean_edu: z.number(),
+      mean_source_quality: z.number(),
     }),
   ),
 });
@@ -239,13 +178,13 @@ export const VerifyResultSchema = z.object({
 
 export type VerifyResult = z.infer<typeof VerifyResultSchema>;
 
-export const AsOfMixtureRowSchema = z.object({
+export const AsOfSourceRowSchema = z.object({
   source_feed: z.string(),
   tokens: z.number().int().nonnegative(),
   documents: z.number().int().nonnegative(),
 });
 
-export type AsOfMixtureRow = z.infer<typeof AsOfMixtureRowSchema>;
+export type AsOfSourceRow = z.infer<typeof AsOfSourceRowSchema>;
 
 export const DatasetSummarySchema = z.object({
   documents: z.number().int().nonnegative(),
@@ -259,8 +198,6 @@ export const DatasetSummarySchema = z.object({
     routes: z.array(z.string()),
     sources: z.array(z.string()),
     source_formats: z.array(z.string()),
-    content_tags: z.array(z.string()),
-    min_edu: z.number().nullable(),
     min_quality: z.number().nullable(),
     include_structured: z.boolean(),
     license_policy: z.literal('strict_allowlist'),
@@ -275,7 +212,6 @@ export const DatasetSummarySchema = z.object({
       snapshot_id: z.string().regex(/^\d+$/).nullable(),
       metadata_location: z.string().nullable(),
     }),
-    export_limit: z.number().int().positive(),
   }),
 });
 
@@ -286,7 +222,6 @@ export const CorpusRouteSchema = z.enum([
   'broad_pretraining',
   'posttrain_candidate',
   'reasoning_candidate',
-  'benchmark_candidate',
   'quarantine',
   'retry',
 ]);
@@ -394,11 +329,8 @@ export const SegmentScoreSchema = z.object({
   title: z.string(),
   role: z.string(),
   word_count: z.number().int().nonnegative(),
-  edu_score: z.number().min(0).max(5).nullable(),
-  finepdfs_edu_score: z.number().min(0).max(5).nullable().default(null),
-  fineweb_edu_score: z.number().min(0).max(5).nullable().default(null),
+  source_quality_score: z.number().min(0).max(5).nullable(),
   quality_classifier_revision: z.string().nullable().default(null),
-  comparison_classifier_revision: z.string().nullable().default(null),
   perplexity: z.number().nonnegative().nullable(),
   perplexity_bucket: z.enum(['head', 'middle', 'tail']).nullable(),
   c4_pass: z.boolean(),
@@ -415,10 +347,9 @@ export const DocumentSummarySchema = z.object({
   lang: z.string(),
   valid_from: z.string(),
   quality_score: z.number(),
-  edu_score: z.number(),
+  source_quality_score: z.number(),
   structural_quality_score: z.number(),
   reasoning_score: z.number(),
-  benchmark_score: z.number(),
   perplexity: z.number(),
   risk_tier: z.number().int(),
   route: CorpusRouteSchema,
@@ -444,6 +375,8 @@ export const DocumentPageSchema = z.object({
   page: z.number().int().positive(),
   page_size: z.number().int().positive(),
   pages: z.number().int().nonnegative(),
+  next_cursor: z.string().nullable().optional(),
+  has_more: z.boolean().optional(),
 });
 
 export const DocumentFacetsSchema = z.object({
@@ -476,7 +409,6 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
   removed_body_pii_flags: z.array(z.string()),
   pii_action: z.string(),
   pii_scanner_revision: z.string(),
-  contaminated_with: z.array(z.string()),
   extraction_pipeline: z.string(),
   classifier_revision: z.string(),
   classifier_backend: z.string(),
@@ -514,14 +446,37 @@ export const DocumentDetailSchema = DocumentSummarySchema.omit({ text_preview: t
   eligible_routes: z.array(CorpusRouteSchema),
   route_reasons: z.array(z.string()),
   segment_scores: z.array(SegmentScoreSchema),
+  quality_diagnostics: z.object({
+    mode: z.enum(['diagnostic', 'active']),
+    cutoff: z.number().optional(),
+    passed: z.boolean().optional(),
+    score: z.number(),
+    confidence: z.number().nullable(),
+    class: z.number(),
+    model_revision: z.string(),
+    aggregation: z.string(),
+    bundle_revision: z.string().optional(),
+    classifiers: z.record(z.string(), z.object({
+      mode: z.enum(['diagnostic', 'active']), score: z.number(), class: z.number(),
+      confidence: z.number().nullable(), aggregation: z.string(),
+      weighted_mean: z.number(), mean: z.number(), best_section_id: z.string(),
+      model_revision: z.string(), sections: z.number(), class_5_sections: z.number(),
+    })).default({}),
+    sections: z.array(z.object({
+      section_id: z.string(), title: z.string(), section_type: z.string(),
+      score: z.number(), confidence: z.number().nullable(),
+      class: z.number().nullable(), probabilities: z.array(z.number()),
+      tokens: z.number(), chunks: z.number(), model_revision: z.string(),
+      text: z.string().optional(),
+      classifiers: z.record(z.string(), z.object({
+        score: z.number(), confidence: z.number().nullable(),
+        score_class: z.number().nullable(), probabilities: z.array(z.number()),
+        tokens: z.number(), chunks: z.number(), model_revision: z.string(),
+      })).default({}),
+    })),
+  }).nullable().default(null),
   projection_version: z.string(),
   excluded_sections: z.array(z.string()),
-  decon_exact_matches: z.array(z.string()),
-  decon_semantic_matches: z.array(z.string()),
-  decon_max_similarity: z.number(),
-  decon_ngram_size: z.number().int().positive(),
-  decon_embedding_revision: z.string(),
-  benchmark_set_version: z.string(),
   scientific_artifact: ScientificDocumentSchema.nullable(),
 });
 
@@ -550,21 +505,6 @@ export type CuratedDocumentDetail = z.infer<typeof DocumentDetailSchema>;
 export type DocumentDetail = z.infer<typeof DocumentDetailResponseSchema>;
 export type DocumentPage = z.infer<typeof DocumentPageSchema>;
 export type DocumentFacets = z.infer<typeof DocumentFacetsSchema>;
-
-export const MixtureCompareSchema = z.object({
-  recipe_a: z.string(),
-  recipe_b: z.string(),
-  perplexity_delta: z.array(
-    z.object({
-      step: z.number().int().nonnegative(),
-      delta: z.number(),
-    }),
-  ),
-  tokens_per_hour_a: z.number().nonnegative(),
-  tokens_per_hour_b: z.number().nonnegative(),
-});
-
-export type MixtureCompare = z.infer<typeof MixtureCompareSchema>;
 
 export const FoundryQuotaSchema = z.object({
   provider: z.literal('hetzner'),
@@ -807,6 +747,7 @@ export const FoundryDashboardSchema = z.object({
   models: z.array(FoundryModelSchema),
   human_audits: z.record(z.string(), z.number().int().nonnegative()),
   daily_run_hour_utc: z.number().int().min(0).max(23),
+  daily_run_minute_utc: z.number().int().min(0).max(59),
   queued_candidates: z.number().int().nonnegative(),
   daily_runs: z.array(
     z.object({
@@ -893,10 +834,6 @@ export const FoundryActivitySchema = z.object({
   ),
 });
 
-export const FoundryManualRunResponseSchema = z.object({
-  run: FoundryDashboardSchema.shape.manual_runs.element,
-  created: z.boolean(),
-});
 
 export const FoundryArtifactAuditResponseSchema = z.object({
   audit: ArtifactAuditSchema,

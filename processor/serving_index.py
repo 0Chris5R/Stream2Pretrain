@@ -1,0 +1,603 @@
+"""Incremental Kafka-backed serving index for the monitoring UI.
+
+The Iceberg tables remain authoritative. This read model exists so normal UI
+requests never scan their complete snapshot history. It consumes the durable
+decision and licence topics, upserts current rows into a retained local DuckDB
+file, and acknowledges each Kafka message only after the local transaction.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+import uuid
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from processor import common
+from schemas.gold import GoldRecord
+from schemas.license_admission import LicenseAdmissionDecision
+
+_LOG = logging.getLogger("s2p.serving-index")
+_DECISION_TABLE = "_serving_decision_records"
+_ADMISSION_TABLE = "_serving_license_admission_records"
+_INDEX_SCHEMA_REVISION = "serving-index-v4"
+
+
+def _decision_values(record: GoldRecord) -> dict[str, Any]:
+    import orjson
+
+    row = record.model_dump(mode="python")
+    row.pop("row_id", None)
+    scores = row.pop("segment_scores", [])
+    row["segment_scores_json"] = orjson.dumps(
+        [
+            score.model_dump(mode="json") if hasattr(score, "model_dump") else score
+            for score in scores
+        ]
+    ).decode("utf-8")
+    diagnostics = row.pop("quality_diagnostics", None)
+    row["quality_diagnostics_json"] = orjson.dumps(diagnostics).decode() if diagnostics else None
+    return row
+
+
+def _admission_values(record: LicenseAdmissionDecision) -> dict[str, Any]:
+    return record.model_dump(mode="json")
+
+
+class ServingIndex:
+    """Persistent current-state projection of the two monitoring topics."""
+
+    def __init__(
+        self,
+        *,
+        database_path: str,
+        brokers: str,
+        decisions_topic: str,
+        admissions_topic: str,
+    ) -> None:
+        self.database_path = database_path
+        self.brokers = brokers
+        self.decisions_topic = decisions_topic
+        self.admissions_topic = admissions_topic
+        self._stop = threading.Event()
+        self._threads: dict[str, threading.Thread] = {}
+        self._running_topics: set[str] = set()
+        self._running_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._caught_up = {
+            self.decisions_topic: threading.Event(),
+            self.admissions_topic: threading.Event(),
+        }
+        self._initialize()
+
+    @classmethod
+    def from_env(cls) -> ServingIndex:
+        return cls(
+            database_path=os.environ.get(
+                "S2P_SERVING_INDEX_DATABASE", "/var/lib/s2p-serving/serving.duckdb"
+            ),
+            brokers=os.environ.get("REDPANDA_BROKERS", "redpanda:9092"),
+            decisions_topic=os.environ.get("S2P_DECISIONS_TOPIC", "curation.decisions"),
+            admissions_topic=os.environ.get("S2P_LICENSE_ADMISSIONS_TOPIC", "license.admissions"),
+        )
+
+    @property
+    def running(self) -> bool:
+        with self._running_lock:
+            running = set(self._running_topics)
+        return running == {self.decisions_topic, self.admissions_topic} and all(
+            thread.is_alive() for thread in self._threads.values()
+        )
+
+    @property
+    def ready(self) -> bool:
+        # _initialize completed the authoritative baseline before start().
+        # A healthy reader may serve that snapshot while consumers catch up.
+        return self.running
+
+    @property
+    def caught_up(self) -> bool:
+        return all(event.is_set() for event in self._caught_up.values())
+
+    def start(self) -> None:
+        if self._threads:
+            return
+        for topic, kind in (
+            (self.decisions_topic, "decision"),
+            (self.admissions_topic, "admission"),
+        ):
+            thread = threading.Thread(
+                target=self._consume_topic,
+                kwargs={"topic": topic, "kind": kind},
+                name=f"serving-index-{kind}",
+                daemon=True,
+            )
+            self._threads[topic] = thread
+            thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        for thread in self._threads.values():
+            thread.join(timeout=10)
+
+    def query_service(self) -> Any:
+        """Return the existing typed query service over local current views."""
+        import duckdb  # type: ignore[import-untyped]
+
+        from processor.duckdb_api import (
+            DuckDBQueryService,
+            ScientificArtifactStore,
+            _configure_runtime_limits,
+        )
+
+        connection: Any = duckdb.connect(self.database_path, read_only=False)
+        _configure_runtime_limits(connection)
+        return DuckDBQueryService(
+            connection,
+            gold_relation="serving_gold",
+            decisions_relation="serving_decisions",
+            license_admissions_relation="serving_license_admissions",
+            refresh_iceberg=False,
+            artifact_store=ScientificArtifactStore.from_env(),
+            overview_relation="_serving_overview",
+        )
+
+    def counts(self) -> dict[str, int]:
+        import duckdb  # type: ignore[import-untyped]
+
+        connection: Any = duckdb.connect(self.database_path, read_only=False)
+        try:
+            decision_row = connection.execute(f"SELECT COUNT(*) FROM {_DECISION_TABLE}").fetchone()
+            admission_row = connection.execute(
+                f"SELECT COUNT(*) FROM {_ADMISSION_TABLE}"
+            ).fetchone()
+            assert decision_row is not None and admission_row is not None
+            decisions = int(decision_row[0])
+            admissions = int(admission_row[0])
+            return {"decisions": decisions, "license_admissions": admissions}
+        finally:
+            connection.close()
+
+    def apply_decision(self, connection: Any, record: GoldRecord) -> None:
+        self.apply_decisions(connection, [record])
+
+    def apply_decisions(self, connection: Any, records: Sequence[GoldRecord]) -> None:
+        if not records:
+            return
+        columns = self._columns(connection, _DECISION_TABLE)
+        # The retained topics are at-least-once and can contain the same key
+        # several times in one poll. DuckDB's indexed ON CONFLICT path can hit
+        # an internal constraint failure when one executemany transaction
+        # mutates the same key repeatedly, so collapse the poll first. This is
+        # also exact Iceberg parity: the smallest trace_id wins for one scoring
+        # identity.
+        selected: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for record in records:
+            row = _decision_values(record)
+            missing = sorted(set(columns) - set(row))
+            if missing:
+                raise ValueError(f"decision is missing serving columns: {missing}")
+            key = (
+                str(row["doc_id"]),
+                str(row["scoring_version"]),
+                str(row["classifier_revision"]),
+                str(row["policy_revision"]),
+            )
+            current = selected.get(key)
+            if current is None or str(row["trace_id"]) < str(current["trace_id"]):
+                selected[key] = row
+        rows = [[row[column] for column in columns] for row in selected.values()]
+        placeholders = ", ".join("?" for _ in columns)
+        names = ", ".join(columns)
+        self._replace_batch(
+            connection,
+            _DECISION_TABLE,
+            rows,
+            names,
+            placeholders,
+            ("doc_id", "scoring_version", "classifier_revision", "policy_revision"),
+            earliest_trace=True,
+        )
+
+    def apply_admission(self, connection: Any, record: LicenseAdmissionDecision) -> None:
+        self.apply_admissions(connection, [record])
+
+    def apply_admissions(
+        self, connection: Any, records: Sequence[LicenseAdmissionDecision]
+    ) -> None:
+        if not records:
+            return
+        columns = self._columns(connection, _ADMISSION_TABLE)
+        # Preserve the previous ON CONFLICT semantics for duplicate delivery:
+        # the last occurrence in the consumed poll is the current projection.
+        selected: dict[str, dict[str, Any]] = {}
+        for record in records:
+            row = _admission_values(record)
+            missing = sorted(set(columns) - set(row))
+            if missing:
+                raise ValueError(f"admission is missing serving columns: {missing}")
+            selected[str(row["decision_id"])] = row
+        rows = [[row[column] for column in columns] for row in selected.values()]
+        placeholders = ", ".join("?" for _ in columns)
+        names = ", ".join(columns)
+        self._replace_batch(
+            connection,
+            _ADMISSION_TABLE,
+            rows,
+            names,
+            placeholders,
+            ("decision_id",),
+        )
+
+    def _replace_batch(
+        self,
+        connection: Any,
+        table: str,
+        rows: list[list[Any]],
+        names: str,
+        placeholders: str,
+        keys: tuple[str, ...],
+        *,
+        earliest_trace: bool = False,
+    ) -> None:
+        """Atomic set-based replacement, without DuckDB's wide-row ART upsert.
+
+        There are intentionally no indexes on these nested payload tables.
+        The single writer establishes uniqueness against a deduplicated staging
+        batch. Readers see either complete transaction; Kafka is acknowledged
+        afterwards. Work scans the compact serving table, never Iceberg history.
+        """
+        match = " AND ".join(f"target.{key}=incoming.{key}" for key in keys)
+        with self._write_lock:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.execute(
+                    f"CREATE OR REPLACE TEMP TABLE _incoming AS SELECT * FROM {table} WHERE FALSE"
+                )
+                connection.executemany(
+                    f"INSERT INTO _incoming ({names}) VALUES ({placeholders})", rows
+                )
+                if earliest_trace:
+                    connection.execute(
+                        f"DELETE FROM _incoming AS incoming USING {table} AS target "
+                        f"WHERE {match} AND target.trace_id <= incoming.trace_id"
+                    )
+                connection.execute(
+                    f"DELETE FROM {table} AS target USING _incoming AS incoming WHERE {match}"
+                )
+                connection.execute(f"INSERT INTO {table} SELECT * FROM _incoming")
+                connection.execute("DROP TABLE _incoming")
+                self._refresh_overview(connection)
+                connection.execute("COMMIT")
+            except Exception:
+                # A rollback must not mask the original error if DuckDB itself
+                # invalidated the connection.
+                from contextlib import suppress
+
+                with suppress(Exception):
+                    connection.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _refresh_overview(connection: Any) -> None:
+        """Publish headline aggregates with their exact decision transaction.
+
+        Computation uses only the retained local projection after a delta batch,
+        never remote history and never a dashboard page request.
+        """
+        import orjson
+
+        from processor.duckdb_api import DuckDBQueryService
+
+        overview = DuckDBQueryService(
+            connection,
+            gold_relation="serving_gold",
+            decisions_relation="serving_decisions",
+            license_admissions_relation="serving_license_admissions",
+        ).corpus_overview()
+        connection.execute("CREATE TABLE IF NOT EXISTS _serving_overview (payload VARCHAR)")
+        connection.execute("DELETE FROM _serving_overview")
+        connection.execute(
+            "INSERT INTO _serving_overview VALUES (?)", [orjson.dumps(overview).decode()]
+        )
+
+    def _initialize(self) -> None:
+        import duckdb  # type: ignore[import-untyped]
+
+        from processor.duckdb_api import (
+            _configure_runtime_limits,
+            _configure_s3,
+            _create_empty_gold_relation,
+            _create_empty_license_relation,
+            _load_extensions,
+            _register_iceberg_relation,
+            _register_license_relation,
+        )
+
+        path = Path(self.database_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        connection: Any = duckdb.connect(self.database_path, read_only=False)
+        try:
+            _configure_runtime_limits(connection)
+            _create_empty_gold_relation(connection, "_serving_gold_shape")
+            _create_empty_license_relation(connection, "_serving_admission_shape")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS _serving_metadata (key VARCHAR PRIMARY KEY, value VARCHAR)"
+            )
+            schema_row = connection.execute(
+                "SELECT value FROM _serving_metadata WHERE key = 'schema_revision'"
+            ).fetchone()
+            rebuild = schema_row is None or str(schema_row[0]) != _INDEX_SCHEMA_REVISION
+            if rebuild:
+                # This database is a derived Kafka projection, never the
+                # authority. Rebuild once from authoritative Iceberg when its
+                # physical schema changes, then rotate the consumer identity so
+                # retained topic deltas replay over that complete baseline.
+                connection.execute("DROP VIEW IF EXISTS serving_gold")
+                connection.execute("DROP VIEW IF EXISTS serving_decisions")
+                connection.execute("DROP VIEW IF EXISTS serving_license_admissions")
+                connection.execute(f"DROP TABLE IF EXISTS {_DECISION_TABLE}")
+                connection.execute(f"DROP TABLE IF EXISTS {_ADMISSION_TABLE}")
+                connection.execute("DELETE FROM _serving_metadata")
+            connection.execute(
+                f"CREATE TABLE IF NOT EXISTS {_DECISION_TABLE} AS SELECT * FROM _serving_gold_shape"
+            )
+            connection.execute(
+                f"CREATE TABLE IF NOT EXISTS {_ADMISSION_TABLE} AS "
+                "SELECT * FROM _serving_admission_shape"
+            )
+            self._migrate_quality_columns(connection)
+            if rebuild:
+                _load_extensions(connection)
+                _configure_s3(connection)
+                _register_iceberg_relation(
+                    connection,
+                    "_serving_history_decisions",
+                    os.environ.get("S2P_ICEBERG_DECISIONS_TABLE", "curation_decisions"),
+                )
+                _register_license_relation(connection, "_serving_history_admissions")
+                connection.execute("BEGIN TRANSACTION")
+                try:
+                    self._copy_relation(
+                        connection,
+                        source="_serving_history_decisions",
+                        target=_DECISION_TABLE,
+                    )
+                    self._copy_relation(
+                        connection,
+                        source="_serving_history_admissions",
+                        target=_ADMISSION_TABLE,
+                    )
+                    connection.execute(
+                        "INSERT INTO _serving_metadata VALUES "
+                        "('schema_revision', ?), ('instance_id', ?)",
+                        [_INDEX_SCHEMA_REVISION, uuid.uuid4().hex],
+                    )
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+                finally:
+                    connection.execute("DROP VIEW IF EXISTS _serving_history_decisions")
+                    connection.execute("DROP VIEW IF EXISTS _serving_history_admissions")
+            # Add only the new nullable column. DuckDB requires dependent
+            # indexes/views to be detached before the ALTER transaction.
+            # Rows and Kafka instance identity are never rebuilt or reset.
+            if "quality_diagnostics_json" not in self._columns(connection, _DECISION_TABLE):
+                connection.execute("DROP VIEW IF EXISTS serving_gold")
+                connection.execute("DROP VIEW IF EXISTS serving_decisions")
+                connection.execute("DROP INDEX IF EXISTS serving_decision_key")
+                connection.execute("BEGIN TRANSACTION")
+                try:
+                    connection.execute(
+                        f"ALTER TABLE {_DECISION_TABLE} ADD COLUMN quality_diagnostics_json VARCHAR"
+                    )
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+            connection.execute("DROP INDEX IF EXISTS serving_decision_key")
+            connection.execute("DROP INDEX IF EXISTS serving_admission_key")
+            existing = connection.execute(
+                "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO _serving_metadata VALUES ('instance_id', ?)", [uuid.uuid4().hex]
+                )
+            trainable = (
+                "risk_tier = 1 AND route IN ('pretrain', 'broad_pretraining', "
+                "'posttrain_candidate', 'reasoning_candidate') "
+                "AND ARRAY_LENGTH(reject_reasons) = 0 AND ARRAY_LENGTH(pii_flags) = 0"
+            )
+            connection.execute(
+                f"CREATE OR REPLACE VIEW serving_decisions AS SELECT * FROM {_DECISION_TABLE}"
+            )
+            connection.execute(
+                f"CREATE OR REPLACE VIEW serving_gold AS SELECT * FROM {_DECISION_TABLE} "
+                f"WHERE {trainable}"
+            )
+            connection.execute(
+                "CREATE OR REPLACE VIEW serving_license_admissions AS "
+                f"SELECT * FROM {_ADMISSION_TABLE}"
+            )
+            self._refresh_overview(connection)
+        finally:
+            connection.close()
+
+    @classmethod
+    def _migrate_quality_columns(cls, connection: Any) -> None:
+        """Bring a retained pre-rename index to the current quality schema."""
+        columns = set(cls._columns(connection, _DECISION_TABLE))
+        legacy = {"edu_score", "finepdfs_edu_score"} & columns
+        if not legacy:
+            return
+        connection.execute("DROP VIEW IF EXISTS serving_gold")
+        connection.execute("DROP VIEW IF EXISTS serving_decisions")
+        connection.execute("DROP INDEX IF EXISTS serving_decision_key")
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            if "source_quality_score" not in columns:
+                replacement = "edu_score" if "edu_score" in columns else "finepdfs_edu_score"
+                connection.execute(
+                    f'ALTER TABLE {_DECISION_TABLE} RENAME COLUMN "{replacement}" '
+                    'TO "source_quality_score"'
+                )
+                legacy.remove(replacement)
+            for column in sorted(legacy):
+                connection.execute(f'ALTER TABLE {_DECISION_TABLE} DROP COLUMN "{column}"')
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _copy_relation(connection: Any, *, source: str, target: str) -> None:
+        """Copy one authoritative relation into its local serving shape."""
+        target_columns = [
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info('{target}')").fetchall()
+        ]
+        source_columns = {
+            str(row[0]) for row in connection.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()
+        }
+        projections: list[str] = []
+        for column in target_columns:
+            if column in source_columns:
+                projections.append(f'"{column}"')
+            elif column == "segment_scores_json" and "segment_scores" in source_columns:
+                projections.append('CAST(TO_JSON("segment_scores") AS VARCHAR)')
+            elif column == "quality_diagnostics_json":
+                projections.append("CAST(NULL AS VARCHAR)")
+            else:
+                raise RuntimeError(
+                    f"authoritative {source} is missing serving-index column {column}"
+                )
+        names = ", ".join(f'"{column}"' for column in target_columns)
+        connection.execute(
+            f"INSERT INTO {target} ({names}) SELECT {', '.join(projections)} FROM {source}"
+        )
+
+    def _consumer_group(self, connection: Any) -> str:
+        instance = str(
+            connection.execute(
+                "SELECT value FROM _serving_metadata WHERE key = 'instance_id'"
+            ).fetchone()[0]
+        )
+        return f"s2p-serving-index-{instance}"
+
+    def _consume_topic(self, *, topic: str, kind: str) -> None:
+        import duckdb  # type: ignore[import-untyped]
+        from confluent_kafka import Consumer, KafkaError  # type: ignore[import-untyped]
+
+        connection: Any = duckdb.connect(self.database_path, read_only=False)
+        batch_size = max(1, int(os.environ.get("S2P_SERVING_INDEX_BATCH_SIZE", "1000")))
+        target_offsets: dict[int, int] = {}
+        progress_offsets: dict[int, int] = {}
+        consumer = Consumer(
+            {
+                "bootstrap.servers": self.brokers,
+                "group.id": f"{self._consumer_group(connection)}-{kind}",
+                "auto.offset.reset": "earliest",
+                "enable.auto.commit": False,
+                "fetch.message.max.bytes": int(
+                    os.environ.get("S2P_KAFKA_MESSAGE_MAX_BYTES", "67108864")
+                ),
+                "max.partition.fetch.bytes": int(
+                    os.environ.get("S2P_KAFKA_MESSAGE_MAX_BYTES", "67108864")
+                ),
+            }
+        )
+
+        def assigned(active_consumer: Any, partitions: list[Any]) -> None:
+            committed = active_consumer.committed(partitions, timeout=10)
+            committed_by_partition = {item.partition: item.offset for item in committed}
+            for partition in partitions:
+                low, high = active_consumer.get_watermark_offsets(partition, timeout=10)
+                target_offsets[partition.partition] = high
+                offset = committed_by_partition.get(partition.partition, -1)
+                progress_offsets[partition.partition] = offset if offset >= 0 else low
+            active_consumer.assign(partitions)
+            self._mark_caught_up(topic, target_offsets, progress_offsets)
+
+        consumer.subscribe([topic], on_assign=assigned)
+        with self._running_lock:
+            self._running_topics.add(topic)
+        try:
+            while not self._stop.is_set():
+                messages = consumer.consume(num_messages=batch_size, timeout=1.0)
+                if not messages:
+                    continue
+                decisions: list[GoldRecord] = []
+                admissions: list[LicenseAdmissionDecision] = []
+                invalid = 0
+                handled: list[Any] = []
+                for message in messages:
+                    error = message.error()
+                    if error is not None:
+                        if error.code() == KafkaError._PARTITION_EOF:
+                            continue
+                        raise RuntimeError(str(error))
+                    handled.append(message)
+                    payload = message.value()
+                    if payload is None:
+                        continue
+                    try:
+                        if kind == "decision":
+                            decisions.append(common.gold_loads(payload))
+                        else:
+                            admissions.append(LicenseAdmissionDecision.model_validate_json(payload))
+                    except ValueError:
+                        invalid += 1
+                self.apply_decisions(connection, decisions)
+                self.apply_admissions(connection, admissions)
+                if handled:
+                    consumer.commit(asynchronous=False)
+                    for message in handled:
+                        partition = message.partition()
+                        progress_offsets[partition] = max(
+                            progress_offsets.get(partition, 0), message.offset() + 1
+                        )
+                    self._mark_caught_up(topic, target_offsets, progress_offsets)
+                if invalid:
+                    _LOG.warning(
+                        "serving_index_skipped_invalid_records",
+                        extra={"topic": topic, "count": invalid},
+                    )
+        except Exception:
+            _LOG.exception("serving_index_consumer_failed", extra={"topic": topic})
+        finally:
+            with self._running_lock:
+                self._running_topics.discard(topic)
+            consumer.close()
+            connection.close()
+
+    def _mark_caught_up(
+        self,
+        topic: str,
+        target_offsets: dict[int, int],
+        progress_offsets: dict[int, int],
+    ) -> None:
+        if target_offsets and all(
+            progress_offsets.get(partition, -1) >= high
+            for partition, high in target_offsets.items()
+        ):
+            self._caught_up[topic].set()
+
+    @staticmethod
+    def _columns(connection: Any, table: str) -> list[str]:
+        return [
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info('{table}')").fetchall()
+        ]
+
+
+def wait_until_running(index: ServingIndex, timeout_seconds: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if index.running:
+            return
+        time.sleep(0.05)
+    raise RuntimeError("serving index consumer did not start")
