@@ -32,7 +32,7 @@ spec:
         - name: worker
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-foundry"]
+          command: ["s2p-entrypoint", "s2p-foundry"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics
@@ -59,12 +59,20 @@ spec:
             {{- end }}
             - name: S2P_FOUNDRY_DAILY_RUN_HOUR_UTC
               value: {{ .Values.processor.foundry.dailyRunHourUtc | quote }}
+            - name: S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC
+              value: {{ .Values.processor.foundry.dailyRunMinuteUtc | quote }}
+            - name: S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC
+              value: {{ .Values.processor.foundry.dailyNotBeforeUtc | quote }}
             - name: S2P_FOUNDRY_TASKS_PER_PAPER
               value: {{ .Values.processor.foundry.tasksPerPaper | quote }}
             - name: S2P_FOUNDRY_ACCEPTED_TASKS_PER_PAPER
               value: {{ .Values.processor.foundry.acceptedTasksPerPaper | quote }}
             - name: S2P_FOUNDRY_QUEUE_POLL_SECONDS
               value: {{ .Values.processor.foundry.queuePollSeconds | quote }}
+            - name: S2P_FOUNDRY_ICEBERG_BATCH_SIZE
+              value: {{ .Values.processor.foundry.icebergBatchSize | quote }}
+            - name: S2P_FOUNDRY_ICEBERG_FLUSH_INTERVAL_SECONDS
+              value: {{ .Values.processor.foundry.icebergFlushIntervalSeconds | quote }}
             - name: S2P_FOUNDRY_EVENTS_TABLE
               value: {{ .Values.iceberg.foundryEventsTable | quote }}
             - name: S2P_FOUNDRY_ARTIFACTS_TABLE
@@ -101,7 +109,7 @@ spec:
         - name: api
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-foundry-api"]
+          command: ["s2p-entrypoint", "s2p-foundry-api"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: http
@@ -115,6 +123,10 @@ spec:
               value: /var/lib/s2p/foundry
             - name: S2P_FOUNDRY_DAILY_RUN_HOUR_UTC
               value: {{ .Values.processor.foundry.dailyRunHourUtc | quote }}
+            - name: S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC
+              value: {{ .Values.processor.foundry.dailyRunMinuteUtc | quote }}
+            - name: S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC
+              value: {{ .Values.processor.foundry.dailyNotBeforeUtc | quote }}
             - name: S2P_FOUNDRY_CONTROL_TOKEN
               valueFrom:
                 secretKeyRef:

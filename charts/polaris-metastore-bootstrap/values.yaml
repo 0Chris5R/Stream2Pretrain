@@ -1,0 +1,15 @@
+image:
+  repository: apache/polaris-admin-tool
+  tag: "1.7.0"
+  pullPolicy: IfNotPresent
+
+persistenceSecret: polaris-persistence
+bootstrapSecret: polaris-root-identity
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

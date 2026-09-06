@@ -9,6 +9,8 @@ metadata:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
   replicas: {{ .Values.processor.duckdbApi.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
@@ -27,7 +29,7 @@ spec:
         - name: duckdb-api
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.duckdbApi.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-duckdb-api"]
+          command: ["s2p-entrypoint", "s2p-duckdb-api"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: http
@@ -50,12 +52,21 @@ spec:
               value: /tmp/duckdb-spill
             - name: S2P_DUCKDB_MAX_TEMP_DIRECTORY_SIZE
               value: {{ .Values.processor.duckdbApi.maxTempDirectorySize | quote }}
+            - name: S2P_SERVING_INDEX_ENABLED
+              value: "1"
+            - name: S2P_SERVING_INDEX_DATABASE
+              value: /var/lib/s2p-serving/serving.duckdb
+            - name: S2P_SERVING_INDEX_BATCH_SIZE
+              value: {{ .Values.processor.duckdbApi.servingIndex.batchSize | quote }}
             - name: HOME
               value: /tmp
           livenessProbe:
             httpGet: {path: /healthz, port: http}
-            initialDelaySeconds: 30
             periodSeconds: 30
+          startupProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            failureThreshold: 90
           readinessProbe:
             httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
@@ -65,10 +76,35 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: serving-index
+              mountPath: /var/lib/s2p-serving
       volumes:
         - name: tmp
           emptyDir:
             sizeLimit: {{ .Values.processor.duckdbApi.tempStorageSizeLimit }}
+        - name: serving-index
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-serving-index" $name) .Values.processor.duckdbApi.servingIndex.existingClaim }}
+{{- if not .Values.processor.duckdbApi.servingIndex.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-serving-index" $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.processor.duckdbApi.servingIndex.storageClass }}
+  storageClassName: {{ .Values.processor.duckdbApi.servingIndex.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.processor.duckdbApi.servingIndex.size }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

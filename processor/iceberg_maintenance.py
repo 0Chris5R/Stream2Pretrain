@@ -1,9 +1,9 @@
-"""Bounded Iceberg metadata maintenance and catalog recovery.
+"""Bounded Iceberg snapshot, metadata, manifest, and orphan maintenance.
 
-The command is read-only unless ``--apply`` is present. It never deletes data
-files, manifests, or attestations. Cleanup is limited to old Iceberg
-``*.metadata.json`` objects that are not the catalog's current metadata file
-and are not present in the current table metadata log.
+The command is read-only unless ``--apply`` is present. It deletes only aged
+objects under an Iceberg table root that are absent from a freshly reloaded
+table's retained snapshot graph. Scientific evidence and package attestations
+are outside those table roots and are never candidates.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import time
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -21,14 +22,18 @@ from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from processor import common
-from processor.iceberg_catalog import load_runtime_catalog
+from processor.iceberg_catalog import (
+    DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
+    DEFAULT_SNAPSHOT_RETENTION_HOURS,
+    ensure_iceberg_maintenance_properties,
+    iceberg_maintenance_properties,
+    load_runtime_catalog,
+)
 
 _METADATA_FILE_RE = re.compile(r"(?:^|/)(\d+)-[^/]+\.metadata\.json$")
-DEFAULT_SNAPSHOT_RETENTION_HOURS = 168
-DEFAULT_METADATA_VERSIONS = 20
-DEFAULT_MIN_SNAPSHOTS_TO_KEEP = 10
 _DEFAULT_TABLES = (
     "curated",
     "curation_decisions",
@@ -48,37 +53,11 @@ class ObjectInfo:
 
 
 def _maintenance_properties() -> dict[str, str]:
-    retention_hours = int(
-        os.environ.get(
-            "S2P_ICEBERG_SNAPSHOT_RETENTION_HOURS",
-            DEFAULT_SNAPSHOT_RETENTION_HOURS,
-        )
-    )
-    metadata_versions = int(
-        os.environ.get("S2P_ICEBERG_METADATA_VERSIONS", DEFAULT_METADATA_VERSIONS)
-    )
-    minimum_snapshots = int(
-        os.environ.get("S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP", DEFAULT_MIN_SNAPSHOTS_TO_KEEP)
-    )
-    if min(retention_hours, metadata_versions, minimum_snapshots) < 1:
-        raise ValueError("Iceberg maintenance limits must be at least 1")
-    return {
-        "write.metadata.delete-after-commit.enabled": "true",
-        "write.metadata.previous-versions-max": str(metadata_versions),
-        "history.expire.max-snapshot-age-ms": str(retention_hours * 60 * 60 * 1000),
-        "history.expire.min-snapshots-to-keep": str(minimum_snapshots),
-    }
+    return iceberg_maintenance_properties()
 
 
 def _ensure_maintenance_properties(table: Any) -> None:
-    current = getattr(table, "properties", {})
-    changed = {
-        key: value for key, value in _maintenance_properties().items() if current.get(key) != value
-    }
-    if not changed:
-        return
-    with table.transaction() as txn:
-        txn.set_properties(**changed)
+    ensure_iceberg_maintenance_properties(table)
 
 
 def _s3_location(value: str) -> tuple[str, str]:
@@ -122,22 +101,51 @@ def _cleanup_candidates(
     return [
         item
         for item in objects
-        if item.key.endswith(".metadata.json")
+        if item.key.endswith((".metadata.json", ".avro", ".parquet", ".puffin"))
         and item.key not in protected_keys
         and item.last_modified < older_than
     ]
 
 
 def _delete_objects(s3: Any, *, bucket: str, objects: list[ObjectInfo]) -> None:
+    benign_codes = {"NoSuchKey", "NoSuchObject", "NotFound"}
+    retryable_codes = {"InternalError", "RequestTimeout", "ServiceUnavailable", "SlowDown"}
+    max_attempts = 5
     for offset in range(0, len(objects), 1000):
-        batch = objects[offset : offset + 1000]
-        response = s3.delete_objects(
-            Bucket=bucket,
-            Delete={"Objects": [{"Key": item.key} for item in batch], "Quiet": True},
-        )
-        errors = response.get("Errors", [])
-        if errors:
-            raise RuntimeError(f"MinIO rejected metadata deletions: {errors[:3]}")
+        pending = {item.key for item in objects[offset : offset + 1000]}
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = s3.delete_objects(
+                    Bucket=bucket,
+                    Delete={
+                        "Objects": [{"Key": key} for key in sorted(pending)],
+                        "Quiet": True,
+                    },
+                )
+            except ClientError as exc:
+                code = str(exc.response.get("Error", {}).get("Code", ""))
+                if code in benign_codes:
+                    break
+                if code not in retryable_codes or attempt == max_attempts:
+                    raise
+            else:
+                errors = response.get("Errors", [])
+                fatal = [error for error in errors if str(error.get("Code")) not in retryable_codes]
+                fatal = [error for error in fatal if str(error.get("Code")) not in benign_codes]
+                if fatal:
+                    raise RuntimeError(f"MinIO rejected metadata deletions: {fatal[:3]}")
+                pending = {
+                    str(error.get("Key"))
+                    for error in errors
+                    if str(error.get("Code")) in retryable_codes and error.get("Key")
+                }
+                if not pending:
+                    break
+                if attempt == max_attempts:
+                    raise RuntimeError(
+                        f"MinIO metadata deletions remained retryable after {max_attempts} attempts"
+                    )
+            time.sleep(min(2 ** (attempt - 1), 8))
 
 
 def _latest_metadata_location(
@@ -204,6 +212,88 @@ def _protected_metadata(table: Any) -> tuple[str, set[str]]:
     return bucket, protected
 
 
+def _add_protected_location(
+    protected: set[str],
+    value: str | None,
+    *,
+    bucket: str,
+) -> None:
+    if not value:
+        return
+    location_bucket, key = _s3_location(str(value))
+    if location_bucket != bucket:
+        raise RuntimeError("one Iceberg table references objects in multiple buckets")
+    protected.add(key)
+
+
+def _protected_table_objects(table: Any) -> tuple[str, set[str]]:
+    """Walk every retained snapshot and collect all reachable table objects."""
+    bucket, protected = _protected_metadata(table)
+    metadata = table.metadata
+    visited_manifests: set[str] = set()
+    for snapshot in metadata.snapshots:
+        _add_protected_location(
+            protected,
+            getattr(snapshot, "manifest_list", None),
+            bucket=bucket,
+        )
+        for manifest in snapshot.manifests(table.io):
+            manifest_path = str(getattr(manifest, "manifest_path", ""))
+            _add_protected_location(
+                protected,
+                manifest_path or None,
+                bucket=bucket,
+            )
+            if not manifest_path or manifest_path in visited_manifests:
+                continue
+            visited_manifests.add(manifest_path)
+            for entry in manifest.fetch_manifest_entry(table.io, discard_deleted=True):
+                _add_protected_location(
+                    protected,
+                    getattr(entry.data_file, "file_path", None),
+                    bucket=bucket,
+                )
+    for collection_name in ("statistics", "partition_statistics"):
+        for value in getattr(metadata, collection_name, ()) or ():
+            _add_protected_location(
+                protected,
+                getattr(value, "statistics_path", None),
+                bucket=bucket,
+            )
+    return bucket, protected
+
+
+def _snapshot_ids_to_expire(
+    table: Any,
+    *,
+    older_than: datetime,
+    minimum_to_keep: int,
+) -> list[int]:
+    """Select aged snapshots while retaining a configured recent floor.
+
+    PyIceberg's explicit ``older_than`` operation protects reference heads but
+    does not apply the table's ``history.expire.min-snapshots-to-keep`` property.
+    Select IDs ourselves so the operational retention contract remains true.
+    """
+    snapshots = sorted(
+        table.metadata.snapshots,
+        key=lambda snapshot: (int(snapshot.timestamp_ms), int(snapshot.snapshot_id)),
+        reverse=True,
+    )
+    protected_ids = {int(snapshot.snapshot_id) for snapshot in snapshots[:minimum_to_keep]}
+    protected_ids.update(
+        int(reference.snapshot_id)
+        for reference in (getattr(table.metadata, "refs", {}) or {}).values()
+        if getattr(reference, "snapshot_id", None) is not None
+    )
+    cutoff_ms = int(older_than.timestamp() * 1000)
+    return [
+        int(snapshot.snapshot_id)
+        for snapshot in snapshots
+        if int(snapshot.timestamp_ms) < cutoff_ms and int(snapshot.snapshot_id) not in protected_ids
+    ]
+
+
 def _maintain_table(
     catalog: Any,
     s3: Any,
@@ -216,7 +306,15 @@ def _maintain_table(
     snapshot_cutoff: datetime,
     metadata_cutoff: datetime,
     register_only: bool = False,
+    minimum_snapshots_to_keep: int = DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
 ) -> dict[str, Any]:
+    print(
+        json.dumps(
+            {"table": f"{namespace}.{table_name}", "status": "starting"},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     table, error = _load_or_register_table(
         catalog,
         s3,
@@ -236,19 +334,29 @@ def _maintain_table(
         }
 
     snapshots_before = len(table.metadata.snapshots)
+    expired_snapshot_ids: list[int] = []
     if apply:
         _ensure_maintenance_properties(table)
         table = catalog.load_table((namespace, table_name))
-        table.maintenance.expire_snapshots().older_than(snapshot_cutoff).commit()
-        table = catalog.load_table((namespace, table_name))
+        expired_snapshot_ids = _snapshot_ids_to_expire(
+            table,
+            older_than=snapshot_cutoff,
+            minimum_to_keep=minimum_snapshots_to_keep,
+        )
+        if expired_snapshot_ids:
+            table.maintenance.expire_snapshots().by_ids(expired_snapshot_ids).commit()
+            table = catalog.load_table((namespace, table_name))
 
-    metadata_bucket, protected = _protected_metadata(table)
+    metadata_bucket, protected = _protected_table_objects(table)
     if metadata_bucket != bucket:
         raise RuntimeError(
             f"{namespace}.{table_name} is in bucket {metadata_bucket}, expected {bucket}"
         )
     _, current_key = _metadata_key(str(table.metadata_location))
-    prefix = current_key.rsplit("/", 1)[0] + "/"
+    metadata_marker = "/metadata/"
+    if metadata_marker not in current_key:
+        raise RuntimeError(f"unexpected Iceberg metadata location {current_key}")
+    prefix = current_key.split(metadata_marker, 1)[0] + "/"
     objects = list(_iter_objects(s3, bucket=bucket, prefix=prefix))
     candidates = _cleanup_candidates(
         objects,
@@ -256,18 +364,50 @@ def _maintain_table(
         older_than=metadata_cutoff,
     )
     if apply:
+        # A writer can commit between the first catalog load and object list.
+        # Reload immediately before deletion and protect the newest catalog
+        # view as well. Avoid a second full manifest traversal when no commit
+        # occurred; large retained histories otherwise double maintenance I/O.
+        # The 24-hour age floor remains a second safety barrier.
+        fresh_table = catalog.load_table((namespace, table_name))
+        if str(fresh_table.metadata_location) != str(table.metadata_location):
+            fresh_bucket, fresh_protected = _protected_table_objects(fresh_table)
+            if fresh_bucket != bucket:
+                raise RuntimeError(
+                    f"{namespace}.{table_name} moved to bucket {fresh_bucket} during maintenance"
+                )
+            protected.update(fresh_protected)
+            table = fresh_table
+        candidates = _cleanup_candidates(
+            candidates,
+            protected_keys=protected,
+            older_than=metadata_cutoff,
+        )
         _delete_objects(s3, bucket=bucket, objects=candidates)
 
-    return {
+    result = {
         "table": f"{namespace}.{table_name}",
         "status": "applied" if apply else "dry-run",
         "snapshots_before": snapshots_before,
         "snapshots_after": len(table.metadata.snapshots),
+        "expired_snapshots": len(expired_snapshot_ids),
         "current_metadata": str(table.metadata_location),
-        "protected_metadata_files": len(protected),
-        "unreferenced_metadata_files": len(candidates),
-        "unreferenced_metadata_bytes": sum(item.size for item in candidates),
+        "protected_objects": len(protected),
+        "unreferenced_objects": len(candidates),
+        "unreferenced_bytes": sum(item.size for item in candidates),
+        "unreferenced_by_suffix": {
+            suffix: {
+                "objects": sum(item.key.endswith(suffix) for item in candidates),
+                "bytes": sum(item.size for item in candidates if item.key.endswith(suffix)),
+            }
+            for suffix in (".metadata.json", ".avro", ".parquet", ".puffin")
+        },
+        "oldest_unreferenced_at": (
+            min(item.last_modified for item in candidates).isoformat() if candidates else None
+        ),
     }
+    print(json.dumps(result, sort_keys=True), flush=True)
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -307,6 +447,14 @@ def main() -> None:
     args = _parser().parse_args()
     if args.snapshot_retention_hours < 1 or args.metadata_minimum_age_hours < 1:
         raise SystemExit("retention and minimum age values must be at least one hour")
+    minimum_snapshots_to_keep = int(
+        os.environ.get(
+            "S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP",
+            DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
+        )
+    )
+    if minimum_snapshots_to_keep < 1:
+        raise SystemExit("minimum snapshots to keep must be at least one")
     if args.register_missing and not args.apply:
         raise SystemExit("--register-missing changes the catalog and requires --apply")
     if args.register_only and not args.register_missing:
@@ -319,7 +467,12 @@ def main() -> None:
         aws_access_key_id=cfg.minio_access_key,
         aws_secret_access_key=cfg.minio_secret_key,
         region_name="us-east-1",
-        config=Config(s3={"addressing_style": "path"}),
+        config=Config(
+            retries={"max_attempts": 5, "mode": "standard"},
+            connect_timeout=10,
+            read_timeout=60,
+            s3={"addressing_style": "path"},
+        ),
     )
     namespace = os.environ.get("S2P_ICEBERG_NAMESPACE") or os.environ.get(
         "ICEBERG_NAMESPACE", "gold"
@@ -339,6 +492,7 @@ def main() -> None:
             register_only=bool(args.register_only),
             snapshot_cutoff=now - timedelta(hours=args.snapshot_retention_hours),
             metadata_cutoff=now - timedelta(hours=args.metadata_minimum_age_hours),
+            minimum_snapshots_to_keep=minimum_snapshots_to_keep,
         )
         for table_name in table_names
     ]
@@ -349,6 +503,7 @@ def main() -> None:
                 "register_only": bool(args.register_only),
                 "snapshot_retention_hours": args.snapshot_retention_hours,
                 "metadata_minimum_age_hours": args.metadata_minimum_age_hours,
+                "minimum_snapshots_to_keep": minimum_snapshots_to_keep,
                 "tables": results,
             },
             sort_keys=True,

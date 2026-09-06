@@ -62,7 +62,7 @@ spec:
                   pattern: "^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$"
                 protocol:
                   type: string
-                  enum: [rss, atom, oai-pmh, rest-json, sitemap, manual]
+                  enum: [rss, atom, oai-pmh, rest-json, manual]
                 endpoint:
                   type: string
                   format: uri

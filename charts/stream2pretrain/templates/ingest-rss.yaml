@@ -1,4 +1,4 @@
-{{- if or .Values.sources.arxiv.enabled .Values.mixtureController.enabled }}
+{{- if .Values.sources.arxiv.enabled }}
 {{- $component := "ingest-rss" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $stateClaim := default (printf "%s-ingest-state" (include "stream2pretrain.fullname" .)) .Values.ingest.state.existingClaim }}

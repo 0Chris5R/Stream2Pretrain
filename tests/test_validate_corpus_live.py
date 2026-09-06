@@ -114,6 +114,20 @@ def test_live_corpus_contract_rejects_fixture_only_acceptance() -> None:
         )
 
 
+def test_live_corpus_contract_rejects_impossible_acceptance_count() -> None:
+    with pytest.raises(ValidationError, match="accepted documents exceed durable decisions"):
+        validate_corpus_overview(
+            {
+                "durable_decisions": 3,
+                "training_export_documents": 1,
+                "rejected_by_reason": {"near_duplicate": 1},
+                "per_source_acceptance": [
+                    {"source": "arxiv-html-fetcher", "accepted": 4, "total": 3}
+                ],
+            }
+        )
+
+
 def test_dataset_contract_requires_concrete_classifier_provenance() -> None:
     revisions = {
         key: [f"{key}-v1"]

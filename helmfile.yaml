@@ -90,19 +90,35 @@ releases:
     values:
       - infra/helmfile-values/redpanda.{{ .Environment.Name }}.yaml
 
-  # Official Apache Polaris chart. The DHBW dev profile is explicitly
-  # in-memory; relational persistence remains a measured production blocker.
+  - name: polaris-postgres
+    namespace: polaris
+    chart: ./charts/polaris-postgres
+    labels: {tier: catalog}
+
+  - name: polaris-metastore-bootstrap
+    namespace: polaris
+    chart: ./charts/polaris-metastore-bootstrap
+    labels: {tier: catalog}
+    needs: [polaris/polaris-postgres]
+
+  # Official Apache Polaris chart backed by its production JDBC metastore.
   - name: polaris
     namespace: polaris
     chart: apache-polaris/polaris
     version: 1.7.0
     labels: {tier: catalog}
+    needs: [polaris/polaris-metastore-bootstrap]
     values:
       - infra/helmfile-values/polaris.{{ .Environment.Name }}.yaml
 
   - name: stream2pretrain
     namespace: stream2pretrain
     chart: ./charts/stream2pretrain
+    # Application readiness is verified per changed workload by the deployment
+    # workflow. A release-wide Helm wait reloads unchanged model services and
+    # blocks on unrelated historical failures.
+    wait: false
+    waitForJobs: false
     labels: {tier: application}
     needs:
       - monitoring/kube-prometheus-stack

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: polaris-metastore-bootstrap
+description: Idempotent relational metastore bootstrap for Apache Polaris
+type: application
+version: 0.1.0
+appVersion: "1.7.0"
+

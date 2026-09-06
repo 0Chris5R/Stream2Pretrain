@@ -7,9 +7,19 @@ image:
   pullPolicy: IfNotPresent
 
 persistence:
-  # Demo-only. A relational JDBC backend and its storage requirements remain
-  # needs-measurement before production deployment.
-  type: in-memory
+  type: relational-jdbc
+  relationalJdbc:
+    secret:
+      name: polaris-persistence
+      username: username
+      password: password
+      jdbcUrl: jdbcUrl
+
+advancedConfig:
+  quarkus.datasource.jdbc.min-size: "2"
+  quarkus.datasource.jdbc.max-size: "10"
+  quarkus.datasource.jdbc.acquisition-timeout: "30S"
+  quarkus.datasource.jdbc.idle-removal-interval: "5M"
 
 realmContext:
   type: default
@@ -24,7 +34,7 @@ extraEnv:
   - name: POLARIS_BOOTSTRAP_CREDENTIALS
     valueFrom:
       secretKeyRef:
-        name: polaris-bootstrap
+        name: polaris-root-identity
         key: credentials
   - name: AWS_ACCESS_KEY_ID
     valueFrom:

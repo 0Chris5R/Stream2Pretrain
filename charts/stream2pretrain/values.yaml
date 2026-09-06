@@ -51,7 +51,6 @@ redpanda:
   topics:
     rawFetched: raw.fetched
     smokeRaw: raw.smoke
-    githubReleaseJobs: github.release.jobs
     docsNormalized: docs.normalized
     docsNormalizedSmoke: docs.normalized.smoke
     docsCurated: docs.curated
@@ -60,7 +59,6 @@ redpanda:
     curationDecisionsSmoke: curation.decisions.smoke
     licenseAdmissions: license.admissions
     licenseAdmissionsSmoke: license.admissions.smoke
-    deconAttest: decon.attest
     foundryJobs: foundry.jobs
     foundryEvents: foundry.events
     foundryArtifacts: foundry.artifacts
@@ -71,11 +69,13 @@ redpanda:
 minio:
   endpoint: http://minio.minio.svc.cluster.local:9000
   region: us-east-1
+  # Source bodies and structured scientific artifacts are transient audit and
+  # replay material. Gold corpus rows, Foundry packages, and state are exempt.
+  transientRetentionDays: 1
   buckets:
     bronze: s2p-bronze
     silver: s2p-silver
     gold: s2p-gold
-    decon: s2p-decon
     posttrain: s2p-posttrain
     state: s2p-state
   credentialsSecret: stream2pretrain-minio
@@ -101,8 +101,6 @@ iceberg:
   scopeKey: scope
   branches:
     main: main
-    shadowA: shadow-a
-    shadowB: shadow-b
 
 # -----------------------------------------------------------------------------
 # Network policies
@@ -117,30 +115,9 @@ networkPolicy:
       - oaipmh.arxiv.org
       - rss.arxiv.org
       - arxiv.org
-    github:
-      - api.github.com
-      - github.com
-      - raw.githubusercontent.com
-      - codeload.github.com
     huggingface:
       - huggingface.co
       - cdn-lfs.huggingface.co
-    openreview:
-      - api2.openreview.net
-      - api.openreview.net
-      - openreview.net
-    seed:
-      - huggingface.co
-      - cdn-lfs.huggingface.co
-      - web.archive.org
-      - arxiv.org
-      - softwareheritage.s3.amazonaws.com
-      - s3.amazonaws.com
-    blogs:
-      - openai.com
-      - deepmind.google
-      - bair.berkeley.edu
-      - blog.eleuther.ai
     foundry-providers:
       - inference.hetzner.com
   # Allow DNS to kube-dns.
@@ -171,78 +148,12 @@ sources:
       kind: cronjob
       schedule: "27 */2 * * *"
       licenseDefault: per-record
-    # Native arXiv full-paper-HTML fetcher (v0.2.0). Subscribes to arXiv
+    # Native arXiv full-paper-HTML fetcher. Subscribes to arXiv
     # discovery envelopes on ``raw.fetched`` and walks every fresh id through
     # ``arxiv.org/html/<id>`` (with ``ar5iv.labs.arxiv.org`` as fallback).
     htmlFetcher:
       enabled: true
       feedName: arxiv-html-fetcher
-      backfill:
-        enabled: false
-        schedule: "23 4 * * *"
-        deadlineSeconds: 7200
-        # When non-empty, mount this ConfigMap at /etc/s2p/backfill instead
-        # of the chart's default empty placeholder. Operators populate it
-        # with a single ``ids.txt`` key containing one arXiv id per line.
-        configMap: ""
-  github:
-    enabled: true
-    events:
-      name: github-events
-      pollIntervalSeconds: 60
-      respectXPollInterval: true
-      kind: deployment
-      tokenSecret: stream2pretrain-github
-      tokenSecretKey: token
-      aiOrgFilter:
-        - openai
-        - anthropics
-        - huggingface
-        - google-deepmind
-        - meta-llama
-        - mistralai
-        - allenai
-        - eleutherai
-        - bytewax
-        - vllm-project
-    releases:
-      name: github-releases
-      pollIntervalSeconds: 7200
-      kind: cronjob
-      schedule: "37 */2 * * *"
-      tokenSecret: stream2pretrain-github
-      tokenSecretKey: token
-      repos:
-        - huggingface/transformers
-        - vllm-project/vllm
-        - pytorch/pytorch
-        - ggml-org/llama.cpp
-        - karpathy/llm.c
-        - unslothai/unsloth
-        - meta-llama/llama
-        - openai/whisper
-        - anthropics/courses
-        - apple/ml-tic-lm
-        - mlfoundations/dclm
-        - huggingface/datatrove
-        - NVIDIA-NeMo/Curator
-        - allenai/dolma
-        - bytewax/bytewax
-        - redpanda-data/redpanda
-        - apache/iceberg
-        - MaterializeInc/materialize
-        - risingwavelabs/risingwave
-        - pathwaycom/pathway
-        - unclecode/crawl4ai
-        - firecrawl/firecrawl
-        - microsoft/onnxruntime
-        - ogx-ai/ogx
-        - triton-lang/triton
-        - google-deepmind/gemma
-        - mistralai/mistral-inference
-        - tinygrad/tinygrad
-        - huggingface/pytorch-image-models
-        - pytorch/torchtitan
   huggingface:
     enabled: true
     models:
@@ -259,45 +170,6 @@ sources:
       kind: deployment
       tokenSecret: stream2pretrain-hf
       tokenSecretKey: token
-    spaces:
-      name: hf-spaces
-      endpoint: https://huggingface.co/api/spaces
-      pollIntervalSeconds: 600
-      kind: deployment
-      tokenSecret: stream2pretrain-hf
-      tokenSecretKey: token
-    dailyPapers:
-      name: hf-daily-papers
-      endpoint: https://huggingface.co/api/daily_papers
-      pollIntervalSeconds: 21600
-      kind: cronjob
-      schedule: "47 */6 * * *"
-      tokenSecret: stream2pretrain-hf
-      tokenSecretKey: token
-  blogs:
-    enabled: true
-    pollIntervalSeconds: 21600
-    kind: cronjob
-    schedule: "53 */6 * * *"
-    feeds:
-      - name: openai-news
-        url: https://openai.com/news/rss.xml
-      - name: deepmind
-        url: https://deepmind.google/blog/rss.xml
-      - name: hf-blog
-        url: https://huggingface.co/blog/feed.xml
-      - name: bair
-        url: https://bair.berkeley.edu/blog/feed.xml
-      - name: eleuther
-        url: https://blog.eleuther.ai/index.xml
-  sitemap:
-    enabled: false
-    name: sitemap-poller
-    pollIntervalSeconds: 21600
-    kind: cronjob
-    schedule: "11 */6 * * *"
-    feeds: []
-
 # -----------------------------------------------------------------------------
 # Ingest components
 # -----------------------------------------------------------------------------
@@ -328,25 +200,7 @@ ingest:
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 512Mi}
-  sitemap:
-    image: stream2pretrain/ingest-sitemap
-    replicas: 1
-    resources:
-      requests: {cpu: 50m, memory: 128Mi}
-      limits: {cpu: 500m, memory: 256Mi}
-  githubEvents:
-    image: stream2pretrain/ingest-github-events
-    replicas: 1
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
-  githubReleases:
-    image: stream2pretrain/ingest-github-releases
-    replicas: 1
-    resources:
-      requests: {cpu: 50m, memory: 128Mi}
-      limits: {cpu: 500m, memory: 256Mi}
-  # arXiv full-paper-HTML fetcher (v0.2.0). Long-running Deployment that
+  # arXiv full-paper-HTML fetcher. Long-running Deployment that
   # subscribes to raw.fetched for arXiv ids and fetches the rendered
   # HTML body (with ar5iv as fallback). Toggle via
   # ``sources.arxiv.htmlFetcher.enabled``.
@@ -354,8 +208,8 @@ ingest:
     image: stream2pretrain/ingest-arxiv-html
     replicas: 1
     # The durable group starts at earliest on a clean cluster so every retained
-    # discovery is handled. Historical ids outside retention use the bounded
-    # backfill CronJob.
+    # discovery is handled. The one-time 2026-08-25 frontier reset deliberately
+    # discards older queued ids; there is no historical backfill workload.
     consumerGroup: s2p-arxiv-html-fetcher-v2
     autoOffsetReset: earliest
     # Optional bounded drain for explicit diagnostics. Production is unlimited.
@@ -366,148 +220,39 @@ ingest:
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 768Mi}
-  # GitHub release tarball fetcher (v0.2.0). Consumes a dedicated job topic
-  # emitted by the github_releases poller and downloads each release's source
-  # tarball, emitting one CodeFileRecord per allow-listed file to raw.fetched.
-  githubTarballFetcher:
-    enabled: true
-    image: stream2pretrain/ingest-github-tarball-fetcher
-    replicas: 1
-    consumerGroup: s2p-github-tarball-fetcher
-    # File extensions retained from the tarball (lowercase, leading dot).
-    # Non-listed files are skipped silently. Tune via override.
-    allowedExtensions:
-      - .py
-      - .pyx
-      - .pyi
-      - .c
-      - .h
-      - .cpp
-      - .hpp
-      - .cc
-      - .cu
-      - .rs
-      - .go
-      - .js
-      - .ts
-      - .tsx
-      - .jsx
-      - .java
-      - .scala
-      - .kt
-      - .swift
-      - .rb
-      - .r
-      - .jl
-      - .md
-      - .rst
-      - .txt
-      - .yaml
-      - .yml
-      - .toml
-      - .json
-    # 1 MiB default per-file ceiling. Files above this are skipped without
-    # being read into memory.
-    maxFileSizeBytes: 1048576
-    # These prefixes were observed on pytorch/pytorch as ephemeral CI refs,
-    # not published software releases.
-    excludedTagPrefixes:
-      - ciflow/
-      - trunk/
-    # Above the measured bounded-release time and aligned with processor
-    # consumers, so healthy work does not forfeit its partition before commit.
-    maxPollIntervalMilliseconds: 900000
-    # Four replicas share one GitHub credential. Limiting each to 0.25 req/s
-    # bounds the aggregate steady-state budget at 3600 req/h, leaving headroom
-    # below GitHub's authenticated 5000 req/h core limit for the poller.
-    requestRatePerSecond: 0.25
-    requestBurst: 1
-    keda:
-      # Keep one migration consumer alive for the pre-v0.2 raw.fetched lane;
-      # new work scales to the four partitions of github.release.jobs.
-      minReplicas: 1
-      maxReplicas: 4
-      lagThreshold: 1
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 1, memory: 1Gi}
   hf:
     image: stream2pretrain/ingest-hf
     replicas: 1
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
-  # OpenReview poller (v0.2.0). The same image runs both live and backfill
-  # modes; the Helm template selects via container `command`.
-  openreview:
-    image: stream2pretrain/ingest-openreview
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
-    # Backfill streams a multi-GB HF dataset; size up the head room.
-    backfillResources:
-      requests: {cpu: 200m, memory: 512Mi}
-      limits: {cpu: 1, memory: 2Gi}
-
-# -----------------------------------------------------------------------------
-# OpenReview poller (v0.2.0). Live CronJob polls api2.openreview.net every 6h;
-# the backfill Job is a one-shot REVIEWARENA HF dataset bridge gated behind
-# ``openreviewPoller.runBackfill = true`` so an operator opts in explicitly.
-# -----------------------------------------------------------------------------
-openreviewPoller:
-  enabled: true
-  # ICLR.cc/2026/Conference, NeurIPS.cc/2025/Conference, ICML.cc/2025/Conference,
-  # COLM/2025/Conference. Which years are actually open at any given time is
-  # ``needs-measurement``; the live module skips venues that return zero notes.
-  venues:
-    - ICLR.cc/2026/Conference
-    - NeurIPS.cc/2025/Conference
-    - ICML.cc/2025/Conference
-    - COLM/2025/Conference
-  # OpenReview supports anonymous listing once a venue's submissions are
-  # public. Populate ``tokenSecret`` to unlock pre-release access.
-  tokenSecret: ""
-  tokenSecretKey: token
-  live:
-    # OpenReview's notes endpoints currently require an authenticated token or
-    # interactive challenge. Keep the live poller absent until tokenSecret is
-    # configured; ReviewArena remains the pinned post-training fallback.
-    enabled: false
-    schedule: "17 */6 * * *"
-    activeDeadlineSeconds: 3600
-    # Used only when ingest.state.backend=pvc. The default S3 backend stores
-    # this cursor beside the other poller cursors in minio.buckets.state.
-    state:
-      storageClass: ""
-      size: 1Gi
-      existingClaim: ""
-  runBackfill: false
-  backfill:
-    datasetId: anonymousNeurIPS2026submission4281/reviewarena
-    revision: c2978add17c2099219eaddbc2599974d69d4d09b
-    splits:
-      - neurips
-      - iclr
-      - icml
-      - tmlr
-      - emnlp
-      - corl
-      - colm
-    # Optional smoke-scale limit. Empty means "no limit".
-    maxRows: ""
-    activeDeadlineSeconds: 21600
-
 # -----------------------------------------------------------------------------
 # Processor components
 # -----------------------------------------------------------------------------
 processor:
+  # Bound unfinished normalization and curation work by original content-intake time.
+  maxWorkAgeSeconds: 86400
   fetcher:
     image: stream2pretrain/processor-fetcher-model
+    # Expensive extraction must publish and checkpoint continuously instead of
+    # inheriting Bytewax's 1,000-record-per-partition connector default.
+    sourceBatchSize: 1
     # Production workers use the immutable fetcher model profile. It contains
     # only Docling and figure-classification artifacts and fails startup when
     # a real extraction dependency is missing.
     requireRealModels: true
     doclingEnabled: true
+    # Match the fetcher's exact expanded-object ceiling. Larger PDFs receive a
+    # durable record-local failure instead of crash-looping the Bytewax flow.
+    doclingMaxBytes: 67108864
+    # Temporary parent-enforced process deadline. The rollout observed valid
+    # Docling returns through 203.95s, so 240s replaces the unsafe 180s
+    # cooperative thread timeout. Tune from the emitted cloud percentile only.
+    pdfHardTimeoutSeconds: 240
+    # Emergency capacity switch only. False durably defers PDF records before
+    # MinIO reads while every non-PDF source continues through the full path.
+    # Keep true in the portable chart; deployment overrides must explain why.
+    pdfProcessingEnabled: true
     # Bytewax owns source progress in a durable recovery database. Scale this
     # as one coordinated execution, never with independent Kafka-lag replicas.
     replicas: 1
@@ -544,29 +289,36 @@ processor:
     # immutable classifiers are isolated behind modelService so the local RWO
     # checkpoint never pins multi-GB model memory or image layers to one node.
     image: stream2pretrain/processor
+    scoringVersion: pretrain-content-v4
+    # Four documents bound publication latency with the two-stage classifiers.
+    # Section RPCs still fill all four inference replicas; no input is omitted.
+    sourceBatchSize: 4
     replicas: 1
     requireRealModels: true
     doclingEnabled: false
     usePresidio: true
+    # Two segments per RPC keeps request overhead bounded while the six-way
+    # curator pool can distribute independent batches across all ready model
+    # replicas. Increase only after the documented memory/latency benchmark.
+    classifierBatchSize: 2
     resources:
-      requests: {cpu: 500m, memory: 1Gi}
-      limits: {cpu: 2, memory: 2Gi}
+      # The retained deduplication/recovery state was measured at about 1.8 GiB
+      # before Python and request buffers. A 2 GiB ceiling OOM-killed the live
+      # curator, so reserve its steady-state footprint and retain growth room.
+      requests: {cpu: 500m, memory: 2Gi}
+      limits: {cpu: 2, memory: 6Gi}
     checkpoint:
       storageClass: ""
       size: 20Gi
       recoveryPartitions: 4
       snapshotSeconds: 1
-    onnxModel: /models/fineweb-edu/model.onnx
     minHashBands: 14
     minHashRowsPerBand: 9
     # Immutable component-specific images are the default. Bootstrap or URL
     # remains an explicit escape hatch for a private external model bundle.
     modelBundle:
       bootstrap: false
-      url: ""
-      sha256: ""
       sizeMi: 10240
-      image: ghcr.io/stream2pretrain/curl-jq:1.0.0
       resources:
         requests: {cpu: 500m, memory: 512Mi}
         limits: {cpu: 2, memory: 2Gi}
@@ -574,36 +326,46 @@ processor:
     enabled: true
     replicas: 1
     port: 8094
+    maxBatchItems: 2
     # Each real-model family has an independent image and runtime boundary.
     # This avoids a monolithic multi-GB image/process and lets Kubernetes
     # schedule or scale the resources each backend actually consumes.
     profiles:
+      # Four independent heads: HF quality; arXiv quality, math and posttrain.
       quality:
+        runtimeProfile: quality
         image: stream2pretrain/processor-quality-model
+        autoscaling:
+          minReplicas: 2
+          # Override with the measured reservation ceiling for the cluster.
+          maxReplicas: 6
         resources:
           requests: {cpu: 1, memory: 2Gi}
-          limits: {cpu: 2, memory: 3Gi}
+          limits: {cpu: 2, memory: 6Gi}
       kenlm:
+        runtimeProfile: kenlm
         image: stream2pretrain/processor-kenlm-model
+        autoscaling:
+          minReplicas: 1
+          maxReplicas: 3
         resources:
           requests: {cpu: 500m, memory: 1Gi}
           limits: {cpu: 2, memory: 3Gi}
-      embedding:
-        image: stream2pretrain/processor-embedding-model
-        resources:
-          requests: {cpu: 250m, memory: 512Mi}
-          limits: {cpu: 1, memory: 1Gi}
     autoscaling:
       enabled: true
       minReplicas: 1
       maxReplicas: 3
-      targetCPUUtilizationPercentage: 75
+      pollingIntervalSeconds: 15
+      cooldownPeriodSeconds: 300
+      prometheusServerAddress: http://kps-prometheus.monitoring.svc.cluster.local:9090
   iceberg:
     image: stream2pretrain/processor-iceberg-writer
+    sourceBatchSize: 1
     replicas: 1
     resources:
-      requests: {cpu: 200m, memory: 512Mi}
-      limits: {cpu: 1, memory: 1Gi}
+      # Reserve memory for table metadata, Arrow buffers and input recovery.
+      requests: {cpu: 200m, memory: 1Gi}
+      limits: {cpu: 2, memory: 4Gi}
     flushIntervalSeconds: 60
     flushRecords: 5000
     checkpoint:
@@ -617,14 +379,21 @@ processor:
       snapshotSeconds: 1
     maintenance:
       enabled: true
-      schedule: "17 * * * *"
-      snapshotRetentionHours: 168
+      # Independent schedules keep a historically large table from blocking
+      # lifecycle enforcement for every other table.
+      tables:
+        - {name: curated, schedule: "7 * * * *"}
+        - {name: curation_decisions, schedule: "17 * * * *"}
+        - {name: license_admissions, schedule: "27 * * * *"}
+        - {name: foundry_events, schedule: "37 * * * *"}
+        - {name: posttrain_artifacts, schedule: "47 * * * *"}
+      snapshotRetentionHours: 24
       minSnapshotsToKeep: 10
       metadataVersions: 20
       orphanMinimumAgeHours: 24
       resources:
-        requests: {cpu: 100m, memory: 256Mi}
-        limits: {cpu: 1, memory: 1Gi}
+        requests: {cpu: 250m, memory: 1Gi}
+        limits: {cpu: 2, memory: 4Gi}
   duckdbApi:
     image: stream2pretrain/processor-duckdb-api
     replicas: 1
@@ -635,53 +404,39 @@ processor:
     catalogRefreshSeconds: 30
     # DuckDB otherwise assumes most host memory is available and Kubernetes
     # kills the API during whole-table sorts. Spill bounded scans to emptyDir.
-    memoryLimit: 512MB
+    memoryLimit: 4GB
     threads: 1
     maxTempDirectorySize: 3GB
     tempStorageSizeLimit: 4Gi
+    # Kafka-backed current-state read model. Iceberg remains authoritative;
+    # this retained index prevents interactive pages from scanning history.
+    servingIndex:
+      existingClaim: ""
+      storageClass: local-path
+      size: 10Gi
+      batchSize: 250
     resources:
-      requests: {cpu: 100m, memory: 512Mi}
-      limits: {cpu: 1, memory: 1Gi}
-  deconGate:
-    image: stream2pretrain/decon-gate
-    replicas: 1
-    apiPort: 8081
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
-    benchmarks:
-      - mmlu
-      - gsm8k
-      - humaneval
-      - math
-      - gpqa
-    bloomBits: 33
-    bloomHashes: 7
-    signingKeySecret: stream2pretrain-decon-signing
-    signingKeyKey: ed25519.key
-    signingCertKey: ed25519.crt
-    benchmarkSetVersion: v2026-06-01
-    benchmarkCorpus:
-      configMap: stream2pretrain-decon-benchmarks
-      secret: ""
-      kind: restricted_reserve
-      fileName: corpus.json
-      mountPath: /etc/stream2pretrain/decon
+      requests: {cpu: 100m, memory: 2Gi}
+      limits: {cpu: 1, memory: 6Gi}
   foundry:
     enabled: true
     image: stream2pretrain/processor-foundry
     replicas: 1
     apiPort: 8092
-    dailyRunHourUtc: 0 # needs-measurement
+    dailyRunHourUtc: 8
+    dailyRunMinuteUtc: 30 # 10:30 Europe/Berlin while CEST is active
+    dailyNotBeforeUtc: "2026-08-28T08:30:00Z"
     tasksPerPaper: 6
     acceptedTasksPerPaper: 3
     queuePollSeconds: 10
+    icebergBatchSize: 5000
+    icebergFlushIntervalSeconds: 3600
     enableOracles: false
     oracleRuntimeClass: ""
     providerSecret: stream2pretrain-foundry-providers
     controlTokenKey: controlToken
     hetznerKey: HETZNER_INFERENCE_API_KEY
-    signingKeySecret: stream2pretrain-decon-signing
+    signingKeySecret: stream2pretrain-foundry-signing
     signingKeyKey: ed25519.key
     signingCertKey: ed25519.crt
     hetznerModels:
@@ -697,80 +452,18 @@ processor:
       limits: {cpu: 500m, memory: 512Mi} # needs-measurement
 
 # -----------------------------------------------------------------------------
-# Mixture controller (kopf)
+# SourceFeed controller (kopf)
 # -----------------------------------------------------------------------------
-mixtureController:
-  image: stream2pretrain/mixture-controller
+sourceController:
+  image: stream2pretrain/processor
   replicas: 1
   apiPort: 8080
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: 500m, memory: 512Mi}
-  reconcileIntervalSeconds: 30
 
 # -----------------------------------------------------------------------------
-# Seed loader (one-shot Bytewax Job; v0.2.0)
-# -----------------------------------------------------------------------------
-# Streams the 5-component HuggingFace seed mixture into docs.normalized as
-# Silver records. Disabled by default - kick off explicitly via the helper
-# script `scripts/seed_corpus.sh`. Honest scope notes live in
-# processor/seed/README.md; the headline ones:
-#   - HF cache PVC default is 50Gi. Full 5-component backfill needs 1-2 TiB,
-#     so the demo cluster runs only a selected subset via --components=...
-#   - peS2o v3 token count and FineWeb-Edu domain-filter yield are
-#     `needs-measurement` per docs/research-seed-corpus.md.
-seedLoader:
-  enabled: false
-  image: stream2pretrain/processor-seed-loader
-  # The seed Job serializes admission -> Silver acknowledgement -> cursor.
-  # Keep this true until a transactional cross-topic Bytewax outbox exists.
-  inProcess: true
-  dryRun: false
-  # Components to ingest, in priority order. Override on the helm CLI:
-  #   --set seedLoader.components={pes2o,stack-edu}
-  components:
-    - pes2o
-    - redpajama-arxiv
-    - fineweb-edu
-    - stack-edu
-    - wayback
-  maxDocsPerComponent: 0  # 0 means unlimited; set to N for smoke runs
-  waybackMonths: 24
-  stateBucket: s2p-state
-  runId: ""  # filled in by scripts/seed_corpus.sh; templates default to now
-  activeDeadlineSeconds: 86400
-  hfTokenSecret: stream2pretrain-hf
-  hfTokenSecretKey: token
-  hf_cache_pvc:
-    existingClaim: ""
-    storageClass: ""
-    size: 50Gi
-  resources:
-    requests: {cpu: 500m, memory: 2Gi}
-    limits: {cpu: 2, memory: 6Gi}
-  # FineWeb-Edu URL allowlist - hostnames matched as exact-host or suffix
-  # (so `magazine.sebastianraschka.com` matches `sebastianraschka.com`).
-  fineweb_url_allowlist:
-    - arxiv.org
-    - openai.com
-    - deepmind.google
-    - anthropic.com
-    - ai.meta.com
-    - huggingface.co
-    - distill.pub
-    - eleuther.ai
-    - bair.berkeley.edu
-    - lilianweng.github.io
-    - sebastianraschka.com
-    - magazine.sebastianraschka.com
-    - jalammar.github.io
-    - karpathy.ai
-    - pytorch.org
-    - tensorflow.org
-    - pytorch-lightning.readthedocs.io
-
-# -----------------------------------------------------------------------------
-# UI (Next.js 14)
+# UI (Next.js 16)
 # -----------------------------------------------------------------------------
 ui:
   image: stream2pretrain/ui

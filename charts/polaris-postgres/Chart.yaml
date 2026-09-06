@@ -1,0 +1,7 @@
+apiVersion: v2
+name: polaris-postgres
+description: Persistent PostgreSQL metastore for Apache Polaris
+type: application
+version: 0.1.0
+appVersion: "17.6"
+

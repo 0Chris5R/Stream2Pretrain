@@ -159,8 +159,6 @@ Iceberg + observability).
   value: {{ .Values.redpanda.topics.rawFetched | quote }}
 - name: S2P_SMOKE_RAW_TOPIC
   value: {{ .Values.redpanda.topics.smokeRaw | quote }}
-- name: S2P_GITHUB_RELEASE_JOBS_TOPIC
-  value: {{ .Values.redpanda.topics.githubReleaseJobs | quote }}
 - name: S2P_NORMALIZED_TOPIC
   value: {{ .Values.redpanda.topics.docsNormalized | quote }}
 - name: S2P_SMOKE_NORMALIZED_TOPIC
@@ -177,8 +175,6 @@ Iceberg + observability).
   value: {{ .Values.redpanda.topics.licenseAdmissions | quote }}
 - name: S2P_SMOKE_LICENSE_ADMISSIONS_TOPIC
   value: {{ .Values.redpanda.topics.licenseAdmissionsSmoke | quote }}
-- name: S2P_DECON_TOPIC
-  value: {{ .Values.redpanda.topics.deconAttest | quote }}
 - name: S2P_FOUNDRY_JOBS_TOPIC
   value: {{ .Values.redpanda.topics.foundryJobs | quote }}
 - name: S2P_FOUNDRY_EVENTS_TOPIC
@@ -195,10 +191,10 @@ Iceberg + observability).
   value: {{ .Values.minio.buckets.silver | quote }}
 - name: MINIO_GOLD_BUCKET
   value: {{ .Values.minio.buckets.gold | quote }}
-- name: MINIO_DECON_BUCKET
-  value: {{ .Values.minio.buckets.decon | quote }}
 - name: MINIO_POSTTRAIN_BUCKET
   value: {{ .Values.minio.buckets.posttrain | quote }}
+- name: S2P_TRANSIENT_OBJECT_RETENTION_DAYS
+  value: {{ .Values.minio.transientRetentionDays | quote }}
 - name: S2P_STATE_BACKEND
   value: {{ .Values.ingest.state.backend | quote }}
 - name: S2P_STATE_BUCKET

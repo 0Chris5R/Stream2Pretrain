@@ -10,7 +10,6 @@ from schemas.topics import (
     DOCS_CURATED_SMOKE,
     DOCS_NORMALIZED,
     DOCS_NORMALIZED_SMOKE,
-    GITHUB_RELEASE_JOBS,
     LICENSE_ADMISSIONS,
     LICENSE_ADMISSIONS_SMOKE,
     RAW_FETCHED,
@@ -18,14 +17,6 @@ from schemas.topics import (
     dev_topic_configs,
     prod_topic_configs,
 )
-
-
-def test_github_release_jobs_topic_is_provisioned_in_every_profile() -> None:
-    assert GITHUB_RELEASE_JOBS in ALL_TOPICS
-    for configs in (dev_topic_configs(), prod_topic_configs()):
-        matching = [config for config in configs if config.name == GITHUB_RELEASE_JOBS]
-        assert len(matching) == 1
-        assert matching[0].partitions > 1
 
 
 def test_smoke_lane_is_complete_short_lived_and_distinct() -> None:

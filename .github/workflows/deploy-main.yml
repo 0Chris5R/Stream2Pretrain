@@ -2376,6 +2376,36 @@ jobs:
               fi
             done
 
+            # The manifest-era Deployment used a different immutable selector.
+            # Replace only that stateless controller when its selector cannot
+            # be adopted; Services, PostgreSQL, and Iceberg objects remain.
+            current_polaris_selector="$(
+              kubectl -n polaris get deployment/polaris -o json 2>/dev/null \
+                | jq -cS '.spec.selector.matchLabels' || true
+            )"
+            chart_polaris_selector='{"app.kubernetes.io/instance":"polaris","app.kubernetes.io/name":"polaris"}'
+            polaris_release_status="$(
+              helm -n polaris status polaris -o json 2>/dev/null \
+                | jq -r '.info.status // "missing"' || printf 'missing'
+            )"
+            if [[ "$polaris_release_status" != "deployed" \
+               || "$current_polaris_selector" != "$chart_polaris_selector" ]]; then
+              kubectl -n polaris delete deployment/polaris \
+                --ignore-not-found --wait=true
+            fi
+            polaris_catalog_endpoint_ports="$(
+              kubectl -n polaris get endpointslice \
+                -l kubernetes.io/service-name=polaris -o json 2>/dev/null \
+                | jq '[
+                    .items[].ports[]?
+                    | select(.port == 8181)
+                  ] | length' || printf '0'
+            )"
+            if kubectl -n polaris get service/polaris >/dev/null 2>&1 \
+               && [[ "$polaris_catalog_endpoint_ports" -eq 0 ]]; then
+              kubectl -n polaris delete service/polaris --wait=true
+            fi
+
             helmfile \
               --helm-binary "$(command -v helm)" \
               --file helmfile.yaml \

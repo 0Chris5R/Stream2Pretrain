@@ -46,7 +46,7 @@ spec:
     metadata:
       labels:
         {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
-        stream2pretrain.io/egress-class: blogs
+        stream2pretrain.io/egress-class: arxiv
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
@@ -59,7 +59,7 @@ spec:
         - name: fetcher
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image "tag" .Values.processor.fetcher.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-fetcher"]
+          command: ["s2p-entrypoint", "s2p-fetcher"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics
@@ -68,10 +68,12 @@ spec:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
+            - name: S2P_PRETRAIN_MAX_WORK_AGE_SECONDS
+              value: {{ .Values.processor.maxWorkAgeSeconds | int | quote }}
             - name: S2P_BYTEWAX_FLOW_NAME
-              value: "s2p-fetcher-v2"
+              value: "s2p-fetcher-live-v5"
             - name: S2P_BYTEWAX_RECOVERY_NAME
-              value: "fetcher-v2"
+              value: "fetcher-live-v5"
             - name: S2P_STATE_DIR
               value: /var/lib/s2p/checkpoint
             - name: S2P_CONSUMER_GROUP
@@ -82,6 +84,8 @@ spec:
               value: {{ $checkpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
               value: {{ $checkpoint.snapshotSeconds | quote }}
+            - name: S2P_BYTEWAX_SOURCE_BATCH_SIZE
+              value: {{ .Values.processor.fetcher.sourceBatchSize | int | quote }}
             - name: S2P_MAX_RAW_OBJECT_BYTES
               value: "67108864"
             - name: S2P_MAX_EXPANDED_OBJECT_BYTES
@@ -90,16 +94,24 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_DOCLING_MAX_BYTES
+              value: {{ .Values.processor.fetcher.doclingMaxBytes | int | quote }}
+            - name: S2P_PDF_HARD_TIMEOUT_SECONDS
+              value: {{ .Values.processor.fetcher.pdfHardTimeoutSeconds | quote }}
+            - name: S2P_PDF_PROCESSING_ENABLED
+              value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.fetcher.requireRealModels | quote }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 3
           readinessProbe:
             httpGet: {path: /readyz, port: metrics}
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.processor.fetcher.resources | nindent 12 }}
           volumeMounts:
@@ -172,7 +184,7 @@ spec:
     metadata:
       labels:
         {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $canaryComponent) | nindent 8 }}
-        stream2pretrain.io/egress-class: blogs
+        stream2pretrain.io/egress-class: arxiv
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
@@ -185,7 +197,7 @@ spec:
         - name: fetcher
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image "tag" .Values.processor.fetcher.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-fetcher"]
+          command: ["s2p-entrypoint", "s2p-fetcher"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
             - name: metrics
@@ -214,6 +226,8 @@ spec:
               value: {{ $canaryCheckpoint.recoveryPartitions | int | quote }}
             - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
               value: {{ $canaryCheckpoint.snapshotSeconds | quote }}
+            - name: S2P_BYTEWAX_SOURCE_BATCH_SIZE
+              value: {{ .Values.processor.fetcher.sourceBatchSize | int | quote }}
             - name: S2P_MAX_RAW_OBJECT_BYTES
               value: "67108864"
             - name: S2P_MAX_EXPANDED_OBJECT_BYTES
@@ -222,16 +236,24 @@ spec:
               value: "0"
             - name: S2P_DOCLING_ENABLED
               value: {{ ternary "1" "0" .Values.processor.fetcher.doclingEnabled | quote }}
+            - name: S2P_DOCLING_MAX_BYTES
+              value: {{ .Values.processor.fetcher.doclingMaxBytes | int | quote }}
+            - name: S2P_PDF_HARD_TIMEOUT_SECONDS
+              value: {{ .Values.processor.fetcher.pdfHardTimeoutSeconds | quote }}
+            - name: S2P_PDF_PROCESSING_ENABLED
+              value: {{ ternary "1" "0" .Values.processor.fetcher.pdfProcessingEnabled | quote }}
             - name: S2P_REQUIRE_REAL_MODELS
               value: {{ ternary "1" "0" .Values.processor.fetcher.requireRealModels | quote }}
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 3
           readinessProbe:
             httpGet: {path: /readyz, port: metrics}
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.processor.fetcher.canary.resources | nindent 12 }}
           volumeMounts:

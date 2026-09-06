@@ -1,7 +1,7 @@
 # Stream2Pretrain - Operations Runbook
 
 Routine procedures for the curator on a k3s cluster. The dev-stack equivalent
-(docker compose) is documented in the README's Quickstart section. This file
+(docker compose) is documented in the [local guide](../local/README.md). This file
 assumes you can `kubectl` against the cluster as a user with chart-admin
 privileges in the `stream2pretrain` namespace.
 
@@ -15,7 +15,7 @@ OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh plan
 # 1.2 Provision the reviewed VM plan and install k3s.
 OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh cluster
 
-# 1.3 Provision MinIO, required buckets, Secrets, and benchmark ConfigMap.
+# 1.3 Provision MinIO, required buckets, and Secrets.
 # See infra/README.md. No demo credentials are created by the script.
 
 # 1.4 Apply the measured ownership tiers.
@@ -27,17 +27,16 @@ OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh cluster
 # 1.5 Seed sources and verify.
 NAMESPACE=stream2pretrain bash scripts/load_seed_feeds.sh
 ./scripts/setup_dhbw_demo.sh verify
-kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:3000
+kubectl -n stream2pretrain port-forward svc/stream2pretrain-ui 3000:80
 ```
 
-The chart-owned RSS, OAI-PMH, and sitemap CronJobs are suspended templates.
+The chart-owned RSS and OAI-PMH CronJobs are suspended templates.
 The SourceFeed controller creates the only active CronJob for each CRD. Do not
 unsuspend a template job: doing so would duplicate the per-source schedules.
 
-This sequence is for a clean install. Do not apply the application tier to the
-current legacy release until the immutable-selector and curator StatefulSet
-migration in `docs/infrastructure-reimplementation.md` is approved. Loki,
-Tempo, and Alloy are not in the measured baseline.
+This sequence provisions a new installation. Existing deployments apply only
+the changed ownership tier. Loki, Tempo and Alloy are not enabled in the DHBW
+profile.
 
 ## 2. Scale the processor
 
@@ -48,22 +47,35 @@ failure escapes the operator so Bytewax cannot checkpoint past the record.
 The curator recovery boundary also covers its near-duplicate index and
 deterministic decision cache.
 
+`processor.fetcher.sourceBatchSize` and `processor.curate.sourceBatchSize`
+default to one record per Kafka partition. This is intentional: extraction,
+OCR, and classification are expensive, so inheriting Bytewax's 1,000-record
+connector default can leave hours of computed results unpublished and
+uncheckpointed. Do not increase either value without measuring end-to-end
+durable append latency and restart replay on the cluster.
+
 Ordinary Kafka-lag KEDA must not independently scale either core execution:
 broker commits are not the authoritative Bytewax progress boundary. A core
 rescale is a coordinated stop, worker-count change, and restart using the
-pre-created recovery partitions. Quality, KenLM, and E5 remain stateless
-`processor-model-service-*` deployments with CPU HPA and cross-node spreading.
+pre-created recovery partitions. ModernBERT quality and KenLM services are
+stateless deployments with separate resource budgets and demand-based scaling.
+The four quality heads share each quality Pod's bounded CPU budget. The
+curator leases asynchronous requests to ready replicas and preserves input
+order and exact model provenance.
 Their deployment strategy is `Recreate`: the DHBW nodes cannot hold two
 generations of the multi-GiB model images at once. The release workflow removes
-the model HPAs, scales each service to one Pod, and lets Helm recreate the HPAs
-after applying the replacement specification.
+an HPA and scales its service to one Pod only when that service's immutable
+image digest changed. An unchanged digest preserves the running Pod, loaded
+model memory, HPA state, and readiness. Foundry has a separate application
+image, so post-training edits do not replace pretraining workers and core edits
+do not replace Foundry.
 
 The single Iceberg writer retains one Bytewax recovery partition. That state
 shard count is independent of the four Kafka topic partitions and deliberately
 matches the existing cloud checkpoint.
 
 KEDA remains appropriate for independently committing ingest consumers with a
-dedicated input topic, such as the GitHub tarball fetcher. It is disabled for
+dedicated input topic. It is disabled for
 the arXiv HTML fetcher because that worker consumes and republishes on the
 shared `raw.fetched` topic, making Kafka lag a self-amplifying signal rather
 than an arXiv backlog. Keep that worker at one replica until a source-specific
@@ -84,11 +96,35 @@ advance production progress or mutate production state. Any deterministic
 canary-only failure is separated under the state bucket's
 `canary-processing-failures/` prefix instead of the production Gold ledger.
 
-Before each release, `scripts/reconcile_topic_partitions.sh` also reconciles
+Normalization and curation each stop unfinished work once the original content
+intake timestamp is 24 hours old. The check runs before expensive processing,
+after a long normalization, before classifier retry, and before durable curation
+output. An extraction retry preserves the original timestamp and never receives
+a new window. Missing legacy timestamps also expire closed. These skips emit
+`s2p_processor_work_expired_total` by stage, source and reason; they are neither
+quality rejections nor unique-document counts. Completed decisions, Gold data
+and post-training artifacts do not age out. The one-day Bronze/Silver retention
+remains a separate audit-asset lifetime. The Foundry independently freezes and
+expires daily cohorts.
+
+When a core or source contract changes, `scripts/reconcile_topic_partitions.sh`
+also reconciles
 the seven-day core and 24-hour smoke retention already declared in
 `schemas/topics.py`, the document-topic partition floor, delete cleanup policy,
-and the maximum Kafka record size. Deployment stops if a required topic has no
-partitions.
+and the maximum Kafka record size. It inventories topics once and applies
+configuration by retention class instead of opening a Kubernetes exec session
+for every property of every topic. Deployment stops if a required topic has no
+partitions. Documentation-only pushes do not deploy. Python and Helm checks,
+source reconciliation, the core canary, image builds, and rollout waits are
+selected from the changed paths and immutable digests; an unchanged unhealthy
+workload cannot delay an unrelated release. Application updates use a direct
+Helm sync, then wait in parallel only for Deployments and StatefulSets whose
+generation changed in that release. The normal readiness budget is 60 seconds;
+only an actual multi-GiB model-image change receives the extended model-load
+budget. Source-only processor images rely on the locked repository suite and
+the separately validated immutable dependency bases; their Dockerfile stages
+do not import the runtime again, so BuildKit can reuse those large bases
+without materializing them for ordinary source edits.
 
 ```bash
 uv run python scripts/capacity_probe.py
@@ -137,7 +173,7 @@ The deployment writes and validates the identity-bound
 retained state volume. Legacy state without either a matching marker or a
 readable recovery source fails closed, and an identity mismatch is never
 overwritten. After the first Bytewax snapshot, the PVC is authoritative. The
-only manual case is a **deliberate replay** such as a contamination bisect.
+only manual case is an explicitly approved recovery or audit replay.
 
 ```bash
 # 4.1 Stop the curator.
@@ -155,56 +191,36 @@ kubectl -n stream2pretrain delete pvc \
 kubectl -n stream2pretrain scale statefulset stream2pretrain-processor-curate --replicas=1
 ```
 
-## 5. Rotate the Decon-Gate signing key
+## 5. Rotate the Foundry artifact-signing key
 
-The prototype uses a single in-cluster Ed25519 key in a Kubernetes Secret.
-A real deployment should use Sigstore Rekor; this runbook covers the
-prototype path.
+The Foundry uses a persistent in-cluster Ed25519 key in a Kubernetes Secret to
+sign generated packages. Deployment bootstrap creates the identity once when
+it is absent and never overwrites an existing Secret. Operators may instead
+pre-provision that Secret with their managed key before the first deployment.
 
 ```bash
 # 5.1 Generate a fresh key pair.
 openssl genpkey -algorithm Ed25519 -out new.key
 openssl pkey -in new.key -pubout -out new.pub
 
-# 5.2 Wrap the public key in a self-signed cert (used as `signer_cert`).
+# 5.2 Wrap the public key in a self-signed certificate.
 openssl req -new -x509 -key new.key -out new.crt -days 365 \
-    -subj "/CN=stream2pretrain-decon-gate/O=Stream2Pretrain"
+    -subj "/CN=stream2pretrain-foundry/O=Stream2Pretrain"
 
 # 5.3 Update the Secret in-place.
-kubectl -n stream2pretrain create secret generic stream2pretrain-decon-signing \
+kubectl -n stream2pretrain create secret generic stream2pretrain-foundry-signing \
     --from-file=ed25519.key=new.key \
     --from-file=ed25519.crt=new.crt \
     --dry-run=client -o yaml | kubectl apply -f -
 
-# 5.4 Restart signing workloads to pick up the new key.
-kubectl -n stream2pretrain rollout restart statefulset/stream2pretrain-processor-curate
-kubectl -n stream2pretrain rollout restart deploy/stream2pretrain-processor-iceberg-writer
+# 5.4 Restart the Foundry workload to pick up the new key.
+kubectl -n stream2pretrain rollout restart statefulset/stream2pretrain-processor-foundry
 ```
 
-After rotation, old attestations remain verifiable using their embedded
-`signer_cert` field; only new attestations carry the new cert.
+Existing packages retain the certificate stored with their signature; newly
+generated packages use the new key.
 
-## 6. Promote a shadow MixtureRecipe
-
-The shadow A/B feature runs a candidate `MixtureRecipe` alongside the
-production one. When the candidate's perplexity-delta gate passes, the
-mixture controller flips the `branch` of the production recipe to the
-candidate's Iceberg branch.
-
-```bash
-# 6.1 Inspect both recipes.
-kubectl -n stream2pretrain get mixturerecipes -o wide
-
-# 6.2 Trigger a manual promotion (bypassing the perplexity gate).
-kubectl -n stream2pretrain patch mixturerecipe candidate \
-    --type=merge -p '{"metadata":{"annotations":{"stream2pretrain.io/promote":"true"}}}'
-
-# 6.3 Roll back if downstream metrics regress.
-kubectl -n stream2pretrain patch mixturerecipe production \
-    --type=merge -p '{"spec":{"branch":"main"}}'
-```
-
-## 7. Observability cheat sheet
+## 6. Observability cheat sheet
 
 - **Grafana**: `kubectl -n monitoring port-forward svc/grafana 3001:80`
   -> dashboards "Stream2Pretrain - Pipeline" and "Stream2Pretrain - KEDA".
@@ -214,22 +230,45 @@ kubectl -n stream2pretrain patch mixturerecipe production \
 - **Redpanda Console**: `kubectl port-forward svc/redpanda-console 8080`
   -> topic browser, consumer-group lag.
 
-## 8. Backups
+## 7. Backups
 
-- Mirror `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-decon`, and
-  `s2p-posttrain` to a second failure domain on the reviewed schedule.
+- Mirror `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-posttrain` to a
+  second failure domain on the reviewed schedule.
 - Iceberg data and metadata live in `s2p-gold`; snapshot expiry and orphan
   removal must run through the guarded Iceberg maintenance command, not a
   bucket-wide age deletion.
+- Writers retain twenty previous metadata versions. The scheduled per-table
+  Iceberg maintenance CronJobs are the sole physical cleanup owners: they
+  retain 24 hours and at least ten snapshots, walk the complete retained
+  snapshot graph, and removes
+  only aged, unreachable metadata, manifests, data and statistics files. Inspect
+  its most recent log before any manual maintenance run.
 - Back up Redpanda if the configured replay horizon is operationally required,
   plus the curator and foundry state PVCs for in-flight recovery.
-- Production Polaris requires its relational database backup and a tested
-  catalog restore. The DHBW dev profile is in-memory and is not a recoverable
-  production catalog.
+- Back up the Polaris PostgreSQL PVC and test catalog restoration alongside the
+  MinIO backup. The relational metastore retains table pointers and access
+  metadata; Iceberg data and metadata remain in MinIO.
 - See [`storage-scaling.md`](./storage-scaling.md) for the complete ownership
   and lifecycle contract.
 
-## 9. Quotas and DHBWCloud caveats
+### Dashboard serving index
+
+Normal monitoring routes never query complete Iceberg history. The DuckDB API
+keeps a retained current-state read model from `curation.decisions` and
+`license.admissions`, acknowledging Kafka records only after the local upsert.
+Headline totals, Documents, Sources, and Dataset selection query this compact
+index. Documents use cursor pagination and fetch further rows only on demand.
+The `as-of` route applies source-validity intervals to the same retained index,
+which includes all scoring generations. It does not reconstruct processing-time
+Iceberg snapshots. Explicit read-only SQL uses a separate executor against
+Iceberg, so an expensive lakehouse query cannot block monitoring pages.
+
+The serving-index PVC is retained across Helm releases. If that PVC is
+deliberately removed, use a fresh index identity and replay the still-retained
+Kafka topics from `earliest`; never point an empty index at an existing
+committed consumer group.
+
+## 8. Quotas and DHBWCloud caveats
 
 - DHBWCloud OpenStack quota: vCPU / RAM / disk per VM is `needs-measurement`
   - confirm with the team before increasing replica caps.
@@ -238,7 +277,7 @@ kubectl -n stream2pretrain patch mixturerecipe production \
 - Wildcard TLS DNS zone (rfc2136 + tsig credentials) is required for
   cert-manager. Per the lecture, the team's zone is `needs-measurement`.
 
-## 10. Decommission
+## 9. Decommission
 
 ```bash
 # 10.1 Stop new ingestion.

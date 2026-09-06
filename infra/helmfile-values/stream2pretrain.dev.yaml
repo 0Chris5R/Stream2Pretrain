@@ -25,7 +25,6 @@ minio:
     bronze: s2p-bronze
     silver: s2p-silver
     gold: s2p-gold
-    decon: s2p-decon
     posttrain: s2p-posttrain
 
 iceberg:
@@ -55,6 +54,11 @@ processor:
     tag: "0.2.0-1f4cf19"
     requireRealModels: true
     doclingEnabled: true
+    # Full CPU PDF extraction has an explicit memory ceiling.
+    pdfProcessingEnabled: true
+    resources:
+      requests: {cpu: 200m, memory: 2Gi}
+      limits: {cpu: 2, memory: 8Gi}
   curate:
     replicas: 1
     tag: "0.2.0-619290f"
@@ -62,40 +66,45 @@ processor:
     doclingEnabled: false
     usePresidio: true
     resources:
-      requests: {cpu: 500m, memory: 1Gi}
-      limits: {cpu: 2, memory: 2Gi}
+      # Reserve state/cache headroom independently of inference services.
+      requests: {cpu: 500m, memory: 2Gi}
+      limits: {cpu: 2, memory: 6Gi}
     modelBundle:
       bootstrap: false
   modelService:
     enabled: true
     replicas: 1
+    profiles:
+      quality:
+        autoscaling:
+          minReplicas: 2
+          # Ceiling fits the current three-node reservation budget.
+          maxReplicas: 4
     autoscaling:
       enabled: true
       minReplicas: 1
-      # Three 8 GB nodes were measured on 2026-08-23. Each model family can
-      # place one strict replica per worker, away from the stateful curator.
-      maxReplicas: 2
-      targetCPUUtilizationPercentage: 80
+      # Profile-specific ceilings override this fallback. The curator remains
+      # a single checkpoint owner, leasing one request per ready model Pod.
+      maxReplicas: 3
   iceberg:
     replicas: 1
+    # Recovery holds Arrow buffers and both Iceberg frontiers in memory.
+    resources:
+      requests: {cpu: 200m, memory: 1Gi}
+      limits: {cpu: 2, memory: 4Gi}
   duckdbApi:
     replicas: 1
-    # The live Iceberg dedup/window scan peaks above the previous 1 GiB Pod
-    # ceiling even with DuckDB spilling enabled. Keep half the Pod available
-    # for the Python runtime, Iceberg metadata, and S3 buffers.
-    memoryLimit: 1GB
+    # The retained index bootstraps the complete Iceberg history once, then
+    # serves and updates that persistent baseline incrementally from Kafka.
+    memoryLimit: 4GB
     resources:
-      requests: {cpu: 100m, memory: 768Mi}
-      limits: {cpu: 1, memory: 2Gi}
-  deconGate:
-    replicas: 1
-    benchmarkCorpus:
-      kind: synthetic_canary
+      requests: {cpu: 100m, memory: 2Gi}
+      limits: {cpu: 1, memory: 6Gi}
   # Single-writer foundry on the measured control-plane image cache.
   foundry:
     enabled: true
 
-mixtureController:
+sourceController:
   enabled: true
   replicas: 1
 
@@ -125,14 +134,9 @@ sources:
   arxiv:
     # The SourceFeed controller owns the per-feed RSS and OAI-PMH schedules.
     # Keep the Helm CronJobs rendered but suspended as clone templates.
-    enabled: false
+    enabled: true
     htmlFetcher:
       enabled: true
-  # Blog SourceFeeds clone the suspended RSS template above, so a second
-  # aggregate blog CronJob would only duplicate polling.
-  blogs:
-    enabled: false
-
 ingest:
   # One arXiv OAI page per two-hour poll is a measured-course-cluster
   # backpressure boundary; the durable token resumes the same window later.
@@ -143,13 +147,3 @@ ingest:
     maxRecordsPerLoop: 0
   hf:
     replicas: 1
-  githubTarballFetcher:
-    enabled: true
-
-openreviewPoller:
-  enabled: true
-  live:
-    state:
-      # Reuse the already-bound cursor volume; a standalone WaitForFirstConsumer
-      # PVC cannot bind until the first six-hour CronJob and would block Helm.
-      existingClaim: stream2pretrain-ingest-state

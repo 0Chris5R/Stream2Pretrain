@@ -163,6 +163,12 @@ bootstrap_polaris() {
     python - < "$ROOT_DIR/scripts/bootstrap_polaris.py"
 }
 
+ensure_foundry_signing_identity() {
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  bash "$ROOT_DIR/scripts/ensure_foundry_signing_secret.sh" \
+    stream2pretrain stream2pretrain-foundry-signing
+}
+
 required_secrets() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local missing=0
@@ -176,9 +182,7 @@ required_secrets() {
     stream2pretrain/stream2pretrain-minio/secretKey \
     stream2pretrain/stream2pretrain-polaris/credential \
     stream2pretrain/stream2pretrain-polaris/scope \
-    stream2pretrain/stream2pretrain-github/token \
-    stream2pretrain/stream2pretrain-hf/token \
-    stream2pretrain/stream2pretrain-decon-signing/ed25519.key; do
+    stream2pretrain/stream2pretrain-hf/token; do
     namespace="${item%%/*}"
     remainder="${item#*/}"
     secret="${remainder%%/*}"
@@ -198,8 +202,7 @@ required_secrets() {
     | grep -q '^kind: StatefulSet$'; then
     for item in \
       stream2pretrain/stream2pretrain-foundry-providers/HETZNER_INFERENCE_API_KEY \
-      stream2pretrain/stream2pretrain-foundry-providers/controlToken \
-      stream2pretrain/stream2pretrain-decon-signing/ed25519.crt; do
+      stream2pretrain/stream2pretrain-foundry-providers/controlToken; do
       namespace="${item%%/*}"
       remainder="${item#*/}"
       secret="${remainder%%/*}"
@@ -212,32 +215,78 @@ required_secrets() {
       fi
     done
   fi
-  if ! kubectl get configmap -n stream2pretrain stream2pretrain-decon-benchmarks >/dev/null 2>&1; then
-    printf 'Missing required ConfigMap: stream2pretrain/stream2pretrain-decon-benchmarks\n' >&2
-    missing=1
-  fi
   return "$missing"
-}
-
-required_platform_secret() {
-  export KUBECONFIG="$KUBECONFIG_PATH"
-  if ! kubectl get secret -n monitoring grafana-admin >/dev/null 2>&1; then
-    printf 'Missing required Secret: monitoring/grafana-admin\n' >&2
-    return 1
-  fi
 }
 
 required_catalog_secret() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local missing=0
   local secret
-  for secret in polaris-bootstrap polaris-minio; do
+  for secret in polaris-minio; do
     if ! kubectl get secret -n polaris "$secret" >/dev/null 2>&1; then
       printf 'Missing required Secret: polaris/%s\n' "$secret" >&2
       missing=1
     fi
   done
   return "$missing"
+}
+
+ensure_polaris_persistence_identity() {
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  kubectl create namespace polaris --dry-run=client -o yaml | kubectl apply -f -
+  if ! kubectl -n polaris get secret polaris-persistence >/dev/null 2>&1; then
+    local password
+    password="$(openssl rand -hex 32)"
+    kubectl -n polaris create secret generic polaris-persistence \
+      --from-literal=username=polaris \
+      --from-literal=password="$password" \
+      --from-literal=jdbcUrl='jdbc:postgresql://polaris-postgres.polaris.svc.cluster.local:5432/polaris'
+    unset password
+  fi
+  local key
+  for key in username password jdbcUrl; do
+    if ! kubectl -n polaris get secret polaris-persistence \
+      -o "go-template={{ index .data \"$key\" }}" 2>/dev/null \
+      | grep -q .; then
+      printf 'Missing required Secret key: polaris/polaris-persistence/%s\n' "$key" >&2
+      return 1
+    fi
+  done
+  local application_credential
+  application_credential="$(
+    kubectl -n stream2pretrain get secret stream2pretrain-polaris \
+      -o jsonpath='{.data.credential}' | base64 --decode
+  )"
+  local bootstrap_client bootstrap_secret
+  IFS=':' read -r bootstrap_client bootstrap_secret <<< "$application_credential"
+  if [[ -z "$bootstrap_client" || -z "$bootstrap_secret" ]]; then
+    printf 'Polaris application credential must be client:secret\n' >&2
+    return 1
+  fi
+  kubectl -n polaris create secret generic polaris-root-identity \
+    --from-literal=credentials="POLARIS,$bootstrap_client,$bootstrap_secret" \
+    --dry-run=client -o yaml | kubectl apply -f -
+  unset bootstrap_client bootstrap_secret
+  unset application_credential
+}
+
+adopt_polaris_release_resources() {
+  export KUBECONFIG="$KUBECONFIG_PATH"
+  local resource
+  for resource in \
+    serviceaccount/polaris \
+    configmap/polaris \
+    service/polaris-mgmt \
+    service/polaris \
+    deployment/polaris; do
+    if kubectl -n polaris get "$resource" >/dev/null 2>&1; then
+      kubectl -n polaris label "$resource" \
+        app.kubernetes.io/managed-by=Helm --overwrite
+      kubectl -n polaris annotate "$resource" \
+        meta.helm.sh/release-name=polaris \
+        meta.helm.sh/release-namespace=polaris --overwrite
+    fi
+  done
 }
 
 required_application_services() {
@@ -267,12 +316,12 @@ ensure_topics() {
   export KUBECONFIG="$KUBECONFIG_PATH"
   local topic
   for topic in \
-    raw.fetched raw.smoke github.release.jobs \
+    raw.fetched raw.smoke \
     docs.normalized docs.normalized.smoke \
     docs.curated docs.curated.smoke \
     curation.decisions curation.decisions.smoke \
     license.admissions license.admissions.smoke \
-    decon.attest foundry.jobs foundry.events foundry.artifacts; do
+    foundry.jobs foundry.events foundry.artifacts; do
     if ! topic_exists "$topic"; then
       local retention_ms=604800000
       [[ "$topic" == *.smoke ]] && retention_ms=86400000
@@ -292,12 +341,12 @@ required_topics() {
   local missing=0
   local topic
   for topic in \
-    raw.fetched raw.smoke github.release.jobs \
+    raw.fetched raw.smoke \
     docs.normalized docs.normalized.smoke \
     docs.curated docs.curated.smoke \
     curation.decisions curation.decisions.smoke \
     license.admissions license.admissions.smoke \
-    decon.attest foundry.jobs foundry.events foundry.artifacts; do
+    foundry.jobs foundry.events foundry.artifacts; do
     if ! topic_exists "$topic"; then
       printf 'Missing required Redpanda topic: %s\n' "$topic" >&2
       missing=1
@@ -328,7 +377,6 @@ case "$COMMAND" in
     ;;
   platform)
     validate
-    required_platform_secret
     apply_edge
     apply_tier "$COMMAND"
     ;;
@@ -339,6 +387,8 @@ case "$COMMAND" in
   catalog)
     validate
     required_catalog_secret
+    ensure_polaris_persistence_identity
+    adopt_polaris_release_resources
     apply_tier catalog
     ;;
   topics)
@@ -347,6 +397,7 @@ case "$COMMAND" in
     ;;
   application)
     validate
+    ensure_foundry_signing_identity
     required_secrets
     required_application_services
     required_topics

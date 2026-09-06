@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 import zlib
@@ -83,6 +85,41 @@ def topic_partition_count(producer: Producer, topic: str) -> int:
     if count < 1:
         raise RuntimeError(f"smoke topic has no partitions: {topic}")
     return count
+
+
+def prepare_curator_offsets(group_id: str) -> dict[str, int]:
+    """Start an isolated canary at explicit frontiers captured before injection."""
+    if re.fullmatch(r"s2p-curate-smoke-[0-9]+(?:-[0-9]+)?", group_id) is None:
+        raise ValueError("only a release-specific canary group may be prepared")
+    topic = required_env("S2P_SMOKE_NORMALIZED_TOPIC")
+    if not topic.endswith(".smoke") or topic == os.environ.get("S2P_NORMALIZED_TOPIC"):
+        raise ValueError("the canary input must be an isolated smoke topic")
+    consumer = Consumer(
+        {
+            "bootstrap.servers": required_env("REDPANDA_BROKERS"),
+            "group.id": group_id,
+            "enable.auto.commit": False,
+        }
+    )
+    try:
+        metadata = consumer.list_topics(topic, timeout=10.0).topics.get(topic)
+        if metadata is None or metadata.error is not None or not metadata.partitions:
+            raise RuntimeError(f"cannot inspect canary input topic {topic}")
+        offsets = [
+            TopicPartition(
+                topic,
+                partition,
+                consumer.get_watermark_offsets(TopicPartition(topic, partition), timeout=10.0)[1],
+            )
+            for partition in sorted(metadata.partitions)
+        ]
+        consumer.assign(offsets)
+        committed = consumer.commit(offsets=offsets, asynchronous=False)
+        if len(committed) != len(offsets) or any(partition.error for partition in committed):
+            raise RuntimeError("canary frontier commit failed")
+        return {str(partition.partition): partition.offset for partition in offsets}
+    finally:
+        consumer.close()
 
 
 def tail_consumer(topic: str) -> Consumer:
@@ -170,6 +207,12 @@ def close_consumers(consumers: list[Consumer]) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepare-curator", metavar="GROUP")
+    args = parser.parse_args()
+    if args.prepare_curator:
+        print(json.dumps(prepare_curator_offsets(args.prepare_curator)))
+        return
     started = time.monotonic()
     now = datetime.now(UTC)
     # A fixed Bytewax canary fetcher owns this short-retention lane with its own
@@ -293,9 +336,16 @@ def main() -> None:
             in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
             and not decision.get("reject_reasons")
             and not decision.get("pii_flags")
-            and not decision.get("contaminated_with")
         )
-        if not trainable:
+        quality = decision.get("quality_diagnostics") or {}
+        correctly_quality_rejected = (
+            quality.get("mode") == "active"
+            and quality.get("passed") is False
+            and float(quality.get("score", 5)) < float(quality.get("cutoff", 0))
+            and decision.get("reject_reasons") == ["low_quality_score"]
+            and decision.get("route") == "quarantine"
+        )
+        if not trainable and not correctly_quality_rejected:
             curated_consumer.close()
             for consumer in production_consumers.values():
                 consumer.close()
@@ -304,11 +354,14 @@ def main() -> None:
                 f"route={decision.get('route')} risk={decision.get('risk_tier')} "
                 f"reasons={decision.get('reject_reasons')}"
             )
-        curated_seen = consume_document(curated_consumer, curated_topic, doc_id, 60.0) is not None
-        if not curated_seen:
+        curated_seen = (
+            consume_document(curated_consumer, curated_topic, doc_id, 60.0 if trainable else 3.0)
+            is not None
+        )
+        if curated_seen != trainable:
             for consumer in production_consumers.values():
                 consumer.close()
-            raise RuntimeError(f"training-eligible document missing from docs.curated: {doc_id}")
+            raise RuntimeError(f"curated publication disagrees with the quality decision: {doc_id}")
         assert_document_absent(
             production_consumers,
             doc_id,
@@ -326,6 +379,8 @@ def main() -> None:
             "risk_tier": decision.get("risk_tier"),
             "reject_reasons": decision.get("reject_reasons"),
             "curated_seen": curated_seen,
+            "quality_gate_passed": quality.get("passed"),
+            "quality_score": quality.get("score"),
             "probe_partition": probe_partition,
             "elapsed_seconds": round(time.monotonic() - started, 3),
         }

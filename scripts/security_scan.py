@@ -1,8 +1,8 @@
 """Repository-local security lint for production readiness.
 
 The scan is intentionally narrow and deterministic. It is not a replacement
-for a hosted secret scanner, but it catches the production footguns this repo
-has already hit: public admin CIDR defaults, pasted private keys, and real-
+for a hosted secret scanner, but it checks public admin CIDR defaults,
+pasted private keys, and real-
 looking provider tokens. Example placeholders and test fixtures are allowed so
 the gate can run on every developer machine without external services.
 """

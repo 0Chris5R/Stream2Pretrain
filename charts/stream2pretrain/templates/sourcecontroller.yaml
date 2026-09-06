@@ -1,6 +1,5 @@
-{{- $component := "decon-gate" }}
+{{- $component := "source-controller" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
-{{- $bench := .Values.processor.deconGate.benchmarkCorpus }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,7 +8,9 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
-  replicas: {{ .Values.processor.deconGate.replicas }}
+  replicas: {{ .Values.sourceController.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
@@ -17,62 +18,54 @@ spec:
     metadata:
       labels:
         {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .Values.processor.deconGate.apiPort | quote }}
     spec:
       serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
       {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
       {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       containers:
-        - name: api
-          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.deconGate.image) | quote }}
+        - name: controller
+          image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.sourceController.image "tag" .Values.sourceController.tag) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["s2p-decon-api"]
+          command: ["s2p-entrypoint", "s2p-source-controller"]
           {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
           ports:
-            - name: metrics
-              containerPort: {{ .Values.processor.deconGate.apiPort }}
+            - name: http
+              containerPort: {{ .Values.sourceController.apiPort }}
           env:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
               value: {{ $component | quote }}
-            - name: S2P_DECON_API_PORT
-              value: {{ .Values.processor.deconGate.apiPort | quote }}
-            - name: S2P_BENCH_SET_VERSION
-              value: {{ .Values.processor.deconGate.benchmarkSetVersion | quote }}
-            - name: S2P_BENCH_CORPUS_PATH
-              value: {{ printf "%s/%s" $bench.mountPath $bench.fileName | quote }}
-            - name: S2P_BENCHMARK_CORPUS_KIND
-              value: {{ .Values.processor.deconGate.benchmarkCorpus.kind | quote }}
+            - name: S2P_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: S2P_CONTROL_API_PORT
+              value: {{ .Values.sourceController.apiPort | quote }}
+            - name: USER
+              value: stream2pretrain
+            - name: HOME
+              value: /tmp
+            - name: S2P_RSS_CRONJOB
+              value: {{ printf "%s-ingest-rss" (include "stream2pretrain.fullname" .) | quote }}
+            - name: S2P_OAI_CRONJOB
+              value: {{ printf "%s-ingest-oaipmh" (include "stream2pretrain.fullname" .) | quote }}
           livenessProbe:
-            httpGet: {path: /healthz, port: metrics}
+            httpGet: {path: /healthz, port: http}
             initialDelaySeconds: 30
             periodSeconds: 30
           readinessProbe:
-            httpGet: {path: /readyz, port: metrics}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            {{- toYaml .Values.processor.deconGate.resources | nindent 12 }}
+            {{- toYaml .Values.sourceController.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: decon-benchmarks
-              mountPath: {{ $bench.mountPath | quote }}
-              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: decon-benchmarks
-          {{- if $bench.secret }}
-          secret:
-            secretName: {{ $bench.secret | quote }}
-          {{- else }}
-          configMap:
-            name: {{ $bench.configMap | quote }}
-          {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -84,8 +77,8 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - name: metrics
-      port: {{ .Values.processor.deconGate.apiPort }}
-      targetPort: {{ .Values.processor.deconGate.apiPort }}
+    - name: http
+      port: {{ .Values.sourceController.apiPort }}
+      targetPort: http
   selector:
     {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}

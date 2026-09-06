@@ -121,6 +121,19 @@ def validate_corpus_overview(payload: dict[str, Any]) -> None:
     ]
     if not production_rows:
         raise ValidationError("the durable corpus contains only fixture or smoke sources")
+    for row in production_rows:
+        accepted = _integer(
+            row.get("accepted"),
+            f"corpus-overview.per_source_acceptance.{row.get('source')}.accepted",
+        )
+        total = _integer(
+            row.get("total"),
+            f"corpus-overview.per_source_acceptance.{row.get('source')}.total",
+        )
+        if accepted > total:
+            raise ValidationError(
+                f"accepted documents exceed durable decisions for {row.get('source')}"
+            )
     if not any(
         isinstance(row.get("total"), int)
         and not isinstance(row.get("total"), bool)

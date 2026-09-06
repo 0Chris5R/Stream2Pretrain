@@ -3,9 +3,7 @@
 Loads / creates the gold table via the Polaris REST catalog (pyiceberg
 ``RestCatalog``), collects incoming records into bounded time/size batches,
 and commits those batches as Iceberg snapshots. Per-record provenance stays in
-the table rows and the signed snapshot attestation stays in its dedicated
-MinIO bucket. This avoids an additional metadata-only Iceberg commit for every
-data commit.
+the table rows.
 
 The Bytewax sink wraps :class:`IcebergWriter` so the same class can be
 exercised by unit tests without spinning up a Bytewax dataflow.
@@ -16,8 +14,6 @@ Partitioning follows RESEARCH.md section 6:
 
     silver.PARTITION BY lang, bucket(16, doc_id)
     gold.PARTITION BY lang, risk_tier, month(valid_from)
-    decon_attestations.PARTITION BY month(committed_at)
-
 The partition spec is set up on first ``ensure_table`` call so a fresh
 deployment is one-shot bootstrappable.
 """
@@ -29,16 +25,18 @@ import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import orjson
 
 from processor import common
-from processor.decon_gate import DeconGate
+from processor.iceberg_catalog import (
+    ensure_iceberg_maintenance_properties,
+    iceberg_maintenance_properties,
+)
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.probes import start_probe_server
-from schemas.decon import DeconAttestation
 from schemas.gold import GoldRecord
 from schemas.license_admission import LicenseAdmissionDecision
 
@@ -50,12 +48,8 @@ if TYPE_CHECKING:
 
 DEFAULT_GOLD_NAMESPACE: str = "gold"
 DEFAULT_GOLD_TABLE: str = "curated"
-DECON_TABLE: str = "decon_attestations"
 DEFAULT_BATCH_SIZE: int = 256
 DEFAULT_FLUSH_INTERVAL_SECONDS: int = 60
-DEFAULT_METADATA_VERSIONS: int = 20
-DEFAULT_SNAPSHOT_RETENTION_HOURS: int = 168
-DEFAULT_MIN_SNAPSHOTS_TO_KEEP: int = 10
 DecisionKey = tuple[str, str, str, str]
 
 
@@ -67,37 +61,11 @@ def _positive_int_env(name: str, default: int) -> int:
 
 
 def _maintenance_properties() -> dict[str, str]:
-    return {
-        "write.metadata.delete-after-commit.enabled": "true",
-        "write.metadata.previous-versions-max": str(
-            _positive_int_env("S2P_ICEBERG_METADATA_VERSIONS", DEFAULT_METADATA_VERSIONS)
-        ),
-        "history.expire.max-snapshot-age-ms": str(
-            _positive_int_env(
-                "S2P_ICEBERG_SNAPSHOT_RETENTION_HOURS",
-                DEFAULT_SNAPSHOT_RETENTION_HOURS,
-            )
-            * 60
-            * 60
-            * 1000
-        ),
-        "history.expire.min-snapshots-to-keep": str(
-            _positive_int_env(
-                "S2P_ICEBERG_MIN_SNAPSHOTS_TO_KEEP",
-                DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
-            )
-        ),
-    }
+    return iceberg_maintenance_properties()
 
 
 def _ensure_maintenance_properties(table: Table) -> None:
-    current = getattr(table, "properties", {})
-    desired = _maintenance_properties()
-    changed = {key: value for key, value in desired.items() if current.get(key) != value}
-    if not changed:
-        return
-    with table.transaction() as txn:
-        txn.set_properties(**changed)
+    ensure_iceberg_maintenance_properties(table)
 
 
 def _is_missing_catalog_table(exc: Exception) -> bool:
@@ -120,6 +88,23 @@ def _ensure_optional_columns(table: Table, columns: tuple[tuple[str, object], ..
     update = table.update_schema()
     for name, field_type in missing:
         update.add_column(name, field_type, required=False)
+    update.commit()
+
+
+def _ensure_source_quality_column(table: Table) -> None:
+    """Rename the active quality column while preserving every stored value and field ID."""
+    schema = table.schema()
+    try:
+        schema.find_field("source_quality_score")
+        return
+    except ValueError:
+        pass
+    try:
+        schema.find_field("edu_score")
+    except ValueError as exc:
+        raise RuntimeError("Gold table has no source quality column") from exc
+    update = table.update_schema()
+    update.rename_column("edu_score", "source_quality_score")
     update.commit()
 
 
@@ -315,9 +300,7 @@ class WriterStats:
 
     rows_committed: int = 0
     decisions_committed: int = 0
-    benchmark_candidates_committed: int = 0
     snapshot_id: int | None = None
-    attestation_signed: bool = False
     watermark: datetime | None = None
 
 
@@ -343,15 +326,12 @@ class _Buffer:
 
 
 class IcebergWriter:
-    """Buffer-and-commit writer for the gold + decon attestation tables.
+    """Buffer-and-commit writer for the decisions and clean Gold tables.
 
     Parameters
     ----------
     catalog
         A pyiceberg ``Catalog`` (constructed once per pod).
-    decon
-        The :class:`DeconGate` instance that produced the curated batch -
-        used to flush a signed attestation each time we commit.
     batch_size
         Soft trigger for committing. ``flush`` can also be called
         directly for time-based triggers.
@@ -361,20 +341,10 @@ class IcebergWriter:
         self,
         *,
         catalog: Catalog,
-        decon: DeconGate,
-        scoring_version: str,
-        classifier_revision: str,
-        policy_revision: str,
-        attestation_writer: AttestationSink | None = None,
         metrics: ProcessorMetrics | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
     ) -> None:
         self._catalog = catalog
-        self._decon = decon
-        self._scoring_version = scoring_version
-        self._classifier_revision = classifier_revision
-        self._policy_revision = policy_revision
-        self._attestation_writer = attestation_writer
         self._metrics = metrics
         self._batch_size = batch_size
         self._buffer = _Buffer()
@@ -386,8 +356,6 @@ class IcebergWriter:
         cls,
         cfg: common.ProcessorConfig,
         *,
-        decon: DeconGate,
-        attestation_writer: AttestationSink | None = None,
         metrics: ProcessorMetrics | None = None,
     ) -> IcebergWriter:
         """Build a writer from a :class:`ProcessorConfig`.
@@ -398,20 +366,15 @@ class IcebergWriter:
         from processor.iceberg_catalog import load_runtime_catalog
 
         catalog = load_runtime_catalog(cfg)
-        sink = attestation_writer if attestation_writer is not None else build_attestation_sink(cfg)
         return cls(
             catalog=catalog,
-            decon=decon,
-            scoring_version=cfg.benchmark_set_version,
-            classifier_revision=os.environ.get("S2P_FINEWEB_EDU_REVISION", "fineweb-edu-unset"),
-            policy_revision=os.environ.get("S2P_POLICY_REVISION", "git:dev"),
-            attestation_writer=sink,
             metrics=metrics,
             batch_size=_positive_int_env("S2P_FLUSH_RECORDS", DEFAULT_BATCH_SIZE),
         )
 
     def add(self, record: GoldRecord) -> WriterStats | None:
         """Buffer one scored decision; auto-flush at ``batch_size``."""
+        record = common.upgrade_gold_record(record)
         with self._lock:
             self._buffer.add(record)
             if len(self._buffer) >= self._batch_size:
@@ -429,7 +392,7 @@ class IcebergWriter:
         """Internal commit path - caller holds ``self._lock``.
 
         Order is buffer-snapshot, attempt-append, then-on-success reset +
-        attestation. Failures re-raise so the calling Bytewax operator
+        commit bookkeeping. Failures re-raise so the calling Bytewax operator
         retries with the same buffer (rather than dropping rows on a
         transient catalog/MinIO outage).
         """
@@ -449,7 +412,6 @@ class IcebergWriter:
         )
         started = time.perf_counter()
         decision_snapshot_id: int | None = None
-        attestation_signed = False
         if decision_rows:
             decision_snapshot_id = self._append(
                 decisions_table,
@@ -461,28 +423,6 @@ class IcebergWriter:
                     f"iceberg decision append failed for {len(decision_rows)} rows; buffer preserved"
                 )
             self._remember_rows("decisions", decision_rows)
-
-            # The decision snapshot is authoritative. Sign it immediately so
-            # a later Gold repair cannot leave an unattested audit
-            # snapshot after an at-least-once replay.
-            attestation = self._decon.flush_attestation(
-                snapshot_id=decision_snapshot_id,
-                committed_at=datetime.now(UTC),
-                extra_per_benchmark_hits=_aggregate_per_benchmark_hits(decision_rows),
-                extra_rejected_doc_hashes=_aggregate_rejected_doc_hashes(decision_rows),
-                extra_tokens_scanned=_aggregate_tokens_scanned(decision_rows),
-                extra_tokens_flagged=_aggregate_tokens_flagged(decision_rows),
-            )
-            attest_uri = None
-            if self._attestation_writer is not None:
-                attest_uri = self._attestation_writer.write(attestation)
-            self._set_snapshot_props(
-                decisions_table,
-                decision_snapshot_id,
-                attestation,
-                attest_uri,
-            )
-            attestation_signed = bool(attestation.signature)
 
         if gold_rows and gold_table is not None:
             gold_snapshot_id = self._append(
@@ -501,15 +441,12 @@ class IcebergWriter:
             self._metrics.record_iceberg_flush(
                 rows=len(gold_rows),
                 decisions=len(decision_rows),
-                benchmark_candidates=0,
                 seconds=elapsed,
             )
         return WriterStats(
             rows_committed=len(gold_rows),
             decisions_committed=len(decision_rows),
-            benchmark_candidates_committed=0,
             snapshot_id=decision_snapshot_id,
-            attestation_signed=attestation_signed,
             watermark=watermark,
         )
 
@@ -605,7 +542,14 @@ class IcebergWriter:
             if not _is_missing_catalog_table(exc):
                 raise
         else:
-            _ensure_optional_columns(table, (("training_usage", StringType()),))
+            _ensure_source_quality_column(table)
+            _ensure_optional_columns(
+                table,
+                (
+                    ("training_usage", StringType()),
+                    ("quality_diagnostics_json", StringType()),
+                ),
+            )
             return table
         # Bring up an empty namespace if it does not yet exist.
         with suppress(Exception):
@@ -616,7 +560,7 @@ class IcebergWriter:
             NestedField(3, "lang", StringType(), required=True),
             NestedField(4, "tokens", IntegerType(), required=True),
             NestedField(5, "quality_score", DoubleType(), required=True),
-            NestedField(6, "edu_score", DoubleType(), required=True),
+            NestedField(6, "source_quality_score", DoubleType(), required=True),
             NestedField(7, "license", StringType(), required=True),
             NestedField(8, "license_source", StringType(), required=True),
             NestedField(9, "risk_tier", IntegerType(), required=True),
@@ -624,12 +568,6 @@ class IcebergWriter:
                 10,
                 "pii_flags",
                 ListType(11, StringType(), element_required=False),
-                required=False,
-            ),
-            NestedField(
-                12,
-                "contaminated_with",
-                ListType(13, StringType(), element_required=False),
                 required=False,
             ),
             NestedField(14, "valid_from", TimestamptzType(), required=True),
@@ -678,7 +616,6 @@ class IcebergWriter:
             NestedField(49, "structural_quality_score", DoubleType(), required=True),
             NestedField(50, "extraction_completeness", DoubleType(), required=True),
             NestedField(51, "reasoning_score", DoubleType(), required=True),
-            NestedField(52, "benchmark_score", DoubleType(), required=True),
             NestedField(53, "route", StringType(), required=True),
             NestedField(
                 54,
@@ -733,24 +670,9 @@ class IcebergWriter:
             NestedField(80, "gopher_ellipsis_line_ratio", DoubleType(), required=True),
             NestedField(81, "gopher_symbol_word_ratio", DoubleType(), required=True),
             NestedField(82, "gopher_alpha_word_ratio", DoubleType(), required=True),
-            NestedField(
-                83,
-                "decon_exact_matches",
-                ListType(84, StringType(), element_required=False),
-                required=False,
-            ),
-            NestedField(
-                85,
-                "decon_semantic_matches",
-                ListType(86, StringType(), element_required=False),
-                required=False,
-            ),
-            NestedField(87, "decon_max_similarity", DoubleType(), required=True),
-            NestedField(88, "decon_ngram_size", IntegerType(), required=True),
-            NestedField(89, "decon_embedding_revision", StringType(), required=True),
-            NestedField(90, "benchmark_set_version", StringType(), required=True),
             NestedField(91, "classifier_backend", StringType(), required=True),
             NestedField(92, "training_usage", StringType(), required=False),
+            NestedField(93, "quality_diagnostics_json", StringType(), required=False),
         )
         partition_spec = PartitionSpec(
             PartitionField(source_id=3, field_id=1000, transform=IdentityTransform(), name="lang"),
@@ -781,17 +703,20 @@ class IcebergWriter:
             "lang": [r.lang for r in rows],
             "tokens": [r.tokens for r in rows],
             "quality_score": [float(r.quality_score) for r in rows],
-            "edu_score": [float(r.edu_score) for r in rows],
+            "source_quality_score": [float(r.source_quality_score) for r in rows],
             "license": [r.license for r in rows],
             "license_source": [r.license_source for r in rows],
             "risk_tier": [int(r.risk_tier) for r in rows],
             "pii_flags": [list(r.pii_flags) for r in rows],
-            "contaminated_with": [list(r.contaminated_with) for r in rows],
             "valid_from": [r.valid_from for r in rows],
             "valid_to": [r.valid_to for r in rows],
             "reject_reasons": [list(r.reject_reasons) for r in rows],
             "scoring_version": [r.scoring_version for r in rows],
             "classifier_revision": [r.classifier_revision for r in rows],
+            "quality_diagnostics_json": [
+                orjson.dumps(r.quality_diagnostics).decode() if r.quality_diagnostics else None
+                for r in rows
+            ],
             "policy_revision": [r.policy_revision for r in rows],
             "snapshot_id": [r.snapshot_id for r in rows],
             "trace_id": [r.trace_id for r in rows],
@@ -823,7 +748,6 @@ class IcebergWriter:
             "structural_quality_score": [float(r.structural_quality_score) for r in rows],
             "extraction_completeness": [float(r.extraction_completeness) for r in rows],
             "reasoning_score": [float(r.reasoning_score) for r in rows],
-            "benchmark_score": [float(r.benchmark_score) for r in rows],
             "route": [r.route for r in rows],
             "eligible_routes": [list(r.eligible_routes) for r in rows],
             "route_reasons": [list(r.route_reasons) for r in rows],
@@ -853,12 +777,6 @@ class IcebergWriter:
             "gopher_ellipsis_line_ratio": [float(r.gopher_ellipsis_line_ratio) for r in rows],
             "gopher_symbol_word_ratio": [float(r.gopher_symbol_word_ratio) for r in rows],
             "gopher_alpha_word_ratio": [float(r.gopher_alpha_word_ratio) for r in rows],
-            "decon_exact_matches": [list(r.decon_exact_matches) for r in rows],
-            "decon_semantic_matches": [list(r.decon_semantic_matches) for r in rows],
-            "decon_max_similarity": [float(r.decon_max_similarity) for r in rows],
-            "decon_ngram_size": [r.decon_ngram_size for r in rows],
-            "decon_embedding_revision": [r.decon_embedding_revision for r in rows],
-            "benchmark_set_version": [r.benchmark_set_version for r in rows],
             "classifier_backend": [r.classifier_backend for r in rows],
             "training_usage": [r.training_usage for r in rows],
         }
@@ -873,17 +791,17 @@ class IcebergWriter:
                 pa.field("lang", pa.string(), nullable=False),
                 pa.field("tokens", pa.int32(), nullable=False),
                 pa.field("quality_score", pa.float64(), nullable=False),
-                pa.field("edu_score", pa.float64(), nullable=False),
+                pa.field("source_quality_score", pa.float64(), nullable=False),
                 pa.field("license", pa.string(), nullable=False),
                 pa.field("license_source", pa.string(), nullable=False),
                 pa.field("risk_tier", pa.int32(), nullable=False),
                 pa.field("pii_flags", pa.list_(pa.string()), nullable=True),
-                pa.field("contaminated_with", pa.list_(pa.string()), nullable=True),
                 pa.field("valid_from", pa.timestamp("us", tz="UTC"), nullable=False),
                 pa.field("valid_to", pa.timestamp("us", tz="UTC"), nullable=True),
                 pa.field("reject_reasons", pa.list_(pa.string()), nullable=True),
                 pa.field("scoring_version", pa.string(), nullable=False),
                 pa.field("classifier_revision", pa.string(), nullable=False),
+                pa.field("quality_diagnostics_json", pa.string(), nullable=True),
                 pa.field("policy_revision", pa.string(), nullable=False),
                 pa.field("snapshot_id", pa.int64(), nullable=True),
                 pa.field("trace_id", pa.string(), nullable=False),
@@ -915,7 +833,6 @@ class IcebergWriter:
                 pa.field("structural_quality_score", pa.float64(), nullable=False),
                 pa.field("extraction_completeness", pa.float64(), nullable=False),
                 pa.field("reasoning_score", pa.float64(), nullable=False),
-                pa.field("benchmark_score", pa.float64(), nullable=False),
                 pa.field("route", pa.string(), nullable=False),
                 pa.field("eligible_routes", pa.list_(pa.string()), nullable=True),
                 pa.field("route_reasons", pa.list_(pa.string()), nullable=True),
@@ -940,12 +857,6 @@ class IcebergWriter:
                 pa.field("gopher_ellipsis_line_ratio", pa.float64(), nullable=False),
                 pa.field("gopher_symbol_word_ratio", pa.float64(), nullable=False),
                 pa.field("gopher_alpha_word_ratio", pa.float64(), nullable=False),
-                pa.field("decon_exact_matches", pa.list_(pa.string()), nullable=True),
-                pa.field("decon_semantic_matches", pa.list_(pa.string()), nullable=True),
-                pa.field("decon_max_similarity", pa.float64(), nullable=False),
-                pa.field("decon_ngram_size", pa.int32(), nullable=False),
-                pa.field("decon_embedding_revision", pa.string(), nullable=False),
-                pa.field("benchmark_set_version", pa.string(), nullable=False),
                 pa.field("classifier_backend", pa.string(), nullable=False),
                 pa.field("training_usage", pa.string(), nullable=True),
             ]
@@ -965,158 +876,6 @@ class IcebergWriter:
         table.append(arrow_table)
         snapshot = table.current_snapshot()
         return int(snapshot.snapshot_id) if snapshot else None
-
-    def _set_snapshot_props(
-        self,
-        table: Table,
-        snapshot_id: int,
-        attestation: DeconAttestation,
-        attest_uri: str | None,
-    ) -> None:
-        """Add summary metadata when the runtime supports snapshot updates.
-
-        The signed attestation object is the durable historical record. Never
-        emulate snapshot summaries with one accumulating table property per
-        snapshot: that makes every metadata JSON file grow with the full
-        history and caused quadratic object-storage growth in the live cluster.
-        """
-        per_snapshot = {
-            f"stream2pretrain.snapshot.{snapshot_id}.policy_revision": self._policy_revision,
-            f"stream2pretrain.snapshot.{snapshot_id}.scoring_version": self._scoring_version,
-            f"stream2pretrain.snapshot.{snapshot_id}.classifier_revision": (
-                self._classifier_revision
-            ),
-            f"stream2pretrain.snapshot.{snapshot_id}.attestation_signature": (
-                attestation.signature
-            ),
-            f"stream2pretrain.snapshot.{snapshot_id}.attestation_set_version": (
-                attestation.benchmark_set_version
-            ),
-        }
-        if attest_uri:
-            per_snapshot[f"stream2pretrain.snapshot.{snapshot_id}.decon_attestation_uri"] = (
-                attest_uri
-            )
-        # Best-effort only. PyIceberg versions without a snapshot-summary
-        # update API keep the facts in rows plus the signed attestation object.
-        try:
-            update = getattr(table, "update_snapshot", None)
-            if callable(update):
-                with update() as us:  # type: ignore[misc]
-                    setter = getattr(us, "set_snapshot_summary_property", None)
-                    if callable(setter):
-                        for k, v in per_snapshot.items():
-                            setter(k.split(".", 2)[-1], v)
-                        return
-        except Exception:
-            # Annotation is best-effort; the data and attestation commits have
-            # already succeeded.
-            pass
-
-
-def build_attestation_sink(cfg: common.ProcessorConfig) -> AttestationSink:
-    """Create the production attestation sink from processor config."""
-    import boto3
-    from confluent_kafka import Producer
-
-    s3_client = boto3.client(
-        "s3",
-        endpoint_url=cfg.minio_endpoint,
-        aws_access_key_id=cfg.minio_access_key,
-        aws_secret_access_key=cfg.minio_secret_key,
-        region_name="us-east-1",
-    )
-    producer = Producer({"bootstrap.servers": cfg.redpanda_brokers})
-    return AttestationSink(
-        s3_client=s3_client,
-        bucket=cfg.decon_bucket,
-        kafka_producer=producer,
-        topic=cfg.decon_attest_topic,
-        strict=os.environ.get("S2P_REQUIRE_DURABLE_OUTPUTS") == "1",
-    )
-
-
-class AttestationSink:
-    """Writes a signed :class:`DeconAttestation` to MinIO + Kafka.
-
-    The S3 path is
-    ``s3://<decon>/decon/<benchmark_set_version>/<snapshot_id>.json``.
-    Kafka publication uses the dev/prod ``decon.attest`` topic constants.
-    """
-
-    def __init__(
-        self,
-        *,
-        s3_client: object,
-        bucket: str,
-        kafka_producer: object | None = None,
-        topic: str = "decon.attest",
-        strict: bool = False,
-    ) -> None:
-        self._s3 = s3_client
-        self._bucket = bucket
-        self._producer = kafka_producer
-        self._topic = topic
-        self._strict = strict
-
-    def write(self, attestation: DeconAttestation) -> str:
-        """Persist + publish; returns the canonical s3 URI."""
-        payload = common.decon_dumps(attestation)
-        key = f"decon/{attestation.benchmark_set_version}/{attestation.snapshot_id:020d}.json"
-        try:
-            self._s3.put_object(  # type: ignore[union-attr]
-                Bucket=self._bucket,
-                Key=key,
-                Body=payload,
-                ContentType="application/json",
-            )
-        except Exception:
-            if self._strict:
-                raise
-            return ""
-        uri = f"s3://{self._bucket}/{key}"
-        if self._producer is not None:
-            try:
-                self._producer.produce(
-                    self._topic, key=str(attestation.snapshot_id).encode(), value=payload
-                )  # type: ignore[union-attr]
-                remaining = self._producer.flush()  # type: ignore[union-attr]
-                if remaining and self._strict:
-                    raise RuntimeError(f"{remaining} decon attestation messages were not delivered")
-            except Exception:
-                if self._strict:
-                    raise
-        return uri
-
-
-def _aggregate_per_benchmark_hits(rows: list[GoldRecord]) -> dict[str, int]:
-    """Sum the per-benchmark contamination tags across buffered rows.
-
-    The curator stamps each :class:`GoldRecord.contaminated_with` with the
-    benchmarks the in-process Decon-Gate fired on. Aggregating here lets
-    the writer's attestation reflect the actual per-snapshot scan signal
-    even though it does not own the populated bloom filters.
-    """
-    out: dict[str, int] = {}
-    for r in rows:
-        for bench in r.contaminated_with or []:
-            out[bench] = out.get(bench, 0) + 1
-    return out
-
-
-def _aggregate_rejected_doc_hashes(rows: list[GoldRecord]) -> list[str]:
-    """Collect doc ids that fired any contamination tag in this batch."""
-    return [r.doc_id for r in rows if r.contaminated_with]
-
-
-def _aggregate_tokens_scanned(rows: list[GoldRecord]) -> int:
-    """Sum the curator-reported token counts for the buffered rows."""
-    return sum(int(r.tokens or 0) for r in rows)
-
-
-def _aggregate_tokens_flagged(rows: list[GoldRecord]) -> int:
-    """Sum tokens belonging to documents that were flagged in this batch."""
-    return sum(int(r.tokens or 0) for r in rows if r.contaminated_with)
 
 
 def _decision_key(record: GoldRecord) -> DecisionKey:
@@ -1141,7 +900,6 @@ def _is_trainable_gold(record: GoldRecord) -> bool:
         in {"pretrain", "broad_pretraining", "posttrain_candidate", "reasoning_candidate"}
         and not record.reject_reasons
         and not record.pii_flags
-        and not record.contaminated_with
     )
 
 
@@ -1155,8 +913,7 @@ def build_dataflow(
     from bytewax.dataflow import Dataflow
 
     tracer = common.init_tracer("s2p-iceberg-writer", cfg)
-    decon = DeconGate(benchmark_set_version=cfg.benchmark_set_version)
-    writer = IcebergWriter.from_config(cfg, decon=decon, metrics=PROCESSOR_METRICS)
+    writer = IcebergWriter.from_config(cfg, metrics=PROCESSOR_METRICS)
     from processor.iceberg_catalog import load_runtime_catalog
 
     admission_writer = LicenseAdmissionWriter(load_runtime_catalog(cfg))
@@ -1168,7 +925,7 @@ def build_dataflow(
             DEFAULT_FLUSH_INTERVAL_SECONDS,
         )
     )
-    flow = Dataflow("s2p-iceberg-writer")
+    flow = Dataflow(os.environ.get("S2P_BYTEWAX_FLOW_NAME", "s2p-iceberg-writer-live-v2"))
     # The configured offset is only the bootstrap frontier for a new recovery
     # database. Once snapshots exist, Bytewax recovery owns progress.
     start_offset = common.kafka_starting_offset()
@@ -1179,6 +936,7 @@ def build_dataflow(
         topics=[cfg.decisions_topic],
         starting_offset=start_offset,
         add_config=common.kafka_consumer_config(cfg.consumer_group),
+        batch_size=common.kafka_source_batch_size(),
     )
     inp = op.input("docs_curated", flow, source)
 
@@ -1239,6 +997,7 @@ def build_dataflow(
         topics=[cfg.license_admissions_topic],
         starting_offset=start_offset,
         add_config=common.kafka_consumer_config(f"{cfg.consumer_group}-licenses"),
+        batch_size=common.kafka_source_batch_size(),
     )
     admission_inp = op.input("license_admissions", flow, admission_source)
 
@@ -1317,6 +1076,6 @@ def main() -> None:
     common.run_bytewax_flow(
         flow,
         cfg,
-        "iceberg-writer",
+        os.environ.get("S2P_BYTEWAX_RECOVERY_NAME", "iceberg-writer-live-v2"),
         runtime_status=runtime_status,
     )
