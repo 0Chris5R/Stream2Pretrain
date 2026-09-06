@@ -1,4 +1,4 @@
-"""SourceFeed and MixtureRecipe CRD specs.
+"""SourceFeed CRD specification.
 
 These Pydantic models mirror the ``spec`` block of the K8s CRDs declared in
 ``charts/stream2pretrain/crds/``. Keeping them here (instead of inside the
@@ -23,7 +23,6 @@ FeedProtocol = Literal[
     "atom",
     "oai-pmh",
     "rest-json",
-    "sitemap",
     "manual",
 ]
 
@@ -99,57 +98,4 @@ class SourceFeedSpec(BaseModel):
             )
         if self.auth.type == "header" and not self.auth.header_name:
             raise ValueError("auth.header_name is required when auth.type == 'header'")
-        return self
-
-
-class MixtureSourceWeight(BaseModel):
-    """A single source's weight within a mixture."""
-
-    model_config = ConfigDict(
-        extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel
-    )
-
-    source_feed: str = Field(..., min_length=1, max_length=63)
-    weight: float = Field(..., gt=0.0, le=1.0)
-
-
-class MixtureRecipeSpec(BaseModel):
-    """Spec of a MixtureRecipe CRD instance.
-
-    Two MixtureRecipe instances pointing at the same SourceFeed set form the
-    shadow A/B comparison: each materializes a separate Iceberg branch and a
-    proxy LM is trained on each branch in rolling windows.
-    """
-
-    model_config = ConfigDict(
-        extra="forbid", frozen=True, populate_by_name=True, alias_generator=_to_lower_camel
-    )
-
-    name: str = Field(..., min_length=1, max_length=63)
-    branch: str = Field(
-        ...,
-        min_length=1,
-        max_length=63,
-        description="Iceberg branch name this recipe writes to.",
-    )
-    sources: list[MixtureSourceWeight] = Field(..., min_length=1)
-    min_quality_score: float = Field(default=2.0, ge=0.0, le=5.0)
-    min_edu_score: float = Field(default=2.0, ge=0.0, le=5.0)
-    max_risk_tier: Literal[1, 2, 3] = 2
-    languages: list[str] = Field(
-        default_factory=lambda: ["en"],
-        description="Language allow-list (ISO codes).",
-    )
-    target_tokens_per_hour: int | None = Field(
-        default=None,
-        ge=0,
-        description="Optional throttle target; None means uncapped.",
-    )
-
-    @model_validator(mode="after")
-    def _check_weights_sum(self) -> MixtureRecipeSpec:
-        total = sum(s.weight for s in self.sources)
-        # Allow small floating point slack but reject obvious misconfigurations.
-        if not (0.999 <= total <= 1.001):
-            raise ValueError(f"source weights must sum to 1.0 (got {total:.6f})")
         return self

@@ -1,1 +1,1 @@
-"""Hugging Face exact-version card poller and Daily Papers discovery adapter."""
+"""Hugging Face durable README-blob change feed."""

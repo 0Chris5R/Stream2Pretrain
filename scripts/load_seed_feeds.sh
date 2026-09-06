@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stream2Pretrain - apply the Phase-1 SourceFeed CRDs into the active kube context.
+# Stream2Pretrain - apply the SourceFeed CRDs into the active kube context.
 #
 # This converts the dev YAML catalogue (ingest/feeds.dev.yaml) into proper
 # SourceFeed CRD instances and applies them with `kubectl`. The shape mirrors
@@ -32,12 +32,10 @@ if [[ ! -f "${CRD_FILE}" ]]; then
   exit 1
 fi
 
-# The controller-supported Phase-1 set, expressed as inline manifests so the
+# The controller-supported set, expressed as inline manifests so the
 # script has no Python dependency. This script installs only sources handled by
-# the generic RSS, Atom, OAI-PMH, or sitemap poller templates. GitHub discovery/tarballs,
-# Hugging Face model/dataset/Space cards and Daily Papers, arXiv full text, and
-# OpenReview remain chart-managed dedicated workloads and are intentionally not
-# duplicated as generic SourceFeed CRDs here.
+# the generic arXiv RSS and OAI-PMH discovery templates. Discovery CRDs are
+# internal scheduling lanes and are not exposed as corpus sources.
 read -r -d '' MANIFEST <<'YAML' || true
 ---
 apiVersion: stream2pretrain.io/v1alpha1
@@ -119,86 +117,6 @@ spec:
   licenseDefault: per-record
   egressAllow: ["oaipmh.arxiv.org", "export.arxiv.org"]
   enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: rss-openai-news
-spec:
-  name: rss-openai-news
-  protocol: rss
-  endpoint: https://openai.com/news/rss.xml
-  pollIntervalSeconds: 21600
-  rateLimit:
-    requestsPerSecond: 1.0
-    burst: 2
-  licenseDefault: per-record
-  egressAllow: ["openai.com", "cdn.openai.com"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: rss-deepmind-blog
-spec:
-  name: rss-deepmind-blog
-  protocol: rss
-  endpoint: https://deepmind.google/blog/rss.xml
-  pollIntervalSeconds: 21600
-  rateLimit:
-    requestsPerSecond: 1.0
-    burst: 2
-  licenseDefault: per-record
-  egressAllow: ["deepmind.google"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: rss-hf-blog
-spec:
-  name: rss-hf-blog
-  protocol: rss
-  endpoint: https://huggingface.co/blog/feed.xml
-  pollIntervalSeconds: 21600
-  rateLimit:
-    requestsPerSecond: 1.0
-    burst: 2
-  licenseDefault: per-record
-  egressAllow: ["huggingface.co", "hf.co"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: rss-bair-blog
-spec:
-  name: rss-bair-blog
-  protocol: rss
-  endpoint: https://bair.berkeley.edu/blog/feed.xml
-  pollIntervalSeconds: 86400
-  rateLimit:
-    requestsPerSecond: 0.5
-    burst: 1
-  licenseDefault: per-record
-  egressAllow: ["bair.berkeley.edu"]
-  enabled: true
----
-apiVersion: stream2pretrain.io/v1alpha1
-kind: SourceFeed
-metadata:
-  name: rss-eleuther-blog
-spec:
-  name: rss-eleuther-blog
-  protocol: rss
-  endpoint: https://blog.eleuther.ai/index.xml
-  pollIntervalSeconds: 86400
-  rateLimit:
-    requestsPerSecond: 0.5
-    burst: 1
-  licenseDefault: per-record
-  egressAllow: ["blog.eleuther.ai"]
-  enabled: true
 YAML
 
 if [[ "${DRY_RUN}" == "1" ]]; then
@@ -206,7 +124,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-echo "applying Phase-1 SourceFeed catalogue to namespace=${NAMESPACE}"
+echo "applying SourceFeed catalogue to namespace=${NAMESPACE}"
 echo "${MANIFEST}" | kubectl apply -n "${NAMESPACE}" -f -
 
 echo

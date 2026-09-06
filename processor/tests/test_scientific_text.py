@@ -36,7 +36,7 @@ Researcher, A. Prior work.
         text=text,
         title="paper",
         source_format="markdown",
-        extraction_pipeline="reviewarena-ocr-markdown-v1",
+        extraction_pipeline="source-ocr-markdown-v1",
     )
 
     assert document.title == "A Structured OCR Paper"

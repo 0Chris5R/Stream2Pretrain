@@ -57,7 +57,7 @@ class FeedStateStore:
     def _path_for(self, feed_name: str) -> Path:
         # Percent-encode separators and Windows-reserved characters while
         # preserving readable feed names. Source state is also exercised by
-        # the local Windows profile, where keys such as ``openreview:venue``
+        # the local Windows profile, where keys such as ``source:cursor``
         # cannot be used as file names.
         safe = quote(feed_name, safe="._-")
         return self._root / f"{safe}.json"

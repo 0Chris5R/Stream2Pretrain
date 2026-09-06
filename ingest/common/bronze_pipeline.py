@@ -8,6 +8,7 @@ handling, and dedup logic.
 
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, cast
@@ -165,3 +166,67 @@ async def fetch_and_publish(
         with tracer.start_as_current_span("kafka.produce"):
             await producer.send(record)
         return record
+
+
+async def publish_discovery_payload(
+    *,
+    payload: bytes,
+    url: str,
+    source_feed: str,
+    producer: BronzeProducer,
+    minio: MinioWriter,
+    bucket: str,
+    extension: str,
+    content_type: str,
+    extraction_pipeline: str,
+    metadata: dict[str, str] | None = None,
+) -> BronzeRecord:
+    """Publish an internal discovery envelope without a corpus decision.
+
+    Discovery records only schedule a content-bearing worker. They are not
+    training documents, so they deliberately bypass the licence ledger and
+    must always use ``source_format=metadata``. The downstream content worker
+    performs the item-scoped licence decision before fetching the real body.
+    """
+    canon = canonical_url(url)
+    doc_id = doc_id_for_url(canon)
+    fetched_at = datetime.now(tz=UTC)
+    key = bronze_object_key(
+        source_feed=source_feed,
+        doc_id=doc_id,
+        fetched_at=fetched_at,
+        extension=extension,
+    )
+    object_metadata = {"doc_id": doc_id, "source_feed": source_feed, "url": canon}
+    if metadata:
+        object_metadata.update(metadata)
+    stored = await minio.put_bronze(
+        key=key,
+        payload=payload,
+        content_type=content_type,
+        gzip_compress=True,
+        metadata=object_metadata,
+    )
+    record = BronzeRecord(
+        doc_id=doc_id,
+        url=canon,  # type: ignore[arg-type]
+        fetched_at=fetched_at,
+        http_status=200,
+        content_type=content_type,
+        raw_html_s3_uri=bronze_s3_uri(
+            bucket=bucket,
+            source_feed=source_feed,
+            doc_id=doc_id,
+            fetched_at=fetched_at,
+            extension=extension,
+        ),
+        source_feed=source_feed,
+        trace_id=secrets.token_hex(16),
+        bytes_size=stored,
+        source_format="metadata",
+        extraction_pipeline=extraction_pipeline,
+        spdx_license=None,
+        spdx_license_source="unknown",
+    )
+    await producer.send(record)
+    return record

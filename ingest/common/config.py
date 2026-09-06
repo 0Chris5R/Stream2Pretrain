@@ -44,7 +44,6 @@ class IngestConfig:
     minio_bronze_bucket: str
     otel_endpoint: str | None
     otel_protocol: str
-    github_token: str | None
     hf_token: str | None
     user_agent: str
     http_timeout_seconds: float = 30.0
@@ -52,7 +51,6 @@ class IngestConfig:
     feed_config_path: str | None = None
     request_jitter_max_seconds: float = 0.5
     raw_topic: str = "raw.fetched"
-    github_release_jobs_topic: str = "github.release.jobs"
     license_admissions_topic: str = "license.admissions"
 
     @property
@@ -63,8 +61,8 @@ class IngestConfig:
 def load_config() -> IngestConfig:
     """Load the ingest configuration from the process environment.
 
-    Defaults follow ``.env.example``. ``GITHUB_TOKEN`` and ``HF_TOKEN`` are
-    optional; GitHub sources use the lower anonymous rate budget without one.
+    Defaults follow ``.env.example``. ``HF_TOKEN`` is optional for public Hub
+    card reads.
     """
     return IngestConfig(
         env=_env("S2P_ENV", "dev"),
@@ -76,7 +74,6 @@ def load_config() -> IngestConfig:
         minio_bronze_bucket=_env("MINIO_BRONZE_BUCKET", "bronze"),
         otel_endpoint=_env_optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
         otel_protocol=_env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
-        github_token=_env_optional("GITHUB_TOKEN"),
         hf_token=_env_optional("HF_TOKEN"),
         user_agent=_env(
             "S2P_USER_AGENT",
@@ -86,6 +83,5 @@ def load_config() -> IngestConfig:
         http_max_retries=_env_int("S2P_HTTP_MAX_RETRIES", 4),
         feed_config_path=_env_optional("S2P_FEED_CONFIG"),
         raw_topic=_env("S2P_RAW_TOPIC", "raw.fetched"),
-        github_release_jobs_topic=_env("S2P_GITHUB_RELEASE_JOBS_TOPIC", "github.release.jobs"),
         license_admissions_topic=_env("S2P_LICENSE_ADMISSIONS_TOPIC", "license.admissions"),
     )

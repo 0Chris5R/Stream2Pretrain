@@ -1,7 +1,7 @@
 """Redpanda topic catalogue.
 
 These are the canonical topics every Stream2Pretrain component reads or
-writes. The constants are imported across ingest, processor, and decon-gate so
+writes. The constants are imported across ingest and processor components so
 typos surface at import time, not at runtime in the field.
 
 Partition / replication factors are split between dev and prod profiles.
@@ -20,12 +20,10 @@ from typing import Final
 # k8s manifests, rpk scripts, and OpenTelemetry span attributes.
 RAW_FETCHED: Final[str] = "raw.fetched"
 RAW_SMOKE: Final[str] = "raw.smoke"
-GITHUB_RELEASE_JOBS: Final[str] = "github.release.jobs"
 DOCS_NORMALIZED: Final[str] = "docs.normalized"
 DOCS_NORMALIZED_SMOKE: Final[str] = "docs.normalized.smoke"
 DOCS_CURATED: Final[str] = "docs.curated"
 DOCS_CURATED_SMOKE: Final[str] = "docs.curated.smoke"
-DECON_ATTEST: Final[str] = "decon.attest"
 CURATION_DECISIONS: Final[str] = "curation.decisions"
 CURATION_DECISIONS_SMOKE: Final[str] = "curation.decisions.smoke"
 LICENSE_ADMISSIONS: Final[str] = "license.admissions"
@@ -34,20 +32,9 @@ FOUNDRY_JOBS: Final[str] = "foundry.jobs"
 FOUNDRY_EVENTS: Final[str] = "foundry.events"
 FOUNDRY_ARTIFACTS: Final[str] = "foundry.artifacts"
 
-# v0.2.0 deliberately does NOT add a ``docs.code`` topic. Per-file code
-# records produced by ``ingest/github_release_tarball_fetcher`` ride the same
-# ``raw.fetched`` topic and carry ``source_format='code'`` on the BronzeRecord;
-# Silver/Gold equivalents likewise ride ``docs.normalized`` / ``docs.curated``.
-# Downstream operators dispatch on the ``source_format`` column. This keeps
-# the shared document topics stable. ``curation.decisions`` is an audit stream,
-# not another document-format stream: every accepted or rejected score result
-# is published there so attestations and quarantine storage are complete.
-CODE_SOURCE_FORMAT: Final[str] = "code"
-
 ALL_TOPICS: Final[tuple[str, ...]] = (
     RAW_FETCHED,
     RAW_SMOKE,
-    GITHUB_RELEASE_JOBS,
     DOCS_NORMALIZED,
     DOCS_NORMALIZED_SMOKE,
     DOCS_CURATED,
@@ -56,7 +43,6 @@ ALL_TOPICS: Final[tuple[str, ...]] = (
     CURATION_DECISIONS_SMOKE,
     LICENSE_ADMISSIONS,
     LICENSE_ADMISSIONS_SMOKE,
-    DECON_ATTEST,
     FOUNDRY_JOBS,
     FOUNDRY_EVENTS,
     FOUNDRY_ARTIFACTS,
@@ -95,10 +81,7 @@ class TopicConfig:
 _DEV_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 _SMOKE_RETENTION_MS = 24 * 60 * 60 * 1000
 
-# Prod profile: 3-broker target, longer retention so contamination bisect can
-# replay weeks of history. The decon.attest topic is "compact + tombstone-free"
-# in spirit; we keep delete so old certificates can age out alongside their
-# Iceberg snapshots, but with a long retention.
+# Prod profile: 3-broker target with longer retention for operational replay.
 _PROD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 
@@ -110,12 +93,6 @@ def dev_topic_configs() -> list[TopicConfig]:
         ),
         TopicConfig(
             RAW_SMOKE, partitions=4, replication_factor=1, retention_ms=_SMOKE_RETENTION_MS
-        ),
-        TopicConfig(
-            GITHUB_RELEASE_JOBS,
-            partitions=4,
-            replication_factor=1,
-            retention_ms=_DEV_RETENTION_MS,
         ),
         TopicConfig(
             DOCS_NORMALIZED, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
@@ -154,9 +131,6 @@ def dev_topic_configs() -> list[TopicConfig]:
             retention_ms=_SMOKE_RETENTION_MS,
         ),
         TopicConfig(
-            DECON_ATTEST, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
-        ),
-        TopicConfig(
             FOUNDRY_JOBS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
@@ -180,12 +154,6 @@ def prod_topic_configs() -> list[TopicConfig]:
         ),
         TopicConfig(
             RAW_SMOKE, partitions=3, replication_factor=3, retention_ms=_SMOKE_RETENTION_MS
-        ),
-        TopicConfig(
-            GITHUB_RELEASE_JOBS,
-            partitions=12,
-            replication_factor=3,
-            retention_ms=_PROD_RETENTION_MS,
         ),
         TopicConfig(
             DOCS_NORMALIZED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS
@@ -222,9 +190,6 @@ def prod_topic_configs() -> list[TopicConfig]:
             partitions=3,
             replication_factor=3,
             retention_ms=_SMOKE_RETENTION_MS,
-        ),
-        TopicConfig(
-            DECON_ATTEST, partitions=3, replication_factor=3, retention_ms=_PROD_RETENTION_MS
         ),
         TopicConfig(
             FOUNDRY_JOBS, partitions=6, replication_factor=3, retention_ms=_PROD_RETENTION_MS

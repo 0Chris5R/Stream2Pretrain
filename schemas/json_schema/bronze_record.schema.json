@@ -22,7 +22,7 @@
       "type": "string"
     },
     "doc_id": {
-      "description": "Content-addressed document id, sha256 of the canonical URL.",
+      "description": "Stable document-revision id. Usually the sha256 of the canonical URL; exact content projections may bind an immutable source object.",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "title": "Doc Id",
       "type": "string"
@@ -95,10 +95,8 @@
         "pdf",
         "latex",
         "markdown",
-        "code",
         "web",
-        "metadata",
-        "review"
+        "metadata"
       ],
       "title": "Source Format",
       "type": "string"
@@ -114,22 +112,19 @@
         }
       ],
       "default": null,
-      "description": "OSI-list verified SPDX id (e.g. 'Apache-2.0'); None when no machine-readable license was attached to the source.",
+      "description": "Item-level licence identifier (e.g. 'Apache-2.0'); None when no machine-readable license was attached to the source.",
       "title": "Spdx License"
     },
     "spdx_license_source": {
       "default": "unknown",
       "description": "Where the SPDX id was read from.",
       "enum": [
-        "github_api",
         "file_header",
         "http_link",
         "html_meta",
         "rss_entry",
         "oai_metadata",
         "arxiv_api",
-        "openreview_note",
-        "openreview_terms",
         "hf_card",
         "archived_page",
         "source_terms",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,8 +10,20 @@ import httpx
 import pytest
 
 from ingest.common.config import IngestConfig
+from ingest.common.state import FeedStateStore
 from ingest.common.tests.conftest import FakeMinio, FakeProducer  # type: ignore[attr-defined]
 from ingest.hf_poller import poller as hf_module
+
+
+def _git_blob(payload: bytes) -> str:
+    framed = f"blob {len(payload)}\0".encode("ascii") + payload
+    return hashlib.sha1(framed).hexdigest()  # Git object identity, not security.
+
+
+def _readme_response(request: httpx.Request, payload: bytes) -> httpx.Response:
+    if request.method == "HEAD":
+        return httpx.Response(200, headers={"etag": f'"{_git_blob(payload)}"'})
+    return httpx.Response(200, content=payload)
 
 
 def _cfg(token: str | None = "hf_test") -> IngestConfig:
@@ -24,7 +37,6 @@ def _cfg(token: str | None = "hf_test") -> IngestConfig:
         minio_bronze_bucket="bronze",
         otel_endpoint=None,
         otel_protocol="grpc",
-        github_token=None,
         hf_token=token,
         user_agent="ua",
         http_timeout_seconds=2.0,
@@ -39,21 +51,16 @@ def _models_payload() -> list[dict]:
             "lastModified": "2026-06-14T10:00:00Z",
             "sha": "a" * 40,
             "license": "Apache-2.0",
+            "siblings": [{"rfilename": "README.md"}],
         },
         {
             "id": "mistralai/Mistral-Small-3",
             "lastModified": "2026-06-14T11:00:00Z",
             "sha": "b" * 40,
             "license": "MIT",
+            "siblings": [{"rfilename": "README.md"}],
         },
         {"id": "no-last-modified-model"},  # missing lastModified -> skipped
-    ]
-
-
-def _papers_payload() -> list[dict]:
-    return [
-        {"paper": {"id": "2406.12345", "title": "Paper A", "license": "CC-BY-4.0"}},
-        {"paper": {"id": "2406.67890", "title": "Paper B", "license": "CC-BY-SA-4.0"}},
     ]
 
 
@@ -68,17 +75,6 @@ def _dataset_payload() -> list[dict]:
     ]
 
 
-def _space_payload() -> list[dict]:
-    return [
-        {
-            "id": "org/research-demo",
-            "lastModified": "2026-08-20T11:00:00Z",
-            "sha": "d" * 40,
-            "tags": ["license:apache-2.0"],
-        }
-    ]
-
-
 @pytest.mark.asyncio
 async def test_poll_models_emits_two(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
@@ -87,11 +83,13 @@ async def test_poll_models_emits_two(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     await fake_producer.start()
     await fake_minio.start()
 
+    body = b"# Model card\n\nLicensed model documentation."
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/models":
             return httpx.Response(200, json=_models_payload())
         if request.url.path.endswith("/README.md"):
-            return httpx.Response(200, text="# Model card\n\nLicensed model documentation.")
+            return _readme_response(request, body)
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -99,15 +97,25 @@ async def test_poll_models_emits_two(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         "ingest.hf_poller.poller.build_async_client",
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
+    admissions = FakeProducer()
     emitted = await hf_module.poll_models(
         _cfg(),
         producer=fake_producer,  # type: ignore[arg-type]
         minio=fake_minio,
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
     )
     assert emitted == 2
     assert len(fake_producer.sent) == 2
     assert all(item["record"].source_format == "web" for item in fake_producer.sent)
+    assert all(
+        item["record"].spdx_license == hf_module.HF_PUBLIC_REPOSITORY_TERMS
+        for item in fake_producer.sent
+    )
+    assert all(item["record"].resolver == "hf-public-repository-terms" for item in admissions.sent)
+    assert all(
+        item["record"].doc_id == admission["record"].doc_id
+        for item, admission in zip(fake_producer.sent, admissions.sent, strict=True)
+    )
 
 
 @pytest.mark.asyncio
@@ -118,11 +126,13 @@ async def test_poll_dataset_cards_emits_versioned_markdown(
     fake_producer = FakeProducer()
     fake_minio = FakeMinio()
 
+    body = b"# Dataset card\n\nDocumented research data."
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/datasets":
             return httpx.Response(200, json=_dataset_payload())
         if request.url.path.endswith("/README.md"):
-            return httpx.Response(200, text="# Dataset card\n\nDocumented research data.")
+            return _readme_response(request, body)
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -132,36 +142,50 @@ async def test_poll_dataset_cards_emits_versioned_markdown(
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
 
+    admissions = FakeProducer()
     emitted = await hf_module.poll_hub_cards(
         _cfg(),
         kind="dataset",
         producer=fake_producer,  # type: ignore[arg-type]
         minio=fake_minio,
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
     )
 
     assert emitted == 1
     record = fake_producer.sent[0]["record"]
     assert record.source_feed == "hf-datasets"
     assert record.source_format == "web"
-    assert record.extraction_pipeline == "hf-dataset-card-markdown-v1"
+    assert record.extraction_pipeline == "hf-dataset-card-markdown-v2"
     assert "/blob/" in str(record.url)
+    assert record.spdx_license == hf_module.HF_PUBLIC_REPOSITORY_TERMS
+    assert admissions.sent[0]["record"].resolver == "hf-public-repository-terms"
 
 
 @pytest.mark.asyncio
-async def test_poll_space_cards_emits_versioned_markdown(
+async def test_model_without_readme_is_discovery_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
+    requests: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/spaces":
-            return httpx.Response(200, json=_space_payload())
-        if request.url.path.endswith("/README.md"):
-            return httpx.Response(200, text="# Space card\n\nLicensed research application.")
-        return httpx.Response(404)
+        requests.append(request.url.path)
+        if request.url.path == "/api/models":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "example/weights-only",
+                        "lastModified": "2026-08-25T12:00:00Z",
+                        "sha": "d" * 40,
+                        "siblings": [
+                            {"rfilename": ".gitattributes"},
+                            {"rfilename": "model.safetensors"},
+                        ],
+                    }
+                ],
+            )
+        return httpx.Response(500, request=request)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -169,20 +193,60 @@ async def test_poll_space_cards_emits_versioned_markdown(
         "build_async_client",
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
+    records = FakeProducer()
+    admissions = FakeProducer()
+
+    emitted = await hf_module.poll_models(
+        _cfg(),
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
+    )
+
+    assert emitted == 0
+    assert requests == ["/api/models"]
+    assert records.sent == []
+    assert admissions.sent == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_without_readme_is_discovery_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/datasets":
+            return httpx.Response(200, json=_dataset_payload())
+        if request.url.path.endswith("/README.md") and request.method == "HEAD":
+            return httpx.Response(404)
+        return httpx.Response(500, request=request)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        hf_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
+    )
+    records = FakeProducer()
+    admissions = FakeProducer()
 
     emitted = await hf_module.poll_hub_cards(
         _cfg(),
-        kind="space",
-        producer=fake_producer,  # type: ignore[arg-type]
-        minio=fake_minio,
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
+        kind="dataset",
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
     )
 
-    assert emitted == 1
-    record = fake_producer.sent[0]["record"]
-    assert record.source_feed == "hf-spaces"
-    assert record.extraction_pipeline == "hf-space-card-markdown-v1"
-    assert f"/blob/{'d' * 40}/README.md" in str(record.url)
+    assert emitted == 0
+    assert len(requests) == 2
+    assert requests[0] == "/api/datasets"
+    assert requests[1].endswith("/README.md")
+    assert records.sent == []
+    assert admissions.sent == []
 
 
 @pytest.mark.asyncio
@@ -227,8 +291,7 @@ async def test_hub_card_without_exact_revision_is_quarantined_before_card_fetch(
     assert emitted == 0
     assert requests == ["/api/datasets"]
     assert records.sent == []
-    assert admissions.sent[0]["record"].status == "quarantined"
-    assert admissions.sent[0]["record"].evidence_scope == "unknown"
+    assert admissions.sent == []
 
 
 @pytest.mark.asyncio
@@ -271,21 +334,37 @@ async def test_model_without_exact_revision_is_quarantined_before_card_fetch(
     assert emitted == 0
     assert requests == ["/api/models"]
     assert records.sent == []
-    assert admissions.sent[0]["record"].status == "quarantined"
-    assert admissions.sent[0]["record"].evidence_scope == "unknown"
+    assert admissions.sent == []
 
 
 @pytest.mark.asyncio
-async def test_poll_daily_papers_uses_public_api_without_token(
+async def test_weights_only_repo_commit_does_not_emit_unchanged_readme(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
+    body = b"# Stable model card\n\nArchitecture and evaluation details."
+    phase = 1
+    body_gets = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert "authorization" not in request.headers
-        return httpx.Response(200, json=_papers_payload())
+        nonlocal body_gets
+        if request.url.path == "/api/models":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "org/stable-card",
+                        "lastModified": f"2026-08-30T0{phase}:00:00Z",
+                        "sha": ("a" if phase == 1 else "b") * 40,
+                        "siblings": [{"rfilename": "README.md"}],
+                    }
+                ],
+            )
+        if request.url.path.endswith("/README.md"):
+            if request.method == "GET":
+                body_gets += 1
+            return _readme_response(request, body)
+        return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -293,58 +372,274 @@ async def test_poll_daily_papers_uses_public_api_without_token(
         "build_async_client",
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
-    emitted = await hf_module.poll_daily_papers(
-        _cfg(token=None),
-        producer=fake_producer,
-        minio=fake_minio,  # type: ignore[arg-type]
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
+    records = FakeProducer()
+    admissions = FakeProducer()
+    first = await hf_module.poll_models(
+        _cfg(),
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
     )
-    assert emitted == 2
+    phase = 2
+    second = await hf_module.poll_models(
+        _cfg(),
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
+    )
 
-
-def test_model_license_reads_hub_license_tag() -> None:
-    assert hf_module._model_license({"tags": ["pytorch", "license:apache-2.0"]}) == "Apache-2.0"
+    assert (first, second) == (1, 0)
+    assert body_gets == 1
+    assert len(records.sent) == 1
+    assert len(admissions.sent) == 1
 
 
 @pytest.mark.asyncio
-async def test_poll_daily_papers_emits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_paginated_scan_handles_same_timestamp_ties_and_completes_watermark(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
-    await fake_producer.start()
-    await fake_minio.start()
+    bodies = {
+        "org/old": b"# Old boundary card",
+        "org/a": b"# Card A",
+        "org/b": b"# Card B",
+        "org/c": b"# Card C",
+        "org/older": b"# Older card",
+    }
+    phase = 1
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def row(repo_id: str, timestamp: str, revision: str) -> dict[str, object]:
+        return {
+            "id": repo_id,
+            "lastModified": timestamp,
+            "sha": revision * 40,
+            "siblings": [{"rfilename": "README.md"}],
+        }
+
+    def list_response(request: httpx.Request) -> httpx.Response:
+        cursor = request.url.params.get("cursor")
+        if phase == 1:
+            return httpx.Response(200, json=[row("org/old", "2026-08-30T12:00:00Z", "d")])
+        if cursor is None:
+            return httpx.Response(
+                200,
+                json=[
+                    row("org/b", "2026-08-30T13:00:00Z", "b"),
+                    row("org/a", "2026-08-30T13:00:00Z", "a"),
+                ],
+                headers={"link": ('<https://huggingface.co/api/models?cursor=page-2>; rel="next"')},
+            )
+        if cursor == "page-2":
+            return httpx.Response(
+                200,
+                json=[
+                    row("org/old", "2026-08-30T12:00:00Z", "d"),
+                    row("org/c", "2026-08-30T13:00:00Z", "c"),
+                ],
+                headers={"link": ('<https://huggingface.co/api/models?cursor=page-3>; rel="next"')},
+            )
+        assert cursor == "page-3"
         return httpx.Response(
             200,
-            content=json.dumps(_papers_payload()).encode("utf-8"),
-            headers={"content-type": "application/json"},
+            json=[row("org/older", "2026-08-30T11:00:00Z", "e")],
         )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/models":
+            return list_response(request)
+        if request.url.path.endswith("/README.md"):
+            repo_id = "/".join(request.url.path.split("/")[1:3])
+            return _readme_response(request, bodies[repo_id])
+        return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
-        "ingest.hf_poller.poller.build_async_client",
+        hf_module,
+        "build_async_client",
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
-    emitted = await hf_module.poll_daily_papers(
-        _cfg(),
-        producer=fake_producer,
-        minio=fake_minio,  # type: ignore[arg-type]
-        admission_producer=FakeProducer(),  # type: ignore[arg-type]
+    records = FakeProducer()
+    admissions = FakeProducer()
+    assert (
+        await hf_module.poll_models(
+            _cfg(),
+            producer=records,  # type: ignore[arg-type]
+            minio=FakeMinio(),  # type: ignore[arg-type]
+            admission_producer=admissions,  # type: ignore[arg-type]
+            limit=2,
+        )
+        == 1
     )
-    assert emitted == 2
+    records.sent.clear()
+    admissions.sent.clear()
+    phase = 2
+
+    emitted = await hf_module.poll_models(
+        _cfg(),
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
+        limit=2,
+    )
+
+    assert emitted == 3
+    assert [str(item["record"].url).split("/")[3:5] for item in records.sent] == [
+        ["org", "a"],
+        ["org", "b"],
+        ["org", "c"],
+    ]
+    state = FeedStateStore(tmp_path / ".s2p-state" / "hf").get(hf_module.SOURCE_FEED_MODELS)
+    assert "scan" not in state
+    assert state["completed"]["last_modified"] == "2026-08-30T13:00:00.000000Z"
+    assert state["completed"]["catalogue_revisions"] == sorted(
+        json.dumps([f"org/{name}", name * 40], separators=(",", ":")) for name in ("a", "b", "c")
+    )
 
 
 @pytest.mark.asyncio
-async def test_poll_daily_papers_raises_on_upstream_http_error(
+async def test_page_crash_resumes_without_reemitting_completed_items(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    fake_producer = FakeProducer()
-    fake_minio = FakeMinio()
+    bodies = {
+        "org/old": b"# Old boundary card",
+        "org/a": b"# Card A",
+        "org/b": b"# Card B",
+        "org/older": b"# Older card",
+    }
+    phase = 1
+    fail_b_once = True
+    get_counts: dict[str, int] = {}
+
+    def row(repo_id: str, timestamp: str, revision: str) -> dict[str, object]:
+        return {
+            "id": repo_id,
+            "lastModified": timestamp,
+            "sha": revision * 40,
+            "siblings": [{"rfilename": "README.md"}],
+        }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, request=request)
+        nonlocal fail_b_once
+        if request.url.path == "/api/models":
+            if phase == 1:
+                return httpx.Response(200, json=[row("org/old", "2026-08-30T10:00:00Z", "d")])
+            if request.url.params.get("cursor") == "page-2":
+                return httpx.Response(
+                    200,
+                    json=[row("org/older", "2026-08-30T09:00:00Z", "e")],
+                )
+            return httpx.Response(
+                200,
+                json=[
+                    row("org/b", "2026-08-30T11:00:00Z", "b"),
+                    row("org/a", "2026-08-30T12:00:00Z", "a"),
+                ],
+                headers={"link": ('<https://huggingface.co/api/models?cursor=page-2>; rel="next"')},
+            )
+        if request.url.path.endswith("/README.md"):
+            repo_id = "/".join(request.url.path.split("/")[1:3])
+            if request.method == "GET":
+                get_counts[repo_id] = get_counts.get(repo_id, 0) + 1
+                if repo_id == "org/b" and fail_b_once:
+                    fail_b_once = False
+                    return httpx.Response(500)
+            return _readme_response(request, bodies[repo_id])
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        hf_module,
+        "build_async_client",
+        lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
+    )
+    records = FakeProducer()
+    admissions = FakeProducer()
+    await hf_module.poll_models(
+        _cfg(),
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
+        limit=2,
+    )
+    records.sent.clear()
+    admissions.sent.clear()
+    phase = 2
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await hf_module.poll_models(
+            _cfg(),
+            producer=records,  # type: ignore[arg-type]
+            minio=FakeMinio(),  # type: ignore[arg-type]
+            admission_producer=admissions,  # type: ignore[arg-type]
+            limit=2,
+        )
+
+    failed_state = FeedStateStore(tmp_path / ".s2p-state" / "hf").get(hf_module.SOURCE_FEED_MODELS)
+    assert failed_state["completed"]["last_modified"] == "2026-08-30T10:00:00.000000Z"
+    assert failed_state["scan"]["processed_catalogue_revisions"] == [
+        json.dumps(["org/a", "a" * 40], separators=(",", ":"))
+    ]
+
+    emitted = await hf_module.poll_models(
+        _cfg(),
+        producer=records,  # type: ignore[arg-type]
+        minio=FakeMinio(),  # type: ignore[arg-type]
+        admission_producer=admissions,  # type: ignore[arg-type]
+        limit=2,
+    )
+
+    assert emitted == 1
+    assert get_counts == {"org/old": 1, "org/a": 1, "org/b": 2}
+    assert [str(item["record"].url).split("/")[3:5] for item in records.sent] == [
+        ["org", "a"],
+        ["org", "b"],
+    ]
+    completed = FeedStateStore(tmp_path / ".s2p-state" / "hf").get(hf_module.SOURCE_FEED_MODELS)
+    assert "scan" not in completed
+    assert completed["completed"]["last_modified"] == "2026-08-30T12:00:00.000000Z"
+
+
+@pytest.mark.asyncio
+async def test_full_page_without_next_link_cannot_advance_watermark(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    old_watermark = {
+        "last_modified": "2026-08-30T10:00:00.000000Z",
+        "catalogue_revisions": [],
+        "legacy_repositories": [],
+    }
+    FeedStateStore(tmp_path / ".s2p-state" / "hf").put(
+        hf_module.SOURCE_FEED_MODELS,
+        {"version": hf_module.HF_SCAN_STATE_VERSION, "completed": old_watermark},
+    )
+    bodies = {"org/a": b"# Card A", "org/b": b"# Card B"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/models":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "org/a",
+                        "lastModified": "2026-08-30T12:00:00Z",
+                        "sha": "a" * 40,
+                        "siblings": [{"rfilename": "README.md"}],
+                    },
+                    {
+                        "id": "org/b",
+                        "lastModified": "2026-08-30T11:00:00Z",
+                        "sha": "b" * 40,
+                        "siblings": [{"rfilename": "README.md"}],
+                    },
+                ],
+                # Deliberately no Link: rel=next.
+            )
+        if request.url.path.endswith("/README.md"):
+            repo_id = "/".join(request.url.path.split("/")[1:3])
+            return _readme_response(request, bodies[repo_id])
+        return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -353,13 +648,18 @@ async def test_poll_daily_papers_raises_on_upstream_http_error(
         lambda cfg, **kw: httpx.AsyncClient(transport=transport, headers=kw.get("headers", {})),
     )
 
-    with pytest.raises(httpx.HTTPStatusError, match="503"):
-        await hf_module.poll_daily_papers(
+    with pytest.raises(RuntimeError, match="pagination ended before the durable watermark"):
+        await hf_module.poll_models(
             _cfg(),
-            producer=fake_producer,
-            minio=fake_minio,  # type: ignore[arg-type]
+            producer=FakeProducer(),  # type: ignore[arg-type]
+            minio=FakeMinio(),  # type: ignore[arg-type]
             admission_producer=FakeProducer(),  # type: ignore[arg-type]
+            limit=2,
         )
+
+    state = FeedStateStore(tmp_path / ".s2p-state" / "hf").get(hf_module.SOURCE_FEED_MODELS)
+    assert state["completed"] == old_watermark
+    assert state["scan"]["head_last_modified"] == "2026-08-30T12:00:00.000000Z"
 
 
 @pytest.mark.asyncio
@@ -367,9 +667,9 @@ async def test_models_deployment_repeats_only_models(monkeypatch: pytest.MonkeyP
     passes: list[str] = []
     sleeps: list[float] = []
 
-    async def fake_run_pass(_: IngestConfig, *, mode: str = "all") -> tuple[int, int, int, int]:
+    async def fake_run_pass(_: IngestConfig, *, mode: str = "all") -> tuple[int, int]:
         passes.append(mode)
-        return 1, 0, 0, 0
+        return 1, 0
 
     class StopLoopError(Exception):
         pass

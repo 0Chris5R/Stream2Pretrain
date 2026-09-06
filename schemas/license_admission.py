@@ -1,8 +1,8 @@
 """Immutable pre-fetch licence admission decisions.
 
 Every content-bearing ingest path emits one of these records before it starts
-the document fetch. The record proves that unknown or excluded licences never
-reached extraction, OCR, classification, or curation.
+the document fetch. Missing rights are restricted to derived post-training;
+explicit incompatible rights never reach extraction or curation.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ LicenseAdmissionStatus = Literal["admitted", "posttrain_transform_only", "quaran
 
 
 class LicenseAdmissionDecision(BaseModel):
-    """One fail-closed licence decision made before content retrieval."""
+    """One purpose-aware licence decision made before content retrieval."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

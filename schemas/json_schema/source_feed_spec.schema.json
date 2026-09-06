@@ -118,10 +118,8 @@
       "type": "string"
     },
     "licenseDefault": {
+      "const": "per-record",
       "default": "per-record",
-      "enum": [
-        "per-record"
-      ],
       "title": "Licensedefault",
       "type": "string"
     },
@@ -143,7 +141,6 @@
         "atom",
         "oai-pmh",
         "rest-json",
-        "sitemap",
         "manual"
       ],
       "title": "Protocol",

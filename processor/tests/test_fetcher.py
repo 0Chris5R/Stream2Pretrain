@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import gzip
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from processor.fetcher import (
     FetcherState,
+    PdfProcessingTemporarilyDisabled,
+    RawObjectEmpty,
+    RawObjectMissing,
     _markdown_prose_projection,
-    _review_payload_text,
     fetch_raw_bytes,
     fetcher_input_topics,
     normalize,
@@ -22,6 +26,7 @@ from processor.operators.extract import ResiliparseExtractor
 from processor.operators.langid import LangIdentifier
 from processor.operators.minhash import MinHasher
 from processor.operators.validity import ValidityEnricher
+from processor.work_cutoff import WorkCutoff
 from schemas.bronze import BronzeRecord
 
 
@@ -66,6 +71,17 @@ def test_fetch_raw_bytes_decompresses_gzip(bronze_record: BronzeRecord) -> None:
     assert s3.calls and s3.calls[0][0] == "bronze"
 
 
+def test_expired_bronze_is_skipped_before_object_fetch(bronze_record: BronzeRecord) -> None:
+    s3 = _FakeS3(b"must not be read")
+    now = datetime(2026, 9, 4, tzinfo=UTC)
+    bronze = bronze_record.model_copy(update={"fetched_at": now - timedelta(days=2)})
+    result = process_bronze_payload(
+        _state(s3), bronze.model_dump_json().encode(), work_cutoff=WorkCutoff(clock=lambda: now)
+    )
+    assert result is None
+    assert s3.calls == []
+
+
 def test_scientific_extraction_is_source_aware(bronze_record: BronzeRecord) -> None:
     blog = bronze_record.model_copy(
         update={
@@ -80,16 +96,8 @@ def test_scientific_extraction_is_source_aware(bronze_record: BronzeRecord) -> N
             "extraction_pipeline": "arxiv-html-2026-06",
         }
     )
-    review = blog.model_copy(
-        update={
-            "source_format": "review",
-            "source_feed": "openreview-live",
-        }
-    )
-
     assert uses_scientific_extraction(blog) is False
     assert uses_scientific_extraction(paper) is True
-    assert uses_scientific_extraction(review) is False
 
 
 def test_hf_card_projection_excludes_frontmatter_and_fenced_code() -> None:
@@ -114,25 +122,33 @@ SECRET = "not training prose"
     assert "pipeline_tag" in metadata
 
 
-def test_openreview_projection_separates_labels_from_review_prose() -> None:
-    payload = b"""{
-      "id": "note-1",
-      "forum": "paper-1",
-      "invitation": "ICLR.cc/2026/Conference/-/Official_Review",
-      "content": {
-        "summary": {"value": "The paper studies robust optimization."},
-        "strengths": {"value": "The evaluation covers several baselines."},
-        "rating": {"value": "8: accept"},
-        "confidence": {"value": "4: high"}
-      }
-    }"""
+def test_hf_card_title_is_bounded_to_silver_schema_limit() -> None:
+    heading = "x" * 4096
+    text, title, _ = _markdown_prose_projection(
+        f"# {heading}\n\nDocumented model usage and evaluation details.".encode()
+    )
 
-    text, _, metadata = _review_payload_text(payload)
+    assert title == heading[:2048]
+    assert heading in text
 
-    assert "[FIELD summary]" in text
-    assert "[FIELD strengths]" in text
-    assert "8: accept" not in text
-    assert "rating: 8: accept" in metadata
+
+def test_hf_card_projection_removes_multiline_html_comments() -> None:
+    payload = b"""# Useful Model
+
+<!--
+https://example.invalid/tracking-asset.png
+-->
+
+## Evaluation
+
+Evaluation reports accuracy on a named benchmark.
+"""
+
+    text, title, _ = _markdown_prose_projection(payload)
+
+    assert title == "Useful Model"
+    assert "tracking-asset" not in text
+    assert "Evaluation reports accuracy" in text
 
 
 def test_fetch_raw_bytes_rejects_oversized_stored_object(
@@ -158,6 +174,87 @@ def test_fetch_raw_bytes_rejects_oversized_gzip_expansion(
         fetch_raw_bytes(state, bronze_record)
 
 
+def test_missing_raw_object_is_a_record_local_durable_failure(
+    bronze_record: BronzeRecord,
+) -> None:
+    class _MissingS3:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": f"missing {Bucket}/{Key}"}},
+                "GetObject",
+            )
+
+    state = _state(_FakeS3(b""))
+    state.s3 = _MissingS3()
+
+    with pytest.raises(RawObjectMissing, match=bronze_record.doc_id):
+        fetch_raw_bytes(state, bronze_record)
+
+
+def test_empty_raw_object_is_a_record_local_durable_failure(
+    bronze_record: BronzeRecord,
+) -> None:
+    state = _state(_FakeS3(b"", gzip_encoded=False))
+
+    with pytest.raises(RawObjectEmpty, match=bronze_record.doc_id):
+        process_bronze_payload(state, bronze_record.model_dump_json().encode("utf-8"))
+
+
+@pytest.mark.parametrize("source_feed", ["hf-models", "hf-datasets"])
+def test_empty_hf_card_is_an_intentional_source_skip(
+    bronze_record: BronzeRecord,
+    source_feed: str,
+) -> None:
+    state = _state(_FakeS3(b"", gzip_encoded=False))
+    card = bronze_record.model_copy(
+        update={
+            "source_feed": source_feed,
+            "source_format": "web",
+            "content_type": "text/markdown; charset=utf-8",
+            "extraction_pipeline": (
+                "hf-model-card-markdown-v1"
+                if source_feed == "hf-models"
+                else "hf-dataset-card-markdown-v1"
+            ),
+        }
+    )
+
+    assert process_bronze_payload(state, card.model_dump_json().encode("utf-8")) is None
+
+
+def test_frontmatter_only_hf_card_is_an_intentional_source_skip(
+    bronze_record: BronzeRecord,
+) -> None:
+    state = _state(_FakeS3(b"---\nlicense: apache-2.0\n---\n"))
+    card = bronze_record.model_copy(
+        update={
+            "source_feed": "hf-models",
+            "source_format": "web",
+            "content_type": "text/markdown; charset=utf-8",
+            "extraction_pipeline": "hf-model-card-markdown-v1",
+        }
+    )
+
+    assert process_bronze_payload(state, card.model_dump_json().encode("utf-8")) is None
+
+
+def test_transient_raw_object_failure_remains_retryable(
+    bronze_record: BronzeRecord,
+) -> None:
+    class _UnavailableS3:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+            raise ClientError(
+                {"Error": {"Code": "SlowDown", "Message": f"retry {Bucket}/{Key}"}},
+                "GetObject",
+            )
+
+    state = _state(_FakeS3(b""))
+    state.s3 = _UnavailableS3()
+
+    with pytest.raises(RuntimeError, match="raw object read failed"):
+        fetch_raw_bytes(state, bronze_record)
+
+
 def test_normalize_returns_silver(bronze_record: BronzeRecord) -> None:
     html = (
         b"<html><head><title>Streaming Curator</title></head><body>"
@@ -177,51 +274,6 @@ def test_normalize_returns_silver(bronze_record: BronzeRecord) -> None:
         "license_effective_date",
         "wayback_first_seen",
     }
-
-
-def test_normalize_code_bronze_decodes_plain_text(bronze_record: BronzeRecord) -> None:
-    state = _state(_FakeS3(b""))
-    code_bronze = bronze_record.model_copy(
-        update={
-            "url": "https://github.com/org/repo/blob/v1/src/foo.py",
-            "source_format": "code",
-            "extraction_pipeline": "github-release-tarball-2026-06",
-            "spdx_license": "Apache-2.0",
-            "spdx_license_source": "github_api",
-        }
-    )
-    silver = normalize(state, code_bronze, b"def fit_model(x):\n    return x\n")
-    assert silver is not None
-    assert silver.source_format == "code"
-    assert silver.extraction_pipeline == "github-release-tarball-2026-06"
-    assert silver.spdx_license == "Apache-2.0"
-    assert "def fit_model" in silver.text
-
-
-@pytest.mark.parametrize("source_format", ["latex", "markdown"])
-def test_normalize_scientific_text_skips_html_extraction(
-    bronze_record: BronzeRecord, source_format: str
-) -> None:
-    state = _state(_FakeS3(b""))
-    scientific_bronze = bronze_record.model_copy(
-        update={
-            "url": "https://openreview.net/pdf?id=paper1",
-            "source_format": source_format,
-            "source_feed": "openreview-backfill",
-            "extraction_pipeline": "reviewarena-ocr-markdown-v1",
-            "spdx_license": "unknown",
-            "spdx_license_source": "unknown",
-            "training_usage": "posttrain_transform_only",
-        }
-    )
-    payload = b"# A scientific paper\n\nWe derive the objective $L(theta)$ and evaluate it."
-
-    silver = normalize(state, scientific_bronze, payload)
-
-    assert silver is not None
-    assert silver.source_format == source_format
-    assert "derive the objective" in silver.text
-    assert silver.extracted_with == "reviewarena-ocr-markdown-v1"
 
 
 def test_normalize_structured_metadata_extracts_human_text(bronze_record: BronzeRecord) -> None:
@@ -303,20 +355,23 @@ def test_missing_non_code_license_stops_before_minio_and_processing(
     assert s3.calls == []
 
 
-def test_missing_code_license_stops_before_minio_and_processing(
-    bronze_record: BronzeRecord,
+def test_temporarily_disabled_pdf_is_deferred_before_minio(
+    bronze_record: BronzeRecord, monkeypatch: Any
 ) -> None:
-    s3 = _FakeS3(b"must not be read")
+    monkeypatch.setenv("S2P_PDF_PROCESSING_ENABLED", "0")
+    s3 = _FakeS3(b"%PDF-1.7\nnot fetched", gzip_encoded=False)
     state = _state(s3)
-    unlicensed = bronze_record.model_copy(
+    pdf = bronze_record.model_copy(
         update={
-            "source_format": "code",
-            "spdx_license": None,
-            "spdx_license_source": "unknown",
+            "source_format": "pdf",
+            "content_type": "application/pdf",
+            "extraction_pipeline": "docling-pdf-cpu-2.114.0",
         }
     )
 
-    assert process_bronze_payload(state, unlicensed.model_dump_json().encode()) is None
+    with pytest.raises(PdfProcessingTemporarilyDisabled):
+        process_bronze_payload(state, pdf.model_dump_json().encode())
+
     assert s3.calls == []
 
 

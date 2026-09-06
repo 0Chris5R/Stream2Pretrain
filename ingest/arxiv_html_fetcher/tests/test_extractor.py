@@ -20,14 +20,14 @@ from ingest.arxiv_html_fetcher.extractor import (
 
 ARXIV_NATIVE = """<!DOCTYPE html>
 <html><head>
-<title>Streaming Decon-Gate</title>
+<title>Streaming Scientific Curation</title>
 <meta name="citation_publication_date" content="2026/05/12">
 <meta name="citation_license" content="https://creativecommons.org/licenses/by/4.0/">
 </head><body>
 <article>
-<h1>Streaming Decon-Gate</h1>
+<h1>Streaming Scientific Curation</h1>
 <h2>1. Introduction</h2>
-<p>We propose a streaming decon-gate for fresh pretraining data.</p>
+<p>We propose a streaming curation pipeline for fresh pretraining data.</p>
 <math display="block"><annotation encoding="application/x-tex">\\mathcal{L} = -\\sum_i p_i \\log q_i</annotation></math>
 <h2>2. Method</h2>
 <p>The inline rate <math display="inline"><annotation encoding="application/x-tex">\\lambda</annotation></math> tracks per-snapshot lag.</p>
@@ -92,7 +92,7 @@ def test_parse_submission_date_handles_known_arxiv_formats() -> None:
 def test_extract_arxiv_html_parses_metadata_and_math() -> None:
     doc = extract_arxiv_html(ARXIV_NATIVE)
     assert doc.extraction_pipeline == ARXIV_PIPELINE
-    assert doc.title == "Streaming Decon-Gate"
+    assert doc.title == "Streaming Scientific Curation"
     assert doc.spdx_license == "CC-BY-4.0"
     assert doc.submission_date is not None
     assert doc.submission_date.year == 2026
@@ -102,7 +102,7 @@ def test_extract_arxiv_html_parses_metadata_and_math() -> None:
     # Inline math must keep the lambda token wrapped in single dollars.
     assert "$\\lambda$" in doc.text
     # Headings must be captured with their original level prefix.
-    assert any(h.startswith("# Streaming Decon-Gate") for h in doc.headings)
+    assert any(h.startswith("# Streaming Scientific Curation") for h in doc.headings)
     assert any(h.startswith("## 1. Introduction") for h in doc.headings)
     assert any(h.startswith("### 2.1 Validity intervals") for h in doc.headings)
     assert doc.word_count > 0
@@ -128,5 +128,5 @@ def test_extract_arxiv_html_handles_documents_without_metadata() -> None:
 
 def test_extract_arxiv_html_accepts_bytes_input() -> None:
     doc = extract_arxiv_html(ARXIV_NATIVE.encode("utf-8"))
-    assert doc.title == "Streaming Decon-Gate"
+    assert doc.title == "Streaming Scientific Curation"
     assert "$$" in doc.text

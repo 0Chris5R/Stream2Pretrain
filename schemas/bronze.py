@@ -7,21 +7,20 @@ the metadata pointer is what flows on the ``raw.fetched`` Redpanda topic.
 
 Field semantics match RESEARCH.md section 6.
 
-v0.2.0 adds three classifier columns shared by Bronze, Silver, and Gold:
+Bronze, Silver and Gold share source provenance:
 
 - ``source_format`` records the wire shape the document arrived in (HTML page
-  vs PDF vs LaTeX source vs code file vs raw web vs metadata-only vs review
+  vs PDF vs LaTeX source vs raw web vs metadata-only
   text). Downstream operators dispatch on this column to pick the correct
   extractor pipeline.
 - ``extraction_pipeline`` is a free-form identifier of the operator chain that
-  produced the record (e.g. ``"arxiv-html-2026-06"`` for the native arXiv HTML
-  fetcher, ``"marker-pdf-1.5"`` for a future PDF-Markdown sidecar). Together
+  produced the record. Together
   with ``minhash_backend`` on the Silver record, this gives forensic operators
   enough information to reproduce any document.
-- ``spdx_license`` carries the OSI-list verified SPDX id that the source
+- ``spdx_license`` carries the item-level licence identifier that the source
   attached to the document; ``spdx_license_source`` records where the
-  classifier read it from. Both default to ``unknown`` for sources that do not
-  publish a machine-readable license.
+  resolver read it from. Missing identifiers are ``None`` with provenance
+  ``unknown``.
 """
 
 from __future__ import annotations
@@ -35,7 +34,10 @@ DocId = Annotated[
     str,
     Field(
         pattern=r"^sha256:[0-9a-f]{64}$",
-        description="Content-addressed document id, sha256 of the canonical URL.",
+        description=(
+            "Stable document-revision id. Usually the sha256 of the canonical URL; "
+            "exact content projections may bind an immutable source object."
+        ),
     ),
 ]
 TraceId = Annotated[
@@ -51,36 +53,26 @@ SourceFormat = Literal[
     "pdf",
     "latex",
     "markdown",
-    "code",
     "web",
     "metadata",
-    "review",
 ]
 """Wire shape of the source document.
 
-- ``html``: a rendered HTML page (arXiv ``/html/<id>``, ar5iv, AI-lab blog).
-- ``pdf``: a binary PDF (OpenReview, ACL Anthology, conference proceedings).
-- ``latex``: TeX/LaTeX source from arXiv ``s3://arxiv/src``.
-- ``markdown``: scientific full text already converted to Markdown by a
-  source-side OCR or document extraction pipeline.
-- ``code``: a single source file extracted from a release tarball or
-  ``the-stack-v2`` blob.
-- ``web``: an opaque crawled web page (CommonCrawl-derived seeds).
+- ``html``: a rendered HTML page, such as arXiv ``/html/<id>``.
+- ``pdf``: a binary paper PDF.
+- ``latex``: TeX/LaTeX source.
+- ``markdown``: structured Markdown text, including HF cards.
+- ``web``: an ordinary web-prose document.
 - ``metadata``: an OAI-PMH or REST JSON record with no body, only metadata.
-- ``review``: peer-review prose from OpenReview (separate from the paper PDF
-  it discusses).
 """
 
 SpdxLicenseSource = Literal[
-    "github_api",
     "file_header",
     "http_link",
     "html_meta",
     "rss_entry",
     "oai_metadata",
     "arxiv_api",
-    "openreview_note",
-    "openreview_terms",
     "hf_card",
     "archived_page",
     "source_terms",
@@ -90,13 +82,11 @@ SpdxLicenseSource = Literal[
 ]
 """Provenance of the SPDX id attached to the document.
 
-- ``github_api``: GitHub ``/repos/{o}/{r}/license`` response.
 - ``file_header``: a licence identifier attached to the individual file.
 - ``http_link``: an RFC 8288 ``Link`` response header with ``rel=license``.
 - ``html_meta``: ``<meta name="dc.rights">`` / ``<meta name="license">`` tag
   on the source HTML page.
-- ``dataset_metadata``: per-blob attestation in a HuggingFace dataset
-  (``the-stack-v2``, ``stack-edu``, etc.).
+- ``dataset_metadata``: an item-level attestation in a dataset record.
 - ``manual_override``: explicit synthetic-fixture or audited administrative
   provenance. Normal SourceFeed CRDs accept only ``per-record`` resolution and
   cannot use this value as a source-wide default.
@@ -148,7 +138,7 @@ class BronzeRecord(BaseModel):
         default=None, ge=0, description="Size of the stored raw payload in bytes."
     )
 
-    # v0.2.0 classifier columns (carried forward to Silver and Gold).
+    # Source provenance (carried forward to Silver and Gold).
     source_format: SourceFormat = Field(
         default="html",
         description=("Wire shape of the document; downstream extractors dispatch on this."),
@@ -166,7 +156,7 @@ class BronzeRecord(BaseModel):
         default=None,
         max_length=128,
         description=(
-            "OSI-list verified SPDX id (e.g. 'Apache-2.0'); None when no "
+            "Item-level licence identifier (e.g. 'Apache-2.0'); None when no "
             "machine-readable license was attached to the source."
         ),
     )
