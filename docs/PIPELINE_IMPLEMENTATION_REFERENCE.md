@@ -366,6 +366,7 @@ prompt version.
 The processing order is: six evidence-graph passes, independent graph critic,
 up to two bounded graph repair and recheck rounds, task design, deterministic
 task normalization, one bounded task repair against exact validation errors,
+one paper-grounded SFT recovery attempt when both normal proposals fail,
 independent answerability audit, completion of omitted per-task decisions,
 diversity selection, two independent solver plans with bounded frozen tools,
 grounding critic, completion of omitted per-trajectory decisions, SFT
@@ -375,16 +376,31 @@ verifier critiques receive one structure-only repair. A second invalid verifier
 critique falls back to the deterministic task-derived contract rather than
 accepting an unchecked model judgment.
 
-Task-family priority is derivation, assumption/consequence, single-paper
+Graph criticism and both repairs receive the full prompt-safe PaperBundle, not
+only spans already referenced by the candidate graph. After two unsuccessful
+repairs, a non-empty graph that still satisfies deterministic span and edge
+integrity is retained with the unresolved critic findings recorded as
+uncertainties. Node IDs still explicitly marked invalid are removed with their
+incident edges; downstream task, grounding and executable validation remain
+mandatory.
+
+RL route precedes SFT route. Within each route, task-family priority is derivation, assumption/consequence, single-paper
 research, result reproduction, experiment configuration, figure/table,
 claim/evidence, method DAG and grounded explanation, then corruption diagnosis.
 Up to six tasks are proposed and up to three diverse tasks are retained per
 paper. Low-value proposals are omitted rather than filling a quota. No synthetic
-edge-reversal task is added. Prompt provenance uses `paper-foundry-prompts-v6`.
+edge-reversal task is added. Prompt provenance uses `paper-foundry-prompts-v7`.
 The grounding critic records missing scientific deliverables per trajectory.
 An unsupported claim, contradiction or missing required output blocks that
 trajectory even if the critic's summary boolean is positive. Formatting concerns
 remain the responsibility of deterministic validators.
+
+Task routes are deterministic. The model-proposed route is normalized to RL only
+when the task has difficulty 4 or 5, multiple reasoning operations and a finite
+executable outcome for its family; otherwise a substantive task is SFT. The
+answerability critic sees no hidden target values and can reject an unanswerable
+or leaking task, but cannot downgrade RL based on novelty. Routed solver failures
+are persisted as rejected artifacts in their original pool.
 
 ## 5. Verbatim model prompt templates
 
@@ -453,14 +469,17 @@ Identify caveats, changing definitions, contradictory results, negative evidence
 You are a fresh scientific grounding critic with no access to compiler reasoning.
 Return one JSON object that validates exactly against REQUIRED_JSON_SCHEMA. Check source-span
 grounding, atomicity, overclaims, missing qualifiers, equation dependencies, method order,
-conflicts, and suitability for deterministic verification.
+conflicts, and suitability for deterministic verification. Set accepted=false only for a concrete
+problem that would make downstream scientific tasks unsafe or unanswerable, identify the affected
+node or relation whenever possible, and give an actionable repair. Missing optional coverage is an
+uncertainty, not a reason to reject an otherwise grounded graph.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(GraphCritique.model_json_schema()).decode()}
 ```
 
 ```text
 PAPER_BUNDLE:
-{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}
+{bundle_prompt_json(bundle).decode()}
 PRIVATE_OFFICIAL_ORACLE_RESULTS:
 {canonical_json(oracle_results).decode()}
 CANDIDATE_GRAPH:
@@ -486,7 +505,7 @@ REQUIRED_JSON_SCHEMA:
 ```text
 Return only a bounded delta against GRAPH that resolves the CRITIQUE; do not restate unchanged graph content.
 PAPER_BUNDLE:
-{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}
+{bundle_prompt_json(bundle).decode()}
 PRIVATE_OFFICIAL_ORACLE_RESULTS:
 {canonical_json(oracle_results).decode()}
 GRAPH:
@@ -518,6 +537,12 @@ must involve a multi-step scientific failure or algorithmic chain, not schema re
 configuration or reproduction tasks require audited oracle results. Keep answers hidden, context paper-local,
 and distractors same-paper only.
 
+Prefer RL whenever the paper supports a difficult task with an executable finite outcome. The strongest RL
+targets are multi-equation derivations, scaling-law or regime calculations, synthesis across several results,
+and counterfactual assumption changes with a checkable numeric, symbolic, or discrete consequence. Do not
+reserve RL for unusually novel task formats, and do not convert a verifiable derivation into SFT merely because
+its answer is concise. Use SFT directly only when the best substantive task has no sound deterministic outcome.
+
 Construct the scientific solution before proposing the task: identify the supplied inputs, linked reasoning
 steps, requested outputs, and independently checkable target values. Every necessary equation, table cell,
 assumption and definition must exist in the learner-accessible paper context or frozen tools, not just in the
@@ -528,8 +553,9 @@ an edge reversal. Require consequences beyond the correction itself. Two unrelat
 or extra graph identifiers do not make a deep task. Prefer, when supported, deriving a LoRA scaling relation
 and checking its limiting regime, composing affine log-score transformations, deriving a T-SVD factorization
 consequence, or analyzing a quasi-Newton approximation under changed assumptions. These are depth examples,
-not permission to introduce topics or mathematics absent from this paper. An empty task list is better than
-invented difficulty. SFT should explain a substantive paper-specific inference, not pad a trivial task.
+not permission to introduce topics or mathematics absent from this paper. Return an empty task list only when
+the paper contains no answerable, substantive paper-specific reasoning task of either route. SFT should explain
+a substantive paper-specific inference, not pad a trivial task.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {canonical_json(TaskBatch.model_json_schema()).decode()}
@@ -541,7 +567,7 @@ Propose up to {count} materially different TaskSpecs. Cover the strongest suppor
 AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:
 {canonical_json(sorted(oracle_result_ids)).decode()}
 PAPER_BUNDLE:
-{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}
+{bundle_prompt_json(bundle).decode()}
 EVIDENCE_GRAPH:
 {canonical_json(graph).decode()}
 ```
@@ -569,7 +595,19 @@ FIRST_PROPOSAL:
 AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:
 {canonical_json(sorted(oracle_ids)).decode()}
 PAPER_BUNDLE:
-{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}
+{bundle_prompt_json(bundle).decode()}
+EVIDENCE_GRAPH:
+{canonical_json(graph).decode()}
+```
+
+If that repair also produces no valid task, the final SFT recovery prompt is:
+
+```text
+Both normal task-design attempts failed deterministic validation. Return one or two answerable SFT TaskSpecs grounded in this paper. Choose the strongest substantive paper-specific explanation, comparison, limitation analysis, or synthesis supported by the evidence. Ask for multiple linked reasoning steps, not a summary, lookup, schema exercise, or invented calculation. Set route to sft and do not return an empty list when the graph contains a supported scientific claim, method, finding, equation, limitation, or comparison.
+PRIOR_DETERMINISTIC_ERRORS:
+{canonical_json(validation_errors).decode()}
+PAPER_BUNDLE:
+{bundle_prompt_json(bundle).decode()}
 EVIDENCE_GRAPH:
 {canonical_json(graph).decode()}
 ```
@@ -582,8 +620,10 @@ with decisions. Reject tasks that require external knowledge, expose their answe
 incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier when
 proposed for RL. Valuable answerable open-ended SFT synthesis does not require a finite RL outcome.
 Also reject shallow tasks whose substance is one lookup, one arithmetic operation, internal-ID listing,
-simple edge reversal, or manifest-format compliance. Mark unique_enough_for_rl only for difficulty 4-5
-work requiring multiple linked reasoning steps and an answer-facing numeric, symbolic, or discrete outcome.
+simple edge reversal, or manifest-format compliance. Routing is determined independently by executable code;
+do not demand novelty, compare the task with other tasks, or downgrade an answerable task because its format is
+familiar. A difficulty 4-5 task with multiple linked reasoning steps and an answer-facing numeric, symbolic,
+or discrete outcome is valuable RL material.
 Do not confuse a long instruction with deep reasoning. A concise formula derivation can be deep; a long list
 of requested fields can still be shallow.
 Check each requested output against the actual learner-accessible spans and tools, not merely against
@@ -602,8 +642,8 @@ PAPER_BUNDLE:
 {bundle_prompt_json(bundle, span_ids=task_spans).decode()}
 EVIDENCE_GRAPH:
 {canonical_json(graph).decode()}
-TASKS:
-{canonical_json(tasks).decode()}
+PUBLIC_TASKS:
+{canonical_json([_task_without_hidden_answers(task) for task in tasks]).decode()}
 ```
 
 When a valid response omits one or more task decisions, the completion user
@@ -706,11 +746,13 @@ instructions.
 The solution-contract repair user prompt is exactly:
 
 ```text
-Repair this final reference solution's structured manifest without changing its scientific conclusion. Claims and method nodes use graph node IDs. Numeric expected values use numeric_results entries with the exact target key. For a derivation task, string expected values use equations entries with the exact target key; for all other task families, string expected values use configuration entries. Preserve the readable report, evidence, and required relations.
+Repair only this final reference solution's structured manifest. Do not change the readable report or add a value, conclusion, relation, or citation that is not already explicit in that report. Claims and method nodes use graph node IDs. Numeric outputs use numeric_results entries with the supplied output key. Derivation outputs use equations entries with the supplied output key; other discrete outputs use configuration entries. If the report does not contain a required scientific result, leave it absent so deterministic validation can reject the trajectory.
 CONTRACT_VIOLATIONS:
 {canonical_json(violations).decode()}
-TASK:
-{canonical_json(task).decode()}
+PUBLIC_TASK_AND_OUTPUT_SHAPE:
+{canonical_json(_task_without_hidden_answers(task)).decode()}
+GRAPH:
+{canonical_json(graph).decode()}
 CURRENT_FINAL_TURN:
 {canonical_json(turn).decode()}
 ```
@@ -745,8 +787,8 @@ PAPER_BUNDLE:
 {bundle_prompt_json(bundle, span_ids=task_spans).decode()}
 GRAPH:
 {canonical_json(graph).decode()}
-TASK:
-{canonical_json(task).decode()}
+PUBLIC_TASK:
+{canonical_json(_task_without_hidden_answers(task)).decode()}
 SOLUTIONS:
 {canonical_json(trajectories).decode()}
 ```
@@ -788,8 +830,8 @@ TASK:
 {canonical_json(task).decode()}
 GRAPH:
 {canonical_json(graph).decode()}
-PAPER_SPAN_IDS:
-{canonical_json([span.span_id for span in bundle.stable_spans]).decode()}
+PAPER_CONTEXT:
+{bundle_prompt_json(bundle, span_ids=public_spans).decode()}
 ```
 
 ```text
@@ -815,8 +857,8 @@ GRAPH:
 {canonical_json(graph).decode()}
 VERIFIER:
 {canonical_json(spec).decode()}
-SPAN_IDS:
-{canonical_json([span.span_id for span in bundle.stable_spans]).decode()}
+PAPER_CONTEXT:
+{bundle_prompt_json(bundle, span_ids=public_spans).decode()}
 ```
 
 ```text
@@ -829,8 +871,8 @@ CURRENT_VERIFIER:
 {canonical_json(spec).decode()}
 CRITIQUE:
 {canonical_json(critique).decode()}
-SPAN_IDS:
-{canonical_json([span.span_id for span in bundle.stable_spans]).decode()}
+PAPER_CONTEXT:
+{bundle_prompt_json(bundle, span_ids=public_spans).decode()}
 ```
 
 A schema-invalid verifier critique receives this one structure-only repair:
@@ -944,7 +986,10 @@ reward to zero. Passing requires every hard predicate and reward >= 0.999.
   the inclusive two-element bound; every `forbidden_keys` key must be absent.
   At least one supported check must exist and all checks must pass.
 - `report_manifest_consistency`: the stripped report and at least one committed
-  manifest or evidence ID must both be present.
+  manifest or evidence ID must both be present. Numeric and symbolic targets
+  must be visible in the readable answer. A discrete target must occur verbatim
+  or share a substantive token with the answer; the grounding critic owns
+  semantic paraphrase review while the manifest still enforces the exact value.
 
 Provider-authored predicates are canonicalized against the hidden task before
 execution. Unknown graph/span/value targets reject normalization. Model choices

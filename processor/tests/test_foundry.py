@@ -49,12 +49,16 @@ from processor.foundry.symbolic import symbolically_equivalent
 from processor.foundry.tasking import (
     GroundingCritique,
     SolvedTask,
+    SolverFailure,
     SolverTurn,
     TaskFactory,
     TaskOutputError,
     TrajectoryGroundingDecision,
+    _answerability_prompt,
     _answerability_system,
     _designer_system,
+    _ensure_solution_contract,
+    _grounding_prompt,
     _grounding_system,
     _machine_verifiable,
     _normalize_expected_values,
@@ -587,6 +591,67 @@ def test_graph_repair_is_a_bounded_delta_that_preserves_valid_nodes() -> None:
     assert "do not restate unchanged graph content" in repair_call["user"]
 
 
+def test_graph_repair_sees_full_bundle_and_retains_deterministically_valid_graph() -> None:
+    extra_text = "A qualification omitted from the candidate graph."
+    bundle = _bundle().model_copy(
+        update={
+            "stable_spans": [
+                *_bundle().stable_spans,
+                StableSpan(
+                    span_id="section-2.span1",
+                    section_id="section-2",
+                    section_role="limitations",
+                    ordinal=1,
+                    text=extra_text,
+                    text_hash=sha256(extra_text),
+                ),
+            ]
+        }
+    )
+
+    class RejectingCriticControl:
+        config = SimpleNamespace(prompt_version="test-v1")
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.calls.append(kwargs)
+            if kwargs["role"] == "structure_compiler":
+                data: dict[str, Any] = {
+                    "nodes": [
+                        {
+                            "id": "claim:1",
+                            "type": "claim",
+                            "canonical_text": "The reported result is supported.",
+                            "supporting_spans": ["section-1.span1"],
+                        }
+                    ]
+                }
+            elif kwargs["role"] == "graph_critic":
+                data = {
+                    "accepted": False,
+                    "findings": ["The qualification remains uncertain."],
+                    "missing_evidence": ["Inspect the limitations section."],
+                    "repair_instructions": ["Attach the qualification if supported."],
+                }
+            else:
+                data = {}
+            return data, _trace(f"trace:{len(self.calls)}")
+
+    control = RejectingCriticControl()
+    graph, _traces = EvidenceGraphCompiler(control).compile(  # type: ignore[arg-type]
+        job_id="job:retained-graph",
+        bundle=bundle,
+    )
+
+    assert [node.id for node in graph.nodes] == ["claim:1"]
+    assert any("qualification remains uncertain" in value for value in graph.uncertainties)
+    repair_calls = [call for call in control.calls if call["role"] == "graph_repair"]
+    assert len(repair_calls) == 2
+    assert all(extra_text in call["user"] for call in repair_calls)
+
+
 def test_solver_turn_drops_symbolic_null_from_numeric_results() -> None:
     raw = {
         "status": "final",
@@ -870,7 +935,7 @@ def test_routed_sft_with_no_valid_solution_is_persisted_with_exact_failure_trace
         solved=[],
         common_traces=[],
         oracle_results=[],
-        unsolved_sft=[
+        unsolved_tasks=[
             UnsolvedTask(
                 task=task,
                 reason=str(failure),
@@ -900,6 +965,61 @@ def test_routed_sft_with_no_valid_solution_is_persisted_with_exact_failure_trace
         "trace:4",
     ]
     assert store.artifact(artifact.artifact_id) is not None
+
+
+def test_routed_rl_with_no_valid_solution_is_persisted_as_rejected_environment(
+    tmp_path: Path,
+) -> None:
+    task = _task().model_copy(update={"route": "rl"})
+    trace = _trace("trace:rl-solver").model_copy(update={"role": "solver_a"})
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+    job_id, _created = store.start_job(
+        paper_id=_bundle().paper_id,
+        paper_hash=_bundle().paper_hash,
+        doc_id="doc:unsolved-rl",
+        policy_version="posttrain-policy-v6",
+    )
+    pipeline = FoundryPipeline(
+        config=FoundryConfig(),
+        store=store,
+        control=object(),  # type: ignore[arg-type]
+        package_sink=object(),  # type: ignore[arg-type]
+    )
+
+    artifacts = pipeline._validate_and_package(
+        job_id=job_id,
+        bundle=_bundle(),
+        graph=_graph(),
+        solved=[],
+        common_traces=[],
+        oracle_results=[],
+        unsolved_tasks=[
+            UnsolvedTask(
+                task=task,
+                reason="both blind solvers returned invalid responses",
+                traces=(trace,),
+                solver_failures=(
+                    SolverFailure(
+                        role="solver_a",
+                        reason="invalid response",
+                        traces=(trace,),
+                    ),
+                ),
+            )
+        ],
+    )
+
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact.kind == "rl_environment"
+    assert artifact.pool == "rl"
+    assert artifact.status == "rejected"
+    assert artifact.validation.details["rejection_reason"] == (
+        "routed RL task produced no valid trajectory"
+    )
+    assert artifact.validation.details["task_failure"] == (
+        "both blind solvers returned invalid responses"
+    )
 
 
 def test_grounding_gate_ignores_only_proven_format_false_negative() -> None:
@@ -971,7 +1091,7 @@ def test_v2_prompts_encode_deep_task_and_per_trajectory_contracts() -> None:
     assert "per-condition results" in solver
     assert "missing_required_outputs" in grounding
     assert "An honest statement" in grounding
-    assert FoundryConfig().prompt_version == "paper-foundry-prompts-v6"
+    assert FoundryConfig().prompt_version == "paper-foundry-prompts-v7"
 
 
 def test_verifier_normalizes_compiler_field_placement_and_expected_targets() -> None:
@@ -1453,7 +1573,7 @@ def test_v2_verifier_directly_enforces_every_scientific_contract_in_package(
         assert score_response(variant.model_dump_json(), environment_root) == expected_score, name
 
 
-def test_v2_verifier_contract_cannot_be_authored_by_provider() -> None:
+def test_v2_verifier_compiler_cannot_remove_deterministic_contract() -> None:
     task, graph = _deep_derivation()
 
     class AuditOnlyControl:
@@ -1462,6 +1582,17 @@ def test_v2_verifier_contract_cannot_be_authored_by_provider() -> None:
 
         def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
             self.roles.append(kwargs["role"])
+            if kwargs["role"] == "verifier_compiler":
+                return (
+                    {
+                        "verifier_id": "provider-verifier",
+                        "task_id": "wrong-task",
+                        "version": 1,
+                        "predicates": [],
+                        "determinism_seed": 0,
+                    },
+                    _trace("trace:verifier-compiler"),
+                )
             return (
                 {
                     "accepted": True,
@@ -1481,10 +1612,10 @@ def test_v2_verifier_contract_cannot_be_authored_by_provider() -> None:
         task=task,
     )
 
-    assert control.roles == ["verifier_critic"]
-    assert len(traces) == 1
+    assert control.roles == ["verifier_compiler", "verifier_critic"]
+    assert len(traces) == 2
     assert verifier.version == 2
-    assert verifier.critic_audit[0]["action"] == "audit_only_no_contract_mutation"
+    assert verifier.critic_audit[0]["accepted"] is True
     assert {predicate.target for predicate in verifier.predicates if predicate.target} <= set(
         [*task.hidden_targets.required_nodes, *task.hidden_targets.expected_values]
     )
@@ -1513,6 +1644,92 @@ def test_task_selection_prioritizes_deep_families_and_caps_repetition() -> None:
         "assumption_consequence",
         "corruption_diagnosis",
     ]
+
+
+def test_task_selection_prefers_rl_over_sft_before_family_priority() -> None:
+    task, _graph_value = _deep_derivation()
+    sft_derivation = task.model_copy(update={"task_id": "task:sft", "route": "sft"})
+    rl_assumption = task.model_copy(
+        update={
+            "task_id": "task:rl",
+            "family": "assumption_consequence",
+            "route": "rl",
+        }
+    )
+
+    selected = _select_diverse_tasks([sft_derivation, rl_assumption], limit=1)
+
+    assert selected == [rl_assumption]
+
+
+def test_grounding_critic_never_receives_hidden_answer_values() -> None:
+    task, graph = _deep_derivation()
+    task = task.model_copy(
+        update={
+            "hidden_targets": task.hidden_targets.model_copy(
+                update={"expected_values": {"equation:result": "secret_symbolic_target"}}
+            )
+        }
+    )
+    prompt = _grounding_prompt(_bundle(), graph, task, [])
+
+    assert '"hidden_targets"' not in prompt
+    assert "secret_symbolic_target" not in prompt
+    assert '"output_targets"' in prompt
+
+
+def test_answerability_critic_never_receives_hidden_answer_values() -> None:
+    task, graph = _deep_derivation()
+    task = task.model_copy(
+        update={
+            "hidden_targets": task.hidden_targets.model_copy(
+                update={"expected_values": {"equation:result": "secret_symbolic_target"}}
+            )
+        }
+    )
+    prompt = _answerability_prompt(_bundle(), graph, [task])
+
+    assert '"hidden_targets"' not in prompt
+    assert "secret_symbolic_target" not in prompt
+    assert '"output_targets"' in prompt
+
+
+def test_solution_contract_repair_never_receives_hidden_answer_values() -> None:
+    task, graph = _deep_derivation()
+    task = task.model_copy(
+        update={
+            "hidden_targets": task.hidden_targets.model_copy(
+                update={"expected_values": {"equation:result": "secret_symbolic_target"}}
+            )
+        }
+    )
+    turn = SolverTurn(
+        status="final",
+        report="The available evidence does not establish the requested expression.",
+        answer_manifest=AnswerManifest(equations=[]),
+    )
+
+    class CaptureRepairControl:
+        def __init__(self) -> None:
+            self.user = ""
+
+        def call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+            self.user = kwargs["user"]
+            return turn.model_dump(mode="json"), _trace("trace:contract-repair")
+
+    control = CaptureRepairControl()
+    with pytest.raises(TaskOutputError, match="remained incomplete"):
+        _ensure_solution_contract(
+            control=control,  # type: ignore[arg-type]
+            turn=turn,
+            job_id="job:contract-repair",
+            paper_id=_bundle().paper_id,
+            role="solver_a",
+            task=task,
+            graph=graph,
+        )
+
+    assert "secret_symbolic_target" not in control.user
 
 
 def test_derivation_manifest_does_not_require_public_span_ids() -> None:

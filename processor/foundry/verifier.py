@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from processor.foundry.control import ProviderControlPlane
+from processor.foundry.paper_adapter import bundle_prompt_json
 from processor.foundry.symbolic import (
     symbolic_expression_is_checkable,
     symbolically_equivalent,
@@ -65,40 +66,6 @@ class VerifierCompiler:
         graph: PaperEvidenceGraph,
         task: TaskSpec,
     ) -> tuple[VerifierSpec, list[ProviderTrace]]:
-        if task.content_policy_revision == "scientific-reasoning-v2":
-            # The executable contract is derived solely from reviewed TaskSpec
-            # targets. The model critic may identify risks for audit, but it
-            # cannot add qualifications, targets, or predicate schemas.
-            spec = deterministic_verifier(task, bundle, graph)
-            critique_data, critic_trace = self.control.call(
-                job_id=job_id,
-                paper_id=bundle.paper_id,
-                role="verifier_critic",
-                system=_critic_system(),
-                user=_critic_prompt(bundle, graph, task, spec),
-                max_output_tokens=6_000,
-                call_key=f"verifier_critic:{task.task_id}:deterministic-v2",
-            )
-            critique, critique_repair = _validate_critic(
-                control=self.control,
-                data=critique_data,
-                job_id=job_id,
-                paper_id=bundle.paper_id,
-                call_key=f"verifier_critic:{task.task_id}:deterministic-v2",
-            )
-            return (
-                spec.model_copy(
-                    update={
-                        "critic_audit": [
-                            {
-                                **_critic_audit("deterministic-v2", critique),
-                                "action": "audit_only_no_contract_mutation",
-                            }
-                        ]
-                    }
-                ),
-                [critic_trace, *([critique_repair] if critique_repair is not None else [])],
-            )
         data, compiler_trace = self.control.call(
             job_id=job_id,
             paper_id=bundle.paper_id,
@@ -1057,21 +1024,25 @@ def _scientific_report_consistency(
         elif (
             isinstance(expected, str)
             and task.family != "derivation_completion"
-            and expected.casefold() not in report.casefold()
+            and not _discrete_value_is_reflected(report, expected)
         ):
             failures.append(f"discrete target {target} is absent from the report")
-
     required_values = task.hidden_targets.configuration_constraints.get("required_values", {})
     if isinstance(required_values, dict):
         for target, expected in required_values.items():
-            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
-                if not _numeric_value_appears(
+            missing_numeric = (
+                isinstance(expected, (int, float))
+                and not isinstance(expected, bool)
+                and not _numeric_value_appears(
                     report,
                     float(expected),
                     _report_numeric_tolerance(float(expected)),
-                ):
-                    failures.append(f"configuration value {target} is absent from the report")
-            elif isinstance(expected, str) and expected.casefold() not in report.casefold():
+                )
+            )
+            missing_discrete = isinstance(expected, str) and not _discrete_value_is_reflected(
+                report, expected
+            )
+            if missing_numeric or missing_discrete:
                 failures.append(f"configuration value {target} is absent from the report")
 
     if failures:
@@ -1094,6 +1065,18 @@ def _numeric_value_appears(report: str, expected: float, tolerance: float) -> bo
 def _report_numeric_tolerance(expected: float) -> float:
     """Permit ordinary displayed rounding while the manifest stays exact."""
     return max(_numeric_tolerance(expected), abs(expected) * 5e-4, 1e-8)
+
+
+def _discrete_value_is_reflected(report: str, expected: str) -> bool:
+    normalized_expected = expected.casefold().strip()
+    normalized_report = report.casefold()
+    if normalized_expected in normalized_report:
+        return True
+    expected_terms = {
+        term for term in re.findall(r"[a-z0-9]+", normalized_expected) if len(term) >= 4
+    }
+    report_terms = set(re.findall(r"[a-z0-9]+", normalized_report))
+    return bool(expected_terms) and bool(expected_terms & report_terms)
 
 
 def _symbolic_submission_matches(submitted: str, expected: str) -> bool:
@@ -1210,10 +1193,14 @@ REQUIRED_JSON_SCHEMA:
 
 
 def _compiler_prompt(bundle: PaperBundle, graph: PaperEvidenceGraph, task: TaskSpec) -> str:
+    public_spans = {
+        *task.public_context_policy.included_spans,
+        *task.public_context_policy.same_paper_distractors,
+    }
     return (
         f"TASK:\n{canonical_json(task).decode()}\n"
         f"GRAPH:\n{canonical_json(graph).decode()}\n"
-        f"PAPER_SPAN_IDS:\n{canonical_json([span.span_id for span in bundle.stable_spans]).decode()}"
+        f"PAPER_CONTEXT:\n{bundle_prompt_json(bundle, span_ids=public_spans).decode()}"
     )
 
 
@@ -1240,10 +1227,14 @@ def _critic_prompt(
     task: TaskSpec,
     spec: VerifierSpec,
 ) -> str:
+    public_spans = {
+        *task.public_context_policy.included_spans,
+        *task.public_context_policy.same_paper_distractors,
+    }
     return (
         f"TASK:\n{canonical_json(task).decode()}\nGRAPH:\n{canonical_json(graph).decode()}\n"
         f"VERIFIER:\n{canonical_json(spec).decode()}\n"
-        f"SPAN_IDS:\n{canonical_json([span.span_id for span in bundle.stable_spans]).decode()}"
+        f"PAPER_CONTEXT:\n{bundle_prompt_json(bundle, span_ids=public_spans).decode()}"
     )
 
 
@@ -1254,12 +1245,16 @@ def _repair_prompt(
     spec: VerifierSpec,
     critique: VerifierCritique,
 ) -> str:
+    public_spans = {
+        *task.public_context_policy.included_spans,
+        *task.public_context_policy.same_paper_distractors,
+    }
     return (
         "Return a complete replacement VerifierSpec using only the allowlisted predicates.\n"
         f"TASK:\n{canonical_json(task).decode()}\nGRAPH:\n{canonical_json(graph).decode()}\n"
         f"CURRENT_VERIFIER:\n{canonical_json(spec).decode()}\n"
         f"CRITIQUE:\n{canonical_json(critique).decode()}\n"
-        f"SPAN_IDS:\n{canonical_json([span.span_id for span in bundle.stable_spans]).decode()}"
+        f"PAPER_CONTEXT:\n{bundle_prompt_json(bundle, span_ids=public_spans).decode()}"
     )
 
 

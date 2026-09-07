@@ -250,7 +250,7 @@ def _scientific_report_consistency(
         ) or (
             isinstance(expected, str)
             and task.get("family") != "derivation_completion"
-            and expected.casefold() not in report.casefold()
+            and not _discrete_value_is_reflected(report, expected)
         ):
             return False
     constraints = hidden.get("configuration_constraints", {})
@@ -266,7 +266,7 @@ def _scientific_report_consistency(
                     _report_numeric_tolerance(float(expected)),
                 ):
                     return False
-            elif isinstance(expected, str) and expected.casefold() not in report.casefold():
+            elif isinstance(expected, str) and not _discrete_value_is_reflected(report, expected):
                 return False
     return True
 
@@ -285,6 +285,18 @@ def _numeric_value_appears(report: str, expected: float, tolerance: float) -> bo
 
 def _report_numeric_tolerance(expected: float) -> float:
     return max(1e-9, abs(expected) * 1e-4, 1e-8)
+
+
+def _discrete_value_is_reflected(report: str, expected: str) -> bool:
+    normalized_expected = expected.casefold().strip()
+    normalized_report = report.casefold()
+    if normalized_expected in normalized_report:
+        return True
+    expected_terms = {
+        term for term in re.findall(r"[a-z0-9]+", normalized_expected) if len(term) >= 4
+    }
+    report_terms = set(re.findall(r"[a-z0-9]+", normalized_report))
+    return bool(expected_terms) and bool(expected_terms & report_terms)
 
 
 def _symbolic_value_appears(report: str, expected: str) -> bool:

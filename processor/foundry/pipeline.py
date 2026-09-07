@@ -215,9 +215,8 @@ class FoundryPipeline:
                             solver_failures=exc.solver_failures,
                         )
                     )
-            unsolved_sft = [value for value in task_failures if value.task.route == "sft"]
-            if not solved and not unsolved_sft:
-                raise ValueError("no task produced a valid solution after bounded repairs")
+            if not solved and not task_failures:
+                raise ValueError("no task reached solution generation")
             self._transition(
                 job_id,
                 bundle.paper_id,
@@ -236,7 +235,7 @@ class FoundryPipeline:
                 solved=solved,
                 common_traces=[*graph_traces, *task_traces],
                 oracle_results=oracle_results,
-                unsolved_sft=unsolved_sft,
+                unsolved_tasks=task_failures,
             )
         except ProviderOutputError as exc:
             # A completed but malformed structured response is deterministic
@@ -318,7 +317,7 @@ class FoundryPipeline:
         solved: list[SolvedTask],
         common_traces: list[ProviderTrace],
         oracle_results: list[OracleResult],
-        unsolved_sft: list[UnsolvedTask] | None = None,
+        unsolved_tasks: list[UnsolvedTask] | None = None,
     ) -> list[FoundryArtifactRecord]:
         artifacts = [
             self._rejected_artifact(
@@ -326,7 +325,7 @@ class FoundryPipeline:
                 bundle=bundle,
                 task=failure.task,
                 traces=[*common_traces, *failure.traces],
-                reason="routed SFT task produced no valid trajectory",
+                reason=f"routed {failure.task.route.upper()} task produced no valid trajectory",
                 details={
                     "failure_stage": "solution_generation",
                     "task": failure.task.model_dump(mode="json"),
@@ -344,7 +343,7 @@ class FoundryPipeline:
                     ),
                 },
             )
-            for failure in (unsolved_sft or [])
+            for failure in (unsolved_tasks or [])
         ]
         verifiers_compiled = 0
         adversarial_validated = 0

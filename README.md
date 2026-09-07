@@ -185,7 +185,9 @@ resumable worker, durable queue, validation gates, MinIO packages, and audit UI
 run locally or as a single-writer Kubernetes StatefulSet; the daily path ranks
 candidates received in the preceding 24 hours with no fixed paper cap, then
 continues until the cohort or provider capacity is exhausted. It generates
-datasets but does not train a model. See
+datasets but does not train a model. Deterministic routing prefers difficult,
+finite, executable RL work; answerability and grounding reviewers never see the
+hidden target, and every routed SFT or RL failure remains inspectable. See
 [`docs/POSTTRAIN_FOUNDRY.md`](docs/POSTTRAIN_FOUNDRY.md) for the design and
 operations guide.
 

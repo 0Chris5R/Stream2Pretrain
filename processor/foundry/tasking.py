@@ -39,7 +39,6 @@ class AnswerabilityDecision(BaseModel):
     task_id: str
     answerable: bool
     leakage_free: bool
-    unique_enough_for_rl: bool
     findings: list[str] = Field(default_factory=list)
 
 
@@ -250,13 +249,50 @@ class TaskFactory:
                 limit=self.control.config.tasks_per_paper,
             )
             if not validated:
-                reasons = repaired_errors or validation_errors
-                detail = "; ".join(reasons[:6])
-                raise TaskOutputError(
-                    "no proposed task passed deterministic specification checks"
-                    + (f": {detail}" if detail else ""),
-                    traces=proposal_traces,
+                fallback_data, fallback_trace = self.control.call(
+                    job_id=job_id,
+                    paper_id=bundle.paper_id,
+                    role="final_repair",
+                    system=_designer_system(),
+                    user=_task_sft_fallback_prompt(
+                        bundle=bundle,
+                        graph=graph,
+                        validation_errors=repaired_errors or validation_errors,
+                    ),
+                    max_output_tokens=8_000,
+                    call_key="task_designer:sft_fallback",
                 )
+                proposal_traces.append(fallback_trace)
+                fallback_batch, fallback_schema_trace = _validate_or_repair(
+                    control=self.control,
+                    model=TaskBatch,
+                    data=fallback_data,
+                    job_id=job_id,
+                    paper_id=bundle.paper_id,
+                    call_key="task_designer:sft_fallback",
+                    context=(
+                        "Preserve the supported paper-specific SFT task and repair only schema "
+                        "violations."
+                    ),
+                )
+                if fallback_schema_trace is not None:
+                    proposal_traces.append(fallback_schema_trace)
+                validated, fallback_errors = _normalize_and_validate_tasks(
+                    batch=fallback_batch,
+                    bundle=bundle,
+                    graph=graph,
+                    trace=proposal_traces[-1],
+                    oracle_ids=oracle_ids,
+                    limit=min(2, self.control.config.tasks_per_paper),
+                )
+                if not validated:
+                    reasons = fallback_errors or repaired_errors or validation_errors
+                    detail = "; ".join(reasons[:6])
+                    raise TaskOutputError(
+                        "no proposed task passed deterministic specification checks"
+                        + (f": {detail}" if detail else ""),
+                        traces=proposal_traces,
+                    )
         critique_data, critic_trace = self.control.call(
             job_id=job_id,
             paper_id=bundle.paper_id,
@@ -320,13 +356,9 @@ class TaskFactory:
             decision = by_id.get(task.task_id)
             if decision is None or not decision.answerable or not decision.leakage_free:
                 continue
-            route = task.route
-            if route == "rl" and not decision.unique_enough_for_rl:
-                route = "sft"
             accepted.append(
                 task.model_copy(
                     update={
-                        "route": route,
                         "ambiguity_risks": [*task.ambiguity_risks, *decision.findings],
                         "construction_provenance": [
                             *task.construction_provenance,
@@ -798,14 +830,17 @@ def _ensure_solution_contract(
         role="final_repair",
         system=_structured_repair_system(SolverTurn),
         user=(
-            "Repair this final reference solution's structured manifest without changing its "
-            "scientific conclusion. Claims and method nodes use graph node IDs. Numeric expected "
-            "values use numeric_results entries with the exact target key. For a derivation task, "
-            "string expected values use equations entries with the exact target key; for all "
-            "other task families, string expected values use configuration entries. Preserve the "
-            "readable report, evidence, and required relations.\n"
+            "Repair only this final reference solution's structured manifest. Do not change the "
+            "readable report or add a value, conclusion, relation, or citation that is not already "
+            "explicit in that report. Claims and method nodes use graph node IDs. Numeric outputs "
+            "use numeric_results entries with the supplied output key. Derivation outputs use "
+            "equations entries with the supplied output key; other discrete outputs use "
+            "configuration entries. If the report does not contain a required scientific result, "
+            "leave it absent so deterministic validation can reject the trajectory.\n"
             f"CONTRACT_VIOLATIONS:\n{canonical_json(violations).decode()}\n"
-            f"TASK:\n{canonical_json(task).decode()}\n"
+            f"PUBLIC_TASK_AND_OUTPUT_SHAPE:\n"
+            f"{canonical_json(_task_without_hidden_answers(task)).decode()}\n"
+            f"GRAPH:\n{canonical_json(graph).decode()}\n"
             f"CURRENT_FINAL_TURN:\n{canonical_json(turn).decode()}"
         ),
         max_output_tokens=16_000,
@@ -1030,6 +1065,55 @@ def _normalize_expected_values(values: dict[str, float | str]) -> dict[str, floa
     return normalized
 
 
+def _has_finite_outcome(task: TaskSpec) -> bool:
+    values = task.hidden_targets.expected_values
+    if any(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        for value in values.values()
+    ):
+        return True
+    if task.family == "derivation_completion" and any(
+        isinstance(value, str) and symbolic_expression_is_checkable(value)
+        for value in values.values()
+    ):
+        return True
+    if task.family != "derivation_completion" and any(
+        isinstance(value, str) and bool(value.strip()) for value in values.values()
+    ):
+        return True
+    required_values = task.hidden_targets.configuration_constraints.get("required_values", {})
+    return isinstance(required_values, dict) and bool(required_values)
+
+
+def _task_without_hidden_answers(task: TaskSpec) -> dict[str, object]:
+    output_targets = []
+    for target, value in task.hidden_targets.expected_values.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            output_type = "numeric"
+        elif task.family == "derivation_completion":
+            output_type = "symbolic"
+        else:
+            output_type = "discrete"
+        output_targets.append({"id": target, "type": output_type})
+    required_values = task.hidden_targets.configuration_constraints.get("required_values", {})
+    configuration_output_keys = (
+        sorted(str(key) for key in required_values) if isinstance(required_values, dict) else []
+    )
+    return {
+        "task_id": task.task_id,
+        "paper_id": task.paper_id,
+        "family": task.family,
+        "instruction": task.public_instruction,
+        "public_context_policy": task.public_context_policy.model_dump(mode="json"),
+        "answer_contract": task.answer_contract,
+        "output_targets": output_targets,
+        "configuration_output_keys": configuration_output_keys,
+        "route": task.route,
+    }
+
+
 def _machine_verifiable(
     task: TaskSpec,
     graph: PaperEvidenceGraph,
@@ -1066,7 +1150,9 @@ def _machine_verifiable(
             and nodes[edge.source].type == "equation"
             and nodes[edge.target].type == "equation"
         ]
-        if strict_reasoning and (len(equation_nodes) < 2 or not derivation_relations):
+        if strict_reasoning and not (
+            len(equation_nodes) >= 2 or (equation_nodes and derivation_relations)
+        ):
             return False
         expected_expressions = [
             value for value in targets.expected_values.values() if isinstance(value, str)
@@ -1091,7 +1177,7 @@ def _machine_verifiable(
             return bool(
                 len(method_nodes) >= 4
                 and len(targets.required_relations) >= 3
-                and (targets.expected_values or targets.configuration_constraints)
+                and _has_finite_outcome(task)
             )
         return len(method_nodes) >= 2
     if task.family == "figure_table_reasoning":
@@ -1101,7 +1187,7 @@ def _machine_verifiable(
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         ]
         if strict_reasoning:
-            return bool(len(numeric_values) >= 2 and len(targets.required_nodes) >= 2)
+            return bool(numeric_values and len(targets.required_nodes) >= 2)
         return bool(targets.expected_values) or any(
             nodes.get(node_id) and nodes[node_id].type in {"figure_value", "table_value", "metric"}
             for node_id in targets.required_nodes
@@ -1112,7 +1198,7 @@ def _machine_verifiable(
                 targets.required_faults
                 and len(targets.required_relations) >= 2
                 and len(targets.required_nodes) >= 3
-                and (targets.expected_values or targets.configuration_constraints)
+                and _has_finite_outcome(task)
             )
         return bool(targets.required_faults and targets.required_relations)
     if task.family == "assumption_consequence":
@@ -1120,14 +1206,15 @@ def _machine_verifiable(
             return bool(
                 len(targets.required_relations) >= 2
                 and len(targets.required_nodes) >= 3
-                and (targets.expected_values or targets.configuration_constraints)
+                and _has_finite_outcome(task)
             )
         return bool(targets.required_relations and targets.required_nodes)
     if task.family == "single_paper_research":
         return bool(
             task.public_context_policy.tool_access
-            and (targets.required_nodes or targets.expected_values)
+            and len(targets.required_nodes) >= (2 if strict_reasoning else 1)
             and targets.accepted_evidence_sets
+            and (not strict_reasoning or _has_finite_outcome(task))
         )
     if task.family == "experiment_configuration":
         return bool(
@@ -1151,7 +1238,7 @@ def _machine_verifiable(
         return bool(
             targets.accepted_evidence_sets
             and len(targets.required_nodes) >= 2
-            and (targets.expected_values or targets.configuration_constraints)
+            and _has_finite_outcome(task)
         )
     return bool(targets.accepted_evidence_sets or targets.required_nodes)
 
@@ -1191,7 +1278,12 @@ def _task_quality_violations(task: TaskSpec, graph: PaperEvidenceGraph) -> list[
             for node_id in targets.required_nodes
             if nodes.get(node_id) and nodes[node_id].type == "equation"
         ]
-        if len(equation_nodes) < 2 or not targets.required_relations:
+        derivation_relations = [
+            edge
+            for edge in targets.required_relations
+            if edge.relation in {"derives", "depends_on", "uses", "produces", "enables"}
+        ]
+        if not equation_nodes or (len(equation_nodes) < 2 and not derivation_relations):
             violations.append(
                 "derivation is direct formula lookup rather than a multi-step derivation"
             )
@@ -1201,7 +1293,7 @@ def _task_quality_violations(task: TaskSpec, graph: PaperEvidenceGraph) -> list[
             for value in targets.expected_values.values()
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         ]
-        if len(numeric_targets) < 2 or len(targets.required_nodes) < 2:
+        if not numeric_targets or len(targets.required_nodes) < 2:
             violations.append("numeric task is a single lookup or one-step arithmetic exercise")
     elif task.family == "method_dag":
         method_nodes = [
@@ -1256,6 +1348,7 @@ def _select_diverse_tasks(tasks: list[TaskSpec], *, limit: int) -> list[TaskSpec
     ranked = sorted(
         tasks,
         key=lambda task: (
+            0 if task.route == "rl" else 1,
             family_priority.get(task.family, len(family_priority)),
             -depth(task),
             task.task_id,
@@ -1295,6 +1388,12 @@ must involve a multi-step scientific failure or algorithmic chain, not schema re
 configuration or reproduction tasks require audited oracle results. Keep answers hidden, context paper-local,
 and distractors same-paper only.
 
+Prefer RL whenever the paper supports a difficult task with an executable finite outcome. The strongest RL
+targets are multi-equation derivations, scaling-law or regime calculations, synthesis across several results,
+and counterfactual assumption changes with a checkable numeric, symbolic, or discrete consequence. Do not
+reserve RL for unusually novel task formats, and do not convert a verifiable derivation into SFT merely because
+its answer is concise. Use SFT directly only when the best substantive task has no sound deterministic outcome.
+
 Construct the scientific solution before proposing the task: identify the supplied inputs, linked reasoning
 steps, requested outputs, and independently checkable target values. Every necessary equation, table cell,
 assumption and definition must exist in the learner-accessible paper context or frozen tools, not just in the
@@ -1305,8 +1404,9 @@ an edge reversal. Require consequences beyond the correction itself. Two unrelat
 or extra graph identifiers do not make a deep task. Prefer, when supported, deriving a LoRA scaling relation
 and checking its limiting regime, composing affine log-score transformations, deriving a T-SVD factorization
 consequence, or analyzing a quasi-Newton approximation under changed assumptions. These are depth examples,
-not permission to introduce topics or mathematics absent from this paper. An empty task list is better than
-invented difficulty. SFT should explain a substantive paper-specific inference, not pad a trivial task.
+not permission to introduce topics or mathematics absent from this paper. Return an empty task list only when
+the paper contains no answerable, substantive paper-specific reasoning task of either route. SFT should explain
+a substantive paper-specific inference, not pad a trivial task.
 The response must validate exactly against REQUIRED_JSON_SCHEMA.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
@@ -1344,7 +1444,6 @@ def _designer_prompt(
     count: int,
     oracle_result_ids: set[str],
 ) -> str:
-    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
         f"Propose up to {count} materially different TaskSpecs. Cover the strongest supported "
         "scientific problems, prioritizing derivation, scaling-law or regime inference, multi-result "
@@ -1355,7 +1454,7 @@ def _designer_prompt(
         "work to SFT.\n"
         f"{bundle.metadata.get('classifier_section_hints', '')}\n"
         f"AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:\n{canonical_json(sorted(oracle_result_ids)).decode()}\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}"
     )
 
@@ -1369,7 +1468,6 @@ def _task_semantic_repair_prompt(
     count: int,
     oracle_ids: set[str],
 ) -> str:
-    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
         "The first proposal contained no usable task after deterministic validation. Repair the "
         "existing supported ideas against the exact errors below. Do not relax the quality bar, "
@@ -1381,7 +1479,27 @@ def _task_semantic_repair_prompt(
         f"DETERMINISTIC_ERRORS:\n{canonical_json(validation_errors).decode()}\n"
         f"FIRST_PROPOSAL:\n{canonical_json(batch).decode()}\n"
         f"AVAILABLE_PRIVATE_ORACLE_RESULT_IDS:\n{canonical_json(sorted(oracle_ids)).decode()}\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
+        f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}"
+    )
+
+
+def _task_sft_fallback_prompt(
+    *,
+    bundle: PaperBundle,
+    graph: PaperEvidenceGraph,
+    validation_errors: list[str],
+) -> str:
+    return (
+        "Both normal task-design attempts failed deterministic validation. Return one or two "
+        "answerable SFT TaskSpecs grounded in this paper. Choose the strongest substantive "
+        "paper-specific explanation, comparison, limitation analysis, or synthesis supported by "
+        "the evidence. Ask for multiple linked reasoning steps, not a summary, lookup, schema "
+        "exercise, or invented calculation. Set route to sft and do not return an empty list when "
+        "the graph contains a supported scientific claim, method, finding, equation, limitation, "
+        "or comparison.\n"
+        f"PRIOR_DETERMINISTIC_ERRORS:\n{canonical_json(validation_errors).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}"
     )
 
@@ -1393,8 +1511,10 @@ with decisions. Reject tasks that require external knowledge, expose their answe
 incompatible valid interpretations, cite unavailable evidence, or cannot support a finite verifier when
 proposed for RL. Valuable answerable open-ended SFT synthesis does not require a finite RL outcome.
 Also reject shallow tasks whose substance is one lookup, one arithmetic operation, internal-ID listing,
-simple edge reversal, or manifest-format compliance. Mark unique_enough_for_rl only for difficulty 4-5
-work requiring multiple linked reasoning steps and an answer-facing numeric, symbolic, or discrete outcome.
+simple edge reversal, or manifest-format compliance. Routing is determined independently by executable code;
+do not demand novelty, compare the task with other tasks, or downgrade an answerable task because its format is
+familiar. A difficulty 4-5 task with multiple linked reasoning steps and an answer-facing numeric, symbolic,
+or discrete outcome is valuable RL material.
 Do not confuse a long instruction with deep reasoning. A concise formula derivation can be deep; a long list
 of requested fields can still be shallow.
 Check each requested output against the actual learner-accessible spans and tools, not merely against
@@ -1424,7 +1544,8 @@ def _answerability_prompt(
     return (
         f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=task_spans).decode()}\n"
         f"EVIDENCE_GRAPH:\n{canonical_json(graph).decode()}\n"
-        f"TASKS:\n{canonical_json(tasks).decode()}"
+        f"PUBLIC_TASKS:\n"
+        f"{canonical_json([_task_without_hidden_answers(task) for task in tasks]).decode()}"
     )
 
 
@@ -1613,7 +1734,8 @@ def _grounding_prompt(
     }
     return (
         f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=task_spans).decode()}\n"
-        f"GRAPH:\n{canonical_json(graph).decode()}\nTASK:\n{canonical_json(task).decode()}\n"
+        f"GRAPH:\n{canonical_json(graph).decode()}\n"
+        f"PUBLIC_TASK:\n{canonical_json(_task_without_hidden_answers(task)).decode()}\n"
         f"SOLUTIONS:\n{canonical_json(trajectories).decode()}"
     )
 

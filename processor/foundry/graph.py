@@ -236,10 +236,33 @@ class EvidenceGraphCompiler:
             if recheck.invalid_node_ids or recheck.missing_evidence or recheck.invalid_relations:
                 recheck = recheck.model_copy(update={"accepted": False})
             critique = recheck
-        if not critique.accepted:
-            raise ValueError("independent graph critic rejected two bounded repairs")
+        if not critique.accepted and critique.invalid_node_ids:
+            invalid_ids = set(critique.invalid_node_ids)
+            graph = graph.model_copy(
+                update={
+                    "nodes": [node for node in graph.nodes if node.id not in invalid_ids],
+                    "edges": [
+                        edge
+                        for edge in graph.edges
+                        if edge.source not in invalid_ids and edge.target not in invalid_ids
+                    ],
+                }
+            )
         if not graph.nodes:
             raise ValueError("evidence compiler produced an empty graph")
+        if not critique.accepted:
+            unresolved = [
+                "Independent graph review retained for downstream task validation: " + finding
+                for finding in [
+                    *critique.findings,
+                    *critique.missing_evidence,
+                    *critique.invalid_relations,
+                ]
+            ]
+            graph = graph.model_copy(
+                update={"uncertainties": list(dict.fromkeys([*graph.uncertainties, *unresolved]))}
+            )
+            validate_graph_against_bundle(graph, bundle)
         return graph, traces
 
 
@@ -511,7 +534,10 @@ def _critic_system_prompt() -> str:
     return f"""You are a fresh scientific grounding critic with no access to compiler reasoning.
 Return one JSON object that validates exactly against REQUIRED_JSON_SCHEMA. Check source-span
 grounding, atomicity, overclaims, missing qualifiers, equation dependencies, method order,
-conflicts, and suitability for deterministic verification.
+conflicts, and suitability for deterministic verification. Set accepted=false only for a concrete
+problem that would make downstream scientific tasks unsafe or unanswerable, identify the affected
+node or relation whenever possible, and give an actionable repair. Missing optional coverage is an
+uncertainty, not a reason to reject an otherwise grounded graph.
 REQUIRED_JSON_SCHEMA:
 {schema}"""
 
@@ -550,9 +576,8 @@ def _critic_prompt(
     graph: PaperEvidenceGraph,
     oracle_results: list[OracleResult],
 ) -> str:
-    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"CANDIDATE_GRAPH:\n{canonical_json(graph).decode()}"
     )
@@ -564,11 +589,10 @@ def _repair_prompt(
     critique: GraphCritique,
     oracle_results: list[OracleResult],
 ) -> str:
-    supporting_spans = {span_id for node in graph.nodes for span_id in node.supporting_spans}
     return (
         "Return only a bounded delta against GRAPH that resolves the CRITIQUE; do not restate "
         "unchanged graph content.\n"
-        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle, span_ids=supporting_spans).decode()}\n"
+        f"PAPER_BUNDLE:\n{bundle_prompt_json(bundle).decode()}\n"
         f"PRIVATE_OFFICIAL_ORACLE_RESULTS:\n{canonical_json(oracle_results).decode()}\n"
         f"GRAPH:\n{canonical_json(graph).decode()}\n"
         f"CRITIQUE:\n{canonical_json(critique).decode()}"
