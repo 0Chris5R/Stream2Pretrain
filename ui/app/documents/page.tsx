@@ -67,6 +67,8 @@ interface Filters {
   sort: string;
 }
 
+type OpenFilter = 'route' | 'tags' | 'more' | null;
+
 const EMPTY_FILTERS: Filters = {
   search: '',
   routes: [],
@@ -102,6 +104,7 @@ async function fetchDocument(docId: string): Promise<DocumentDetail> {
 
 export default function DocumentsPage() {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [openFilter, setOpenFilter] = useState<OpenFilter>(null);
   const [selected, setSelected] = useState('');
   const deferredSearch = useDeferredValue(filters.search);
   const query = useMemo(
@@ -178,6 +181,8 @@ export default function DocumentsPage() {
           </div>
           <FilterMenu
             label="Route"
+            open={openFilter === 'route'}
+            onOpenChange={(open) => setOpenFilter(open ? 'route' : null)}
             values={ROUTES}
             selected={filters.routes}
             onChange={(routes) => update({ routes: routes as CorpusRoute[] })}
@@ -186,22 +191,33 @@ export default function DocumentsPage() {
             label="Source"
             value={filters.source}
             values={facets.data?.sources ?? []}
+            onOpen={() => setOpenFilter(null)}
             onChange={(source) => update({ source })}
           />
           <SelectFilter
             label="Format"
             value={filters.sourceFormat}
             values={facets.data?.source_formats ?? []}
+            onOpen={() => setOpenFilter(null)}
             onChange={(sourceFormat) => update({ sourceFormat })}
           />
           <FilterMenu
             label="Tags"
+            open={openFilter === 'tags'}
+            onOpenChange={(open) => setOpenFilter(open ? 'tags' : null)}
             values={facets.data?.content_tags ?? []}
             selected={filters.tags}
             onChange={(tags) => update({ tags })}
           />
-          <details className="relative">
-            <summary className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent">
+          <details className="relative" open={openFilter === 'more'}>
+            <summary
+              className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"
+              onMouseDown={() => (document.activeElement as HTMLElement)?.blur()}
+              onClick={(event) => {
+                event.preventDefault();
+                setOpenFilter(openFilter === 'more' ? null : 'more');
+              }}
+            >
               <Filter className="h-4 w-4" /> More
               {activeFilters > 0 ? <Badge variant="secondary">{activeFilters}</Badge> : null}
             </summary>
@@ -695,7 +711,7 @@ function AdvancedFilters({
   update: (patch: Partial<Filters>) => void;
 }) {
   return (
-    <div className="bg-popover absolute right-0 top-12 z-20 w-[22rem] space-y-4 rounded-xl border p-4 shadow-xl">
+    <div className="bg-card absolute right-0 top-12 z-20 w-[22rem] space-y-4 rounded-xl border p-4 shadow-xl">
       <div className="grid grid-cols-2 gap-2">
         <Field label="Published from">
           <Input
@@ -787,22 +803,33 @@ function AdvancedFilters({
 
 function FilterMenu({
   label,
+  open,
+  onOpenChange,
   values,
   selected,
   onChange,
 }: {
   label: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   values: readonly string[];
   selected: readonly string[];
   onChange: (values: string[]) => void;
 }) {
   return (
-    <details className="relative">
-      <summary className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent">
+    <details className="relative" open={open}>
+      <summary
+        className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border px-3 text-sm hover:bg-accent"
+        onMouseDown={() => (document.activeElement as HTMLElement)?.blur()}
+        onClick={(event) => {
+          event.preventDefault();
+          onOpenChange(!open);
+        }}
+      >
         {label}
         {selected.length ? <Badge variant="secondary">{selected.length}</Badge> : null}
       </summary>
-      <div className="bg-popover absolute left-0 top-12 z-20 max-h-72 min-w-60 overflow-y-auto rounded-lg border p-2 shadow-xl">
+      <div className="bg-card absolute left-0 top-12 z-20 max-h-72 min-w-60 overflow-y-auto rounded-lg border p-2 shadow-xl">
         {values.map((value) => {
           const checked = selected.includes(value);
           return (
@@ -832,11 +859,13 @@ function SelectFilter({
   label,
   value,
   values,
+  onOpen,
   onChange,
 }: {
   label: string;
   value: string;
   values: string[];
+  onOpen: () => void;
   onChange: (value: string) => void;
 }) {
   return (
@@ -844,6 +873,8 @@ function SelectFilter({
       aria-label={label}
       className="h-10 max-w-48 rounded-md border bg-background px-3 text-sm"
       value={value}
+      onMouseDown={onOpen}
+      onFocus={onOpen}
       onChange={(event) => onChange(event.target.value)}
     >
       <option value="">{label}</option>
