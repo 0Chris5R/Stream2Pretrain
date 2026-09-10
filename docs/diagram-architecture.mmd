@@ -1,0 +1,78 @@
+flowchart LR
+    subgraph DIL["1. Data Ingestion Layer"]
+        direction TB
+        AX["arXiv"] --> LA["Licence Admission"]
+        HF["Hugging Face"] --> LA
+        LA -- "admitted" --> MB["MinIO Bronze\n(Raw Immutable Gzip)"]
+        LA -- "quarantined" --> QUAR["Quarantine\n(Audit only)"]
+    end
+
+    subgraph SPS["2. Stream Processing Layer  (Redpanda · Bytewax)"]
+        direction TB
+        subgraph J1["Job n  (Active Live Pipeline)"]
+            direction LR
+            D1A["Fetcher"] --> D2A["Curator (v1)"] --> D3A["Iceberg Writer"]
+        end
+        subgraph J2["Job n+1  (Historical Replay on Model/Rule Update)"]
+            direction LR
+            D1B["Fetcher"] --> D2B["Curator (updated)"] --> D3B["Iceberg Writer"]
+        end
+    end
+
+    subgraph SL["3. Lakehouse & Serving Layer"]
+        direction TB
+        MG["MinIO Gold\n(Iceberg Parquet)"]
+        PO["Polaris Catalog\n(Table Snapshots)"]
+        DK["DuckDB API\n(Corpus Route Ledger)"]
+        UI["Web Cockpit\n(Next.js)"]
+        
+        PO -. "1. Snapshot Meta" .-> DK
+        MG -. "2. Read Data" .-> DK
+        DK --> UI
+    end
+
+    %% Ingestion to Stream Jobs
+    MB ==>|"Live Events"| J1
+    MB -.->|"Replay from Offset 0 / Bronze"| J2
+
+    %% Storage Writes
+    D3A -->|"Commit Snapshot n"| PO
+    D3A -->|"Parquet n"| MG
+    D3B -.->|"Commit Snapshot n+1"| PO
+    D3B -.->|"Parquet n+1"| MG
+
+    %% Post-Training Foundry
+    subgraph FDY["4. Post-Training Foundry  (experimental)"]
+        direction LR
+        FW["Foundry Worker\nSFT · RL generation"]
+        HR["Human Review"]
+        FW --> HR
+    end
+
+    MG -->|"posttrain_candidate"| FW
+    HR -->|"approved artifacts"| MG
+
+    %% Styles
+    style AX   fill:#bfdbfe,stroke:#2563eb,color:#1e3a8a
+    style HF   fill:#bfdbfe,stroke:#2563eb,color:#1e3a8a
+    style LA   fill:#fef9c3,stroke:#ca8a04,color:#78350f
+    style MB   fill:#bbf7d0,stroke:#16a34a,color:#14532d
+    style QUAR fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-dasharray:5 3
+    style J1   fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px
+    style J2   fill:#f1f5f9,stroke:#64748b,stroke-dasharray:5 3
+    style D1A  fill:#86efac,stroke:#15803d,color:#14532d
+    style D2A  fill:#86efac,stroke:#15803d,color:#14532d
+    style D3A  fill:#86efac,stroke:#15803d,color:#14532d
+    style D1B  fill:#cbd5e1,stroke:#475569,color:#0f172a
+    style D2B  fill:#cbd5e1,stroke:#475569,color:#0f172a
+    style D3B  fill:#cbd5e1,stroke:#475569,color:#0f172a
+    style MG   fill:#bbf7d0,stroke:#16a34a,color:#14532d
+    style PO   fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+    style DK   fill:#fde68a,stroke:#d97706,color:#78350f
+    style UI   fill:#bfdbfe,stroke:#2563eb,color:#1e3a8a
+    style FDY  fill:#f5f3ff,stroke:#7c3aed,stroke-width:2px,stroke-dasharray:6 3
+    style FW   fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+    style HR   fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    style DIL  fill:#eff6ff,stroke:#2563eb,stroke-width:2px
+    style SPS  fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
+    style SL   fill:#fefce8,stroke:#ca8a04,stroke-width:2px

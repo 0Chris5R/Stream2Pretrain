@@ -1,0 +1,76 @@
+---
+title: Stream2Pretrain -- Post-Training Foundry
+---
+flowchart TD
+
+    %% ── Input ─────────────────────────────────────────────────────
+    IN["docs.curated\n(posttrain_candidate papers)"]
+
+    %% ── Daily Queue ───────────────────────────────────────────────
+    subgraph SCHED["Daily Scheduler  (StatefulSet)"]
+        direction TB
+        QU["Durable ranked queue\n24h candidate snapshot"]
+        BU["Immutable PaperBundle\nGold record + scientific artifact"]
+        QU -->|"ranked by posttrain\nsuitability score"| BU
+    end
+
+    %% ── Generation Pipeline ───────────────────────────────────────
+    subgraph GEN["Generation Pipeline  (Qwen3.8-27B · Hetzner Inference)"]
+        direction TB
+        EG["Evidence Graph\n6-pass extraction"]
+        TP["Task Proposal\n+ answerability audit"]
+        SV["Solver\nindependent trajectories"]
+        VC["Verifier Compiler\ndeterministic checks"]
+        AT["Adversarial & Mutation\nvalidation"]
+        EG --> TP --> SV --> VC --> AT
+    end
+
+    %% ── Output ────────────────────────────────────────────────────
+    subgraph OUT["Validated Output"]
+        direction LR
+        SP["SFT Pool\n(train 80% · benchmark 20%)"]
+        RP["RL Pool\n(train 80% · benchmark 20%)"]
+    end
+
+    HR["Human Review\n(Web Cockpit · named approval)"]
+
+    subgraph STORE["Storage"]
+        direction LR
+        MG["MinIO Gold\nSigned packages"]
+        IC["Iceberg\nAudit tables"]
+    end
+
+    %% ── Flow ──────────────────────────────────────────────────────
+    IN --> QU
+    BU --> EG
+
+    AT -->|"SFT: plausible trajectory"| SP
+    AT -->|"RL: all checks pass"| RP
+
+    SP & RP --> HR
+    HR -->|"approved"| STORE
+    HR -->|"rejected"| IC
+
+    %% ── Styles ────────────────────────────────────────────────────
+    style IN   fill:#bbf7d0,stroke:#16a34a,color:#14532d
+
+    style SCHED fill:#fef9c3,stroke:#ca8a04,stroke-width:2px
+    style QU   fill:#fde68a,stroke:#d97706,color:#78350f
+    style BU   fill:#fde68a,stroke:#d97706,color:#78350f
+
+    style GEN  fill:#f0f9ff,stroke:#0284c7,stroke-width:2px
+    style EG   fill:#bae6fd,stroke:#0284c7,color:#0c4a6e
+    style TP   fill:#bae6fd,stroke:#0284c7,color:#0c4a6e
+    style SV   fill:#bae6fd,stroke:#0284c7,color:#0c4a6e
+    style VC   fill:#bae6fd,stroke:#0284c7,color:#0c4a6e
+    style AT   fill:#bae6fd,stroke:#0284c7,color:#0c4a6e
+
+    style OUT  fill:#f5f3ff,stroke:#7c3aed,stroke-width:2px
+    style SP   fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+    style RP   fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+
+    style HR   fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+
+    style STORE fill:#dcfce7,stroke:#16a34a,stroke-width:2px
+    style MG   fill:#bbf7d0,stroke:#16a34a,color:#14532d
+    style IC   fill:#bbf7d0,stroke:#16a34a,color:#14532d

@@ -1,0 +1,78 @@
+---
+title: Stream2Pretrain -- Data Flow
+---
+flowchart LR
+
+    %% ── Sources ───────────────────────────────────────────────────
+    AX["arXiv"]
+    HF["Hugging Face\nModel- & Dataset-Cards"]
+
+    %% ── Ingestion ─────────────────────────────────────────────────
+    LA["Licence Admission\npermissive / posttrain-only / quarantined"]
+    QUAR["Quarantine\nvisible in license_admissions only"]
+    MB["MinIO Bronze\nImmutable gzip source data"]
+
+    %% ── Processing ────────────────────────────────────────────────
+    subgraph RP["Redpanda  (underlying transport — all arrows are Kafka topics)"]
+        direction LR
+        FE["Fetcher  (Bytewax)\nText extraction · SilverRecord"]
+
+        subgraph CUB["Curator  (Bytewax · StatefulSet)"]
+            direction LR
+            CUD["Deterministic checks\nLanguage · PII · Deduplication"]
+            CL["4x ModernBERT Classifiers\nQuality · Math · Posttrain Suitability"]
+            CUD -->|"passed"| CL
+        end
+
+        IW["Iceberg Writer  (PyIceberg)"]
+    end
+
+    %% ── Persistence ───────────────────────────────────────────────
+    MG["MinIO Gold\nIceberg V2 Parquet"]
+    PO["Polaris\nIceberg REST Catalog"]
+
+    %% ── Serving ───────────────────────────────────────────────────
+    DK["DuckDB API\nServing layer · paginated"]
+    UI["Web Cockpit  (Next.js)\nDashboard · Documents · Datasets"]
+
+    %% ── Flow ──────────────────────────────────────────────────────
+    AX & HF --> LA
+
+    LA -->|"quarantined\n(no body fetch)"| QUAR
+    LA -->|"license.admissions\n(all documents)"| IW
+    LA -->|"admitted /\nposttrain-only"| MB
+
+    MB -->|"raw.fetched"| FE
+    FE -->|"docs.normalized"| CUD
+
+    CUD -->|"rejected\ncuration.decisions"| IW
+    CL -->|"curation.decisions\n+ docs.curated (if passed)"| IW
+
+    IW -->|"Parquet data"| MG
+    IW -->|"table metadata & snapshots"| PO
+
+    DK -->|"1. where is snapshot?"| PO
+    PO -->|"2. metadata path"| DK
+    DK -->|"3. read Parquet"| MG
+    MG -->|"4. data"| DK
+
+    DK --> UI
+
+    %% ── Styles ────────────────────────────────────────────────────
+    style AX   fill:#bfdbfe,stroke:#2563eb,color:#1e3a8a
+    style HF   fill:#bfdbfe,stroke:#2563eb,color:#1e3a8a
+    style LA   fill:#fef9c3,stroke:#ca8a04,color:#78350f
+    style QUAR fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-dasharray:5 3
+    style MB   fill:#bbf7d0,stroke:#16a34a,color:#14532d
+
+    style RP   fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#7c2d12
+    style FE   fill:#86efac,stroke:#15803d,color:#14532d
+    style CUB  fill:#d1fae5,stroke:#059669,stroke-width:1.5px
+    style CUD  fill:#86efac,stroke:#15803d,color:#14532d
+    style CL   fill:#a7f3d0,stroke:#059669,color:#064e3b
+    style IW   fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+
+    style MG   fill:#bbf7d0,stroke:#16a34a,color:#14532d
+    style PO   fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+    style DK   fill:#fde68a,stroke:#d97706,color:#78350f
+    style UI   fill:#bfdbfe,stroke:#2563eb,color:#1e3a8a
