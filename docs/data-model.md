@@ -11,14 +11,16 @@ contracts. Iceberg columns and Arrow conversion are defined in
 |---|---|---|
 | Bronze | Compressed source bytes in MinIO; typed pointers on `raw.fetched` | One-day source audit window |
 | Silver | Normalized text, retained sections, heuristic signals and scientific evidence on `docs.normalized` | Kafka retention; transient MinIO extraction assets have one-day retention |
-| Decisions | All curation outcomes in `gold.curation_decisions` | Durable |
-| Gold | Trainable records in `gold.curated`; retained scientific evidence for Foundry candidates | Durable |
+| Licence admissions | Item-level pre-fetch routes in physical table `gold.license_admissions` | Durable |
+| Decisions | All downstream curation outcomes in physical table `gold.curation_decisions` | Durable |
+| Gold | Trainable records in physical table `gold.curated`; retained scientific evidence for Foundry candidates | Durable |
 | Post-training | Queue evidence, generated tasks, trajectories, verifier packages and artifact audits | Durable |
 
-The per-item pre-fetch licence decision is a separate internal event contract,
-folded into the same corpus route view by serving. Discovery events are not
-corpus records. Explicit incompatible rights produce a quarantine record
-without fetching the source body.
+The per-item pre-fetch licence decision is a separate internal event contract
+and physical Iceberg table. Serving folds it together with downstream curation
+decisions into one logical corpus route view. That view is not an additional
+Iceberg table. Discovery events are not corpus records. Explicit incompatible
+rights produce a quarantine record without fetching the source body.
 
 [Storage ownership](storage-scaling.md) defines physical cleanup boundaries.
 Neither the pretraining corpus nor its decision history has a one-day expiry.
@@ -77,8 +79,10 @@ The as-of predicate is
 
 ## Persistence and serving
 
-Both Gold tables partition by language, risk tier and month of `valid_from`.
-Silver is an event and extraction layer, not an additional Iceberg table.
+The curated and curation-decision tables partition by language, risk tier and
+month of `valid_from`. Licence admissions partition by source, admission status,
+and month of `observed_at`. Silver is an event and extraction layer, not an
+additional Iceberg table.
 
 Every curation outcome goes to the decisions topic and table. Gold additionally
 requires risk tier 1, a trainable route, no reject reasons and no unresolved PII

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "stream2pretrain-minio.name" . }}
+  labels:
+    {{- include "stream2pretrain-minio.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "stream2pretrain-minio.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+    - name: console
+      port: 9001
+      targetPort: console

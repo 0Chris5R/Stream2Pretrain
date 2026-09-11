@@ -43,7 +43,7 @@ async function fetchActivity(window: ActivityWindow): Promise<ActivitySummary> {
 }
 
 export function ActivityPanel() {
-  const [window, setWindow] = useState<ActivityWindow>('5m');
+  const [window, setWindow] = useState<ActivityWindow>('24h');
   const activity = useQuery({
     queryKey: ['activity', window],
     queryFn: () => fetchActivity(window),

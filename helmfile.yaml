@@ -90,6 +90,14 @@ releases:
     values:
       - infra/helmfile-values/redpanda.{{ .Environment.Name }}.yaml
 
+  - name: minio
+    namespace: minio
+    chart: ./charts/minio
+    atomic: true
+    labels: {tier: storage, component: object-storage}
+    values:
+      - infra/helmfile-values/minio.{{ .Environment.Name }}.yaml
+
   - name: polaris-postgres
     namespace: polaris
     chart: ./charts/polaris-postgres
@@ -107,7 +115,9 @@ releases:
     chart: apache-polaris/polaris
     version: 1.7.0
     labels: {tier: catalog}
-    needs: [polaris/polaris-metastore-bootstrap]
+    needs:
+      - minio/minio
+      - polaris/polaris-metastore-bootstrap
     values:
       - infra/helmfile-values/polaris.{{ .Environment.Name }}.yaml
 
@@ -124,8 +134,10 @@ releases:
       - monitoring/kube-prometheus-stack
       - keda/keda
       - gatekeeper-system/gatekeeper
+      - minio/minio
       - redpanda/redpanda
       - polaris/polaris
     values:
       - charts/stream2pretrain/values-{{ .Environment.Name }}.yaml
       - infra/helmfile-values/stream2pretrain.{{ .Environment.Name }}.yaml
+      - infra/helmfile-values/stream2pretrain.{{ if eq (env "S2P_CORE_ONLY") "1" }}core-only{{ else }}full{{ end }}.yaml

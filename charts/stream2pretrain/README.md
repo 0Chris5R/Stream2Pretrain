@@ -5,7 +5,7 @@ classifier services, Iceberg writer, DuckDB API, Foundry and UI. It also supplie
 the SourceFeed CRD, KEDA configuration, persistence, metrics,
 alerts, network policies and Gatekeeper constraints.
 
-Platform dependencies are installed through [the root Helmfile](../../helmfile.yaml).
+Platform and storage dependencies are installed through [the root Helmfile](../../helmfile.yaml).
 The measured DHBW overlay is
 [stream2pretrain.dev.yaml](../../infra/helmfile-values/stream2pretrain.dev.yaml).
 The production values enable security controls but require measured capacity
@@ -48,12 +48,16 @@ helm upgrade --install stream2pretrain ./charts/stream2pretrain \
 Supply built image references for a manual install. The CI workflow does this
 automatically.
 
+For evaluation of only the required streaming and pretraining path, append
+`-f infra/helmfile-values/stream2pretrain.core-only.yaml`. This disables only
+the external-provider Foundry extension.
+
 ## Secrets
 
 | Secret | Keys | Consumer |
 |---|---|---|
 | stream2pretrain-minio | accessKey, secretKey | Object-store clients |
-| stream2pretrain-polaris | clientId, clientSecret | Catalog clients |
+| stream2pretrain-polaris | credential, scope | Catalog clients |
 | stream2pretrain-hf | token | HF poller |
 | stream2pretrain-foundry-providers | HETZNER_INFERENCE_API_KEY, controlToken | Foundry worker/API and authenticated artifact audits |
 | stream2pretrain-foundry-signing | ed25519.key, ed25519.crt | Artifact signer; deployment creates it once if absent |

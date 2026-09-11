@@ -2,7 +2,7 @@
  * Typed fetch wrapper with zod validation.
  *
  * The cockpit talks to two backends:
- *   1) Next.js API routes (same origin) — these proxy to in-cluster services.
+ *   1) Next.js API routes (same origin) - these proxy to in-cluster services.
  *   2) Server-Sent Events for live throughput.
  *
  * Network errors and validation errors both throw `ApiError`, which the

@@ -90,6 +90,8 @@ improvement. Confidence is entropy-derived and is not empirically calibrated.
 
 ## Training procedure
 
+[The pool exporter](../scripts/export_pretrain_judge_pool.py) reads the latest
+durable full-text rows without applying existing classifier or route filters.
 [The data builder](../scripts/build_classifier_training_data.py) joins complete
 prepared source projections to validated teacher responses and assigns the
 document split before emitting section rows. Evaluation date and section roles

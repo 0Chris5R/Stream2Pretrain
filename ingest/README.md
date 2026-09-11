@@ -2,10 +2,11 @@
 
 The ingest layer turns external feeds into ``BronzeRecord`` events on the
 ``raw.fetched`` Redpanda topic, with the raw bytes parked in MinIO under
-``s3://bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.<ext>``.
+``s3://s2p-bronze/year=YYYY/month=MM/day=DD/source=<feed>/<doc_id>.<ext>``.
 
-See ``../SOURCES.md`` for the full feed catalogue and rate limits, and
-``../RESEARCH.md`` section 7 for the architectural plan.
+See [`../SOURCES.md`](../SOURCES.md) for the active source catalogue and
+[`../docs/SOURCE_PROCESSING_POLICY.md`](../docs/SOURCE_PROCESSING_POLICY.md)
+for the extraction and routing contract.
 
 ## Components
 

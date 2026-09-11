@@ -77,8 +77,6 @@ spec:
               value: "1"
             - name: HF_HUB_DISABLE_TELEMETRY
               value: "1"
-            - name: FINEPDFS_EDU_V2_REVISION
-              value: "90ddef285f67230389057c14b2f6bbfeb70d40ea"
             - name: KENLM_REVISION
               value: "3fbe35c83b1a39f420a345b7c96a186c8030d834"
             - name: FIGURE_CLASSIFIER_REVISION

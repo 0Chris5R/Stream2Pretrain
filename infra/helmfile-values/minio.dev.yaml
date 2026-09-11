@@ -1,0 +1,7 @@
+---
+# The measured DHBW cluster claim is 10 GiB. local-path does not support online
+# expansion, so this value must match the retained claim used by the migration.
+persistence:
+  claimName: minio-data
+  storageClass: local-path
+  size: 10Gi

@@ -6,7 +6,9 @@ profile: dev
 
 image:
   registry: docker.io
-  tag: "0.2.0-2e1d99b"
+  # Local fallback only. GitHub Actions replaces every application image with
+  # the digest built for the workflow's exact GITHUB_SHA.
+  tag: "0.2.0"
   # Images currently exist only in the control-plane containerd store. Never
   # hide an incomplete image distribution step behind a remote pull attempt.
   pullPolicy: Never
@@ -51,7 +53,6 @@ keda:
 processor:
   fetcher:
     replicas: 1
-    tag: "0.2.0-1f4cf19"
     requireRealModels: true
     doclingEnabled: true
     # Full CPU PDF extraction has an explicit memory ceiling.
@@ -61,7 +62,6 @@ processor:
       limits: {cpu: 2, memory: 8Gi}
   curate:
     replicas: 1
-    tag: "0.2.0-619290f"
     requireRealModels: true
     doclingEnabled: false
     usePresidio: true
@@ -78,8 +78,9 @@ processor:
       quality:
         autoscaling:
           minReplicas: 2
-          # Ceiling fits the current three-node reservation budget.
-          maxReplicas: 4
+          # Three is the measured ceiling that preserves the 2 GiB reservation
+          # required by the worker-2-local DuckDB serving-index volume.
+          maxReplicas: 3
     autoscaling:
       enabled: true
       minReplicas: 1
@@ -105,7 +106,6 @@ processor:
     enabled: true
 
 sourceController:
-  enabled: true
   replicas: 1
 
 ui:
@@ -143,7 +143,6 @@ ingest:
   oaipmh:
     maxPagesPerRun: 1
   arxivHtmlFetcher:
-    tag: "0.2.0-619290f"
     maxRecordsPerLoop: 0
   hf:
     replicas: 1

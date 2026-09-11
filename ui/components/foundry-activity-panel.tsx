@@ -82,7 +82,7 @@ async function fetchActivity(window: ActivityWindow): Promise<FoundryActivity> {
 }
 
 export function FoundryActivityPanel({ dashboard }: { dashboard?: FoundryDashboard }) {
-  const [window, setWindow] = React.useState<ActivityWindow>('5m');
+  const [window, setWindow] = React.useState<ActivityWindow>('24h');
   const chartsReady = React.useSyncExternalStore(
     subscribeToClient,
     clientSnapshot,

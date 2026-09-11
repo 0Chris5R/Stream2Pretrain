@@ -1,0 +1,44 @@
+fullnameOverride: minio
+
+image:
+  repository: quay.io/minio/minio
+  tag: RELEASE.2025-04-08T15-41-24Z
+  pullPolicy: IfNotPresent
+
+clientImage:
+  repository: quay.io/minio/mc
+  tag: RELEASE.2025-04-08T15-39-49Z
+  pullPolicy: IfNotPresent
+
+credentialsSecret: minio-root
+
+persistence:
+  claimName: minio-data
+  storageClass: local-path
+  # The recorded historical high-water mark was about 52 GiB. This request
+  # leaves measurable headroom without claiming that local-path enforces quota.
+  size: 64Gi
+
+buckets:
+  - s2p-bronze
+  - s2p-silver
+  - s2p-gold
+  - s2p-posttrain
+  - s2p-state
+
+bucketBootstrap:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack

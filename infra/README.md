@@ -1,10 +1,10 @@
 # Stream2Pretrain infrastructure
 
 This directory contains the measured DHBWCloud deployment path. Terraform owns
-the OpenStack VMs, Ansible owns k3s, and Helmfile owns the platform, catalog,
-and application releases. MinIO is an explicit external prerequisite because
-the existing cluster already has a stateful MinIO deployment and its replacement
-topology has not been measured.
+the OpenStack VMs, Ansible owns k3s, and Helmfile owns the platform, storage,
+catalog, and application releases. The repository includes a standalone MinIO
+StatefulSet for a fresh course deployment. It is not a distributed or
+high-availability object-store topology.
 
 The supported Helmfile environment is `dev`, parameterized for the DHBW
 cluster. Other chart overrides require their own measured infrastructure.
@@ -54,17 +54,20 @@ The release graph and exact chart versions are in `../helmfile.yaml` and
 - The existing, non-committed DHBW DNS inventory. By default the script reads
   `../cloud/dns-credentials.yaml`; set `DNS_CREDENTIALS_INVENTORY` when it is
   stored elsewhere.
-- A reachable MinIO service named `minio` in namespace `minio`, the application
-  buckets `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-posttrain`,
-  and externally managed credentials.
 - Application images published to a registry reachable from every eligible
   node, with digest pins and a pull Secret if the registry is private.
 
 Required Secrets for enabled components are listed below. The deployment owns
 the explicitly marked internal identities; all others are externally managed.
+Create the operator-supplied Secrets with
+[`scripts/configure_dhbw_secrets.sh`](../scripts/configure_dhbw_secrets.sh) as
+shown in the root README.
+Set `S2P_CORE_ONLY=1` for both Secret creation and application deployment when
+the optional Foundry provider is unavailable.
 
 | Namespace | Object | Required keys |
 | --- | --- | --- |
+| `minio` | Secret `minio-root` | `accessKey`, `secretKey` |
 | `polaris` | Secret `polaris-minio` | `accessKey`, `secretKey` |
 | `polaris` | Secret `polaris-persistence` | `username`, `password`, `jdbcUrl`; deployment creates it once unless pre-provisioned |
 | `stream2pretrain` | Secret `stream2pretrain-minio` | `accessKey`, `secretKey` |
@@ -106,6 +109,7 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 
 # Apply each in-cluster ownership tier after its prerequisites exist
 ./scripts/setup_dhbw_demo.sh platform
+./scripts/setup_dhbw_demo.sh storage
 ./scripts/setup_dhbw_demo.sh catalog
 ./scripts/setup_dhbw_demo.sh topics
 ./scripts/setup_dhbw_demo.sh application
@@ -118,8 +122,9 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 ```
 
 `platform` installs cert-manager, Traefik, ExternalDNS,
-kube-prometheus-stack, KEDA, Gatekeeper, and Redpanda. `catalog` installs the
-official Apache Polaris 1.7.0 chart. `topics` idempotently creates the
+kube-prometheus-stack, KEDA, Gatekeeper, and Redpanda. `storage` installs the
+repository-owned MinIO StatefulSet and idempotently creates the five application
+buckets. `catalog` installs the official Apache Polaris 1.7.0 chart. `topics` idempotently creates the
 configured topics. The release reconciles four document-topic partitions
 in the DHBW profile, with single-broker replication. `application` installs the local
 Stream2Pretrain chart. Loki, Tempo, and
@@ -138,7 +143,7 @@ configured models are present in authenticated model discovery. See
 and audit workflow.
 
 Bulk corpus storage must not share a k3s node root filesystem in a production
-deployment. The current `local-path` MinIO volume cannot gain physical capacity
+deployment. The course `local-path` MinIO volume cannot gain physical capacity
 by editing its PVC, and it is not a valid target for a PVC autoresizer. See
 [`../docs/storage-scaling.md`](../docs/storage-scaling.md) for the data-owner
 map, safe maintenance boundary, and the external S3 or expandable-CSI migration
@@ -177,10 +182,11 @@ presented as production hardening.
 
 ## Destructive operations
 
-No teardown command is provided. Removing the cluster or stateful releases can
-destroy MinIO, Redpanda, Prometheus, and curator data. Snapshot the relevant
-volumes and obtain explicit approval before removing `prevent_destroy` or
-deleting any PVC.
+The provisioning script intentionally has no teardown command. The operations
+runbook records a separate manual decommission procedure for an explicitly
+approved teardown. Removing the cluster or stateful releases can destroy MinIO,
+Redpanda, Prometheus, and curator data. Snapshot the relevant volumes before
+removing `prevent_destroy` or deleting any PVC.
 
 ## Still needs measurement
 

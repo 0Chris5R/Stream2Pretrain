@@ -7,8 +7,9 @@ description: |
 
   Tech stack: Redpanda, Bytewax, MinIO, Iceberg V2,
   Polaris, Resiliparse, Rensa, LSHBloom, ModernBERT, Next.js 16,
-  DuckDB API, KEDA, kube-prometheus-stack, Loki, Alloy, Tempo, Traefik,
-  cert-manager, OPA Gatekeeper.
+  DuckDB API, KEDA, kube-prometheus-stack, Traefik, and cert-manager.
+  NetworkPolicy, Gatekeeper, Loki, Alloy, and Tempo are optional integrations
+  and are not enabled in the measured DHBW profile.
 type: application
 version: 0.2.0
 appVersion: "0.2.0"

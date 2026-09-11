@@ -51,6 +51,7 @@ jobs:
       sources: ${{ steps.scope.outputs.sources }}
       monitoring: ${{ steps.scope.outputs.monitoring }}
       redpanda: ${{ steps.scope.outputs.redpanda }}
+      storage: ${{ steps.scope.outputs.storage }}
       catalog: ${{ steps.scope.outputs.catalog }}
       foundry_package: ${{ steps.scope.outputs.foundry_package }}
       dns_infra: ${{ steps.scope.outputs.dns_infra }}
@@ -76,6 +77,7 @@ jobs:
             echo "sources=false" >> "$GITHUB_OUTPUT"
             echo "monitoring=false" >> "$GITHUB_OUTPUT"
             echo "redpanda=false" >> "$GITHUB_OUTPUT"
+            echo "storage=true" >> "$GITHUB_OUTPUT"
             echo "catalog=false" >> "$GITHUB_OUTPUT"
             echo "foundry_package=false" >> "$GITHUB_OUTPUT"
             echo "dns_infra=false" >> "$GITHUB_OUTPUT"
@@ -96,6 +98,7 @@ jobs:
           sources=false
           monitoring=false
           redpanda=false
+          storage=false
           catalog=false
           foundry_package=false
           dns_infra=false
@@ -140,6 +143,11 @@ jobs:
             redpanda=true
           fi
           if grep -Eq \
+            '^(\.github/workflows/deploy-main\.yml$|charts/minio/.*|infra/helmfile-values/minio\.dev\.yaml$|helmfile\.yaml$|scripts/setup_dhbw_demo\.sh$)' \
+            "$changed"; then
+            storage=true
+          fi
+          if grep -Eq \
             '^(charts/polaris-(postgres|metastore-bootstrap)/.*|infra/helmfile-values/polaris\.dev\.yaml|helmfile\.yaml)$' \
             "$changed"; then
             catalog=true
@@ -168,6 +176,7 @@ jobs:
           echo "sources=$sources" >> "$GITHUB_OUTPUT"
           echo "monitoring=$monitoring" >> "$GITHUB_OUTPUT"
           echo "redpanda=$redpanda" >> "$GITHUB_OUTPUT"
+          echo "storage=$storage" >> "$GITHUB_OUTPUT"
           echo "catalog=$catalog" >> "$GITHUB_OUTPUT"
           echo "foundry_package=$foundry_package" >> "$GITHUB_OUTPUT"
           echo "dns_infra=$dns_infra" >> "$GITHUB_OUTPUT"
@@ -961,6 +970,7 @@ jobs:
       SOURCES_CHANGED: ${{ needs.changes.outputs.sources }}
       MONITORING_CHANGED: ${{ needs.changes.outputs.monitoring }}
       REDPANDA_CHANGED: ${{ needs.changes.outputs.redpanda }}
+      STORAGE_CHANGED: ${{ needs.changes.outputs.storage }}
       CATALOG_CHANGED: ${{ needs.changes.outputs.catalog }}
       DNS_INFRA_CHANGED: ${{ needs.changes.outputs.dns_infra }}
       MODEL_RUNTIME_CHANGED: ${{ needs.changes.outputs.model_runtime }}
@@ -1229,6 +1239,11 @@ jobs:
             evidence_dir="$RUNNER_TEMP/submission-evidence"
             mkdir -p "$evidence_dir"
             kubectl get nodes -o json > "$evidence_dir/nodes.json"
+            kubectl get pods -A \
+              -o 'custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,READY:.status.containerStatuses[*].ready,STATUS:.status.phase,NODE:.spec.nodeName' \
+              > "$evidence_dir/platform-pods.txt"
+            kubectl get statefulset,deployment,pvc -A -o wide \
+              > "$evidence_dir/platform-workloads.txt"
             kubectl -n stream2pretrain get pods -o json | jq '{items: [.items[] | {name: .metadata.name, created: .metadata.creationTimestamp, node: .spec.nodeName, containers: [.spec.containers[] | {name,image,resources}], status: .status}]}' > "$evidence_dir/pods.json"
             kubectl top nodes > "$evidence_dir/node-usage.txt"
             kubectl -n stream2pretrain top pods --containers > "$evidence_dir/pod-usage.txt"
@@ -2307,6 +2322,26 @@ jobs:
             exit 1
           fi
           echo "::endgroup::"
+
+          if [[ "$DEPLOY_MODE" == "deploy" ]] \
+             && { [[ "$STORAGE_CHANGED" == "true" ]] \
+               || ! kubectl -n minio get service/minio >/dev/null 2>&1; }; then
+            echo "::group::Reconcile MinIO storage"
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=minio \
+              sync \
+              --reset-values \
+              --wait \
+              --wait-for-jobs \
+              --timeout 300 \
+              --suppress-secrets
+            kubectl -n minio rollout status statefulset/minio --timeout=300s
+            echo "::endgroup::"
+            finish_phase "MinIO storage reconciliation"
+          fi
 
           minio_ready_addresses="$(
             kubectl -n minio get endpointslice \

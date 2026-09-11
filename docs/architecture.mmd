@@ -1,17 +1,20 @@
 flowchart LR
-  arxiv["arXiv feeds"] --> arxivFetch["arXiv full text"]
-  hf["Hugging Face API"] --> hfFetch["Exact-revision cards"]
-  arxivFetch --> raw[(raw.fetched)]
-  hfFetch --> raw
-  raw --> fetcher["Bytewax fetcher"]
-  fetcher --> normalized[(docs.normalized)]
-  normalized --> curator["Bytewax curator"]
-  curator --> decisions[(curation.decisions)]
-  curator --> curated[(docs.curated)]
-  decisions --> writer["Iceberg writer"]
-  curated --> writer
-  writer --> lakehouse["MinIO + Iceberg + Polaris"]
-  lakehouse --> duckdb["DuckDB API"]
-  duckdb --> ui["Read-only cockpit"]
-  curated --> foundry["SFT/RL Foundry"]
+  sources["arXiv and Hugging Face sources"] --> ingest["Poll, license and fetch"]
+  ingest --> redpanda["Redpanda admissions, raw, normalized and decision topics"]
+  ingest --> minio["MinIO Bronze, Silver, Gold, state and packages"]
+  redpanda --> bytewax["Bytewax extraction and stateful curation"]
+  bytewax --> models["Four ModernBERT heads and KenLM API"]
+  bytewax --> writer["Iceberg writer"]
+  writer --> lakehouse["Iceberg V2 Parquet tables in MinIO"]
+  lakehouse --> polaris["Polaris catalog"]
+  polaris --> duckdb["DuckDB API"]
+  duckdb --> ui["Next.js monitoring, inspection and export cockpit"]
+  bytewax --> foundry["Experimental SFT/RL Foundry"]
+  foundry --> minio
   foundry --> ui
+
+  subgraph kubernetes["Kubernetes and operational plane"]
+    helmfile["Helmfile: edge, platform, storage, catalog, application"]
+    state["PVC-backed recovery, dedup, serving index and PostgreSQL"]
+    metrics["Prometheus, ServiceMonitors and alerts"]
+  end

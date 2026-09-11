@@ -6,7 +6,8 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
-PY_DIRS := schemas ingest processor tests
+PY_DIRS := schemas ingest processor tests scripts
+PYTEST_RUNTIME := --with duckdb==1.5.3 --with beautifulsoup4==4.15.0 --with lxml==6.1.1 --with pillow==12.3.0 --with 'pyiceberg[sql-sqlite]==0.11.1' --with sqlitedict==2.1.0
 HELM_CHART := charts/stream2pretrain
 HELMFILE := helmfile.yaml
 CONTAINER_ENGINE ?= $(shell if command -v podman >/dev/null 2>&1; then echo podman; else echo docker; fi)
@@ -32,7 +33,11 @@ typecheck: ## Run mypy across the workspace.
 
 .PHONY: test
 test: ## Run deterministic tests without starting containers.
-	uv run pytest schemas ingest processor tests --ignore=tests/integration
+	uv run $(PYTEST_RUNTIME) pytest
+
+.PHONY: submission
+submission: ## Build the deterministic, tracked-files-only submission ZIP.
+	uv run python scripts/package_submission.py
 
 .PHONY: dev-up
 dev-up: ## Start the local dev stack (Redpanda + MinIO) via docker compose.

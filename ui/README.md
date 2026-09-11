@@ -12,8 +12,9 @@ The Next.js curation UI contains six workspaces:
 - `/post-training`: generation activity, artifact inspection and human audit.
 
 The product design and upstream inspirations are recorded in
-`docs/UI_DESIGN_PROVENANCE.md`. Score meanings are in
-`docs/SCORING_AND_ROUTING.md`.
+[`docs/UI_DESIGN_PROVENANCE.md`](../docs/UI_DESIGN_PROVENANCE.md). Score
+meanings are in
+[`docs/SCORING_AND_ROUTING.md`](../docs/SCORING_AND_ROUTING.md).
 
 ## Stack
 

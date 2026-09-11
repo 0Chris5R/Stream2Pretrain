@@ -8,7 +8,7 @@ and [the operations guide](docs/operations.md) for cloud commands.
 
 ```bash
 uv sync --all-packages --all-groups
-uv run pytest schemas ingest processor tests --ignore=tests/integration
+make test
 uv run ruff check schemas ingest processor tests scripts
 uv run ruff format --check schemas ingest processor tests scripts
 uv run python scripts/security_scan.py
@@ -18,6 +18,9 @@ npm ci
 npm run typecheck -- --incremental false
 npm run lint
 ```
+
+Before hand-in, run `make submission`. It creates the deterministic,
+tracked-files-only archive and SHA-256 checksum under `dist/`.
 
 Integration tests in `tests/integration/` require an explicitly started container
 stack. They are separate from unit checks. [The local guide](local/README.md)

@@ -7,7 +7,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const window = ActivityWindowSchema.safeParse(request.nextUrl.searchParams.get('window') ?? '5m');
+  const window = ActivityWindowSchema.safeParse(request.nextUrl.searchParams.get('window') ?? '24h');
   if (!window.success) {
     return NextResponse.json({ detail: 'window must be one of 5m, 1h, or 24h' }, { status: 400 });
   }

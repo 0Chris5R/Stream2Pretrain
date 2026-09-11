@@ -2,8 +2,6 @@
 
 Stream2Pretrain is a Kubernetes-native pipeline that turns continuous AI research sources into an auditable training-data corpus. It separates permissive pretraining data from grey-area and unlicensed inputs that may only ground derived post-training artifacts, applies source-aware quality rules, stores every decision in an Iceberg lakehouse, and serves the results through a monitoring cockpit.
 
-This README is the report for the DHBW Cloud Computing and Big Data examination.
-
 ## 1. Use Case and Motivation
 
 Large language model training needs current, high-quality material. AI research changes continuously across papers and model or dataset documentation. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
@@ -35,40 +33,22 @@ The relevant Big Data characteristics are:
 | Veracity | Near duplicates, personal data, extraction failures, missing licenses, and low-quality pages must remain visible as explicit decisions. |
 | Value | Accepted records become a queryable training export. Rejected records remain useful for auditing and policy improvement. |
 
-The bounded cloud check on 4 September 2026 returned 17,849 unique durable
-decisions and 6,730 training-export documents across all policy generations.
-Over 27.5 minutes, 113 normalized events and 32 decision events were published,
-about 246 and 70 per hour respectively. The processing backlog grew during this
-verification-loaded interval; sustained catch-up capacity is not demonstrated.
-These event rates include replay and are not counts of new unique papers.
+The frozen submission evidence records 39,743 durable decisions and 10,337
+training-export documents across all policy generations. A separate bounded
+27.5-minute measurement recorded 113 normalized events and 32 decision events.
+The backlog grew during that interval, so sustained catch-up capacity is not
+demonstrated. Event counts include replay and are not counts of new unique
+documents.
 
 ## 3. Architecture Decision
 
 Stream2Pretrain uses a Kappa architecture. Live records enter one streaming path and pass through the same transformations. There is no separate historical batch implementation. Reprocessing uses retained Redpanda events and versioned Iceberg decisions.
 
-```mermaid
-flowchart LR
-    sources["AI research sources"] --> ingest["Ingest pollers"]
-    ingest --> licence["Pre-fetch licence gate"]
-    licence --> admission["Redpanda license.admissions"]
-    licence --> bronze["MinIO Bronze"]
-    licence --> raw["Redpanda raw.fetched"]
-    raw --> fetcher["Bytewax fetcher with durable recovery"]
-    fetcher --> normalized["Redpanda docs.normalized"]
-    normalized --> curate["Bytewax stateful curator"]
-    curate --> decisions["Redpanda curation.decisions"]
-    curate --> clean["Redpanda docs.curated"]
-    admission --> writer
-    clean --> writer
-    decisions --> writer["Iceberg writer"]
-    writer --> lakehouse["MinIO and Iceberg V2"]
-    lakehouse --> catalog["Polaris catalog"]
-    catalog --> query["DuckDB API"]
-    query --> ui["Next.js cockpit"]
-    clean --> foundry["Daily paper SFT/RL Foundry"]
-    foundry --> packages["Signed artifacts and human review"]
-    packages --> ui
-```
+![Stream2Pretrain Kappa architecture](docs/architecture.svg)
+
+A companion Mermaid definition is included in
+[`docs/architecture.mmd`](docs/architecture.mmd). The SVG remains visible when
+the ZIP is read without Mermaid support.
 
 The project makes four justified deviations from a conventional lecture stack:
 
@@ -78,6 +58,8 @@ The project makes four justified deviations from a conventional lecture stack:
 4. Iceberg V2 with Polaris provides table snapshots, schema evolution, and vendor-neutral catalog access.
 
 These choices support the use case directly. They are not included only to increase the number of technologies.
+
+Architecture references include the original [Kappa Architecture proposal](https://www.oreilly.com/radar/questioning-the-lambda-architecture/), the [Redpanda architecture guide](https://docs.redpanda.com/current/get-started/architecture/), the [Bytewax project documentation](https://github.com/bytewax/bytewax), and the [Apache Iceberg specification](https://iceberg.apache.org/spec/). The repository also retains the course material used for the deployment and storage decisions in [`lecture_slides/04 - Container Orchestration.md`](lecture_slides/04%20-%20Container%20Orchestration.md) and [`lecture_slides/04c - Storage and Networking.md`](lecture_slides/04c%20-%20Storage%20and%20Networking.md).
 
 ## 4. Components and Data Flow
 
@@ -98,13 +80,13 @@ These choices support the use case directly. They are not included only to incre
 The end-to-end flow is:
 
 1. A poller discovers a content identity. Internal discovery envelopes schedule a full-content worker and produce no corpus decision.
-2. The content worker resolves the exact item rights and publishes an immutable pre-fetch decision which the product folds into the corpus route ledger.
+2. The content worker resolves the exact item rights and publishes an immutable pre-fetch decision to `license.admissions`.
 3. Permissive and posttrain-only items are compressed into Bronze and published to `raw.fetched`; explicit incompatible rights stop before body fetch.
 4. The fetcher repeats the licence check, extracts text, and publishes a `SilverRecord` to `docs.normalized`.
 5. The curator produces one auditable decision for every normalized record.
 6. Every curation decision is published to `curation.decisions`.
 7. Only eligible records are also published to `docs.curated`.
-8. The writer persists pre-fetch rejections, curation decisions, and accepted rows; query APIs present one corpus route ledger.
+8. The writer persists `license_admissions`, `curation_decisions`, and `curated` as three physical Iceberg tables. The query API combines the first two into the corpus route ledger serving view.
 9. DuckDB reads the catalog metadata and the UI displays the result.
 
 The repository is organized by responsibility:
@@ -211,12 +193,18 @@ The storage model separates evidence from serving data:
 | Layer | Storage | Contents |
 |---|---|---|
 | Bronze | Gzip objects in MinIO | Immutable source bytes and fetch metadata. |
-| Corpus route ledger | Iceberg V2 with Parquet | Every pre-fetch quarantine and downstream curation decision, exposed through one route view with licence provenance. |
+| Licence admissions | Iceberg V2 with Parquet | Physical `license_admissions` table containing every item-level pre-fetch route, including quarantine before body retrieval. |
 | Normalized stream | Redpanda | Extracted text and scientific structure for curation. |
-| Decision table | Iceberg V2 with Parquet | Every accepted and rejected policy outcome. |
-| Curated table | Iceberg V2 with Parquet | Only trainable records. |
+| Curation decisions | Iceberg V2 with Parquet | Physical `curation_decisions` table containing every downstream accepted and rejected policy outcome. |
+| Curated corpus | Iceberg V2 with Parquet | Physical `curated` table containing only trainable records. |
+| Corpus route ledger | DuckDB serving view | Logical latest-per-document view over licence admissions and curation decisions, not a fourth Iceberg table. |
 
-The Iceberg tables partition by language, risk tier, and month of `valid_from`. These fields support the dominant filters while avoiding a partition per document. The schema stores text, quality scores, route reasons, license provenance, PII flags, validity intervals, and exact policy revisions.
+The curated and curation-decision tables partition by language, risk tier, and
+month of `valid_from`; licence admissions partition by source, admission status,
+and month of `observed_at`. These fields support the dominant filters while
+avoiding a partition per document. The schemas store text, quality scores,
+route reasons, licence provenance, PII flags, validity intervals, and exact
+policy revisions.
 
 Iceberg is appropriate because files alone do not provide reliable snapshot identity, schema evolution, or catalog discovery. Polaris provides the catalog boundary. DuckDB reads the exact metadata file selected by Polaris rather than guessing the latest object.
 
@@ -254,37 +242,63 @@ A typical user flow is:
    trajectories, verifiers, validation evidence, provenance, and package files
    for named human review.
 
-The API and document screenshots in section 11 use the same live cluster data shown by the UI.
+The API and dashboard screenshots in section 11 come from the same live cluster.
 
 ## 8. Kubernetes Deployment
 
 | Kubernetes object | Components |
 |---|---|
-| Deployment | Fetcher, arXiv full-text worker, Hugging Face card poller, Iceberg writer, DuckDB API, SourceFeed controller, and UI. |
-| StatefulSet | Curator with a persistent global dedup index and decision cache; single-writer foundry with its durable queue, call cache, and append-only artifact audits; PostgreSQL for the Polaris catalog. |
-| CronJob | Periodic arXiv RSS and OAI-PMH discovery polls. |
+| Deployment | Fetcher, arXiv full-text worker, Hugging Face card poller, Iceberg writer, DuckDB API, SourceFeed controller, UI, and stateless quality and KenLM model services. |
+| StatefulSet | Curator with a persistent global dedup index and decision cache; single-writer foundry with its durable queue, call cache, and append-only artifact audits; MinIO object storage; PostgreSQL for the Polaris catalog. |
+| CronJob | Periodic arXiv RSS and OAI-PMH discovery polls plus per-table Iceberg snapshot and orphan-file maintenance. |
 | ConfigMap | Feed definitions and runtime configuration. |
 | Secret | MinIO, Polaris, Hugging Face, and Ed25519 credentials. |
 | PVC | Curator and foundry recovery state, serving indexes, object storage, and the Polaris relational catalog. |
 | ServiceMonitor and PrometheusRule | Metrics discovery and availability alerts. |
 
-The Helm chart parameterizes replica counts, resources, images, topics, endpoints, model settings, and ingress. Helmfile deploys edge, platform, catalog, and application tiers in dependency order.
+The Helm charts parameterize replica counts, resources, images, topics, endpoints, model settings, object storage, and ingress. Helmfile deploys edge, platform, storage, catalog, and application tiers in dependency order.
 
-The measured cluster exposes 16 vCPUs across three nodes, with approximately
-32/8/8 GiB RAM. Logical object storage occupied about 52 GiB during the final
-check, including 40.2 GiB in Gold and 11.4 GiB in transient Bronze/Silver.
-The short interval added about 8.5 MiB to Gold. Its linear extrapolation is
-0.44 GiB/day, not a retention-adjusted or full-capacity storage forecast.
+MinIO is a first-class release in that graph, not an external or manually
+installed prerequisite. For a fresh installation, `./scripts/setup_dhbw_demo.sh
+storage` installs the repository-owned StatefulSet, PVC, Service,
+ServiceMonitor, and idempotent five-bucket bootstrap before Polaris and the
+application. On 8 September 2026 the live cluster was migrated from its earlier
+manifest-managed Deployment to this Helm release. The migration retained the
+bound `minio-data` PVC and stable Service, inventoried all five buckets before
+and after the handoff, required every object count and byte count to remain at
+least unchanged, and removed the old Deployment only after `minio-0` became
+Ready. The current live StatefulSet, Service, and PVC all carry Helm ownership.
 
-Horizontal scale was demonstrated on the DHBW cluster. The UI Deployment scaled from one to three ready replicas in 14 measured seconds. The pod screenshot shows all three replicas. A temporary request for twenty replicas left seven unavailable, triggered `Stream2PretrainDeploymentUnavailable`, and the alert cleared after restoring one replica.
+The course deployment uses three Kubernetes nodes. Its frozen evidence contains
+about 7.01 GiB across the five MinIO buckets. This is a point-in-time data
+volume, not a capacity forecast.
 
-The core fetcher and curator are coordinated Bytewax executions. They retain
-recovery state on PVCs and deliberately do not use ordinary Kafka-lag KEDA,
-because broker consumer-group offsets are not the authoritative Bytewax
-checkpoint. Independent ingestion workers and stateless classifier services
-remain horizontally scalable. Rescaling a core flow is a coordinated
-stop-and-start operation using the pre-created recovery partitions, not a set
-of independent replicas joining the group.
+Scaling is explicit per component:
+
+| Component | Scaling mechanism | Submission evidence and limit |
+|---|---|---|
+| UI | Ordinary Deployment replicas | Demonstrated from one to three Ready replicas in 14 seconds, then restored to one. The replica field is declared in [`ui.yaml`](charts/stream2pretrain/templates/ui.yaml#L4-L18). |
+| Quality and KenLM APIs | KEDA from active and waiting request metrics, or manual Deployment scaling | The submitted pod capture shows two Ready quality replicas. The measured DHBW range is two to three, declared in [`stream2pretrain.dev.yaml`](infra/helmfile-values/stream2pretrain.dev.yaml#L74-L89), with the Prometheus demand trigger in [`processor-model-service.yaml`](charts/stream2pretrain/templates/processor-model-service.yaml#L131-L159). |
+| External `Qwen3.8-27B` Foundry API | Provider-managed service; Stream2Pretrain can change client concurrency manually | It is not a Kubernetes workload owned by this project, so no cluster autoscaling claim is made. |
+| Source workers | Replica setting and partitioned source ownership | Independently committing workers can scale when each cursor or partition has one owner. The arXiv acquisition worker remains fixed because its shared input/output topic does not expose a safe lag signal. |
+| Fetcher and curator | Coordinated Bytewax rescale using pre-created recovery partitions | They are stateful executions. Replica changes require a controlled stop, state handoff, and restart rather than independent Pods joining a consumer group. |
+| Iceberg writer and Foundry | Single writer in the measured profile | Horizontal writers require external commit or queue coordination and are not claimed as demonstrated. |
+| DuckDB API | Manual replicas after moving the retained serving index to shared or per-replica rebuildable storage | The measured `local-path` index pins the current profile to one replica. |
+| MinIO and Polaris PostgreSQL | Stateful storage services | The course profile is single-instance. A distributed object store and database replication require separate storage capacity and failover validation. |
+
+This distinguishes demonstrated horizontal scaling from components that still
+need coordination. The implementation does not claim that increasing every
+replica field is automatically safe.
+
+Every component nevertheless has an explicit scale-out boundary. Stateless
+HTTP services use Kubernetes replicas or KEDA. Partition-owning stream workers
+scale through a coordinated Bytewax execution restart against the pre-created
+recovery partitions. The single-writer services scale by replacing their local
+coordination boundary: an external commit coordinator for Iceberg, a shared or
+rebuildable serving index for DuckDB, a distributed object-store deployment for
+MinIO, and a replicated PostgreSQL service for Polaris. The course deployment
+demonstrates horizontal Pod scaling for the UI and classifier service and does
+not present these stateful replacement paths as already demonstrated.
 
 ## 9. Deployment Guide
 
@@ -292,11 +306,12 @@ of independent replicas joining the group.
 
 - OpenStack credentials for DHBWCloud
 - Terraform, Ansible, kubectl, Helm 3, Helmfile, and uv
-- Container images built from the included Dockerfiles
+- GitHub CLI access to the repository, or container images built from the included Dockerfiles
 - A reviewed `terraform.tfvars`
-- The existing DHBW RFC2136 inventory outside Git
-- Kubernetes Secrets for MinIO, Polaris, Hugging Face, and Grafana, plus the
-  foundry provider and signing Secrets when the foundry is enabled
+- The DHBW RFC2136 inventory when public DNS and TLS are required
+- Kubernetes Secrets for MinIO, Polaris, and Hugging Face, plus the Foundry
+  provider Secret when the Foundry is enabled. The signing identity is created
+  once by deployment unless it is pre-provisioned.
 
 Use `uv` for every Python command.
 
@@ -304,8 +319,9 @@ Use `uv` for every Python command.
 
 ```bash
 uv sync --all-packages --all-groups
-uv run pytest schemas ingest processor tests --ignore=tests/integration
+make test
 uv run ruff check schemas ingest processor tests scripts
+uv run ruff format --check schemas ingest processor tests scripts
 uv run python scripts/security_scan.py
 ./scripts/setup_dhbw_demo.sh validate
 ```
@@ -319,29 +335,68 @@ export OPENRC_PATH=/absolute/path/to/openrc.sh
 
 export KUBECONFIG=$PWD/infra/kubeconfig-stream2pretrain.yaml
 ./scripts/setup_dhbw_demo.sh platform
-./scripts/setup_dhbw_demo.sh catalog
-./scripts/setup_dhbw_demo.sh topics
 ```
 
 For an existing cluster, apply only the changed ownership tier. The
 [deployment workflow](docs/continuous-deployment.md) reuses unchanged images
 and pinned model layers and deploys only changed application workloads.
 
-Create the required Secrets without committing their values. Then install the application:
+Export the required values without writing them to repository files:
 
 ```bash
+export MINIO_ACCESS_KEY='replace-me'
+export MINIO_SECRET_KEY='replace-me'
+export POLARIS_CREDENTIAL='client-id:client-secret'
+export POLARIS_SCOPE='PRINCIPAL_ROLE:ALL'
+export HF_TOKEN='replace-me'
+export HETZNER_INFERENCE_API_KEY='replace-me'
+export FOUNDRY_CONTROL_TOKEN='replace-me'
+./scripts/configure_dhbw_secrets.sh
+unset MINIO_ACCESS_KEY MINIO_SECRET_KEY POLARIS_CREDENTIAL POLARIS_SCOPE HF_TOKEN
+unset HETZNER_INFERENCE_API_KEY FOUNDRY_CONTROL_TOKEN
+```
+
+The Foundry provider Secret is required by the submitted profile. To deploy
+only the required streaming and pretraining pipeline without provider access,
+set the committed core-only profile for both Secret creation and deployment:
+
+```bash
+export MINIO_ACCESS_KEY='replace-me'
+export MINIO_SECRET_KEY='replace-me'
+export POLARIS_CREDENTIAL='client-id:client-secret'
+export POLARIS_SCOPE='PRINCIPAL_ROLE:ALL'
+export HF_TOKEN='replace-me'
+export S2P_CORE_ONLY=1
+./scripts/configure_dhbw_secrets.sh
+```
+
+In this profile, `HETZNER_INFERENCE_API_KEY` and `FOUNDRY_CONTROL_TOKEN` are not
+required. Keep `S2P_CORE_ONLY=1` exported through the application step below.
+The override changes only `processor.foundry.enabled`.
+
+For a direct fresh-cluster installation, install storage, catalog, topics, and
+the application in dependency order:
+
+```bash
+./scripts/setup_dhbw_demo.sh storage
+./scripts/setup_dhbw_demo.sh catalog
+./scripts/setup_dhbw_demo.sh topics
 ./scripts/setup_dhbw_demo.sh application
 ./scripts/setup_dhbw_demo.sh verify
 ```
 
-Required Secret names are:
+For the supported immutable-image path, push the reviewed revision to `main`
+or run the included workflow explicitly:
 
-- `polaris/polaris-minio`
-- `stream2pretrain/stream2pretrain-minio`
-- `stream2pretrain/stream2pretrain-polaris`
-- `stream2pretrain/stream2pretrain-hf`
-- `stream2pretrain/stream2pretrain-foundry-providers` with
-  `HETZNER_INFERENCE_API_KEY` and `controlToken` when the foundry is enabled
+```bash
+gh workflow run deploy-main.yml --ref main -f mode=deploy
+```
+
+The workflow builds and pins application images, reconciles changed ownership
+tiers, and verifies their readiness. On a fresh cluster it installs the
+repository-owned MinIO release before checking the storage endpoint. Normal
+releases now reconcile that chart directly through Helmfile and wait for the
+StatefulSet rollout before continuing.
 
 The deployment creates the persistent Foundry signing identity once if it was
 not pre-provisioned; it is not an external provider credential.
@@ -363,40 +418,54 @@ or extraction stages. Local runtime and integration tests are opt-in.
 
 ## 10. Key Code Sections
 
-- [`ingest/common/bronze_pipeline.py`](ingest/common/bronze_pipeline.py) stores immutable Bronze bytes and publishes the admitted content event.
-- [`processor/fetcher.py`](processor/fetcher.py) converts Bronze payloads into source-specific normalized records.
-- [`processor/curate.py`](processor/curate.py) applies deterministic checks, learned scoring and routing.
-- [`processor/operators/source_classifiers.py`](processor/operators/source_classifiers.py) implements the four section classifiers.
-- [`processor/iceberg_writer.py`](processor/iceberg_writer.py) defines schemas and partitions and commits audit decisions and eligible rows.
+- [`fetch_and_publish`](ingest/common/bronze_pipeline.py#L44-L169) stores immutable Bronze bytes and publishes the admitted content event.
+- [`normalize`](processor/fetcher.py#L408-L625) converts Bronze payloads into source-specific normalized records.
+- [`curate_one`](processor/curate.py#L822-L1227) applies deterministic checks, learned scoring and routing.
+- [`SourceQualityClassifier`](processor/operators/source_classifiers.py#L56-L145) and [`SourcePosttrainClassifier`](processor/operators/source_classifiers.py#L147-L162) implement the four section classifiers.
+- [`IcebergWriter`](processor/iceberg_writer.py#L328-L879) defines schemas, buffering and commits for audit decisions and eligible rows.
 - [`processor/foundry/`](processor/foundry) contains the experimental resumable paper-to-SFT/RL pipeline, validation gates, and deterministic packaging.
 - [`docs/PIPELINE_IMPLEMENTATION_REFERENCE.md`](docs/PIPELINE_IMPLEMENTATION_REFERENCE.md) records every active projection, classifier, regular expression, routing rule, model prompt template, and deterministic SFT/RL check.
-- [`processor/serving_index.py`](processor/serving_index.py) maintains transactional serving rows and cached aggregates.
-- [`processor/duckdb_api.py`](processor/duckdb_api.py) exposes catalog-backed query and export endpoints.
-- [`ui/app/api/dashboard/route.ts`](ui/app/api/dashboard/route.ts) combines durable totals and activity metrics.
-- [`ui/app/dashboard/page.tsx`](ui/app/dashboard/page.tsx) renders the monitoring dashboard.
-- [`charts/stream2pretrain/templates/processor-curate.yaml`](charts/stream2pretrain/templates/processor-curate.yaml) declares curator resources and recovery storage.
-- [`helmfile.yaml`](helmfile.yaml) orders the platform, catalog and application releases.
-- [`scripts/cluster_smoke.py`](scripts/cluster_smoke.py) verifies an isolated end-to-end record without contaminating production topics.
+- [`ServingIndex.apply_decisions`](processor/serving_index.py#L168-L205) maintains transactional serving rows and cached aggregates.
+- [`DuckDBQueryService`](processor/duckdb_api.py#L111-L1339) exposes catalog-backed query and export operations.
+- [`GET`](ui/app/api/dashboard/route.ts#L82-L105) combines durable totals and activity metrics.
+- [`DashboardPage`](ui/app/dashboard/page.tsx#L37-L235) renders the monitoring dashboard.
+- [`processor-curate.yaml`](charts/stream2pretrain/templates/processor-curate.yaml#L8-L203) declares curator resources and recovery storage.
+- [`charts/minio`](charts/minio) declares the object store, persistent volume, health checks, monitoring and bucket bootstrap.
+- [`helmfile.yaml`](helmfile.yaml#L35-L133) orders the edge, platform, storage, catalog and application releases.
+- [`cluster_smoke.main`](scripts/cluster_smoke.py#L209-L405) verifies an isolated end-to-end record without contaminating production topics.
 
 ## 11. Screenshots and Evidence
 
 ### Live UI
 
-The 4 September 2026 capture uses the live DuckDB and Prometheus APIs. Counts can change between captures as new decisions replace earlier outcomes.
+The 8 September 2026 capture uses the live DuckDB and Prometheus APIs.
 
 ![Live Stream2Pretrain dashboard](docs/screenshots/ui-dashboard.png)
 
 ### Kubernetes pods and horizontal scale
 
-This capture shows the running application pods and three ready UI replicas from the measured scale test.
+This capture shows the application workloads, including two independent Ready
+quality-service replicas. The separate scale test moved the UI Deployment from
+one to three Ready replicas in 14 seconds and restored it to one.
 
-![kubectl get pods with three UI replicas](docs/screenshots/kubectl-pods.png)
+![Current Kubernetes application pods](docs/screenshots/kubectl-pods.png)
+
+The curated platform-wide capture below combines Ready/Running Pod rows from a
+successful read-only evidence workflow with Helm release records queried from
+the same cluster immediately afterward. It covers the application, Redpanda,
+MinIO, Polaris/PostgreSQL, ingress, KEDA, and monitoring namespaces. It shows
+the deployed `minio` Helm release and Ready `minio-0` StatefulSet pod after the
+verified PVC-preserving migration.
+
+![Current Kubernetes platform pods](docs/screenshots/platform-pods.png)
 
 ### Serving output
 
-The serving API returned the exact controlled document from the Iceberg-backed query path with HTTP 200.
+The current typed overview response came from the Iceberg-backed DuckDB serving
+path. It reports durable latest-per-document decisions separately from the
+training-export subset.
 
-![Serving API output for the controlled document](docs/screenshots/serving-output.png)
+![Current DuckDB serving overview](docs/screenshots/serving-output.png)
 
 ### Pipeline output
 
@@ -419,14 +488,16 @@ cached at Foundry admission:
 
 Additional live checks confirmed:
 
-- Polaris exposed both `gold.curation_decisions` and `gold.curated`.
+- Polaris exposed `gold.license_admissions`, `gold.curation_decisions`, and
+  `gold.curated`.
 - DuckDB returned the smoke document and corpus overview with HTTP 200.
 - The UI scale-out from one to three ready replicas took 14 seconds.
 - The availability alert fired during a controlled capacity shortfall and cleared after recovery.
 
-The [submission evidence](docs/submission-evidence.md) records the release checks,
-resource measurements and content spot-check. Classifier training code and
-held-out evaluation statistics are included; source corpora and credentials are not.
+The [submission evidence](docs/submission-evidence.md) records the latest
+verification checks, resource measurements and content spot-check. Classifier
+training code and held-out evaluation statistics are included; source corpora
+and credentials are not.
 
 ## 12. Limits and Outlook
 
@@ -435,7 +506,7 @@ scale. The limits below distinguish measured operation from future scale work.
 
 Known limits are:
 
-- The three-node DHBW profile bounds quality inference at two to four stateless replicas. The 4 September check showed four ready replicas and no core Pod restarts. This demonstrates availability, not sustained intake capacity.
+- The three-node DHBW profile bounds quality inference at two to three stateless replicas. This demonstrates a safe replica range for that service, not sustained end-to-end intake capacity.
 - CI publishes immutable images to GHCR and provides the cluster pull secret when required. Cross-node fetcher scheduling still depends on worker egress and registry availability.
 - Core Bytewax fetcher and curator scaling requires a coordinated restart;
   standard Kafka-lag KEDA is intentionally disabled for them. Iceberg remains
@@ -446,7 +517,7 @@ Known limits are:
   author blocks at extraction and curation boundaries; historical stored rows
   are not rewritten. The spot-check also found numerical PII false positives
   and older admissions below today's quality cutoffs.
-- Post-training requires named human review by design after automated validation. Historical artifacts remain under their recorded policy; the current policy applies stronger schema repair, grounding, and task-specific SFT/RL acceptance gates.
+- Post-training requires named human review after automated validation. No human-approved artifact is presented as final training output. Historical generated artifacts remain audit records rather than proof that the experimental Foundry is ready for unsupervised dataset publication.
 - License detection is a curation heuristic. It is not legal advice or a compliance guarantee.
 
 The next practical work is to measure processor scale under controlled backlog
@@ -463,7 +534,9 @@ and tune worker capacity from that measurement.
 These areas follow authored commit history and overlap across the team. The
 accumulated agent-assisted classifier and pipeline work is attributed to Chris.
 
-The submission includes source, manifests and embedded evidence. Running the
-system requires external infrastructure and credentials; grading does not.
+The submission includes source, manifests and embedded evidence. `make submission`
+creates `dist/Stream2Pretrain-submission.zip` from tracked files only, adds a
+per-file manifest, and writes a sidecar SHA-256 checksum. Running the system
+requires external infrastructure and credentials; grading does not.
 
 License: [Apache-2.0](LICENSE).

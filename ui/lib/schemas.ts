@@ -2,7 +2,7 @@
  * Zod schemas mirrored from `schemas/json_schema/*.schema.json`.
  *
  * Treat these as the wire-contract: they validate every payload entering or
- * leaving the cockpit. Keep them in sync by hand — generation is overkill for
+ * leaving the cockpit. Keep them in sync by hand - generation is overkill for
  * the small surface here, and the source schemas are also hand-curated.
  */
 import { z } from 'zod';

@@ -1,0 +1,5 @@
+# Reproducible evaluator profile for the core streaming and pretraining path.
+# It removes only the external-provider Foundry extension.
+processor:
+  foundry:
+    enabled: false

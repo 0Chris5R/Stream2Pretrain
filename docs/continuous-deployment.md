@@ -61,14 +61,17 @@ Do not commit VPN profiles, kubeconfig files, registry tokens, or private keys.
 
 ## Deployment and diagnostics
 
-Provision platform, catalog, topics and credentials using the README first.
+Provision platform, storage, catalog, topics and credentials using the README first.
 Normal application releases reuse immutable images and apply the declarative
 Helm chart. Unchanged resources and model artifacts are not rebuilt.
 Stateful progress remains on its retained PVC; deployment never resets source
 offsets as a routine action.
 
-The workflow updates the application tier. Terraform, edge networking,
-Redpanda and catalog infrastructure have separate ownership.
+The workflow updates the application tier and reconciles changed platform,
+storage, and catalog ownership scopes independently. A fresh cluster receives
+the repository-owned MinIO release before application readiness checks. Normal
+releases reconcile the MinIO chart directly through Helmfile and require the
+StatefulSet rollout to complete before application readiness checks continue.
 
 Manual modes support deployment, a compact read-only pipeline check, detailed
 diagnostics, UI audit, source/Foundry validation and storage inspection.

@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 ROUTE = Path(__file__).parents[1] / "ui/app/api/activity/route.ts"
+DASHBOARD_PANEL = Path(__file__).parents[1] / "ui/components/activity-panel.tsx"
+FOUNDRY_ROUTE = Path(__file__).parents[1] / "ui/app/api/foundry/activity/route.ts"
+FOUNDRY_PANEL = Path(__file__).parents[1] / "ui/components/foundry-activity-panel.tsx"
 DASHBOARD_ROUTE = Path(__file__).parents[1] / "ui/app/api/dashboard/route.ts"
 DUCKDB_API = Path(__file__).parents[1] / "processor/duckdb_api.py"
 SERVING_INDEX = Path(__file__).parents[1] / "processor/serving_index.py"
@@ -23,6 +26,13 @@ def test_activity_uses_content_only_processor_stage_counters() -> None:
     assert 'redpanda_topic="docs.normalized"' not in source
     assert 'redpanda_topic="curation.decisions"' not in source
     assert 'redpanda_topic="docs.curated"' not in source
+
+
+def test_activity_monitors_default_to_24_hours() -> None:
+    assert "useState<ActivityWindow>('24h')" in DASHBOARD_PANEL.read_text()
+    assert "useState<ActivityWindow>('24h')" in FOUNDRY_PANEL.read_text()
+    assert "searchParams.get('window') ?? '24h'" in ROUTE.read_text()
+    assert "searchParams.get('window') ?? '24h'" in FOUNDRY_ROUTE.read_text()
 
 
 def test_static_dashboard_uses_only_durable_corpus_apis() -> None:

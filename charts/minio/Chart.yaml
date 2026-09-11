@@ -1,0 +1,6 @@
+apiVersion: v2
+name: stream2pretrain-minio
+description: Standalone MinIO object storage for the Stream2Pretrain course deployment
+type: application
+version: 0.1.0
+appVersion: RELEASE.2025-04-08T15-41-24Z

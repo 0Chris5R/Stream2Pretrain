@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMAND="${1:-verify}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
+CORE_ONLY="${S2P_CORE_ONLY:-0}"
 KUBECONFIG_PATH="${KUBECONFIG:-$ROOT_DIR/infra/kubeconfig-stream2pretrain.yaml}"
 OPENRC_PATH="${OPENRC_PATH:-}"
 DNS_CREDENTIALS_INVENTORY="${DNS_CREDENTIALS_INVENTORY:-$ROOT_DIR/../cloud/dns-credentials.yaml}"
@@ -56,6 +57,7 @@ validate() {
   terraform -chdir="$ROOT_DIR/infra/terraform" init -backend=false >/dev/null
   terraform -chdir="$ROOT_DIR/infra/terraform" fmt -check
   terraform -chdir="$ROOT_DIR/infra/terraform" validate
+  "$HELM_BINARY" lint "$ROOT_DIR/charts/minio"
   "$HELM_BINARY" lint "$ROOT_DIR/charts/stream2pretrain" \
     -f "$ROOT_DIR/charts/stream2pretrain/values-$ENVIRONMENT.yaml" \
     -f "$ROOT_DIR/infra/helmfile-values/stream2pretrain.$ENVIRONMENT.yaml"
@@ -194,12 +196,7 @@ required_secrets() {
       missing=1
     fi
   done
-  if "$HELM_BINARY" template stream2pretrain "$ROOT_DIR/charts/stream2pretrain" \
-    --namespace stream2pretrain \
-    --values "$ROOT_DIR/charts/stream2pretrain/values-$ENVIRONMENT.yaml" \
-    --values "$ROOT_DIR/infra/helmfile-values/stream2pretrain.$ENVIRONMENT.yaml" \
-    --show-only templates/processor-foundry.yaml \
-    | grep -q '^kind: StatefulSet$'; then
+  if [[ "$CORE_ONLY" != "1" ]]; then
     for item in \
       stream2pretrain/stream2pretrain-foundry-providers/HETZNER_INFERENCE_API_KEY \
       stream2pretrain/stream2pretrain-foundry-providers/controlToken; do
@@ -380,6 +377,10 @@ case "$COMMAND" in
     apply_edge
     apply_tier "$COMMAND"
     ;;
+  storage)
+    validate
+    apply_tier storage
+    ;;
   edge)
     validate
     apply_edge
@@ -397,7 +398,9 @@ case "$COMMAND" in
     ;;
   application)
     validate
-    ensure_foundry_signing_identity
+    if [[ "$CORE_ONLY" != "1" ]]; then
+      ensure_foundry_signing_identity
+    fi
     required_secrets
     required_application_services
     required_topics
@@ -409,7 +412,7 @@ case "$COMMAND" in
     verify
     ;;
   *)
-    printf 'Usage: %s {validate|plan|cluster|platform|edge|catalog|topics|application|verify}\n' "$0" >&2
+    printf 'Usage: %s {validate|plan|cluster|platform|storage|edge|catalog|topics|application|verify}\n' "$0" >&2
     exit 2
     ;;
 esac

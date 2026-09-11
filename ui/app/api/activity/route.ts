@@ -90,7 +90,7 @@ async function stageSeries(
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const parsedWindow = ActivityWindowSchema.safeParse(request.nextUrl.searchParams.get('window') ?? '5m');
+  const parsedWindow = ActivityWindowSchema.safeParse(request.nextUrl.searchParams.get('window') ?? '24h');
   if (!parsedWindow.success) {
     return NextResponse.json({ detail: 'invalid activity window' }, { status: 400 });
   }

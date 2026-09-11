@@ -15,11 +15,12 @@ OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh plan
 # 1.2 Provision the reviewed VM plan and install k3s.
 OPENRC_PATH=/absolute/path/to/openrc.sh ./scripts/setup_dhbw_demo.sh cluster
 
-# 1.3 Provision MinIO, required buckets, and Secrets.
-# See infra/README.md. No demo credentials are created by the script.
+# 1.3 Create the required Secrets using README.md.
+# No demo credentials are created or committed by the script.
 
 # 1.4 Apply the measured ownership tiers.
 ./scripts/setup_dhbw_demo.sh platform
+./scripts/setup_dhbw_demo.sh storage
 ./scripts/setup_dhbw_demo.sh catalog
 ./scripts/setup_dhbw_demo.sh topics
 ./scripts/setup_dhbw_demo.sh application
@@ -69,6 +70,10 @@ image digest changed. An unchanged digest preserves the running Pod, loaded
 model memory, HPA state, and readiness. Foundry has a separate application
 image, so post-training edits do not replace pretraining workers and core edits
 do not replace Foundry.
+
+The Foundry's `Qwen3.8-27B` model is an external provider API rather than a Pod
+owned by this cluster. Stream2Pretrain can change request concurrency manually,
+but does not claim Kubernetes autoscaling for provider-owned capacity.
 
 The single Iceberg writer retains one Bytewax recovery partition. That state
 shard count is independent of the four Kafka topic partitions and deliberately
@@ -148,7 +153,7 @@ kubectl -n redpanda exec -it redpanda-0 -c redpanda -- \
 # 3.3 Trace a single doc end to end.
 DOC_ID="sha256:..."
 kubectl -n stream2pretrain logs statefulset/stream2pretrain-processor-curate | rg "$DOC_ID"
-# Then jump to Tempo using the trace_id field on the log line.
+# If optional tracing is enabled, use the trace_id in the configured backend.
 ```
 
 If the fetcher, curator, or Iceberg writer stalls, inspect its logs,
@@ -162,6 +167,11 @@ its next recovery snapshot. Kafka consumer-group lag is useful backlog context
 but is not the recovery checkpoint. Deleting either recovery database can
 replay retained input; deleting the curator PVC also destroys the near-duplicate
 and decision-cache boundary and is not a routine restart step.
+
+For a read-only aggregate that correlates these objects with their retained
+Kafka coordinates, run [`audit_processing_failures.py`](../scripts/audit_processing_failures.py)
+inside the fetcher container using the same `python -` pattern as the workflow
+diagnostics.
 
 ## 4. Restart from checkpoint
 
@@ -224,15 +234,18 @@ generated packages use the new key.
 
 - **Grafana**: `kubectl -n monitoring port-forward svc/grafana 3001:80`
   -> dashboards "Stream2Pretrain - Pipeline" and "Stream2Pretrain - KEDA".
-- **Loki**: filter on `{app="curator", source_feed="rss-arxiv-cs-cl"}`.
-- **Tempo / Jaeger**: search by `trace_id` (32 hex chars) recovered from a
-  gold row or a Loki line.
+- **Optional Loki**: when enabled, filter on
+  `{app="curator", source_feed="rss-arxiv-cs-cl"}`.
+- **Optional Tempo / Jaeger**: when enabled, search by `trace_id` recovered
+  from a Gold row or application log. These services are disabled in the DHBW
+  profile.
 - **Redpanda Console**: `kubectl port-forward svc/redpanda-console 8080`
   -> topic browser, consumer-group lag.
 
 ## 7. Backups
 
-- Mirror `s2p-bronze`, `s2p-silver`, `s2p-gold`, and `s2p-posttrain` to a
+- Mirror `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-posttrain`, and
+  `s2p-state` to a
   second failure domain on the reviewed schedule.
 - Iceberg data and metadata live in `s2p-gold`; snapshot expiry and orphan
   removal must run through the guarded Iceberg maintenance command, not a
@@ -240,7 +253,7 @@ generated packages use the new key.
 - Writers retain twenty previous metadata versions. The scheduled per-table
   Iceberg maintenance CronJobs are the sole physical cleanup owners: they
   retain 24 hours and at least ten snapshots, walk the complete retained
-  snapshot graph, and removes
+  snapshot graph, and remove
   only aged, unreachable metadata, manifests, data and statistics files. Inspect
   its most recent log before any manual maintenance run.
 - Back up Redpanda if the configured replay horizon is operationally required,
@@ -280,16 +293,16 @@ committed consumer group.
 ## 9. Decommission
 
 ```bash
-# 10.1 Stop new ingestion.
+# 9.1 Stop new ingestion.
 kubectl -n stream2pretrain scale deploy --all --replicas=0
 
-# 10.2 Tear the chart down.
+# 9.2 Tear the chart down.
 helmfile -f helmfile.yaml destroy
 
-# 10.3 Reclaim PVCs (review first; this is destructive).
+# 9.3 Reclaim PVCs (review first; this is destructive).
 kubectl -n stream2pretrain delete pvc --all
 
-# 10.4 Drop the namespace.
+# 9.4 Drop the namespace.
 kubectl delete namespace stream2pretrain
 ```
 

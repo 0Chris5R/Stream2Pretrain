@@ -1,0 +1,23 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "stream2pretrain-minio.name" . }}
+  namespace: {{ .Values.serviceMonitor.namespace }}
+  labels:
+    {{- include "stream2pretrain-minio.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "stream2pretrain-minio.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: api
+      path: /minio/v2/metrics/cluster
+      interval: 30s
+{{- end }}

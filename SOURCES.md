@@ -47,8 +47,10 @@ repositories, or linked artifacts.
   blob identity are durable; the watermark advances only after a complete
   traversal. Repository commits that leave README bytes unchanged emit no
   corpus item.
-- Daily item counts and sustained throughput are `needs-measurement` until the
-  controlled current-frontier deployment run completes.
+- Daily unique-item intake and sustained catch-up throughput remain
+  `needs-measurement`. The bounded 4 September deployment interval measured
+  worker events, replay, and latest-document changes, not a clean daily intake
+  cohort or maximum sustainable capacity.
 
 ## Official references
 
