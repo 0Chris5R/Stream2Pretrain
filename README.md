@@ -412,6 +412,22 @@ Open `http://127.0.0.1:3000/dashboard` after the port forward starts.
 
 ## 11. Screenshots and Evidence
 
+### Classifier evaluation
+
+The held-out evaluation contains 301 papers and 500 Hugging Face cards, split
+by document. These are agreement measurements against the LLM judge, not
+evidence of downstream training improvement.
+
+| Custom classifier | Pipeline use | Section Spearman | Section MAE |
+|---|---|---:|---:|
+| arXiv pretraining quality | Token-weighted document mean >=3.0 | 0.711 | 0.417 |
+| HF pretraining quality | Token-weighted document mean >=3.5 | 0.913 | 0.311 |
+| arXiv mathematical reasoning | Section hints after quality passes | 0.875 | 0.553 |
+| arXiv post-training suitability | Mean ranks the daily queue | 0.824 | 0.497 |
+
+Aggregate results and the complete training procedure are documented in
+[the classifier guide](docs/CLASSIFIERS.md).
+
 ### Live UI
 
 ![Live Stream2Pretrain Dashboard](docs/screenshots/ui-dashboard.png)

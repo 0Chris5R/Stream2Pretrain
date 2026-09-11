@@ -6,7 +6,9 @@ records the exact processing rules and model prompts.
 
 ## Style and verification
 
-- No emojis or em dashes. Use direct prose.
+- No emojis, em dashes or semicolons. Use direct prose.
+- Make only small, scoped edits and perform an adversarial review after each edit.
+- Match new README prose to the direct style of sections 1 to 3 and avoid generic AI phrasing.
 - Use `uv` for Python. Use `apply_patch` for source edits.
 - Validate deterministic correctness before deploying. Do not run local
   containers, models, or paid provider calls without an explicit request.
