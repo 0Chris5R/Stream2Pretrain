@@ -1,248 +1,128 @@
 # Stream2Pretrain
 
-Stream2Pretrain is a Kubernetes-native pipeline that turns continuous AI research sources into an auditable training-data corpus. It separates permissive pretraining data from grey-area and unlicensed inputs that may only ground derived post-training artifacts, applies source-aware quality rules, stores every decision in an Iceberg lakehouse, and serves the results through a monitoring cockpit.
+Stream2Pretrain is a Kubernetes based data preparation pipeline for language models. The goal is to collect and prepare training data while honoring licenses and quality standards. Next to the text collection for pre-training, the pipeline also classifies which text passages are valuable Supervised-Fine-Tuning (SFT) trajectories for post-training. It also tries to construct Reinforcement Learning (RL) environments from applicable papers.
 
 ## 1. Use Case and Motivation
 
-Large language model training needs current, high-quality material. AI research changes continuously across papers and model or dataset documentation. A periodic manual export becomes stale quickly and gives weak evidence for why a document was accepted or rejected.
+High-quality recent data is one of the most impactful pieces during the training process of language models. To create such a training corpus, fetched texts must go through licence verification, cleaning, quality assessment and curation. The compute intensive nature, the unbounded accumulation of data and highly parallelizable setting of the problem perfectly fit the streaming based Big Data architecture required. Documents can be processed independently, allowing extraction, cleaning and scoring to be distributed across workers. At the same time, checks such as duplicate detection depend on the continuously growing corpus.
 
-Stream2Pretrain solves this as a streaming curation service. Its users are data engineers and researchers who need a reproducible training-data view rather than another web crawler. The service preserves raw input, records every policy decision, and exposes only clean records as training output.
+The project focuses on the processing of the data and therefore obtains its data through open APIs, which are currently:
+- Full arXiv papers in four AI related categories
+- Hugging Face model and dataset card READMEs
 
-The deployed content adapters cover:
-
-- arXiv full papers discovered through OAI-PMH and four RSS categories
-- immutable README-blob revisions from Hugging Face model and dataset cards
-
-Internal discovery envelopes do not appear as sources, documents, acceptances,
-or quarantines.
-
-The DHBW profile runs these content paths on CPU workers. Cloud validation uses
-an isolated synthetic record that cannot enter the production corpus.
-
-This is a Big Data problem because the input is continuous, heterogeneous, and unbounded. The deployed course system uses bounded resources, while its architecture separates the event log, object storage, processing state, table catalog, and query service so the same data path can grow without replacing the processing model.
+Input adapters can be extended easily, but the current sources already create a processing backlog. During testing, normalized input grew faster than completed curation. Compared to crawling the web, these APIs also provide more structured source material.
+The result is a continuously updating training data corpus of curated research material for language-model pre-training and selected post-training tasks.
 
 ## 2. Data Characteristics
 
-The relevant Big Data characteristics are:
+Volume comes from the continuously growing number of documents. On the measured day, the cloud deployment wrote 1,971 MB of new Bronze source objects.
 
-| Characteristic | Project meaning |
-|---|---|
-| Volume | Raw pages, extracted text, decisions, and table snapshots accumulate continuously. Measured values are reported separately from capacity estimates. |
-| Velocity | Pollers create a live stream. Feed updates arrive in bursts rather than at a fixed rate. Redpanda buffers these bursts. |
-| Variety | The pipeline handles HTML, PDF fallback, metadata, and Markdown documentation. Each format carries different extraction and quality signals. |
-| Veracity | Near duplicates, personal data, extraction failures, missing licenses, and low-quality pages must remain visible as explicit decisions. |
-| Value | Accepted records become a queryable training export. Rejected records remain useful for auditing and policy improvement. |
+Velocity results from new and updated documents being fetched continuously. On the measured day, the source activity recorded 1,205 arXiv papers, equivalent to 0.84 papers per minute. The arrival rate can temporarily exceed the processing capacity of the more expensive extraction and quality assessment steps.
 
-The frozen submission evidence records 39,743 durable decisions and 10,337
-training-export documents across all policy generations. A separate bounded
-27.5-minute measurement recorded 113 normalized events and 32 decision events.
-The backlog grew during that interval, so sustained catch-up capacity is not
-demonstrated. Event counts include replay and are not counts of new unique
-documents.
+Variety results from the different source resource types the pipeline fetches and extracts.
+So next to scientific papers, model cards, and dataset cards there are also equations, tables, figures, metadata in HTML, Markdown and many more.
 
 ## 3. Architecture Decision
 
-Stream2Pretrain uses a Kappa architecture. Live records enter one streaming path and pass through the same transformations. There is no separate historical batch implementation. Reprocessing uses retained Redpanda events and versioned Iceberg decisions.
+Stream2Pretrain uses the Kappa architecture as the sources just either produce new entries or update existing ones. That means the processing path can be exactly reused for live updates and replay, so a lambda implementation would just implement everything twice.
 
-![Stream2Pretrain Kappa architecture](docs/architecture.svg)
+![Stream2Pretrain Kappa architecture](docs/diagram-architecture.svg)
 
-A companion Mermaid definition is included in
-[`docs/architecture.mmd`](docs/architecture.mmd). The SVG remains visible when
-the ZIP is read without Mermaid support.
+The project makes the following deviations from the lecture stack:
 
-The project makes four justified deviations from a conventional lecture stack:
-
-1. Redpanda provides the Kafka API with a smaller operational surface for this cluster.
-2. Bytewax keeps the stream logic in Python, where the extraction and classifier libraries already live.
-3. MinIO replaces HDFS because the inputs and scientific artifacts are naturally object-shaped.
-4. Iceberg V2 with Polaris provides table snapshots, schema evolution, and vendor-neutral catalog access.
-
-These choices support the use case directly. They are not included only to increase the number of technologies.
-
-Architecture references include the original [Kappa Architecture proposal](https://www.oreilly.com/radar/questioning-the-lambda-architecture/), the [Redpanda architecture guide](https://docs.redpanda.com/current/get-started/architecture/), the [Bytewax project documentation](https://github.com/bytewax/bytewax), and the [Apache Iceberg specification](https://iceberg.apache.org/spec/). The repository also retains the course material used for the deployment and storage decisions in [`lecture_slides/04 - Container Orchestration.md`](lecture_slides/04%20-%20Container%20Orchestration.md) and [`lecture_slides/04c - Storage and Networking.md`](lecture_slides/04c%20-%20Storage%20and%20Networking.md).
+1. Redpanda provides the Kafka API with fewer operational components.
+2. Bytewax provides stateful stream processing and checkpoint recovery in the same Python environment as the extraction and classifier code.
+3. MinIO fits immutable source bodies and scientific assets through an S3-compatible object interface.
+4. Iceberg V2 provides atomic commits, history and schema evolution over Parquet, while Polaris exposes the catalog to the writer and DuckDB.
 
 ## 4. Components and Data Flow
 
-| Component | Technology | Responsibility and rationale |
-|---|---|---|
-| Source pollers | Python and async HTTP | Discover new records while respecting source-specific formats and rate limits. |
-| Licence admission | Redpanda and Iceberg | Log an immutable pretraining, transform-only, or quarantine route before any document-body request. |
-| Bronze writer | MinIO | Preserve immutable compressed source material before transformation. |
-| Event bus | Redpanda | Decouple ingestion, curation, storage, and replay through named topics. |
-| Fetcher | Bytewax and Resiliparse | Load Bronze bytes, extract text and scientific structure, then emit normalized records. |
-| Curator | Stateful Bytewax flow | Apply language, quality, PII, duplication, and routing policies with durable recovery and global dedup state. |
-| Iceberg writer | PyIceberg | Persist all decisions and the accepted subset as Parquet-backed Iceberg tables. |
-| Catalog | Apache Polaris | Resolve table metadata and snapshots through the Iceberg REST protocol. |
-| Query service | DuckDB API | Read exact Iceberg metadata versions and expose typed read-only endpoints. |
-| Web cockpit | Next.js and TanStack Query | Display durable results and operational activity through real API calls. |
-| Observability | Prometheus | Scrape service metrics and evaluate workload availability alerts. |
+![Stream2Pretrain end-to-end data flow](docs/diagram-dataflow.svg)
 
-The end-to-end flow is:
+Each ingress API has a Python discovery worker whose job is to find potentially new content on the API. It publishes the metadata as a discovery envelope for the processing pipeline.
 
-1. A poller discovers a content identity. Internal discovery envelopes schedule a full-content worker and produce no corpus decision.
-2. The content worker resolves the exact item rights and publishes an immutable pre-fetch decision to `license.admissions`.
-3. Permissive and posttrain-only items are compressed into Bronze and published to `raw.fetched`; explicit incompatible rights stop before body fetch.
-4. The fetcher repeats the licence check, extracts text, and publishes a `SilverRecord` to `docs.normalized`.
-5. The curator produces one auditable decision for every normalized record.
-6. Every curation decision is published to `curation.decisions`.
-7. Only eligible records are also published to `docs.curated`.
-8. The writer persists `license_admissions`, `curation_decisions`, and `curated` as three physical Iceberg tables. The query API combines the first two into the corpus route ledger serving view.
-9. DuckDB reads the catalog metadata and the UI displays the result.
+### Pretraining Pipeline
 
-The repository is organized by responsibility:
+The discovery workers produce work items for arXiv and Hugging Face. The pipeline checks the licence before downloading the source. Incompatible items are quarantined. For admitted items, the fetcher stores the source body in MinIO and publishes a Bronze pointer. The normalizer reads this pointer, extracts the usable text and scientific structure and publishes the normalized record. The curator applies the quality, privacy and duplicate checks and publishes a curation decision. Accepted records are written to the curated Iceberg table, while rejected records remain in the decision table for audit. Polaris provides the catalog for the Iceberg writer and DuckDB reads the stored results for the cockpit and dataset exports.
 
-- [`ingest/`](ingest) contains live source adapters and shared ingestion code.
-- [`processor/`](processor) contains Bytewax flows, policies, Iceberg persistence, and APIs.
-- [`schemas/`](schemas) contains shared Pydantic event contracts.
-- [`ui/`](ui) contains the Next.js cockpit.
-- [`charts/stream2pretrain/`](charts/stream2pretrain) contains the application Helm chart.
-- [`infra/`](infra) contains OpenStack, k3s, Helmfile, and platform configuration.
-- [`scripts/`](scripts) contains deployment, bootstrap, smoke, and benchmark tools.
-- [`docs/continuous-deployment.md`](docs/continuous-deployment.md) documents the main-branch image build, VPN, and application deployment workflow.
-- [`docs/SOURCE_LICENSE_ADMISSION_MATRIX.md`](docs/SOURCE_LICENSE_ADMISSION_MATRIX.md) records the item-level licence resolver and pre-fetch boundary for every live source.
-- [`docs/SOURCE_PROCESSING_POLICY.md`](docs/SOURCE_PROCESSING_POLICY.md) records the discovery-versus-content boundary, extraction path, exact classifier revision, non-applicable signals, and Gold reachability for every source.
+### Post-training Pipeline
+
+![Stream2Pretrain post-training Foundry](docs/diagram-foundry.svg)
+
+The post-training path starts from Gold arxiv papers that were marked eligible for derived training use. These papers enter the Foundry queue, where the stateful worker creates and validates SFT trajectories or RL environments. The generated artifacts are persisted with their evidence and exposed for named human review.
 
 ## 5. Processing Logic
 
 ### Transformations
 
-The fetcher turns raw bytes into normalized document records. It extracts readable text, headings, citations, figures, tables, and equations when the source provides them. The curator then creates segment scores and a final route.
+Stream2Pretrain uses 3 data quality levels: Bronze, Silver and Gold. The transformations are used to elevate the data through the quality stages and filter out low quality samples. In the first step, after licence admission, the source body is downloaded, compressed and stored unchanged as Bronze record, including source metadata and object location.
 
-We trained four independent ModernBERT-base classifiers on LLM-labeled paper
-and card sections, with train/test separation by document. They run on CPU,
-score every retained section on a 0-5 scale, and retain confidence and model
-provenance for inspection.
+To move upwards to a Silver record the data is converted into a format more suitable for structured training. This process can differ between ingress sources. For arxiv papers, it only preserves the scientific sections, equations, tables, figures and captions. Each retained section receives a role, such as abstract, results or limitations. For Hugging Face, it removes metadata, code blocks and navigation elements, to be left with just the technical prose and section structure of the Readme. The Silver record also adds language information, a MinHash signature for similarity checks and keeps links to the original source and scientific artifacts.
 
-| Custom classifier | Purpose | Pipeline use | Held-out section correlation / MAE |
-|---|---|---|---|
-| arXiv pretraining quality | Usefulness of scientific text | Token-weighted document mean >=3.0 | 0.711 / 0.417 |
-| HF pretraining quality | Usefulness of model and dataset documentation | Token-weighted document mean >=3.5 | 0.913 / 0.311 |
-| arXiv mathematical reasoning | Mathematical and derivation-rich content | Highlights promising sections for task generation | 0.875 / 0.553 |
-| arXiv post-training suitability | Potential for grounded SFT/RL tasks | Mean ranks the daily queue; high sections guide generation | 0.824 / 0.497 |
+A Gold record is a record which has passed all quality checks and is ready for use. To reach it, the curator runs checks like if the language is English, if the remaining paragraphs follow the expected structure and that there are no exact and near duplicates. It removes contact information and whole documents if are detected as containing credentials. After that it runs the text in sections through ModernBERT based models to score the retained sections in overlapping windows, where the whole document needs to meet an average quality gate. There are 4 self build models for arxiv quality, hugging face quality, mathematical reasoning and post training suitability.
 
-Correlation is Spearman against the LLM judge, not a downstream training gain.
-The held-out split contains 301 papers and 500 cards. Aggregate results and
-the training procedure are in [the classifier guide](docs/CLASSIFIERS.md).
+From there the data can be either part of pre- or post-training. Permissive rights allow both, while missing or reviewed grey-area rights only allow derived post-training artifacts.
 
-Cheap source-specific cleanup and deterministic rejection run first. Both
-auxiliary arXiv heads run only after quality passes. Section hints do not
-replace the paper supplied to the generator. RSS, OAI and Hub-list envelopes
-are discovery only. See [the classifier guide](docs/CLASSIFIERS.md) for exact
-input, aggregation and evaluation details.
+The post-training pipeline uses Gold record Arxiv papers marked by the classifier. These papers are then collected in a queue, sorted by their suitability score. The complete paper is then put into a graph like structure, that connects claims, equations, method steps, results and limitations. If the paper describes a task where the result can be validated using code, it is turned into a RL environment, otherwise if deemed suitable the paper is used as an SFT trajectory. The generated environment is programmatically validated and stored together with its evidence, where a human reviewer can approve it.
 
-The DHBW chart fails closed on missing models. Source-quality classifiers and KenLM
-run from pinned immutable images behind independently scalable stateless
-inference services; Presidio, MinHash, and tokenization stay with the
-lightweight stateful curator. Every row records its classifier revision and
-backend.
+### State and replay
 
-Before these transformations, the shared licence gate records both verbatim
-pretraining rights and transform-only post-training rights. Permissive content
-can reach pretraining. Grey-area licences, arXiv's non-exclusive distribution
-grant, and missing item rights can only reach the derived post-training route.
-Explicit incompatible, no-derivatives, contradictory, or provider-prohibited
-rights quarantine. The
-curator also redacts ordinary contact PII, quarantines high-risk identifiers,
-applies licence policy, and performs MinHash near-duplicate detection. Language confidence gates natural-language profiles. Gopher, C4,
-and KenLM gates apply only to ordinary web prose, where those
-web-derived signals are meaningful.
-
-### Stateful processing
-
-Near-duplicate detection maintains state across documents. Bytewax snapshots
-source progress and operator state into the fetcher and curator checkpoint
-PVCs. Output is keyed by `doc_id`, so a crash between sink delivery and the
-next recovery snapshot can replay a record without creating a second logical
-decision. The Iceberg writer also uses the scoring, classifier, and policy
-revisions to suppress deterministic replay duplicates.
-The processor input batch is explicitly bounded to one record per Kafka
-partition so expensive extraction and classification publish and checkpoint
-continuously instead of inheriting Bytewax's 1,000-record default.
-
-### Experimental post-training extension
-
-An experimental foundry can turn selected `posttrain_candidate` papers into
-grounded SFT trajectories and signed RL-verifiable environments. The same
-resumable worker, durable queue, validation gates, MinIO packages, and audit UI
-run locally or as a single-writer Kubernetes StatefulSet; the daily path ranks
-candidates received in the preceding 24 hours with no fixed paper cap, then
-continues until the cohort or provider capacity is exhausted. It generates
-datasets but does not train a model. Deterministic routing prefers difficult,
-finite, executable RL work; answerability and grounding reviewers never see the
-hidden target, and every routed SFT or RL failure remains inspectable. See
-[`docs/POSTTRAIN_FOUNDRY.md`](docs/POSTTRAIN_FOUNDRY.md) for the design and
-operations guide.
+The pipeline uses at least once processing. Bytewax saves the progress of the fetcher and curator. After a restart, the workers continue from the latest checkpoint and Redpanda repeats records that were not completed. Each processing stage checkpoints only completed work. Document identifiers and a durable decision state prevent replayed records from creating duplicate outputs.
 
 ### Windowing and late data
 
-Corpus curation is a per-document stateful transformation, so it does not invent an event-time aggregation window. Prometheus supplies operational windows of five minutes, one hour, and twenty-four hours for the UI.
+The pretraining path does not use event-time aggregation windows because its transformations operate on individual documents. Its stateful operations are checkpoint recovery, exact and near-duplicate detection and deterministic replay handling. For each document, the curator checks its content identity and MinHash signature against the durable index of all previously processed documents, rejecting matches and adding new signatures for later comparisons without limiting the state. The post-training pipeline uses windowing with a fixed daily boundary to freeze and rank candidates received during the preceding 24 hours.
 
-Unfinished pretraining work has a separate rolling 24-hour intake window.
-Normalization and curation skip older queue records before further expensive
-work; retries retain their original intake time. The expiry counter is separate
-from quality rejection and does not remove completed corpus data.
-
-Late documents are not discarded because their arrival time is newer than their publication time. Each record carries `valid_from` and optional `valid_to`. Iceberg queries reconstruct the corpus as of a selected timestamp. A replay therefore changes processing time without falsifying source time.
-
-The source and writer use at-least-once replay. Idempotent document identifiers and decision keys provide deterministic table results. The project does not claim exactly-once delivery.
+Late data is handled differently in the two pipelines. In the Foundry, candidates that enter the queue after the cutoff are considered in the next day's batch. In the pretraining pipeline the age of unfinished work is checked against its fetched_at timestamp. Work older than the configured cutoff is expired, while completed corpus data remains available. This is done to keep storage and compute needs under control as the limited resources leave no room for autoscaling compute and storage.
 
 ## 6. Storage Design
 
-The storage model separates evidence from serving data:
+The data is stored in different places depending on what it is used for. MinIO stores the fetched data like papers and articles, Iceberg stores the decisions made during processing and the finished training data. DuckDB acts as the serving layer used by the cockpit:
 
 | Layer | Storage | Contents |
 |---|---|---|
-| Bronze | Gzip objects in MinIO | Immutable source bytes and fetch metadata. |
-| Licence admissions | Iceberg V2 with Parquet | Physical `license_admissions` table containing every item-level pre-fetch route, including quarantine before body retrieval. |
-| Normalized stream | Redpanda | Extracted text and scientific structure for curation. |
-| Curation decisions | Iceberg V2 with Parquet | Physical `curation_decisions` table containing every downstream accepted and rejected policy outcome. |
-| Curated corpus | Iceberg V2 with Parquet | Physical `curated` table containing only trainable records. |
-| Corpus route ledger | DuckDB serving view | Logical latest-per-document view over licence admissions and curation decisions, not a fourth Iceberg table. |
+| Bronze | Gzip objects in MinIO | Source files and fetched metadata. |
+| Licence admissions | Iceberg V2 with Parquet | Each licence route, including quarantine before body retrieval. |
+| Curation decisions | Iceberg V2 with Parquet | Accepted and rejected curation outcomes. |
+| Curated corpus | Iceberg V2 with Parquet | Records that passed the curation gates. |
+| Corpus route ledger | DuckDB serving view | The latest route for each document. |
 
-The curated and curation-decision tables partition by language, risk tier, and
-month of `valid_from`; licence admissions partition by source, admission status,
-and month of `observed_at`. These fields support the dominant filters while
-avoiding a partition per document. The schemas store text, quality scores,
-route reasons, licence provenance, PII flags, validity intervals, and exact
-policy revisions.
+The storage format depends on the data. The original source is saved as a Gzip object because it must remain available for the audit of the fetched content while the structured records are stored in Iceberg tables. DuckDB provides SQL access to the Iceberg tables and acts as a cache for frontend queries.
 
-Iceberg is appropriate because files alone do not provide reliable snapshot identity, schema evolution, or catalog discovery. Polaris provides the catalog boundary. DuckDB reads the exact metadata file selected by Polaris rather than guessing the latest object.
+The curated and curation-decision tables are partitioned by language, risk tier and month of `valid_from`. Licence admissions are partitioned by source, admission status and month of `observed_at`. These fields are used by the cockpit and the exports.
 
-Polaris stores its catalog in PostgreSQL on a persistent volume. The database
-holds durable table pointers and access metadata, while MinIO remains the
-durable home of Iceberg metadata and Parquet data. Bootstrap is idempotent and
-can re-register table pointers from retained Iceberg metadata during recovery.
+The licence admission table stores the source information like URL, observation time and licence result before the body is fetched. The curation decision table records the document identity, quality results, rejection reasons, privacy findings, validity interval and the policy version the item was processed with. The curated table contains the retained training text, token information, origin and references to retained equations, tables, figures and captions.
 
-The full field list is documented in [`docs/data-model.md`](docs/data-model.md).
-Source bodies and transient extraction assets have a one-day audit window;
-training text, decisions and post-training packages are not age-expired.
-Eligible paper evidence is persisted in Gold before candidate publication and
-cached in the Foundry queue. [Storage ownership](docs/storage-scaling.md)
-defines retention and maintenance safety.
+As we require atomic table updates and historical versions for the decisions, Iceberg V2 with Polaris is used. MinIO stores the Parquet files and Iceberg metadata, while Polaris provides the catalog used by the writer and DuckDB.
 
-DuckDB maintains a persistent serving index. It bootstraps from Iceberg once,
-then applies idempotent transactional deltas and caches corpus aggregates.
-Document lists use server-side pagination. Requests do not scan full history.
-Static totals use the latest durable decision per document across all policies;
-Prometheus activity charts count processing events, which can include replay.
+The Iceberg tables store the licence admissions, curation decisions and curated training records. The Foundry keeps its queue and audits as persistent state for post-training work. DuckDB keeps a serving index over the Iceberg tables and can rebuild it from them.
+
+The actual downloaded documents and extracted assets are kept for just one day for audit. Training text, decisions, retained paper evidence and post-training packages kept. Paper evidence is written to Gold before a Foundry candidate is published and is also cached with the queue. The one day retention period is a compromise between replay ability and the available storage on the instances. It drastically reduces required storage while decisions remain traceable.
+
+DuckDB first builds its serving index from Iceberg and then only applies transactional updates. It contains the latest decision for each document and cached corpus aggregates to the cockpit.
 
 ## 7. User-facing UI
 
-The cockpit serves the result-viewer role. It is a separate container and a Kubernetes Deployment. It does not use mock data.
+The cockpit runs as a separate Kubernetes Deployment and serves as the result viewer. It reads the live data.
 
-The dashboard calls the Next.js `/api/dashboard` route. That route combines durable Iceberg totals from DuckDB with Prometheus activity metrics. It shows corpus-route totals, recent processing activity, and a compact post-training summary. Other pages expose document search, read-only source status, strictly licence-filtered dataset export, and post-training inspection. Per-item licence evidence is available in each document's collapsed advanced audit view, including items quarantined before body fetch. All ordinary cockpit pages are monitoring-only; only named human approval or rejection of generated SFT and RL artifacts is interactive.
+The dashboard calls the Next.js /api/dashboard route. The route combines durable Iceberg totals from DuckDB with Prometheus activity metrics. The dashboard shows corpus-route totals, recent processing activity, and a compact post-training summary.
+Other pages provide:
+- Document search
+- Read-only source status
+- Licence-filtered dataset exports
+- Post-training inspection
 
-A typical user flow is:
+Each document includes per-item licence evidence in a collapsed advanced audit view, including documents quarantined before body retrieval.
+The cockpit supports monitoring on all standard pages. Only named users can approve or reject generated SFT and RL artifacts.
+Typical user flow:
 
-1. Open the Dashboard and verify that decisions and accepted training documents are increasing.
-2. Inspect per-source acceptance and rejection reasons.
+1. Open the Dashboard and check whether decisions and accepted training documents are increasing.
+2. Review acceptance rates and rejection reasons by source.
 3. Open Documents and filter by source, route, or decision.
 4. Open Datasets and export a date-bounded pretraining, SFT, or RL dataset.
-5. Open Post-training to inspect the daily ranked path. `Inspect` exposes tasks,
-   trajectories, verifiers, validation evidence, provenance, and package files
-   for named human review.
+5. Open Post-training and inspect the daily ranked path. The `Inspect` view shows tasks, trajectories, verifiers, validation evidence, provenance, and package files for human review.
+The API and dashboard screenshots in Section 11 come from the same live cluster.
 
-The API and dashboard screenshots in section 11 come from the same live cluster.
 
 ## 8. Kubernetes Deployment
 
@@ -278,7 +158,7 @@ Scaling is explicit per component:
 | Component | Scaling mechanism | Submission evidence and limit |
 |---|---|---|
 | UI | Ordinary Deployment replicas | Demonstrated from one to three Ready replicas in 14 seconds, then restored to one. The replica field is declared in [`ui.yaml`](charts/stream2pretrain/templates/ui.yaml#L4-L18). |
-| Quality and KenLM APIs | KEDA from active and waiting request metrics, or manual Deployment scaling | The submitted pod capture shows two Ready quality replicas. The measured DHBW range is two to three, declared in [`stream2pretrain.dev.yaml`](infra/helmfile-values/stream2pretrain.dev.yaml#L74-L89), with the Prometheus demand trigger in [`processor-model-service.yaml`](charts/stream2pretrain/templates/processor-model-service.yaml#L131-L159). |
+| Quality and KenLM APIs | KEDA from active and waiting request metrics, or manual Deployment scaling | The submitted pod capture shows two Ready quality replicas. The curator discovers Ready model pods through a headless Service and leases at most one request to each replica, distributing independent batches while preserving input order and model provenance. The measured DHBW range is two to three, declared in [`stream2pretrain.dev.yaml`](infra/helmfile-values/stream2pretrain.dev.yaml#L74-L89), with the Prometheus demand trigger in [`processor-model-service.yaml`](charts/stream2pretrain/templates/processor-model-service.yaml#L131-L159). |
 | External `Qwen3.8-27B` Foundry API | Provider-managed service; Stream2Pretrain can change client concurrency manually | It is not a Kubernetes workload owned by this project, so no cluster autoscaling claim is made. |
 | Source workers | Replica setting and partitioned source ownership | Independently committing workers can scale when each cursor or partition has one owner. The arXiv acquisition worker remains fixed because its shared input/output topic does not expose a safe lag signal. |
 | Fetcher and curator | Coordinated Bytewax rescale using pre-created recovery partitions | They are stateful executions. Replica changes require a controlled stop, state handoff, and restart rather than independent Pods joining a consumer group. |
@@ -442,6 +322,10 @@ Aggregate results and the complete training procedure are documented in
 This capture shows the application workloads, including two independent Ready quality-service replicas.
 
 ![Current Kubernetes application pods](docs/screenshots/kubectl-pods.png)
+
+The local Kubernetes cluster backed by Podman sends the same 60-request inference workload through the production endpoint-pool client with two and three classifier workers. Every inference response identifies its serving pod through the `X-S2P-Model-Backend` header, allowing the probe to count completed requests per worker.
+
+![Local Kubernetes classifier distribution with two and three workers](docs/screenshots/local-model-distribution.png)
 
 The platform-wide capture combines Pod rows from a read-only evidence workflow with Helm release records from the same cluster. It covers the application, Redpanda, MinIO, Polaris/PostgreSQL, ingress, KEDA, and monitoring namespaces, and shows the deployed `minio` Helm release and Ready `minio-0` StatefulSet pod after the PVC-preserving migration.
 
