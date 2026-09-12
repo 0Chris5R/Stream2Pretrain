@@ -1163,6 +1163,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7.0.1
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.8.17"
+          enable-cache: true
+
       - name: Install Helm 3
         uses: azure/setup-helm@v5.0.1
         with:

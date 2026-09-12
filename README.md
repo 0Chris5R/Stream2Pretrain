@@ -180,6 +180,12 @@ live multi-replica throughput or failover evidence.
 The table separates live observations from offline contract evidence. A replica
 field alone is not treated as proof of correct horizontal scaling.
 
+The legacy Foundry claim held both Bytewax recovery and the SQLite control and
+quota databases. The deployment therefore checks recovery-copy annotations and
+a separate PostgreSQL migration manifest marker before replacing that topology.
+Copying the recovery files alone does not preserve queue, outbox, quota, or
+artifact-audit state.
+
 ## 9. Deployment Guide
 
 ### Prerequisites

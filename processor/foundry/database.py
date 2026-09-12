@@ -211,7 +211,6 @@ def _postgres_sql(sql: str) -> str:
         statement,
         flags=re.IGNORECASE,
     )
-    statement = re.sub(r"\bREAL\b", "DOUBLE PRECISION", statement, flags=re.IGNORECASE)
     statement = re.sub(r"\bMAX\(0,\s*", "GREATEST(0, ", statement, flags=re.IGNORECASE)
     statement = re.sub(r"\bMAX\(value,\s*", "GREATEST(value, ", statement, flags=re.IGNORECASE)
     statement = statement.replace("X''", "''::bytea")

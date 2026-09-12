@@ -11,6 +11,25 @@ from processor.foundry.config import FoundryConfig
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_deploy_job_installs_uv_before_using_it() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy-main.yml").read_text(encoding="utf-8")
+    )
+    deploy_steps = workflow["jobs"]["deploy"]["steps"]
+    setup_index = next(
+        index
+        for index, step in enumerate(deploy_steps)
+        if step.get("uses") == "astral-sh/setup-uv@v9.0.0"
+    )
+    uv_run_indices = [
+        index for index, step in enumerate(deploy_steps) if "uv run" in step.get("run", "")
+    ]
+
+    assert deploy_steps[setup_index]["with"]["version"] == "0.8.17"
+    assert uv_run_indices
+    assert setup_index < min(uv_run_indices)
+
+
 def _packaging_module():
     path = ROOT / "scripts/package_submission.py"
     spec = importlib.util.spec_from_file_location("package_submission", path)
