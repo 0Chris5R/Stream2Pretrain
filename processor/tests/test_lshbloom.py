@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from processor.operators.lshbloom import LSHBloomIndex
+from processor.operators.lshbloom import LSHBloomIndex, PostgresLSHIndex
 from processor.operators.minhash import MinHasher, MinHashSignature
 
 
@@ -209,3 +209,181 @@ def test_different_text_not_near_dup() -> None:
     assert res_a.is_near_duplicate is False
     assert res_b.is_near_duplicate is False
     assert res_a.cluster_id != res_b.cluster_id
+
+
+def test_postgres_index_shares_atomic_clusters_between_replicas() -> None:
+    clusters: dict[tuple[str, str], tuple[str, bytes]] = {}
+    bands: dict[tuple[str, str], str] = {}
+    advisory_locks: list[int] = []
+
+    class Result:
+        def __init__(self, rows: list[tuple[str, str, bytes]] | None = None) -> None:
+            self._rows = rows or []
+
+        def fetchall(self) -> list[tuple[str, str, bytes]]:
+            return self._rows
+
+    class Transaction:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class Connection:
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        def execute(self, sql: str, params: tuple[object, ...] = ()) -> Result:
+            if "pg_advisory_xact_lock" in sql:
+                advisory_locks.append(int(params[0]))
+            elif "SELECT DISTINCT c.cluster_id" in sql:
+                generation = str(params[0])
+                keys = list(params[1])
+                cluster_ids = sorted(
+                    {
+                        bands[(generation, str(key))]
+                        for key in keys
+                        if (generation, str(key)) in bands
+                    }
+                )
+                return Result(
+                    [
+                        (cluster_id, *clusters[(generation, cluster_id)])
+                        for cluster_id in cluster_ids
+                    ]
+                )
+            elif "INSERT INTO curator_lsh_clusters" in sql:
+                generation, cluster_id, doc_id, signature = params
+                clusters.setdefault(
+                    (str(generation), str(cluster_id)),
+                    (str(doc_id), bytes(signature)),
+                )
+            elif "INSERT INTO curator_lsh_bands" in sql:
+                generation, cluster_key, cluster_id = params
+                bands.setdefault((str(generation), str(cluster_key)), str(cluster_id))
+            return Result()
+
+        def close(self) -> None:
+            return None
+
+    def connect(_url: str, *, autocommit: bool) -> Connection:
+        assert autocommit is True
+        return Connection()
+
+    h = MinHasher(num_perms=64)
+    signature = h.signature("shared transactional near duplicate state across curator replicas")
+    first_index = PostgresLSHIndex(
+        "postgresql://coordination",
+        generation="test-v1",
+        num_bands=16,
+        connect=connect,
+    )
+    second_index = PostgresLSHIndex(
+        "postgresql://coordination",
+        generation="test-v1",
+        num_bands=16,
+        connect=connect,
+    )
+
+    first = first_index.observe("sha256:" + "a" * 64, signature)
+    duplicate = second_index.observe("sha256:" + "b" * 64, signature)
+    replay = second_index.observe("sha256:" + "a" * 64, signature)
+
+    assert first.is_near_duplicate is False
+    assert duplicate.is_near_duplicate is True
+    assert duplicate.cluster_id == first.cluster_id
+    assert replay.is_near_duplicate is False
+    assert replay.cluster_id == first.cluster_id
+    assert len(advisory_locks) == 16 * 3
+
+
+def test_postgres_index_replays_transaction_after_primary_failover() -> None:
+    clusters: dict[tuple[str, str], tuple[str, bytes]] = {}
+    bands: dict[tuple[str, str], str] = {}
+    connections: list[Connection] = []
+
+    class FailoverError(Exception):
+        pass
+
+    class Result:
+        def __init__(self, rows: list[tuple[str, str, bytes]] | None = None) -> None:
+            self._rows = rows or []
+
+        def fetchall(self) -> list[tuple[str, str, bytes]]:
+            return self._rows
+
+    class Transaction:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class Connection:
+        def __init__(self, *, fail_first_lock: bool) -> None:
+            self.fail_first_lock = fail_first_lock
+            self.closed = False
+
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        def execute(self, sql: str, params: tuple[object, ...] = ()) -> Result:
+            if "pg_advisory_xact_lock" in sql and self.fail_first_lock:
+                self.fail_first_lock = False
+                raise FailoverError("primary changed")
+            if "SELECT DISTINCT c.cluster_id" in sql:
+                generation = str(params[0])
+                keys = list(params[1])
+                cluster_ids = sorted(
+                    {
+                        bands[(generation, str(key))]
+                        for key in keys
+                        if (generation, str(key)) in bands
+                    }
+                )
+                return Result(
+                    [
+                        (cluster_id, *clusters[(generation, cluster_id)])
+                        for cluster_id in cluster_ids
+                    ]
+                )
+            if "INSERT INTO curator_lsh_clusters" in sql:
+                generation, cluster_id, doc_id, signature = params
+                clusters.setdefault(
+                    (str(generation), str(cluster_id)),
+                    (str(doc_id), bytes(signature)),
+                )
+            if "INSERT INTO curator_lsh_bands" in sql:
+                generation, cluster_key, cluster_id = params
+                bands.setdefault((str(generation), str(cluster_key)), str(cluster_id))
+            return Result()
+
+        def close(self) -> None:
+            self.closed = True
+
+    def connect(_url: str, *, autocommit: bool) -> Connection:
+        assert autocommit is True
+        connection = Connection(fail_first_lock=not connections)
+        connections.append(connection)
+        return connection
+
+    signature = MinHasher(num_perms=64).signature(
+        "transaction replay preserves the global duplicate decision"
+    )
+    index = PostgresLSHIndex(
+        "postgresql://coordination",
+        generation="test-v1",
+        num_bands=16,
+        connect=connect,
+        connection_errors=(FailoverError,),
+    )
+
+    first = index.observe("sha256:" + "a" * 64, signature)
+    duplicate = index.probe("sha256:" + "b" * 64, signature)
+
+    assert first.is_near_duplicate is False
+    assert duplicate.is_near_duplicate is True
+    assert duplicate.cluster_id == first.cluster_id
+    assert len(connections) == 2
+    assert connections[0].closed

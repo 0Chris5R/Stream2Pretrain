@@ -5,11 +5,8 @@ metadata:
   labels:
     app.kubernetes.io/name: polaris-postgres
 spec:
-  clusterIP: None
-  selector:
-    app.kubernetes.io/name: polaris-postgres
+  type: ExternalName
+  externalName: {{ printf "polaris-postgres-rw.%s.svc.cluster.local" .Release.Namespace | quote }}
   ports:
     - name: postgres
       port: 5432
-      targetPort: postgres
-

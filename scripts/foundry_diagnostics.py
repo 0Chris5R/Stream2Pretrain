@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+from processor.foundry.database import (
+    connect_database,
+    coordination_database_target,
+    database_dialect,
+)
 
 
 def _json(value: bytes | str) -> dict[str, Any]:
@@ -19,9 +24,10 @@ def _json(value: bytes | str) -> dict[str, Any]:
 
 def main() -> None:
     state_dir = Path(os.environ.get("S2P_FOUNDRY_STATE_DIR", "/var/lib/s2p/foundry"))
-    database = state_dir / "control.sqlite3"
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
+    target = coordination_database_target(str(state_dir), "control.sqlite3")
+    connection = connect_database(target, read_only=True)
+    backend = database_dialect(connection)
+    database_bytes = Path(target).stat().st_size if backend == "sqlite" else None
 
     jobs = [
         dict(row)
@@ -101,7 +107,8 @@ def main() -> None:
         )
     artifact_counts = Counter(f"{artifact['kind']}:{artifact['status']}" for artifact in artifacts)
     payload = {
-        "database_bytes": database.stat().st_size,
+        "backend": backend,
+        "database_bytes": database_bytes,
         "job_counts": dict(Counter(str(job["state"]) for job in jobs)),
         "artifact_counts": dict(sorted(artifact_counts.items())),
         "candidate_queue": queue,
@@ -113,7 +120,7 @@ def main() -> None:
             dict(row)
             for row in connection.execute(
                 "SELECT state, COUNT(*) AS candidates, "
-                "SUM(scientific_payload IS NOT NULL) AS cached_evidence, "
+                "COUNT(scientific_payload) AS cached_evidence, "
                 "MIN(enqueued_at) AS oldest, MAX(enqueued_at) AS newest "
                 "FROM candidate_queue GROUP BY state"
             )
@@ -123,6 +130,7 @@ def main() -> None:
         "jobs": jobs,
         "artifacts": artifacts,
     }
+    connection.close()
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 

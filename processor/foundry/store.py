@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 from typing import Any, cast
 
+from processor.foundry.database import (
+    FOUNDRY_SCHEMA_LOCK_NAME,
+    connect_database,
+    database_dialect,
+    initialize_database_schema,
+)
 from processor.foundry.util import canonical_json, sha256, stable_id
 from schemas.foundry import (
     ArtifactAuditRecord,
@@ -44,6 +49,21 @@ _PIPELINE_ACTIVITY_STATES = {
 }
 
 
+class CandidateLeaseLostError(RuntimeError):
+    """Raised when a stale worker tries to mutate a reassigned candidate."""
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateClaim:
+    """A candidate payload and its database-backed fencing token."""
+
+    doc_id: str
+    payload: bytes
+    owner_id: str | None
+    claim_token: str | None
+    lease_expires_at: datetime | None
+
+
 class FoundryStore:
     def __init__(
         self,
@@ -52,13 +72,15 @@ class FoundryStore:
         recover_processing: bool = False,
         candidate_generation: str | None = None,
     ) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect_database(path)
+        self._dialect = database_dialect(self._conn)
         self._lock = threading.RLock()
-        self._conn.executescript(
-            """
+        initialize_database_schema(
+            self._conn,
+            dialect=self._dialect,
+            lock_name=FOUNDRY_SCHEMA_LOCK_NAME,
+            script="""
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
             PRAGMA foreign_keys=ON;
@@ -157,7 +179,11 @@ class FoundryStore:
               scientific_payload BLOB,
               attempt_count INTEGER NOT NULL DEFAULT 0,
               next_attempt_at TEXT,
-              last_error TEXT
+              last_error TEXT,
+              claim_owner TEXT,
+              claim_token TEXT,
+              claimed_at TEXT,
+              lease_expires_at TEXT
             );
             CREATE TABLE IF NOT EXISTS daily_runs (
               run_date TEXT PRIMARY KEY,
@@ -210,24 +236,43 @@ class FoundryStore:
             CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(state, updated_at DESC);
             CREATE INDEX IF NOT EXISTS artifacts_created_idx ON artifacts(created_at DESC);
             CREATE INDEX IF NOT EXISTS traces_provider_idx ON provider_traces(provider, completed_at DESC);
-            """
+            """,
+            migrations=(
+                self._ensure_candidate_queue_columns,
+                self._ensure_job_columns,
+                self._ensure_daily_run_columns,
+                self._ensure_manual_run_columns,
+                self._ensure_pool_assignment_columns,
+                self._initialize_candidate_sequence,
+            ),
         )
-        self._ensure_candidate_queue_columns()
-        self._ensure_job_columns()
-        self._ensure_daily_run_columns()
-        self._ensure_manual_run_columns()
-        self._ensure_pool_assignment_columns()
-        self._initialize_candidate_sequence()
         if candidate_generation is not None:
             self.reset_pending_candidates(candidate_generation)
         if recover_processing:
-            self._conn.execute("UPDATE candidate_queue SET state='queued' WHERE state='processing'")
+            self.recover_expired_candidates()
+
+    def recover_expired_candidates(self, *, now: datetime | None = None) -> int:
+        """Return abandoned work to the queue without disturbing active replicas."""
+        current = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE candidate_queue
+                SET state='queued',claim_owner=NULL,claim_token=NULL,claimed_at=NULL,
+                    lease_expires_at=NULL,updated_at=?
+                WHERE state='processing'
+                  AND (lease_expires_at IS NULL OR lease_expires_at<=?)
+                """,
+                (current, current),
+            )
+        return int(cursor.rowcount)
 
     def reset_pending_candidates(self, generation: str) -> int:
         """One-time owner-approved reset. Preserve active work and all artifacts."""
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._serialize_transaction("foundry-candidate-generation")
                 current = self._conn.execute(
                     "SELECT value FROM candidate_control WHERE key='generation'"
                 ).fetchone()
@@ -241,7 +286,10 @@ class FoundryStore:
                     "DELETE FROM daily_run_candidates WHERE doc_id NOT IN (SELECT doc_id FROM candidate_queue)"
                 )
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO candidate_control VALUES ('generation', ?)",
+                    """
+                    INSERT INTO candidate_control(key,value) VALUES ('generation', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
                     (generation,),
                 )
                 self._conn.commit()
@@ -262,15 +310,14 @@ class FoundryStore:
     def record_candidate_admission(self, identity: str, doc_id: str, outcome: str) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR IGNORE INTO candidate_admissions VALUES (?, ?, ?, ?)",
+                """
+                INSERT INTO candidate_admissions(identity,doc_id,outcome,observed_at)
+                VALUES (?, ?, ?, ?) ON CONFLICT(identity) DO NOTHING
+                """,
                 (identity, doc_id, outcome, datetime.now(UTC).isoformat()),
             )
 
     def _ensure_candidate_queue_columns(self) -> None:
-        existing = {
-            str(row["name"])
-            for row in self._conn.execute("PRAGMA table_info(candidate_queue)").fetchall()
-        }
         additions = {
             "reasoning_score": "REAL NOT NULL DEFAULT 0",
             "quality_score": "REAL NOT NULL DEFAULT 0",
@@ -282,6 +329,38 @@ class FoundryStore:
             "attempt_count": "INTEGER NOT NULL DEFAULT 0",
             "next_attempt_at": "TEXT",
             "last_error": "TEXT",
+            "claim_owner": "TEXT",
+            "claim_token": "TEXT",
+            "claimed_at": "TEXT",
+            "lease_expires_at": "TEXT",
+        }
+        if self._dialect == "postgresql":
+            for name, declaration in additions.items():
+                postgres_declaration = declaration.replace("BLOB", "BYTEA")
+                self._conn.execute(
+                    f"ALTER TABLE candidate_queue ADD COLUMN IF NOT EXISTS "
+                    f"{name} {postgres_declaration}"
+                )
+            self._conn.execute(
+                """
+                ALTER TABLE candidate_queue
+                  ALTER COLUMN reasoning_score TYPE DOUBLE PRECISION,
+                  ALTER COLUMN quality_score TYPE DOUBLE PRECISION,
+                  ALTER COLUMN ranking_score TYPE DOUBLE PRECISION
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS candidate_queue_snapshot_idx "
+                "ON candidate_queue(state,enqueue_ordinal)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS candidate_queue_lease_idx "
+                "ON candidate_queue(state,lease_expires_at)"
+            )
+            return
+        existing = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(candidate_queue)").fetchall()
         }
         for name, declaration in additions.items():
             if name not in existing:
@@ -290,8 +369,17 @@ class FoundryStore:
             "CREATE INDEX IF NOT EXISTS candidate_queue_snapshot_idx "
             "ON candidate_queue(state,enqueue_ordinal)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS candidate_queue_lease_idx "
+            "ON candidate_queue(state,lease_expires_at)"
+        )
 
     def _ensure_job_columns(self) -> None:
+        if self._dialect == "postgresql":
+            self._conn.execute(
+                "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lakehouse_published_at TEXT"
+            )
+            return
         existing = {
             str(row["name"]) for row in self._conn.execute("PRAGMA table_info(jobs)").fetchall()
         }
@@ -302,6 +390,12 @@ class FoundryStore:
             )
 
     def _ensure_daily_run_columns(self) -> None:
+        if self._dialect == "postgresql":
+            self._conn.execute(
+                "ALTER TABLE daily_runs ADD COLUMN IF NOT EXISTS "
+                "cutoff_ordinal INTEGER NOT NULL DEFAULT 0"
+            )
+            return
         existing = {
             str(row["name"])
             for row in self._conn.execute("PRAGMA table_info(daily_runs)").fetchall()
@@ -313,15 +407,35 @@ class FoundryStore:
 
     def _initialize_candidate_sequence(self) -> None:
         """Migrate existing candidates and initialize a transaction-safe sequence."""
-        self._conn.execute(
-            "UPDATE candidate_queue SET enqueue_ordinal=rowid WHERE enqueue_ordinal=0"
-        )
+        if self._dialect == "postgresql":
+            self._conn.execute(
+                """
+                WITH highest AS (
+                  SELECT COALESCE(MAX(enqueue_ordinal), 0) AS value
+                  FROM candidate_queue WHERE enqueue_ordinal<>0
+                ), ranked AS (
+                  SELECT doc_id,ROW_NUMBER() OVER (ORDER BY enqueued_at,doc_id) AS ordinal
+                  FROM candidate_queue WHERE enqueue_ordinal=0
+                )
+                UPDATE candidate_queue
+                SET enqueue_ordinal=highest.value + ranked.ordinal
+                FROM highest,ranked
+                WHERE candidate_queue.doc_id=ranked.doc_id
+                """
+            )
+        else:
+            self._conn.execute(
+                "UPDATE candidate_queue SET enqueue_ordinal=rowid WHERE enqueue_ordinal=0"
+            )
         row = self._conn.execute(
             "SELECT COALESCE(MAX(enqueue_ordinal), 0) AS value FROM candidate_queue"
         ).fetchone()
         highest = int(row["value"])
         self._conn.execute(
-            "INSERT OR IGNORE INTO control_sequences(name,value) VALUES ('candidate_enqueue', ?)",
+            """
+            INSERT INTO control_sequences(name,value) VALUES ('candidate_enqueue', ?)
+            ON CONFLICT(name) DO NOTHING
+            """,
             (highest,),
         )
         self._conn.execute(
@@ -330,6 +444,8 @@ class FoundryStore:
         )
 
     def _ensure_pool_assignment_columns(self) -> None:
+        if self._dialect == "postgresql":
+            return
         existing = {
             str(row["name"])
             for row in self._conn.execute("PRAGMA table_info(pool_assignments)").fetchall()
@@ -340,6 +456,15 @@ class FoundryStore:
             )
 
     def _ensure_manual_run_columns(self) -> None:
+        if self._dialect == "postgresql":
+            self._conn.execute(
+                "ALTER TABLE manual_runs ADD COLUMN IF NOT EXISTS max_candidates INTEGER"
+            )
+            self._conn.execute(
+                "ALTER TABLE manual_runs ADD COLUMN IF NOT EXISTS "
+                "cutoff_ordinal INTEGER NOT NULL DEFAULT 0"
+            )
+            return
         existing = {
             str(row["name"])
             for row in self._conn.execute("PRAGMA table_info(manual_runs)").fetchall()
@@ -351,9 +476,21 @@ class FoundryStore:
                 "ALTER TABLE manual_runs ADD COLUMN cutoff_ordinal INTEGER NOT NULL DEFAULT 0"
             )
 
+    def database_ready(self) -> bool:
+        """Return whether the coordination database accepts a fresh query."""
+        with self._lock:
+            try:
+                return self._conn.execute("SELECT 1").fetchone() is not None
+            except Exception:
+                return False
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def _serialize_transaction(self, key: str) -> None:
+        if self._dialect == "postgresql":
+            self._conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (key,))
 
     def start_job(
         self,
@@ -376,9 +513,10 @@ class FoundryStore:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT OR IGNORE INTO jobs(
+                INSERT INTO jobs(
                   job_id,idempotency_key,paper_id,paper_hash,doc_id,state,received_at,updated_at
                 ) VALUES (?, ?, ?, ?, ?, 'RECEIVED', ?, ?)
+                ON CONFLICT(idempotency_key) DO NOTHING
                 """,
                 (job_id, key, paper_id, paper_hash, doc_id, now, now),
             )
@@ -422,8 +560,10 @@ class FoundryStore:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT OR IGNORE INTO provider_results
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO provider_results(
+                  job_id,call_key,prompt_version,request_hash,response_json,trace_json,created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id,call_key,prompt_version,request_hash) DO NOTHING
                 """,
                 (
                     job_id,
@@ -448,8 +588,13 @@ class FoundryStore:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO stream_checkpoints
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO stream_checkpoints(
+                  job_id,call_key,attempt,partial_hash,partial_text,updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id,call_key,attempt) DO UPDATE SET
+                  partial_hash=excluded.partial_hash,
+                  partial_text=excluded.partial_text,
+                  updated_at=excluded.updated_at
                 """,
                 (
                     job_id,
@@ -475,52 +620,59 @@ class FoundryStore:
         idempotency_suffix: str = "",
         update_job_state: bool = True,
     ) -> FoundryEvent:
+        idempotency_key = sha256(
+            {
+                "job_id": job_id,
+                "state": state,
+                "attempt": attempt,
+                "suffix": idempotency_suffix,
+            }
+        )
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COALESCE(MAX(sequence), -1) AS seq FROM events WHERE job_id=?", (job_id,)
-            ).fetchone()
-            sequence = int(row["seq"]) + 1
-            idempotency_key = sha256(
-                {
-                    "job_id": job_id,
-                    "state": state,
-                    "attempt": attempt,
-                    "suffix": idempotency_suffix,
-                }
-            )
-            existing = self._conn.execute(
-                "SELECT event_json FROM events WHERE idempotency_key=?", (idempotency_key,)
-            ).fetchone()
-            if existing is not None:
-                event = FoundryEvent.model_validate_json(existing["event_json"])
-                if update_job_state:
-                    self._conn.execute(
-                        "UPDATE jobs SET state=?,reason=?,updated_at=? WHERE job_id=?",
-                        (
-                            event.state,
-                            event.reason,
-                            datetime.now(UTC).isoformat(),
-                            job_id,
-                        ),
-                    )
-                return event
-            event = FoundryEvent(
-                event_id=f"event:{uuid.uuid4()}",
-                job_id=job_id,
-                paper_id=paper_id,
-                sequence=sequence,
-                state=state,  # type: ignore[arg-type]
-                occurred_at=datetime.now(UTC),
-                attempt=attempt,
-                idempotency_key=idempotency_key,
-                provider_trace_id=provider_trace_id,
-                artifact_hash=artifact_hash,
-                reason=reason,
-                metadata=metadata or {},
-            )
-            payload = canonical_json(event)
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                if self._dialect == "postgresql":
+                    self._conn.execute(
+                        "SELECT job_id FROM jobs WHERE job_id=? FOR UPDATE",
+                        (job_id,),
+                    )
+                existing = self._conn.execute(
+                    "SELECT event_json FROM events WHERE idempotency_key=?",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing is not None:
+                    event = FoundryEvent.model_validate_json(existing["event_json"])
+                    if update_job_state:
+                        self._conn.execute(
+                            "UPDATE jobs SET state=?,reason=?,updated_at=? WHERE job_id=?",
+                            (
+                                event.state,
+                                event.reason,
+                                datetime.now(UTC).isoformat(),
+                                job_id,
+                            ),
+                        )
+                    self._conn.commit()
+                    return event
+                row = self._conn.execute(
+                    "SELECT COALESCE(MAX(sequence), -1) AS seq FROM events WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                sequence = int(row["seq"]) + 1
+                event = FoundryEvent(
+                    event_id=f"event:{uuid.uuid4()}",
+                    job_id=job_id,
+                    paper_id=paper_id,
+                    sequence=sequence,
+                    state=state,  # type: ignore[arg-type]
+                    occurred_at=datetime.now(UTC),
+                    attempt=attempt,
+                    idempotency_key=idempotency_key,
+                    provider_trace_id=provider_trace_id,
+                    artifact_hash=artifact_hash,
+                    reason=reason,
+                    metadata=metadata or {},
+                )
                 self._conn.execute(
                     "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -530,7 +682,7 @@ class FoundryStore:
                         idempotency_key,
                         state,
                         event.occurred_at.isoformat(),
-                        payload,
+                        canonical_json(event),
                     ),
                 )
                 if update_job_state:
@@ -585,7 +737,10 @@ class FoundryStore:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT OR IGNORE INTO provider_traces VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO provider_traces(
+                  trace_id,job_id,provider,role,returned_model,completed_at,trace_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trace_id) DO NOTHING
                 """,
                 (
                     trace.trace_id,
@@ -635,7 +790,18 @@ class FoundryStore:
             try:
                 self._conn.execute(
                     """
-                    INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO artifacts(
+                      artifact_id,job_id,paper_id,task_id,family,kind,status,created_at,artifact_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(artifact_id) DO UPDATE SET
+                      job_id=excluded.job_id,
+                      paper_id=excluded.paper_id,
+                      task_id=excluded.task_id,
+                      family=excluded.family,
+                      kind=excluded.kind,
+                      status=excluded.status,
+                      created_at=excluded.created_at,
+                      artifact_json=excluded.artifact_json
                     """,
                     (
                         artifact.artifact_id,
@@ -723,18 +889,20 @@ class FoundryStore:
         return audit
 
     def artifact_audits(self, *, artifact_id: str | None = None) -> list[dict[str, Any]]:
+        tie_breaker = "audit_id" if self._dialect == "postgresql" else "rowid"
         if artifact_id:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT audit_json FROM artifact_audits
                 WHERE artifact_id=?
-                ORDER BY created_at DESC,rowid DESC
+                ORDER BY created_at DESC,{tie_breaker} DESC
                 """,
                 (artifact_id,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT audit_json FROM artifact_audits ORDER BY created_at DESC,rowid DESC"
+                f"SELECT audit_json FROM artifact_audits "
+                f"ORDER BY created_at DESC,{tie_breaker} DESC"
             ).fetchall()
         return [
             ArtifactAuditRecord.model_validate_json(row["audit_json"]).model_dump(mode="json")
@@ -817,13 +985,108 @@ class FoundryStore:
         cutoff_at: datetime,
         cutoff_ordinal: int | None = None,
         daily_run_date: date | None = None,
+        owner_id: str | None = None,
+        lease_seconds: float = 300.0,
     ) -> tuple[str, bytes] | None:
+        """Claim one candidate while preserving the historical tuple API.
+
+        Calls without an owner retain the original unleased behavior, so a
+        single-process SQLite worker can recover them immediately on restart.
+        Scaled workers use :meth:`claim_candidate_lease` and keep the returned
+        fencing token for every subsequent mutation.
+        """
+        claim = self._claim_candidate(
+            cutoff_at=cutoff_at,
+            cutoff_ordinal=cutoff_ordinal,
+            daily_run_date=daily_run_date,
+            owner_id=owner_id,
+            lease_seconds=lease_seconds,
+        )
+        if claim is None:
+            return None
+        return claim.doc_id, claim.payload
+
+    def claim_candidate_lease(
+        self,
+        *,
+        cutoff_at: datetime,
+        owner_id: str,
+        lease_seconds: float,
+        cutoff_ordinal: int | None = None,
+        daily_run_date: date | None = None,
+    ) -> CandidateClaim | None:
+        """Atomically claim one candidate for a horizontally scaled worker."""
+        claim = self._claim_candidate(
+            cutoff_at=cutoff_at,
+            cutoff_ordinal=cutoff_ordinal,
+            daily_run_date=daily_run_date,
+            owner_id=owner_id,
+            lease_seconds=lease_seconds,
+        )
+        if claim is not None:
+            assert claim.claim_token is not None
+            assert claim.lease_expires_at is not None
+        return claim
+
+    def _claim_candidate(
+        self,
+        *,
+        cutoff_at: datetime,
+        cutoff_ordinal: int | None,
+        daily_run_date: date | None,
+        owner_id: str | None,
+        lease_seconds: float,
+    ) -> CandidateClaim | None:
+        if owner_id is not None and not owner_id.strip():
+            raise ValueError("candidate claim owner is required")
+        if lease_seconds <= 0:
+            raise ValueError("candidate lease must be positive")
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                now = datetime.now(UTC)
+                now_text = now.isoformat()
+                leased = owner_id is not None
+                if leased:
+                    self._serialize_transaction("foundry-candidate-claim")
+                lease_expires_at = (
+                    (now + timedelta(seconds=lease_seconds)).isoformat() if leased else None
+                )
+                eligible = "candidate_queue.state='queued'"
+                eligible_parameters: tuple[Any, ...] = ()
+                serial_clause = ""
+                serial_parameters: tuple[Any, ...] = ()
+                if leased:
+                    eligible = """
+                      (candidate_queue.state='queued' OR (
+                        candidate_queue.state='processing'
+                        AND candidate_queue.claim_owner IS NOT NULL
+                        AND candidate_queue.lease_expires_at IS NOT NULL
+                        AND candidate_queue.lease_expires_at<=?
+                      ))
+                    """
+                    eligible_parameters = (now_text,)
+                    serial_clause = """
+                      AND NOT EXISTS (
+                        SELECT 1 FROM candidate_queue AS active
+                        WHERE active.state='processing'
+                          AND (
+                            active.lease_expires_at IS NULL
+                            OR active.lease_expires_at>?
+                          )
+                      )
+                    """
+                    serial_parameters = (now_text,)
                 boundary = "enqueue_ordinal<=?" if cutoff_ordinal is not None else "enqueued_at<=?"
                 boundary_value: int | str = (
                     cutoff_ordinal if cutoff_ordinal is not None else cutoff_at.isoformat()
+                )
+                lock_clause = (
+                    "FOR UPDATE OF candidate_queue SKIP LOCKED"
+                    if self._dialect == "postgresql" and daily_run_date is not None
+                    else "FOR UPDATE SKIP LOCKED"
+                    if self._dialect == "postgresql"
+                    else ""
                 )
                 if daily_run_date is not None:
                     row = self._conn.execute(
@@ -832,42 +1095,160 @@ class FoundryStore:
                         FROM daily_run_candidates
                         JOIN candidate_queue USING(doc_id)
                         WHERE daily_run_candidates.run_date=?
-                          AND candidate_queue.state='queued' AND {boundary}
+                          AND {eligible}
+                          {serial_clause}
+                          AND {boundary}
                           AND (candidate_queue.next_attempt_at IS NULL
                                OR candidate_queue.next_attempt_at<=?)
                         ORDER BY daily_run_candidates.rank ASC
                         LIMIT 1
+                        {lock_clause}
                         """,
                         (
                             daily_run_date.isoformat(),
+                            *eligible_parameters,
+                            *serial_parameters,
                             boundary_value,
-                            datetime.now(UTC).isoformat(),
+                            now_text,
                         ),
                     ).fetchone()
                 else:
                     row = self._conn.execute(
                         f"""
                         SELECT doc_id,payload FROM candidate_queue
-                        WHERE state='queued' AND {boundary}
+                        WHERE {eligible.replace("candidate_queue.", "")}
+                          {serial_clause}
+                          AND {boundary}
                           AND (next_attempt_at IS NULL OR next_attempt_at<=?)
                         ORDER BY ranking_score DESC, reasoning_score DESC,
                                  quality_score DESC,valid_from DESC,doc_id ASC
                         LIMIT 1
+                        {lock_clause}
                         """,
-                        (boundary_value, datetime.now(UTC).isoformat()),
+                        (
+                            *eligible_parameters,
+                            *serial_parameters,
+                            boundary_value,
+                            now_text,
+                        ),
                     ).fetchone()
                 if row is None:
                     self._conn.rollback()
                     return None
-                self._conn.execute(
-                    "UPDATE candidate_queue SET state='processing',updated_at=? WHERE doc_id=?",
-                    (datetime.now(UTC).isoformat(), row["doc_id"]),
+                claim_token = f"claim:{uuid.uuid4()}" if leased else None
+                update_eligible = "state='queued'"
+                update_parameters: tuple[Any, ...] = ()
+                if leased:
+                    update_eligible = """
+                      (state='queued' OR (
+                        state='processing' AND claim_owner IS NOT NULL
+                        AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+                      ))
+                    """
+                    update_parameters = (now_text,)
+                cursor = self._conn.execute(
+                    f"""
+                    UPDATE candidate_queue
+                    SET state='processing',claim_owner=?,claim_token=?,claimed_at=?,
+                        lease_expires_at=?,updated_at=?
+                    WHERE doc_id=? AND {update_eligible}
+                    """,
+                    (
+                        owner_id,
+                        claim_token,
+                        now_text,
+                        lease_expires_at,
+                        now_text,
+                        row["doc_id"],
+                        *update_parameters,
+                    ),
                 )
+                if cursor.rowcount != 1:
+                    self._conn.rollback()
+                    return None
                 self._conn.commit()
-                return str(row["doc_id"]), bytes(row["payload"])
+                return CandidateClaim(
+                    doc_id=str(row["doc_id"]),
+                    payload=bytes(row["payload"]),
+                    owner_id=owner_id,
+                    claim_token=claim_token,
+                    lease_expires_at=(
+                        datetime.fromisoformat(lease_expires_at)
+                        if lease_expires_at is not None
+                        else None
+                    ),
+                )
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def renew_candidate_lease(
+        self,
+        doc_id: str,
+        *,
+        owner_id: str,
+        lease_seconds: float,
+        claim_token: str | None = None,
+    ) -> bool:
+        if lease_seconds <= 0:
+            raise ValueError("candidate lease must be positive")
+        now = datetime.now(UTC)
+        token_clause = " AND claim_token=?" if claim_token is not None else ""
+        parameters: tuple[Any, ...] = (
+            (
+                (now + timedelta(seconds=lease_seconds)).isoformat(),
+                now.isoformat(),
+                doc_id,
+                owner_id,
+                now.isoformat(),
+                claim_token,
+            )
+            if claim_token is not None
+            else (
+                (now + timedelta(seconds=lease_seconds)).isoformat(),
+                now.isoformat(),
+                doc_id,
+                owner_id,
+                now.isoformat(),
+            )
+        )
+        with self._lock:
+            cursor = self._conn.execute(
+                f"""
+                UPDATE candidate_queue
+                SET lease_expires_at=?,updated_at=?
+                WHERE doc_id=? AND state='processing' AND claim_owner=?
+                  AND lease_expires_at>?
+                  {token_clause}
+                """,
+                parameters,
+            )
+        return cursor.rowcount == 1
+
+    def candidate_claim_owned(
+        self,
+        doc_id: str,
+        *,
+        owner_id: str,
+        claim_token: str | None = None,
+    ) -> bool:
+        token_clause = " AND claim_token=?" if claim_token is not None else ""
+        now = datetime.now(UTC).isoformat()
+        parameters: tuple[Any, ...] = (
+            (doc_id, owner_id, now, claim_token)
+            if claim_token is not None
+            else (doc_id, owner_id, now)
+        )
+        row = self._conn.execute(
+            f"""
+            SELECT 1 FROM candidate_queue
+            WHERE doc_id=? AND state='processing' AND claim_owner=?
+              AND lease_expires_at>?
+              {token_clause}
+            """,
+            parameters,
+        ).fetchone()
+        return row is not None
 
     def candidate_scientific_payload(
         self,
@@ -885,26 +1266,63 @@ class FoundryStore:
             return None
         return bytes(row["scientific_payload"])
 
-    def cache_candidate_scientific_payload(self, doc_id: str, payload: bytes) -> None:
+    def cache_candidate_scientific_payload(
+        self,
+        doc_id: str,
+        payload: bytes,
+        *,
+        owner_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> None:
         """Persist the validated source projection before provider work begins."""
+        if claim_token is not None and owner_id is None:
+            raise ValueError("candidate claim token requires an owner")
+        now = datetime.now(UTC).isoformat()
+        owner_clause = " AND claim_owner=? AND lease_expires_at>?" if owner_id is not None else ""
+        token_clause = " AND claim_token=?" if claim_token is not None else ""
+        parameters: tuple[Any, ...]
+        if owner_id is None:
+            parameters = (payload, now, doc_id)
+        elif claim_token is None:
+            parameters = (payload, now, doc_id, owner_id, now)
+        else:
+            parameters = (payload, now, doc_id, owner_id, now, claim_token)
         with self._lock:
             cursor = self._conn.execute(
-                """
+                f"""
                 UPDATE candidate_queue SET scientific_payload=?,updated_at=?
-                WHERE doc_id=? AND state='processing'
+                WHERE doc_id=? AND state='processing'{owner_clause}{token_clause}
                 """,
-                (payload, datetime.now(UTC).isoformat(), doc_id),
+                parameters,
             )
             if cursor.rowcount != 1:
+                if owner_id is not None:
+                    raise CandidateLeaseLostError(doc_id)
                 raise KeyError(f"candidate is not processing: {doc_id}")
 
-    def interrupted_provider_calls(self) -> list[dict[str, Any]]:
+    def interrupted_provider_calls(
+        self,
+        *,
+        recoverable_only: bool = False,
+    ) -> list[dict[str, Any]]:
         """Return calls left without a terminal event by the prior worker."""
-        rows = self._conn.execute(
+        recoverable_clause = (
             """
+              AND EXISTS (
+                SELECT 1 FROM candidate_queue
+                WHERE candidate_queue.doc_id=jobs.doc_id
+                  AND candidate_queue.state='queued'
+              )
+            """
+            if recoverable_only
+            else ""
+        )
+        rows = self._conn.execute(
+            f"""
             SELECT events.event_json FROM events
             JOIN jobs ON jobs.job_id=events.job_id
             WHERE jobs.state NOT IN ('ACCEPTED_SFT','ACCEPTED_RL','REJECTED','DEPRECATED')
+              {recoverable_clause}
               AND events.state IN (
               'CALL_PLANNED','CALL_STARTED','CALL_SUCCEEDED','CALL_FAILED','CALL_RATE_LIMITED'
             )
@@ -960,6 +1378,7 @@ class FoundryStore:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._serialize_transaction("foundry-run-coordinator")
                 self._conn.execute(
                     """
                     UPDATE daily_runs
@@ -994,8 +1413,23 @@ class FoundryStore:
                     "DELETE FROM candidate_queue WHERE state='queued' AND enqueued_at<=?",
                     (window_start.isoformat(),),
                 )
+                limit_clause = " LIMIT ?" if candidate_limit is not None else ""
+                parameters: tuple[Any, ...] = (
+                    (
+                        cutoff_ordinal,
+                        window_start.isoformat(),
+                        cutoff_at.isoformat(),
+                        candidate_limit,
+                    )
+                    if candidate_limit is not None
+                    else (
+                        cutoff_ordinal,
+                        window_start.isoformat(),
+                        cutoff_at.isoformat(),
+                    )
+                )
                 ranked_rows = self._conn.execute(
-                    """
+                    f"""
                     SELECT doc_id,ranking_score,reasoning_score,quality_score,
                            valid_from,domain_key
                     FROM candidate_queue
@@ -1003,14 +1437,9 @@ class FoundryStore:
                       AND enqueued_at>? AND enqueued_at<=?
                     ORDER BY ranking_score DESC,reasoning_score DESC,quality_score DESC,
                              valid_from DESC,doc_id ASC
-                    LIMIT ?
+                    {limit_clause}
                     """,
-                    (
-                        cutoff_ordinal,
-                        window_start.isoformat(),
-                        cutoff_at.isoformat(),
-                        candidate_limit if candidate_limit is not None else -1,
-                    ),
+                    parameters,
                 ).fetchall()
                 selected_ids = [str(row["doc_id"]) for row in ranked_rows]
                 candidate_count = len(selected_ids)
@@ -1019,10 +1448,11 @@ class FoundryStore:
                 stop_reason = None if candidate_count else "ranked 24-hour cohort is empty"
                 self._conn.execute(
                     """
-                    INSERT OR IGNORE INTO daily_runs(
+                    INSERT INTO daily_runs(
                       run_date,state,cutoff_at,cutoff_ordinal,started_at,completed_at,
                       candidate_count,stop_reason
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_date) DO NOTHING
                     """,
                     (
                         day_text,
@@ -1037,8 +1467,9 @@ class FoundryStore:
                 )
                 self._conn.executemany(
                     """
-                    INSERT OR IGNORE INTO daily_run_candidates(run_date,rank,doc_id)
+                    INSERT INTO daily_run_candidates(run_date,rank,doc_id)
                     VALUES (?, ?, ?)
+                    ON CONFLICT(run_date,doc_id) DO NOTHING
                     """,
                     [(day_text, rank, doc_id) for rank, doc_id in enumerate(selected_ids, start=1)],
                 )
@@ -1128,6 +1559,7 @@ class FoundryStore:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._serialize_transaction("foundry-run-coordinator")
                 active = self._conn.execute(
                     """
                     SELECT * FROM manual_runs
@@ -1259,6 +1691,7 @@ class FoundryStore:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._serialize_transaction(f"foundry-pool:{pool}")
                 existing = self._conn.execute(
                     "SELECT dataset_split,ordinal,pool FROM pool_assignments WHERE allocation_key=?",
                     (allocation_key,),
@@ -1292,9 +1725,31 @@ class FoundryStore:
                 self._conn.rollback()
                 raise
 
-    def finish_candidate(self, doc_id: str) -> None:
+    def finish_candidate(
+        self,
+        doc_id: str,
+        *,
+        owner_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> None:
+        if claim_token is not None and owner_id is None:
+            raise ValueError("candidate claim token requires an owner")
+        now = datetime.now(UTC).isoformat()
+        owner_clause = " AND claim_owner=? AND lease_expires_at>?" if owner_id is not None else ""
+        token_clause = " AND claim_token=?" if claim_token is not None else ""
+        if owner_id is None:
+            parameters: tuple[Any, ...] = (doc_id,)
+        elif claim_token is None:
+            parameters = (doc_id, owner_id, now)
+        else:
+            parameters = (doc_id, owner_id, now, claim_token)
         with self._lock:
-            self._conn.execute("DELETE FROM candidate_queue WHERE doc_id=?", (doc_id,))
+            cursor = self._conn.execute(
+                f"DELETE FROM candidate_queue WHERE doc_id=?{owner_clause}{token_clause}",
+                parameters,
+            )
+        if owner_id is not None and cursor.rowcount != 1:
+            raise CandidateLeaseLostError(doc_id)
 
     def remove_queued_candidate(self, doc_id: str) -> None:
         with self._lock:
@@ -1303,42 +1758,94 @@ class FoundryStore:
                 (doc_id,),
             )
 
-    def release_candidate(self, doc_id: str) -> None:
+    def release_candidate(
+        self,
+        doc_id: str,
+        *,
+        owner_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> None:
+        if claim_token is not None and owner_id is None:
+            raise ValueError("candidate claim token requires an owner")
+        now = datetime.now(UTC).isoformat()
+        owner_clause = " AND claim_owner=? AND lease_expires_at>?" if owner_id is not None else ""
+        token_clause = " AND claim_token=?" if claim_token is not None else ""
+        if owner_id is None:
+            parameters: tuple[Any, ...] = (now, doc_id)
+        elif claim_token is None:
+            parameters = (now, doc_id, owner_id, now)
+        else:
+            parameters = (now, doc_id, owner_id, now, claim_token)
         with self._lock:
-            self._conn.execute(
-                """
-                UPDATE candidate_queue
-                SET state='queued',updated_at=?,next_attempt_at=NULL,last_error=NULL
-                WHERE doc_id=?
+            cursor = self._conn.execute(
+                f"""
+                UPDATE candidate_queue SET
+                  state='queued',updated_at=?,next_attempt_at=NULL,last_error=NULL,
+                  claim_owner=NULL,claim_token=NULL,claimed_at=NULL,lease_expires_at=NULL
+                WHERE doc_id=?{owner_clause}{token_clause}
                 """,
-                (datetime.now(UTC).isoformat(), doc_id),
+                parameters,
             )
+        if owner_id is not None and cursor.rowcount != 1:
+            raise CandidateLeaseLostError(doc_id)
 
-    def defer_candidate(self, doc_id: str, *, reason: str) -> int:
+    def defer_candidate(
+        self,
+        doc_id: str,
+        *,
+        reason: str,
+        owner_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> int:
         """Defer a transiently failed paper so later ranked work can proceed."""
+        if claim_token is not None and owner_id is None:
+            raise ValueError("candidate claim token requires an owner")
+        now = datetime.now(UTC)
+        now_text = now.isoformat()
+        owner_clause = " AND claim_owner=? AND lease_expires_at>?" if owner_id is not None else ""
+        token_clause = " AND claim_token=?" if claim_token is not None else ""
+        if owner_id is None:
+            select_parameters: tuple[Any, ...] = (doc_id,)
+        elif claim_token is None:
+            select_parameters = (doc_id, owner_id, now_text)
+        else:
+            select_parameters = (doc_id, owner_id, now_text, claim_token)
         with self._lock:
             row = self._conn.execute(
-                "SELECT attempt_count FROM candidate_queue WHERE doc_id=?", (doc_id,)
+                f"SELECT attempt_count FROM candidate_queue "
+                f"WHERE doc_id=?{owner_clause}{token_clause}",
+                select_parameters,
             ).fetchone()
             if row is None:
+                if owner_id is not None:
+                    raise CandidateLeaseLostError(doc_id)
                 raise KeyError(doc_id)
             attempt = int(row["attempt_count"]) + 1
-            delay_seconds = min(3600, 60 * (2 ** min(attempt - 1, 6)))
-            now = datetime.now(UTC)
-            self._conn.execute(
-                """
-                UPDATE candidate_queue
-                SET state='queued',attempt_count=?,next_attempt_at=?,last_error=?,updated_at=?
-                WHERE doc_id=?
-                """,
-                (
-                    attempt,
-                    (now + timedelta(seconds=delay_seconds)).isoformat(),
-                    reason[:2000],
-                    now.isoformat(),
-                    doc_id,
-                ),
+            delay_seconds = int(min(3600, 60 * (2 ** min(attempt - 1, 6))))
+            base_parameters: tuple[Any, ...] = (
+                attempt,
+                (now + timedelta(seconds=delay_seconds)).isoformat(),
+                reason[:2000],
+                now_text,
+                doc_id,
             )
+            if owner_id is None:
+                update_parameters = base_parameters
+            elif claim_token is None:
+                update_parameters = (*base_parameters, owner_id, now_text)
+            else:
+                update_parameters = (*base_parameters, owner_id, now_text, claim_token)
+            cursor = self._conn.execute(
+                f"""
+                UPDATE candidate_queue
+                SET state='queued',attempt_count=?,next_attempt_at=?,last_error=?,updated_at=?,
+                    claim_owner=NULL,claim_token=NULL,claimed_at=NULL,lease_expires_at=NULL
+                WHERE doc_id=?{owner_clause}{token_clause}
+                """,
+                update_parameters,
+            )
+            if owner_id is not None and cursor.rowcount != 1:
+                raise CandidateLeaseLostError(doc_id)
             return delay_seconds
 
     def next_candidate_retry_delay(
@@ -1349,14 +1856,36 @@ class FoundryStore:
         daily_run_date: date | None = None,
     ) -> float | None:
         now = datetime.now(UTC)
+        active = self._conn.execute(
+            """
+            SELECT MIN(lease_expires_at) AS retry_at,
+                   SUM(CASE WHEN lease_expires_at IS NULL THEN 1 ELSE 0 END) AS unleased
+            FROM candidate_queue
+            WHERE state='processing'
+              AND (lease_expires_at IS NULL OR lease_expires_at>?)
+            """,
+            (now.isoformat(),),
+        ).fetchone()
+        if active is not None and int(active["unleased"] or 0) > 0:
+            return 1.0
+        if active is not None and active["retry_at"] is not None:
+            return max(
+                0.0,
+                (datetime.fromisoformat(str(active["retry_at"])) - now).total_seconds(),
+            )
         if daily_run_date is not None:
             row = self._conn.execute(
                 """
-                SELECT MIN(candidate_queue.next_attempt_at) AS retry_at
+                SELECT MIN(
+                  CASE candidate_queue.state
+                    WHEN 'processing' THEN candidate_queue.lease_expires_at
+                    ELSE candidate_queue.next_attempt_at
+                  END
+                ) AS retry_at
                 FROM daily_run_candidates
                 JOIN candidate_queue USING(doc_id)
                 WHERE daily_run_candidates.run_date=?
-                  AND candidate_queue.state='queued'
+                  AND candidate_queue.state IN ('queued','processing')
                   AND candidate_queue.enqueue_ordinal<=?
                 """,
                 (daily_run_date.isoformat(), cutoff_ordinal),
@@ -1364,8 +1893,12 @@ class FoundryStore:
         else:
             row = self._conn.execute(
                 """
-                SELECT MIN(next_attempt_at) AS retry_at FROM candidate_queue
-                WHERE state='queued' AND enqueue_ordinal<=? AND enqueued_at<=?
+                SELECT MIN(
+                  CASE state WHEN 'processing' THEN lease_expires_at ELSE next_attempt_at END
+                ) AS retry_at
+                FROM candidate_queue
+                WHERE state IN ('queued','processing')
+                  AND enqueue_ordinal<=? AND enqueued_at<=?
                 """,
                 (cutoff_ordinal, cutoff_at.isoformat()),
             ).fetchone()
@@ -1515,10 +2048,11 @@ class FoundryStore:
 
     def replay_fixture(self, *, job_id: str) -> dict[str, dict[str, list[Any]]]:
         """Return recorded structured outputs in their original per-role order."""
+        tie_breaker = "call_key" if self._dialect == "postgresql" else "rowid"
         rows = self._conn.execute(
-            """
-            SELECT response_json,trace_json,created_at,rowid FROM provider_results
-            WHERE job_id=? ORDER BY created_at,rowid
+            f"""
+            SELECT response_json,trace_json,created_at FROM provider_results
+            WHERE job_id=? ORDER BY created_at,{tie_breaker}
             """,
             (job_id,),
         ).fetchall()
@@ -1532,11 +2066,12 @@ class FoundryStore:
 
     def provider_results(self, *, job_id: str) -> list[dict[str, Any]]:
         """Return durable structured generation results for artifact inspection."""
+        tie_breaker = "call_key" if self._dialect == "postgresql" else "rowid"
         rows = self._conn.execute(
-            """
-            SELECT call_key,prompt_version,response_json,trace_json,created_at,rowid
+            f"""
+            SELECT call_key,prompt_version,response_json,trace_json,created_at
             FROM provider_results
-            WHERE job_id=? ORDER BY created_at,rowid
+            WHERE job_id=? ORDER BY created_at,{tie_breaker}
             """,
             (job_id,),
         ).fetchall()
@@ -1619,17 +2154,18 @@ class FoundryStore:
                 "reason": event.reason,
                 "occurred_at": event.occurred_at.isoformat(),
             }
+        audit_tie_breaker = "latest.audit_id" if self._dialect == "postgresql" else "latest.rowid"
         audit_counts = {
             row["decision"]: int(row["n"])
             for row in self._conn.execute(
-                """
+                f"""
                 SELECT decision,COUNT(*) AS n
                 FROM artifact_audits AS audit
                 WHERE audit.audit_id=(
                   SELECT latest.audit_id
                   FROM artifact_audits AS latest
                   WHERE latest.artifact_id=audit.artifact_id
-                  ORDER BY latest.created_at DESC,latest.rowid DESC
+                  ORDER BY latest.created_at DESC,{audit_tie_breaker} DESC
                   LIMIT 1
                 )
                 GROUP BY decision
@@ -1826,4 +2362,4 @@ class FoundryStore:
         ]
 
 
-__all__ = ["FoundryStore"]
+__all__ = ["CandidateClaim", "CandidateLeaseLostError", "FoundryStore"]

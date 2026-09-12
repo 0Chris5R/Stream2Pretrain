@@ -431,42 +431,94 @@ def run_bytewax_flow(
     *,
     runtime_status: BytewaxRuntimeStatus | None = None,
 ) -> None:
-    """Run one flow with durable source-offset recovery enabled.
+    """Run one local or distributed flow with durable recovery enabled.
 
     Bytewax's Kafka connector deliberately disables broker-side offset commits
     and stores source offsets in its recovery database. Without this explicit
     recovery configuration, every process restart begins at
     ``S2P_KAFKA_START_OFFSET`` and re-emits the retained topic.
+
+    In Kubernetes, a StatefulSet supplies a stable Pod ordinal and a hostfile.
+    Passing both to ``cli_main`` makes all Pods one Bytewax execution instead of
+    several independent consumers with divergent recovery state.
     """
     from bytewax.recovery import RecoveryConfig, init_db_dir
     from bytewax.run import cli_main
 
-    recovery_dir = Path(cfg.state_dir) / "bytewax" / recovery_name
+    recovery_root = Path(os.environ.get("S2P_BYTEWAX_RECOVERY_ROOT", cfg.state_dir))
+    recovery_dir = recovery_root / "bytewax" / recovery_name
     recovery_dir.mkdir(parents=True, exist_ok=True)
     partitions = _env_int("S2P_BYTEWAX_RECOVERY_PARTITIONS", 1)
     if partitions < 1:
         raise RuntimeError("S2P_BYTEWAX_RECOVERY_PARTITIONS must be positive")
-    existing_databases = sorted(recovery_dir.glob("part-*.sqlite3"))
-    if not existing_databases:
-        init_db_dir(recovery_dir, partitions)
+    # All distributed processes can start together against the shared recovery
+    # volume. Serialize first-run initialization so two Pods never create the
+    # same SQLite recovery partitions concurrently.
+    import fcntl
+
+    init_lock_path = recovery_dir.parent / f".{recovery_name}.init.lock"
+    with init_lock_path.open("a+b") as init_lock:
+        fcntl.flock(init_lock.fileno(), fcntl.LOCK_EX)
         existing_databases = sorted(recovery_dir.glob("part-*.sqlite3"))
-    expected_databases = {
-        recovery_dir / f"part-{partition}.sqlite3" for partition in range(partitions)
-    }
-    if set(existing_databases) != expected_databases:
-        existing_names = [path.name for path in existing_databases]
-        raise RuntimeError(
-            f"Bytewax recovery partition mismatch for {recovery_name}: "
-            f"configured={partitions} existing={existing_names}"
-        )
+        if not existing_databases:
+            init_db_dir(recovery_dir, partitions)
+            existing_databases = sorted(recovery_dir.glob("part-*.sqlite3"))
+        expected_databases = {
+            recovery_dir / f"part-{partition}.sqlite3" for partition in range(partitions)
+        }
+        if set(existing_databases) != expected_databases:
+            existing_names = [path.name for path in existing_databases]
+            raise RuntimeError(
+                f"Bytewax recovery partition mismatch for {recovery_name}: "
+                f"configured={partitions} existing={existing_names}"
+            )
     interval = timedelta(seconds=_env_float("S2P_BYTEWAX_SNAPSHOT_SECONDS", 1.0))
     if interval.total_seconds() <= 0:
         raise RuntimeError("S2P_BYTEWAX_SNAPSHOT_SECONDS must be positive")
     if runtime_status is not None:
         runtime_status.mark_runtime_started()
+    workers_per_process = _env_int("BYTEWAX_WORKERS_PER_PROCESS", 1)
+    if workers_per_process < 1:
+        raise RuntimeError("BYTEWAX_WORKERS_PER_PROCESS must be positive")
+
+    process_id_raw = os.environ.get("BYTEWAX_PROCESS_ID", "").strip()
+    if not process_id_raw:
+        pod_name = os.environ.get("BYTEWAX_POD_NAME", "").strip()
+        statefulset_name = os.environ.get("BYTEWAX_STATEFULSET_NAME", "").strip()
+        prefix = f"{statefulset_name}-" if statefulset_name else ""
+        if pod_name and prefix and pod_name.startswith(prefix):
+            process_id_raw = pod_name.removeprefix(prefix)
+
+    process_id: int | None = None
+    if process_id_raw:
+        try:
+            process_id = int(process_id_raw)
+        except ValueError as exc:
+            raise RuntimeError("BYTEWAX_PROCESS_ID or Pod ordinal must be an integer") from exc
+        if process_id < 0:
+            raise RuntimeError("BYTEWAX_PROCESS_ID must not be negative")
+
+    addresses_raw = os.environ.get("BYTEWAX_ADDRESSES", "").strip()
+    hostfile_path = os.environ.get("BYTEWAX_HOSTFILE_PATH", "").strip()
+    if not addresses_raw and hostfile_path:
+        addresses_raw = ";".join(
+            line.strip()
+            for line in Path(hostfile_path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    addresses = [address for address in addresses_raw.split(";") if address] or None
+    if (process_id is None) != (addresses is None):
+        raise RuntimeError(
+            "distributed Bytewax requires both a process id and the complete address list"
+        )
+    if process_id is not None and process_id >= len(addresses or ()):
+        raise RuntimeError("BYTEWAX_PROCESS_ID is outside the configured address list")
     try:
         cli_main(
             flow,
+            workers_per_process=workers_per_process,
+            process_id=process_id,
+            addresses=addresses,
             epoch_interval=interval,
             recovery_config=RecoveryConfig(recovery_dir),
         )

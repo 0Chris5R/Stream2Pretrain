@@ -22,6 +22,7 @@ from processor.foundry import lakehouse
 from processor.foundry.api import _package_archive
 from processor.foundry.config import FoundryConfig, ProviderConfig
 from processor.foundry.control import ProviderControlPlane
+from processor.foundry.database import _postgres_sql, coordination_database_target
 from processor.foundry.graph import BoundedGraphPatch, EvidenceGraphCompiler
 from processor.foundry.inspection import (
     ArtifactInspector,
@@ -41,10 +42,10 @@ from processor.foundry.providers import (
     ProviderError,
     StructuredGeneration,
 )
-from processor.foundry.quota import QuotaExceededError, QuotaLedger
+from processor.foundry.quota import QuotaExceededError, QuotaLeaseLostError, QuotaLedger
 from processor.foundry.routing import ROLE_PROVIDER
 from processor.foundry.standalone_verifier import score_response
-from processor.foundry.store import FoundryStore
+from processor.foundry.store import CandidateLeaseLostError, FoundryStore
 from processor.foundry.symbolic import symbolically_equivalent
 from processor.foundry.tasking import (
     GroundingCritique,
@@ -2329,6 +2330,138 @@ def test_abandoned_reservation_is_conservatively_reconciled_after_restart(
     assert recovered.reconcile_abandoned_reservations() == 0
 
 
+def test_live_quota_reservation_is_not_reconciled_by_another_replica(tmp_path: Path) -> None:
+    config = _provider_config()
+    path = tmp_path / "quota.sqlite3"
+    owner = QuotaLedger(
+        str(path),
+        {"hetzner": config},
+        reservation_lease_seconds=300,
+    )
+    observer = QuotaLedger(str(path), {"hetzner": config})
+    reservation = owner.reserve("hetzner", input_tokens=25, output_tokens=50)
+
+    assert observer.reconcile_abandoned_reservations() == 0
+    assert owner.renew(reservation)
+    assert owner.reconcile(reservation, None)
+    assert not observer.reconcile(reservation, None)
+
+
+def test_expired_quota_reservation_cannot_be_renewed_or_double_charged(tmp_path: Path) -> None:
+    config = _provider_config()
+    path = tmp_path / "quota.sqlite3"
+    owner = QuotaLedger(str(path), {"hetzner": config})
+    reaper = QuotaLedger(str(path), {"hetzner": config})
+    reservation = owner.reserve("hetzner", requests=2, input_tokens=25, output_tokens=50)
+    owner._conn.execute(
+        "UPDATE quota_reservations SET lease_expires_at=? WHERE reservation_id=?",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), reservation.reservation_id),
+    )
+
+    assert not owner.renew(reservation)
+    assert reaper.reconcile_abandoned_reservations() == 1
+    assert not owner.reconcile(reservation, None)
+    day = next(value for value in reaper.states() if value.window == "day")
+    assert day.observed_requests_used == 2
+    assert day.locally_reserved_requests == 0
+
+
+def test_next_reservation_reconciles_expired_replica_capacity(tmp_path: Path) -> None:
+    config = _provider_config()
+    path = tmp_path / "quota.sqlite3"
+    crashed = QuotaLedger(str(path), {"hetzner": config})
+    survivor = QuotaLedger(str(path), {"hetzner": config})
+    abandoned = crashed.reserve("hetzner", requests=2, input_tokens=25, output_tokens=50)
+    crashed._conn.execute(
+        "UPDATE quota_reservations SET lease_expires_at=? WHERE reservation_id=?",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), abandoned.reservation_id),
+    )
+
+    active = survivor.reserve("hetzner", input_tokens=10, output_tokens=20)
+
+    day = next(value for value in survivor.states() if value.window == "day")
+    assert day.observed_requests_used == 2
+    assert day.locally_reserved_requests == 1
+    assert survivor.reconcile(active, None)
+
+
+def test_quota_keepalive_checks_lease_again_before_clean_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quota = QuotaLedger(
+        str(tmp_path / "quota.sqlite3"),
+        {"hetzner": _provider_config()},
+        reservation_lease_seconds=300,
+    )
+    reservation = quota.reserve("hetzner", input_tokens=25, output_tokens=50)
+    renew_results = iter((True, False))
+    monkeypatch.setattr(quota, "renew", lambda _: next(renew_results))
+
+    with pytest.raises(QuotaLeaseLostError), quota.keepalive(reservation):
+        pass
+
+
+def test_postgres_sql_translation_covers_foundry_sqlite_extensions() -> None:
+    statement = _postgres_sql(
+        "SELECT MAX(0, value - ?), json_extract(event_json, '$.attempt') FROM records "
+        "WHERE payload<>X'' AND body BLOB"
+    )
+    assert "GREATEST(0, value - %s)" in statement
+    assert "convert_from(event_json, 'UTF8')::jsonb" in statement
+    assert "''::bytea" in statement
+    assert "body BYTEA" in statement
+    assert "ranking_score DOUBLE PRECISION" in _postgres_sql("ranking_score REAL")
+
+
+def test_coordination_database_target_prefers_shared_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2P_COORDINATION_DATABASE_URL", "postgresql://coordination/foundry")
+    assert (
+        coordination_database_target(str(tmp_path), "control.sqlite3")
+        == "postgresql://coordination/foundry"
+    )
+
+
+def test_foundry_chart_separates_scalable_worker_and_api_workloads() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    template = (repository / "charts/stream2pretrain/templates/processor-foundry.yaml").read_text(
+        encoding="utf-8"
+    )
+    values = (repository / "charts/stream2pretrain/values.yaml").read_text(encoding="utf-8")
+    schema = json.loads(
+        (repository / "charts/stream2pretrain/values.schema.json").read_text(encoding="utf-8")
+    )
+
+    assert '$workerComponent := "foundry-worker"' in template
+    assert '$apiComponent := "foundry-api"' in template
+    assert "kind: StatefulSet" in template
+    assert "kind: Deployment" in template
+    assert template.count("- name: S2P_COORDINATION_DATABASE_URL") == 2
+    worker_template, api_template = template.split("kind: Deployment", maxsplit=1)
+    assert 'include "stream2pretrain.commonEnv"' in worker_template
+    assert 'include "stream2pretrain.commonEnv"' not in api_template
+    for variable in (
+        "S2P_ENV",
+        "LOG_LEVEL",
+        "MINIO_ENDPOINT",
+        "AWS_DEFAULT_REGION",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+    ):
+        assert f"- name: {variable}" in api_template
+    assert "POLARIS_CREDENTIAL" not in api_template
+    assert "REDPANDA_BROKERS" not in api_template
+    assert "processor.foundry.state.accessMode must be ReadWriteMany" in template
+    assert "workerReplicas: 1" in values
+    assert "apiReplicas: 1" in values
+    foundry_schema = schema["properties"]["processor"]["properties"]["foundry"]
+    assert foundry_schema["properties"]["workerReplicas"]["minimum"] == 1
+    assert foundry_schema["properties"]["apiReplicas"]["minimum"] == 1
+
+
 def test_candidate_queue_ranks_snapshot_by_composite_score(tmp_path: Path) -> None:
     store = FoundryStore(str(tmp_path / "control.sqlite3"))
     for doc_id, reasoning, quality, ranking in (
@@ -2632,7 +2765,7 @@ def test_interrupted_provider_calls_are_identified_until_terminal(tmp_path: Path
     assert store.interrupted_provider_calls() == []
 
 
-def test_only_worker_startup_recovers_processing_candidates(tmp_path: Path) -> None:
+def test_worker_recovery_preserves_live_candidate_lease_until_expiry(tmp_path: Path) -> None:
     path = tmp_path / "control.sqlite3"
     worker = FoundryStore(str(path))
     worker.enqueue_candidate(
@@ -2643,7 +2776,11 @@ def test_only_worker_startup_recovers_processing_candidates(tmp_path: Path) -> N
         valid_from=FIXED_TIME,
     )
     cutoff = datetime.now(UTC) + timedelta(seconds=1)
-    assert worker.claim_candidate(cutoff_at=cutoff) == ("paper", b"paper")
+    assert worker.claim_candidate(
+        cutoff_at=cutoff,
+        owner_id="worker-a",
+        lease_seconds=300,
+    ) == ("paper", b"paper")
     worker.close()
 
     api = FoundryStore(str(path))
@@ -2652,8 +2789,234 @@ def test_only_worker_startup_recovers_processing_candidates(tmp_path: Path) -> N
     api.close()
 
     restarted_worker = FoundryStore(str(path), recover_processing=True)
+    assert restarted_worker.queued_candidates() == 0
+    assert restarted_worker.claim_candidate(cutoff_at=cutoff) is None
+
+    recovered = restarted_worker.recover_expired_candidates(
+        now=datetime.now(UTC) + timedelta(minutes=6)
+    )
+    assert recovered == 1
     assert restarted_worker.queued_candidates() == 1
-    assert restarted_worker.claim_candidate(cutoff_at=cutoff) == ("paper", b"paper")
+    assert restarted_worker.claim_candidate(
+        cutoff_at=cutoff,
+        owner_id="worker-b",
+    ) == ("paper", b"paper")
+
+
+def test_candidate_claim_fences_a_stale_worker_after_reassignment(tmp_path: Path) -> None:
+    path = tmp_path / "control.sqlite3"
+    first = FoundryStore(str(path))
+    second = FoundryStore(str(path))
+    first.enqueue_candidate(
+        doc_id="paper",
+        payload=b"paper",
+        reasoning_score=1.0,
+        quality_score=5.0,
+        valid_from=FIXED_TIME,
+    )
+    cutoff = datetime.now(UTC) + timedelta(seconds=1)
+
+    assert first.claim_candidate(
+        cutoff_at=cutoff,
+        owner_id="worker-a",
+        lease_seconds=300,
+    ) == ("paper", b"paper")
+    assert second.claim_candidate(cutoff_at=cutoff, owner_id="worker-b") is None
+
+    assert second.recover_expired_candidates(now=datetime.now(UTC) + timedelta(minutes=6)) == 1
+    assert second.claim_candidate(
+        cutoff_at=cutoff,
+        owner_id="worker-b",
+    ) == ("paper", b"paper")
+
+    with pytest.raises(CandidateLeaseLostError):
+        first.finish_candidate("paper", owner_id="worker-a")
+    with pytest.raises(CandidateLeaseLostError):
+        first.release_candidate("paper", owner_id="worker-a")
+    with pytest.raises(CandidateLeaseLostError):
+        first.defer_candidate("paper", reason="late failure", owner_id="worker-a")
+
+    second.finish_candidate("paper", owner_id="worker-b")
+
+
+def test_candidate_leases_preserve_serial_foundry_processing(tmp_path: Path) -> None:
+    path = tmp_path / "control.sqlite3"
+    first = FoundryStore(str(path))
+    second = FoundryStore(str(path))
+    for doc_id, score in (("first", 1.0), ("second", 0.5)):
+        first.enqueue_candidate(
+            doc_id=doc_id,
+            payload=doc_id.encode(),
+            reasoning_score=score,
+            quality_score=5.0,
+            valid_from=FIXED_TIME,
+        )
+    cutoff = datetime.now(UTC) + timedelta(seconds=1)
+
+    active = first.claim_candidate_lease(
+        cutoff_at=cutoff,
+        owner_id="worker-a",
+        lease_seconds=300,
+    )
+    assert active is not None
+    assert (
+        second.claim_candidate_lease(
+            cutoff_at=cutoff,
+            owner_id="worker-b",
+            lease_seconds=300,
+        )
+        is None
+    )
+
+    first.finish_candidate(
+        active.doc_id,
+        owner_id="worker-a",
+        claim_token=active.claim_token,
+    )
+    following = second.claim_candidate_lease(
+        cutoff_at=cutoff,
+        owner_id="worker-b",
+        lease_seconds=300,
+    )
+    assert following is not None
+    assert following.doc_id == "second"
+
+
+def test_daily_queue_waits_for_active_manual_candidate_lease(tmp_path: Path) -> None:
+    path = tmp_path / "control.sqlite3"
+    manual_worker = FoundryStore(str(path))
+    daily_worker = FoundryStore(str(path))
+    for doc_id, score in (("manual", 1.0), ("daily", 0.5)):
+        manual_worker.enqueue_candidate(
+            doc_id=doc_id,
+            payload=doc_id.encode(),
+            reasoning_score=score,
+            quality_score=5.0,
+            valid_from=FIXED_TIME,
+        )
+    cutoff = datetime.now(UTC) + timedelta(seconds=1)
+    active = manual_worker.claim_candidate_lease(
+        cutoff_at=cutoff,
+        owner_id="manual-worker",
+        lease_seconds=300,
+    )
+    assert active is not None
+    run_day = date(2026, 8, 20)
+    run = daily_worker.start_daily_run(run_day, boundary_at=cutoff)
+
+    assert (
+        daily_worker.claim_candidate_lease(
+            cutoff_at=cutoff,
+            cutoff_ordinal=int(run["cutoff_ordinal"]),
+            daily_run_date=run_day,
+            owner_id="daily-worker",
+            lease_seconds=300,
+        )
+        is None
+    )
+    retry_after = daily_worker.next_candidate_retry_delay(
+        cutoff_at=cutoff,
+        cutoff_ordinal=int(run["cutoff_ordinal"]),
+        daily_run_date=run_day,
+    )
+    assert retry_after is not None
+    assert retry_after > 0
+
+
+def test_candidate_lease_token_and_expiry_are_both_fences(tmp_path: Path) -> None:
+    path = tmp_path / "control.sqlite3"
+    first = FoundryStore(str(path))
+    second = FoundryStore(str(path))
+    first.enqueue_candidate(
+        doc_id="paper",
+        payload=b"paper",
+        reasoning_score=1.0,
+        quality_score=5.0,
+        valid_from=FIXED_TIME,
+    )
+    cutoff = datetime.now(UTC) + timedelta(seconds=1)
+    claim = first.claim_candidate_lease(
+        cutoff_at=cutoff,
+        owner_id="worker-a",
+        lease_seconds=300,
+    )
+    assert claim is not None and claim.claim_token is not None
+
+    with pytest.raises(CandidateLeaseLostError):
+        first.finish_candidate(
+            "paper",
+            owner_id="worker-a",
+            claim_token="wrong-token",
+        )
+
+    first._conn.execute(
+        "UPDATE candidate_queue SET lease_expires_at=? WHERE doc_id='paper'",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
+    )
+    assert not first.renew_candidate_lease(
+        "paper",
+        owner_id="worker-a",
+        claim_token=claim.claim_token,
+        lease_seconds=300,
+    )
+    with pytest.raises(CandidateLeaseLostError):
+        first.release_candidate(
+            "paper",
+            owner_id="worker-a",
+            claim_token=claim.claim_token,
+        )
+
+    reassigned = second.claim_candidate_lease(
+        cutoff_at=cutoff,
+        owner_id="worker-b",
+        lease_seconds=300,
+    )
+    assert reassigned is not None
+    assert reassigned.claim_token != claim.claim_token
+    second.finish_candidate(
+        "paper",
+        owner_id="worker-b",
+        claim_token=reassigned.claim_token,
+    )
+
+
+def test_candidate_claim_token_requires_an_owner(tmp_path: Path) -> None:
+    store = FoundryStore(str(tmp_path / "control.sqlite3"))
+
+    for mutation in (
+        lambda: store.cache_candidate_scientific_payload(
+            "paper",
+            b"scientific",
+            claim_token="claim:token",
+        ),
+        lambda: store.finish_candidate("paper", claim_token="claim:token"),
+        lambda: store.release_candidate("paper", claim_token="claim:token"),
+        lambda: store.defer_candidate(
+            "paper",
+            reason="failure",
+            claim_token="claim:token",
+        ),
+    ):
+        with pytest.raises(ValueError, match="claim token requires an owner"):
+            mutation()
+
+
+def test_legacy_unleased_candidate_claim_is_recovered_on_restart(tmp_path: Path) -> None:
+    path = tmp_path / "control.sqlite3"
+    store = FoundryStore(str(path))
+    store.enqueue_candidate(
+        doc_id="paper",
+        payload=b"paper",
+        reasoning_score=1.0,
+        quality_score=5.0,
+        valid_from=FIXED_TIME,
+    )
+    cutoff = datetime.now(UTC) + timedelta(seconds=1)
+    assert store.claim_candidate(cutoff_at=cutoff) == ("paper", b"paper")
+    store.close()
+
+    restarted = FoundryStore(str(path), recover_processing=True)
+    assert restarted.queued_candidates() == 1
 
 
 def test_daily_run_freezes_even_an_empty_24_hour_cohort(tmp_path: Path) -> None:

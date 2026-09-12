@@ -1,23 +1,54 @@
 {{- if .Values.processor.foundry.enabled }}
-{{- $component := "foundry" }}
-{{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
+{{- $workerComponent := "foundry-worker" }}
+{{- $apiComponent := "foundry-api" }}
+{{- $workerName := printf "%s-%s" (include "stream2pretrain.fullname" .) $workerComponent }}
+{{- $apiName := printf "%s-%s" (include "stream2pretrain.fullname" .) $apiComponent }}
+{{- $serviceName := printf "%s-foundry" (include "stream2pretrain.fullname" .) }}
+{{- $checkpoint := .Values.processor.foundry.state }}
+{{- $checkpointClaim := default (printf "%s-checkpoint" $workerName) $checkpoint.existingClaim }}
+{{- if and (gt (int .Values.processor.foundry.workerReplicas) 1) (ne $checkpoint.accessMode "ReadWriteMany") }}
+{{- fail "processor.foundry.state.accessMode must be ReadWriteMany for a distributed Bytewax execution" }}
+{{- end }}
+{{- if not $checkpoint.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $checkpointClaim }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $workerComponent) | nindent 4 }}
+spec:
+  accessModes: [{{ $checkpoint.accessMode | quote }}]
+  {{- with $checkpoint.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $checkpoint.size | quote }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ $name }}
+  name: {{ $workerName }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $workerComponent) | nindent 4 }}
 spec:
-  serviceName: {{ $name }}
-  replicas: {{ .Values.processor.foundry.replicas }}
+  serviceName: {{ $workerName }}
+  replicas: {{ .Values.processor.foundry.workerReplicas }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
-      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $workerComponent) | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 8 }}
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $workerComponent) | nindent 8 }}
         stream2pretrain.io/egress-class: foundry-providers
       annotations:
         prometheus.io/scrape: "true"
@@ -28,6 +59,24 @@ spec:
       {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
       terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: bytewax-hostfile
+          image: busybox:1.36.1
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command:
+            - sh
+            - -ec
+            - |
+              : > /etc/bytewax/hostfile.txt
+              index=0
+              while [ "$index" -lt "{{ .Values.processor.foundry.workerReplicas }}" ]
+              do
+                echo "{{ $workerName }}-${index}.{{ $workerName }}.{{ .Release.Namespace }}.svc.cluster.local:9999" >> /etc/bytewax/hostfile.txt
+                index=$((index + 1))
+              done
+          volumeMounts:
+            - name: bytewax-hostfile
+              mountPath: /etc/bytewax
       containers:
         - name: worker
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
@@ -37,16 +86,39 @@ spec:
           ports:
             - name: metrics
               containerPort: 9090
+            - name: bytewax
+              containerPort: 9999
           env:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
-              value: {{ $component | quote }}
+              value: {{ $workerComponent | quote }}
             - name: S2P_CONSUMER_GROUP
               value: s2p-foundry
             - name: S2P_STATE_DIR
-              value: /var/lib/s2p/foundry
+              value: /var/lib/s2p/state
             - name: S2P_FOUNDRY_STATE_DIR
-              value: /var/lib/s2p/foundry
+              value: /var/lib/s2p/state
+            - name: S2P_BYTEWAX_RECOVERY_ROOT
+              value: /var/lib/s2p/recovery
+            - name: S2P_BYTEWAX_RECOVERY_PARTITIONS
+              value: {{ $checkpoint.recoveryPartitions | int | quote }}
+            - name: S2P_BYTEWAX_SNAPSHOT_SECONDS
+              value: {{ $checkpoint.snapshotSeconds | quote }}
+            - name: BYTEWAX_WORKERS_PER_PROCESS
+              value: {{ .Values.processor.foundry.workersPerProcess | int | quote }}
+            - name: BYTEWAX_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: BYTEWAX_STATEFULSET_NAME
+              value: {{ $workerName | quote }}
+            - name: BYTEWAX_HOSTFILE_PATH
+              value: /etc/bytewax/hostfile.txt
+            - name: S2P_COORDINATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.coordination.databaseUrlSecret | quote }}
+                  key: {{ .Values.coordination.databaseUrlKey | quote }}
             - name: S2P_FOUNDRY_PROVIDER_MODE
               value: live
             - name: S2P_FOUNDRY_ENABLE_ORACLES
@@ -100,12 +172,82 @@ spec:
             {{- toYaml .Values.processor.foundry.workerResources | nindent 12 }}
           volumeMounts:
             - name: state
-              mountPath: /var/lib/s2p/foundry
+              mountPath: /var/lib/s2p/state
+            - name: recovery
+              mountPath: /var/lib/s2p/recovery
+            - name: bytewax-hostfile
+              mountPath: /etc/bytewax
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             - name: foundry-signing
               mountPath: /var/run/secrets/stream2pretrain/foundry-signing
               readOnly: true
+      volumes:
+        - name: state
+          emptyDir: {}
+        - name: recovery
+          persistentVolumeClaim:
+            claimName: {{ $checkpointClaim | quote }}
+        - name: bytewax-hostfile
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: foundry-signing
+          secret:
+            secretName: {{ .Values.processor.foundry.signingKeySecret | quote }}
+            items:
+              - key: {{ .Values.processor.foundry.signingKeyKey | quote }}
+                path: ed25519.key
+              - key: {{ .Values.processor.foundry.signingCertKey | quote }}
+                path: ed25519.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $workerName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $workerComponent) | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+    - name: bytewax
+      port: 9999
+      targetPort: bytewax
+  selector:
+    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $workerComponent) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $apiName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $apiComponent) | nindent 4 }}
+spec:
+  replicas: {{ .Values.processor.foundry.apiReplicas }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $apiComponent) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $apiComponent) | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.processor.foundry.apiPort | quote }}
+    spec:
+      serviceAccountName: {{ include "stream2pretrain.serviceAccountName" . }}
+      {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
+      {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
+      {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      containers:
         - name: api
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.foundry.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -115,12 +257,23 @@ spec:
             - name: http
               containerPort: {{ .Values.processor.foundry.apiPort }}
           env:
+            - name: S2P_ENV
+              value: {{ .Values.profile | quote }}
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: S2P_COMPONENT
+              value: {{ $apiComponent | quote }}
             - name: S2P_BIND_HOST
               value: "::"
             - name: S2P_FOUNDRY_API_PORT
               value: {{ .Values.processor.foundry.apiPort | quote }}
             - name: S2P_FOUNDRY_STATE_DIR
-              value: /var/lib/s2p/foundry
+              value: /var/lib/s2p/state
+            - name: S2P_COORDINATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.coordination.databaseUrlSecret | quote }}
+                  key: {{ .Values.coordination.databaseUrlKey | quote }}
             - name: S2P_FOUNDRY_DAILY_RUN_HOUR_UTC
               value: {{ .Values.processor.foundry.dailyRunHourUtc | quote }}
             - name: S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC
@@ -158,51 +311,28 @@ spec:
             {{- toYaml .Values.processor.foundry.apiResources | nindent 12 }}
           volumeMounts:
             - name: state
-              mountPath: /var/lib/s2p/foundry
+              mountPath: /var/lib/s2p/state
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: state
+          emptyDir: {}
         - name: tmp
           emptyDir: {}
-        - name: foundry-signing
-          secret:
-            secretName: {{ .Values.processor.foundry.signingKeySecret | quote }}
-            items:
-              - key: {{ .Values.processor.foundry.signingKeyKey | quote }}
-                path: ed25519.key
-              - key: {{ .Values.processor.foundry.signingCertKey | quote }}
-                path: ed25519.crt
-  volumeClaimTemplates:
-    - metadata:
-        name: state
-        labels:
-          {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 10 }}
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        {{- if .Values.processor.foundry.state.storageClass }}
-        storageClassName: {{ .Values.processor.foundry.state.storageClass | quote }}
-        {{- end }}
-        resources:
-          requests:
-            storage: {{ .Values.processor.foundry.state.size | quote }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $name }}
+  name: {{ $serviceName }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $apiComponent) | nindent 4 }}
 spec:
   type: ClusterIP
-  publishNotReadyAddresses: true
   ports:
     - name: http
       port: {{ .Values.processor.foundry.apiPort }}
       targetPort: http
-    - name: metrics
-      port: 9090
-      targetPort: metrics
   selector:
-    {{- include "stream2pretrain.componentServiceSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+    {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $apiComponent) | nindent 4 }}
 {{- end }}

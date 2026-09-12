@@ -22,6 +22,10 @@ records the exact processing rules and model prompts.
   to address CPU, RAM or disk pressure. Optimize demonstrated inefficiencies
   or request capacity.
 - Do not create scheduled monitoring unless explicitly requested.
+- Horizontal scalability is mandatory for every application component. The
+  implementation and submitted evidence must demonstrate that each component
+  can distribute work or state safely across multiple replicas. Documentation
+  of a single-replica limitation does not satisfy this requirement.
 - Never commit credentials, source-corpus exports, teacher labels or optimizer
   checkpoints. Final classifier weights are public release artifacts.
 
@@ -85,12 +89,14 @@ README.md is the sole report and must cover:
 5. Transformations, state, windows and late data.
 6. Storage format, partitions, schema and lakehouse rationale.
 7. Real UI connection and operating flow.
-8. Kubernetes workloads, persistence and horizontal scaling.
+8. Kubernetes workloads, persistence and demonstrated horizontal scaling of
+   every application component.
 9. Reproducible deployment and prerequisites.
 10. Central code and manifest links with explanations.
 11. Embedded UI, pod, serving and pipeline-output evidence.
 12. Honest prototype limits and outlook.
 
 Explain team contributions without inventing work or measurements. Preserve
-the Redpanda/Bytewax lecture-stack justification. Distinguish demonstrated
-horizontal scaling from stateful components that still require coordination.
+the Redpanda/Bytewax lecture-stack justification. Do not claim horizontal
+scalability for a stateful component until its coordination, recovery and
+correctness have been implemented and demonstrated.

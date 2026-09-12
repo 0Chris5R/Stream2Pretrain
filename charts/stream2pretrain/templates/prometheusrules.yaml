@@ -19,14 +19,14 @@ spec:
             sum by (namespace, deployment) (
               kube_deployment_spec_replicas{
                 namespace="{{ .Release.Namespace }}",
-                deployment=~"{{ $fullName }}-(processor-fetcher|processor-iceberg-writer|duckdb|ui)"
+                deployment=~"{{ $fullName }}-(duckdb|ui)"
               }
             )
             >
             sum by (namespace, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="{{ .Release.Namespace }}",
-                deployment=~"{{ $fullName }}-(processor-fetcher|processor-iceberg-writer|duckdb|ui)"
+                deployment=~"{{ $fullName }}-(duckdb|ui)"
               }
             )
           labels:
@@ -35,45 +35,62 @@ spec:
           annotations:
             summary: Stream2Pretrain Deployment has unavailable replicas
             description: Deployment {{ "{{ $labels.deployment }}" }} has fewer available replicas than requested.
-        - alert: Stream2PretrainCuratorUnavailable
+        - alert: Stream2PretrainBytewaxStatefulSetUnavailable
           expr: |
             sum by (namespace, statefulset) (
               kube_statefulset_replicas{
                 namespace="{{ .Release.Namespace }}",
-                statefulset="{{ $fullName }}-processor-curate"
+                statefulset=~"{{ $fullName }}-processor-(fetcher|curate|iceberg-writer)"
               }
             )
             >
             sum by (namespace, statefulset) (
               kube_statefulset_status_replicas_ready{
                 namespace="{{ .Release.Namespace }}",
-                statefulset="{{ $fullName }}-processor-curate"
+                statefulset=~"{{ $fullName }}-processor-(fetcher|curate|iceberg-writer)"
               }
             )
           labels:
             severity: warning
             service: stream2pretrain
           annotations:
-            summary: Stream2Pretrain curator has unavailable replicas
+            summary: Stream2Pretrain Bytewax StatefulSet has unavailable replicas
             description: StatefulSet {{ "{{ $labels.statefulset }}" }} has fewer ready replicas than requested.
         {{- if .Values.processor.foundry.enabled }}
-        - alert: Stream2PretrainFoundryUnavailable
+        - alert: Stream2PretrainFoundryWorkerUnavailable
           expr: |
             kube_statefulset_replicas{
               namespace="{{ .Release.Namespace }}",
-              statefulset="{{ $fullName }}-foundry"
+              statefulset="{{ $fullName }}-foundry-worker"
             }
             >
             kube_statefulset_status_replicas_ready{
               namespace="{{ .Release.Namespace }}",
-              statefulset="{{ $fullName }}-foundry"
+              statefulset="{{ $fullName }}-foundry-worker"
             }
           labels:
             severity: warning
             service: stream2pretrain
           annotations:
-            summary: Stream2Pretrain post-training foundry is unavailable
-            description: The foundry worker is not ready; inspect provider discovery, quota, and credentials.
+            summary: Stream2Pretrain post-training worker is unavailable
+            description: The Foundry worker StatefulSet has fewer ready replicas than requested.
+        - alert: Stream2PretrainFoundryApiUnavailable
+          expr: |
+            kube_deployment_spec_replicas{
+              namespace="{{ .Release.Namespace }}",
+              deployment="{{ $fullName }}-foundry-api"
+            }
+            >
+            kube_deployment_status_replicas_available{
+              namespace="{{ .Release.Namespace }}",
+              deployment="{{ $fullName }}-foundry-api"
+            }
+          labels:
+            severity: warning
+            service: stream2pretrain
+          annotations:
+            summary: Stream2Pretrain post-training API is unavailable
+            description: The Foundry API Deployment has fewer available replicas than requested.
         - alert: Stream2PretrainFoundryProviderRateLimited
           expr: increase(s2p_foundry_provider_calls_total{status="rate_limited"}[5m]) > 0
           labels:

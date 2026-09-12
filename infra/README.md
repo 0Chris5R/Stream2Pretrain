@@ -2,9 +2,11 @@
 
 This directory contains the measured DHBWCloud deployment path. Terraform owns
 the OpenStack VMs, Ansible owns k3s, and Helmfile owns the platform, storage,
-catalog, and application releases. The repository includes a standalone MinIO
-StatefulSet for a fresh course deployment. It is not a distributed or
-high-availability object-store topology.
+catalog, and application releases. The current manifests include a four-member
+MinIO StatefulSet, a three-broker Redpanda profile, and a three-instance
+CloudNativePG cluster for a fresh course deployment. These topologies render
+offline. The frozen cluster evidence predates them and is not a live failover
+or capacity result.
 
 The supported Helmfile environment is `dev`, parameterized for the DHBW
 cluster. Other chart overrides require their own measured infrastructure.
@@ -13,7 +15,7 @@ CoreDNS availability is bootstrap-owned by `infra/ansible/deploy.yaml`. It
 applies `infra/kubernetes/coredns-ha-patch.yaml` and
 `infra/kubernetes/coredns-pdb.yaml`, yielding two topology-spread DNS replicas
 with a one-Pod minimum availability budget. The application release only
-reapplies and fully probes this contract when those manifests change; ordinary
+reapplies and fully probes this contract when those manifests change. Ordinary
 application releases perform a cheap replica/PDB presence check.
 
 ## Safety boundary
@@ -25,6 +27,8 @@ application releases perform a cheap replica/PDB presence check.
 - OpenStack state, plans, credentials, generated inventory, and kubeconfig are
   ignored by Git.
 - Normal application upgrades preserve selectors, recovery identities and PVCs.
+- Retained `local-path` checkpoints are never converted in place. A distributed
+  Bytewax rollout stops until a copied and verified RWX checkpoint exists.
 
 ## Layout
 
@@ -52,13 +56,13 @@ The release graph and exact chart versions are in `../helmfile.yaml` and
   This is appropriate for the isolated course prototype, but its permissive
   ingress rules are not a production security baseline.
 - The existing, non-committed DHBW DNS inventory. By default the script reads
-  `../cloud/dns-credentials.yaml`; set `DNS_CREDENTIALS_INVENTORY` when it is
+  `../cloud/dns-credentials.yaml`. Set `DNS_CREDENTIALS_INVENTORY` when it is
   stored elsewhere.
 - Application images published to a registry reachable from every eligible
   node, with digest pins and a pull Secret if the registry is private.
 
 Required Secrets for enabled components are listed below. The deployment owns
-the explicitly marked internal identities; all others are externally managed.
+the explicitly marked internal identities. All others are externally managed.
 Create the operator-supplied Secrets with
 [`scripts/configure_dhbw_secrets.sh`](../scripts/configure_dhbw_secrets.sh) as
 shown in the root README.
@@ -69,11 +73,12 @@ the optional Foundry provider is unavailable.
 | --- | --- | --- |
 | `minio` | Secret `minio-root` | `accessKey`, `secretKey` |
 | `polaris` | Secret `polaris-minio` | `accessKey`, `secretKey` |
-| `polaris` | Secret `polaris-persistence` | `username`, `password`, `jdbcUrl`; deployment creates it once unless pre-provisioned |
+| `polaris` | Secret `polaris-persistence` | `username`, `password`, `jdbcUrl`. Deployment creates it once unless pre-provisioned |
 | `stream2pretrain` | Secret `stream2pretrain-minio` | `accessKey`, `secretKey` |
 | `stream2pretrain` | Secret `stream2pretrain-polaris` | `credential`, `scope` |
 | `stream2pretrain` | Secret `stream2pretrain-hf` | `token` |
-| `stream2pretrain` | Secret `stream2pretrain-foundry-signing` | `ed25519.key`, `ed25519.crt`; deployment creates it once unless pre-provisioned |
+| `stream2pretrain` | Secret `stream2pretrain-coordination` | `url`. Deployment derives it from `polaris-persistence` without logging credentials |
+| `stream2pretrain` | Secret `stream2pretrain-foundry-signing` | `ed25519.key`, `ed25519.crt`. Deployment creates it once unless pre-provisioned |
 | `stream2pretrain` | Secret `stream2pretrain-foundry-providers` (foundry only) | `HETZNER_INFERENCE_API_KEY`, `controlToken` |
 
 Use Sealed Secrets, External Secrets, or another team-approved mechanism. The
@@ -121,30 +126,51 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 ./scripts/setup_dhbw_demo.sh verify
 ```
 
-`platform` installs cert-manager, Traefik, ExternalDNS,
-kube-prometheus-stack, KEDA, Gatekeeper, and Redpanda. `storage` installs the
-repository-owned MinIO StatefulSet and idempotently creates the five application
-buckets. `catalog` installs the official Apache Polaris 1.7.0 chart. `topics` idempotently creates the
-configured topics. The release reconciles four document-topic partitions
-in the DHBW profile, with single-broker replication. `application` installs the local
-Stream2Pretrain chart. Loki, Tempo, and
+`cluster` uses the pinned lecture role to install Longhorn and its node
+prerequisites. Longhorn is not the default StorageClass, so retained
+`local-path` claims do not move implicitly. `platform` installs cert-manager,
+Traefik, ExternalDNS, kube-prometheus-stack, KEDA, Gatekeeper, CloudNativePG and
+Redpanda. `storage` installs the repository-owned distributed MinIO StatefulSet
+and idempotently creates the five application buckets. `catalog` installs the
+three-instance Polaris PostgreSQL cluster and the official Apache Polaris 1.7.0
+chart. `topics` idempotently creates the configured topics. The release
+reconciles four document-topic partitions with replication factor three.
+`application` installs the local Stream2Pretrain chart. Loki, Tempo, and
 Alloy are excluded until their MinIO credentials, retention, storage, and
 resource requirements are measured.
 
 The Polaris release uses its production relational JDBC backend. A dedicated
-PostgreSQL StatefulSet retains catalog metadata on a 5 GiB PVC. Deployment
-creates the database credential Secret once when it is absent, bootstraps the
-schema idempotently, and then reconciles Polaris. Iceberg data remains in MinIO.
+CloudNativePG cluster retains catalog and coordination data across three
+PostgreSQL instances. Deployment creates the database credential Secret once
+when it is absent, bootstraps the schema idempotently, and then reconciles
+Polaris. Iceberg data remains in MinIO.
 
-The post-training foundry additionally requires its provider Secret, signing
-key, and `s2p-posttrain` bucket. Its single-writer worker starts after all
-configured models are present in authenticated model discovery. See
+The optional
+`infra/helmfile-values/stream2pretrain.horizontal-scaling.yaml` overlay renders
+two replicas for every application component. Each Bytewax stage and the
+Foundry worker render as one two-process distributed execution. Their recovery
+claims use Longhorn `ReadWriteMany`. Source pollers use Kubernetes cursor
+Leases, the source controller uses active-passive reconciliation, DuckDB uses a
+private rebuildable index per Pod, and the Foundry API is stateless. The setup
+script and release workflow reject an existing RWO or mismatched checkpoint
+before stopping workers. Copy and verify retained state before applying
+equivalent values to a deployment profile. The overlay and concurrency tests
+are offline evidence. Safe live replica counts, failover behavior, and Longhorn
+disk headroom remain `needs-measurement` on the course cluster.
+
+The post-training Foundry additionally requires its provider Secret, signing
+key, `s2p-posttrain` bucket, and shared PostgreSQL coordination URL. Candidate
+and quota leases fence concurrent workers, while the API runs as a separate
+stateless Deployment. Workers start after all configured models are present in
+authenticated model discovery. Live multi-worker provider execution remains
+`needs-measurement`. See
 [`../docs/POSTTRAIN_FOUNDRY.md`](../docs/POSTTRAIN_FOUNDRY.md) for the runtime
 and audit workflow.
 
 Bulk corpus storage must not share a k3s node root filesystem in a production
-deployment. The course `local-path` MinIO volume cannot gain physical capacity
-by editing its PVC, and it is not a valid target for a PVC autoresizer. See
+deployment. The frozen course deployment's single `local-path` MinIO volume
+cannot gain physical capacity by editing its PVC, and it is not a valid target
+for a PVC autoresizer. See
 [`../docs/storage-scaling.md`](../docs/storage-scaling.md) for the data-owner
 map, safe maintenance boundary, and the external S3 or expandable-CSI migration
 plan.
@@ -191,8 +217,10 @@ removing `prevent_destroy` or deleting any PVC.
 ## Still needs measurement
 
 - Sustainable document throughput and processor resource requests
+- Live work distribution and replica-loss recovery for every application path
 - Redpanda partition count and retention capacity
-- MinIO production topology and storage throughput
+- MinIO storage throughput and node-loss recovery
+- Longhorn RWX throughput, disk headroom and checkpoint migration time
 - Polaris relational database sizing and recovery behavior
 - Loki and Tempo retention, storage, and CPU/memory requirements
 - KEDA thresholds and maximum replicas

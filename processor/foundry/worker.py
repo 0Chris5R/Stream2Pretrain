@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import socket
 import threading
 import time
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -15,6 +17,7 @@ from processor.foundry.control import (
     ProviderControlPlane,
     ProviderDiscoveryError,
 )
+from processor.foundry.database import coordination_database_target
 from processor.foundry.lakehouse import FoundryLakehouseSink
 from processor.foundry.metrics import (
     ARTIFACTS,
@@ -41,7 +44,7 @@ from processor.foundry.paper_adapter import (
 from processor.foundry.pipeline import FoundryPipeline
 from processor.foundry.providers import ProviderBudgetExhaustedError, ProviderError, build_providers
 from processor.foundry.quota import QuotaExceededError, QuotaLedger
-from processor.foundry.store import FoundryStore
+from processor.foundry.store import CandidateClaim, CandidateLeaseLostError, FoundryStore
 from processor.foundry.util import canonical_json, sha256
 from processor.probes import start_probe_server
 from processor.source_policy import resolve_source_policy
@@ -105,21 +108,83 @@ class KafkaPublisher:
         self._staged_artifact_ids.clear()
 
 
+class CandidateLeaseHeartbeat:
+    def __init__(
+        self,
+        *,
+        store: FoundryStore,
+        doc_id: str,
+        owner_id: str,
+        claim_token: str,
+        lease_seconds: float,
+    ) -> None:
+        self._store = store
+        self._doc_id = doc_id
+        self._owner_id = owner_id
+        self._claim_token = claim_token
+        self._lease_seconds = lease_seconds
+        self._interval = max(0.05, lease_seconds / 3.0)
+        self._stopped = threading.Event()
+        self._lost = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"foundry-candidate-lease-{doc_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._thread.join(timeout=min(5.0, self._interval))
+
+    def assert_owned(self) -> None:
+        if self._lost.is_set() or not self._store.candidate_claim_owned(
+            self._doc_id,
+            owner_id=self._owner_id,
+            claim_token=self._claim_token,
+        ):
+            raise CandidateLeaseLostError(self._doc_id)
+
+    def _run(self) -> None:
+        while not self._stopped.wait(self._interval):
+            try:
+                renewed = self._store.renew_candidate_lease(
+                    self._doc_id,
+                    owner_id=self._owner_id,
+                    claim_token=self._claim_token,
+                    lease_seconds=self._lease_seconds,
+                )
+            except Exception:
+                continue
+            if not renewed:
+                self._lost.set()
+                return
+
+
 class WorkerRuntime:
     def __init__(self, cfg: common.ProcessorConfig) -> None:
         self.cfg = cfg
         self.config = FoundryConfig.from_env()
         state_dir = self.config.state_dir
-        # Only the single-writer worker owns crash recovery. Read-only API
-        # sidecars must never requeue a candidate that this worker is handling.
+        coordination_target = coordination_database_target(state_dir, "control.sqlite3")
+        self.worker_id = os.environ.get("S2P_FOUNDRY_WORKER_ID", "").strip() or (
+            f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4()}"
+        )
+        self.candidate_lease_seconds = max(
+            float(self.config.queue_poll_seconds * 3),
+            self.config.timeout_seconds * 2,
+        )
         self.store = FoundryStore(
-            os.path.join(state_dir, "control.sqlite3"),
+            coordination_target,
             recover_processing=True,
             candidate_generation="source-gates-v1",
         )
         self.quota = QuotaLedger(
-            os.path.join(state_dir, "quota.sqlite3"),
+            coordination_database_target(state_dir, "quota.sqlite3"),
             self.config.providers,
+            reservation_lease_seconds=self.candidate_lease_seconds,
         )
         abandoned_reservations = self.quota.reconcile_abandoned_reservations()
         self.providers = build_providers(
@@ -297,10 +362,19 @@ class WorkerRuntime:
         fallback_doc_id: str,
         manual_run_id: str | None,
     ) -> dict[str, Any]:
-        claimed = self.store.claim_candidate(
+        if not hasattr(self, "worker_id"):
+            self.worker_id = f"local-test:{uuid.uuid4()}"
+        if not hasattr(self, "candidate_lease_seconds"):
+            self.candidate_lease_seconds = max(
+                float(self.config.queue_poll_seconds * 3),
+                self.config.timeout_seconds * 2,
+            )
+        claimed = self.store.claim_candidate_lease(
             cutoff_at=cutoff_at,
             cutoff_ordinal=cutoff_ordinal,
             daily_run_date=run_day,
+            owner_id=self.worker_id,
+            lease_seconds=self.candidate_lease_seconds,
         )
         if claimed is None:
             retry_after = self.store.next_candidate_retry_delay(
@@ -315,7 +389,36 @@ class WorkerRuntime:
                     "retry_after_seconds": retry_after,
                 }
             return {"doc_id": fallback_doc_id, "status": "queue_empty"}
-        claimed_doc_id, claimed_payload = claimed
+        assert claimed.claim_token is not None
+        lease = CandidateLeaseHeartbeat(
+            store=self.store,
+            doc_id=claimed.doc_id,
+            owner_id=self.worker_id,
+            claim_token=claimed.claim_token,
+            lease_seconds=self.candidate_lease_seconds,
+        )
+        lease.start()
+        try:
+            return self._process_claimed_candidate(
+                claim=claimed,
+                lease=lease,
+                run_day=run_day,
+                manual_run_id=manual_run_id,
+            )
+        finally:
+            lease.stop()
+
+    def _process_claimed_candidate(
+        self,
+        *,
+        claim: CandidateClaim,
+        lease: CandidateLeaseHeartbeat,
+        run_day: date | None,
+        manual_run_id: str | None,
+    ) -> dict[str, Any]:
+        assert claim.claim_token is not None
+        claimed_doc_id = claim.doc_id
+        claimed_payload = claim.payload
         try:
             gold = common.gold_loads(claimed_payload)
             scientific_payload = self.store.candidate_scientific_payload(claimed_doc_id)
@@ -327,6 +430,8 @@ class WorkerRuntime:
                 self.store.cache_candidate_scientific_payload(
                     claimed_doc_id,
                     scientific_payload,
+                    owner_id=self.worker_id,
+                    claim_token=claim.claim_token,
                 )
             else:
                 scientific, _ = validate_scientific_artifact_payload(
@@ -362,11 +467,17 @@ class WorkerRuntime:
                 "reason": str(exc),
             }
         except ProviderBudgetExhaustedError:
-            self.store.release_candidate(claimed_doc_id)
+            self._release_candidate_if_owned(claim)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
             raise
         except ProviderError as exc:
-            retry_after = self.store.defer_candidate(claimed_doc_id, reason=str(exc))
+            lease.assert_owned()
+            retry_after = self.store.defer_candidate(
+                claimed_doc_id,
+                reason=str(exc),
+                owner_id=self.worker_id,
+                claim_token=claim.claim_token,
+            )
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
             return {
                 "doc_id": claimed_doc_id,
@@ -375,22 +486,28 @@ class WorkerRuntime:
                 "retry_after_seconds": retry_after,
             }
         except Exception:
-            self.store.release_candidate(claimed_doc_id)
+            self._release_candidate_if_owned(claim)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
             raise
-        # SQLite is the durable outbox. Restage all job outputs so a worker
+        # The coordination database is the durable outbox. Restage all job outputs so a worker
         # restart after a sink failure cannot strand an accepted artifact or
         # an auditable terminal candidate preflight rejection.
         try:
+            lease.assert_owned()
             if "job_id" in job_result:
                 self._flush_job_outbox(job_result)
         except Exception:
-            self.store.release_candidate(claimed_doc_id)
+            self._release_candidate_if_owned(claim)
             QUEUED_CANDIDATES.set(self.store.queued_candidates())
             raise
         # Advance the queue and run counters only after both durable sinks
         # acknowledge the complete job outbox.
-        self.store.finish_candidate(claimed_doc_id)
+        lease.assert_owned()
+        self.store.finish_candidate(
+            claimed_doc_id,
+            owner_id=self.worker_id,
+            claim_token=claim.claim_token,
+        )
         if run_day is not None:
             self.store.record_daily_processed(run_day)
         if manual_run_id is not None:
@@ -399,6 +516,16 @@ class WorkerRuntime:
         if "state" in job_result:
             JOBS.labels(state=str(job_result["state"])).inc()
         return {**job_result, "queued_candidates": self.store.queued_candidates()}
+
+    def _release_candidate_if_owned(self, claim: CandidateClaim) -> None:
+        try:
+            self.store.release_candidate(
+                claim.doc_id,
+                owner_id=self.worker_id,
+                claim_token=claim.claim_token,
+            )
+        except CandidateLeaseLostError:
+            return
 
     def _flush_job_outbox(self, job_result: dict[str, Any]) -> None:
         job_id = str(job_result["job_id"])
@@ -422,7 +549,7 @@ class WorkerRuntime:
 
     def _recover_interrupted_calls(self, abandoned_reservations: int) -> None:
         """Close prior-process call events before the queue resumes them."""
-        recovered = self.store.interrupted_provider_calls()
+        recovered = self.store.interrupted_provider_calls(recoverable_only=True)
         for call in recovered:
             event = self.store.append_event(
                 job_id=str(call["job_id"]),
@@ -449,47 +576,53 @@ class WorkerRuntime:
         log = structlog.get_logger(component="foundry-queue")
         while not self._drain_stop.wait(self.config.queue_poll_seconds):
             try:
-                self.store.mark_lakehouse_published(self.lakehouse.flush(force=False))
+                self._queue_iteration(log)
             except Exception as exc:
-                log.warning("foundry_lakehouse_flush_pending", reason=str(exc))
-            now = datetime.now(UTC)
-            if (
-                self.config.daily_not_before_utc is not None
-                and now < self.config.daily_not_before_utc
-            ):
-                # A schedule migration must not back-run the preceding day's
-                # cohort before its explicitly chosen first boundary.
-                self.store.expire_active_manual_runs(
-                    reason="superseded by scheduled 24-hour cohort"
+                log.warning("foundry_queue_iteration_retry_pending", reason=str(exc))
+
+    def _queue_iteration(self, log: Any) -> None:
+        """Run one scheduler iteration so transient state loss cannot kill the loop."""
+        try:
+            self.store.mark_lakehouse_published(self.lakehouse.flush(force=False))
+        except Exception as exc:
+            log.warning("foundry_lakehouse_flush_pending", reason=str(exc))
+        now = datetime.now(UTC)
+        if self.config.daily_not_before_utc is not None and now < self.config.daily_not_before_utc:
+            # A schedule migration must not back-run the preceding day's
+            # cohort before its explicitly chosen first boundary.
+            self.store.expire_active_manual_runs(reason="superseded by scheduled 24-hour cohort")
+            return
+        run_day, boundary_at = _daily_cohort_boundary(
+            now,
+            self.config.daily_run_hour_utc,
+            self.config.daily_run_minute_utc,
+        )
+        existing = self.store.daily_run(run_day)
+        boundary_changed = existing is None or str(existing["cutoff_at"]) != boundary_at.isoformat()
+        if boundary_changed:
+            expired = self.store.expire_active_manual_runs(
+                reason="superseded by scheduled 24-hour cohort"
+            )
+            if expired:
+                log.info(
+                    "foundry_manual_runs_superseded",
+                    count=expired,
+                    run_date=run_day.isoformat(),
                 )
-                continue
-            run_day, boundary_at = _daily_cohort_boundary(
-                now,
-                self.config.daily_run_hour_utc,
-                self.config.daily_run_minute_utc,
-            )
-            existing = self.store.daily_run(run_day)
-            boundary_changed = (
-                existing is None or str(existing["cutoff_at"]) != boundary_at.isoformat()
-            )
-            if boundary_changed:
-                expired = self.store.expire_active_manual_runs(
-                    reason="superseded by scheduled 24-hour cohort"
-                )
-                if expired:
-                    log.info(
-                        "foundry_manual_runs_superseded",
-                        count=expired,
-                        run_date=run_day.isoformat(),
-                    )
-            run = self.store.start_daily_run(
-                run_day,
-                boundary_at=boundary_at,
-            )
-            if run["state"] not in {"completed", "quota_exhausted"}:
-                self._run_daily_snapshot(run_day, run, log)
-                continue
-            self._run_pending_manual(log)
+        run = self.store.start_daily_run(
+            run_day,
+            boundary_at=boundary_at,
+        )
+        if run["state"] not in {"completed", "quota_exhausted"}:
+            self._run_daily_snapshot(run_day, run, log)
+            return
+        self._run_pending_manual(log)
+
+    def database_ready(self) -> bool:
+        """Require both shared control and quota connections for readiness."""
+        control_ready = self.store.database_ready()
+        quota_ready = self.quota.database_ready()
+        return control_ready and quota_ready
 
     def _run_pending_manual(self, log: Any) -> bool:
         """Run an active control-plane snapshot at the next safe paper boundary."""
@@ -735,8 +868,11 @@ class WorkerRuntime:
 def _candidate_ranking_score(record: GoldRecord) -> float:
     """Learned mean suitability ranks fresh papers, never API cost or length."""
     diagnostics = record.quality_diagnostics or {}
-    suitability = diagnostics.get("classifiers", {}).get("arxiv-posttrain-suitability")
-    if diagnostics.get("mode") == "active" and suitability is not None:
+    classifiers = diagnostics.get("classifiers")
+    suitability = (
+        classifiers.get("arxiv-posttrain-suitability") if isinstance(classifiers, dict) else None
+    )
+    if diagnostics.get("mode") == "active" and isinstance(suitability, dict):
         return float(suitability["weighted_mean"]) / 5.0
     evidence_richness = (
         sum(count > 0 for count in (record.equation_count, record.table_count, record.figure_count))
@@ -767,26 +903,34 @@ def _daily_cohort_boundary(
     return boundary.date(), boundary
 
 
-def build_dataflow(cfg: common.ProcessorConfig | None = None) -> object:
+def build_dataflow(
+    cfg: common.ProcessorConfig | None = None,
+    *,
+    runtime: WorkerRuntime | None = None,
+    runtime_status: common.BytewaxRuntimeStatus | None = None,
+) -> object:
     from bytewax import operators as op
-    from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage, KafkaSource
+    from bytewax.connectors.kafka import KafkaSink, KafkaSinkMessage
     from bytewax.dataflow import Dataflow
 
     runtime_cfg = cfg or common.load_config()
-    runtime = WorkerRuntime(runtime_cfg)
+    active_runtime = runtime or WorkerRuntime(runtime_cfg)
     flow = Dataflow("s2p-foundry")
-    source = KafkaSource(
+    source: Any = common.tracked_kafka_source(
+        runtime_status=runtime_status,
+        source_name="docs_curated",
         brokers=runtime_cfg.redpanda_brokers.split(","),
         topics=[runtime_cfg.curated_topic],
         starting_offset=common.kafka_starting_offset(),
         add_config=common.kafka_consumer_config(
             os.environ.get("S2P_CONSUMER_GROUP", "s2p-foundry")
         ),
+        batch_size=common.kafka_source_batch_size(),
     )
-    messages = op.input("curated", flow, source)
+    messages: Any = op.input("curated", flow, source)
 
     def process_message(message: Any) -> Any:
-        result = runtime.process(bytes(message.value))
+        result = active_runtime.process(bytes(message.value))
         key = str(result.get("job_id") or result.get("doc_id") or "foundry").encode()
         return KafkaSinkMessage(key=key, value=canonical_json(result))
 
@@ -841,22 +985,36 @@ def main() -> None:
 
     cfg = common.load_config()
     common.configure_logging(cfg.log_level, json_output=not cfg.is_dev)
-    ready = threading.Event()
+    runtime_status = common.BytewaxRuntimeStatus()
+    runtime: WorkerRuntime | None = None
+
+    def ready() -> bool:
+        return runtime is not None and runtime_status.is_ready() and runtime.database_ready()
+
     start_probe_server(
         metrics_provider=generate_latest,
-        readiness_provider=ready.is_set,
+        readiness_provider=ready,
     )
     log = structlog.get_logger(component="foundry")
     while True:
         try:
-            flow = build_dataflow(cfg)
+            runtime = WorkerRuntime(cfg)
+            flow = build_dataflow(
+                cfg,
+                runtime=runtime,
+                runtime_status=runtime_status,
+            )
         except ProviderDiscoveryError as exc:
-            ready.clear()
+            runtime = None
             log.warning("foundry_waiting_for_provider", reason=str(exc))
             time.sleep(30)
             continue
-        ready.set()
-        common.run_bytewax_flow(flow, cfg, "foundry")
+        common.run_bytewax_flow(
+            flow,
+            cfg,
+            "foundry",
+            runtime_status=runtime_status,
+        )
         return
 
 

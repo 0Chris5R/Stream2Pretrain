@@ -1,0 +1,31 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: polaris-postgres
+  labels:
+    app.kubernetes.io/name: polaris-postgres
+    app.kubernetes.io/part-of: stream2pretrain
+spec:
+  instances: {{ .Values.instances }}
+  enableSuperuserAccess: false
+  bootstrap:
+    initdb:
+      database: {{ .Values.database.name | quote }}
+      owner: {{ .Values.database.owner | quote }}
+      secret:
+        name: {{ .Values.credentialsSecret | quote }}
+      # CREATE DATABASE belongs in the postgres maintenance database. CNPG
+      # executes postInitSQL there with its bootstrap superuser context.
+      postInitSQL:
+        - {{ printf "CREATE DATABASE %s OWNER %s" .Values.database.coordinationName .Values.database.owner | quote }}
+  storage:
+    storageClass: {{ .Values.persistence.storageClass | quote }}
+    size: {{ .Values.persistence.size | quote }}
+  resources:
+    {{- toYaml .Values.resources | nindent 4 }}
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: required
+  monitoring:
+    enablePodMonitor: {{ .Values.monitoring.enabled }}

@@ -39,7 +39,7 @@ from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
 from ingest.common.probes import start_probe_server
 from ingest.common.s3 import bronze_object_key, bronze_s3_uri
-from ingest.common.state import FeedStateStore
+from ingest.common.state import FeedStateStore, cursor_lease
 from schemas.bronze import BronzeRecord, SourceFormat
 
 log = get_logger(__name__)
@@ -548,6 +548,29 @@ async def _process_readme_revision(
 
 
 async def _poll_source(
+    cfg: IngestConfig,
+    *,
+    source: _HubSource,
+    producer: BronzeProducer,
+    minio: MinioWriter,
+    admission_producer: LicenseAdmissionProducer,
+    limit: int,
+) -> int:
+    async with cursor_lease(source.source_feed) as owns_cursor:
+        if not owns_cursor:
+            log.info("hf_cards.cursor_owned", kind=source.kind)
+            return 0
+        return await _poll_source_owned(
+            cfg,
+            source=source,
+            producer=producer,
+            minio=minio,
+            admission_producer=admission_producer,
+            limit=limit,
+        )
+
+
+async def _poll_source_owned(
     cfg: IngestConfig,
     *,
     source: _HubSource,

@@ -1,8 +1,8 @@
 {{- $component := "processor-fetcher" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $checkpoint := .Values.processor.fetcher.checkpoint }}
-{{- if ne (int .Values.processor.fetcher.replicas) 1 }}
-{{- fail "processor.fetcher.replicas must be exactly 1 until coordinated Bytewax multi-worker recovery is implemented" }}
+{{- if and (gt (int .Values.processor.fetcher.replicas) 1) (ne $checkpoint.accessMode "ReadWriteMany") }}
+{{- fail "processor.fetcher.checkpoint.accessMode must be ReadWriteMany for a distributed Bytewax execution" }}
 {{- end }}
 {{- if ne (int .Values.processor.fetcher.canary.replicas) 1 }}
 {{- fail "processor.fetcher.canary.replicas must be exactly 1" }}
@@ -19,7 +19,7 @@ metadata:
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
-  accessModes: ["ReadWriteOnce"]
+  accessModes: [{{ $checkpoint.accessMode | quote }}]
   {{- with $checkpoint.storageClass }}
   storageClassName: {{ . | quote }}
   {{- end }}
@@ -29,19 +29,21 @@ spec:
 ---
 {{- end }}
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ $name }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 spec:
+  serviceName: {{ $name }}
   replicas: {{ .Values.processor.fetcher.replicas }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
-  strategy:
-    type: Recreate
   template:
     metadata:
       labels:
@@ -55,6 +57,24 @@ spec:
       {{- include "stream2pretrain.imagePullSecrets" . | nindent 6 }}
       {{- include "stream2pretrain.podSecurityContext" . | nindent 6 }}
       {{- include "stream2pretrain.scheduling" . | nindent 6 }}
+      initContainers:
+        - name: bytewax-hostfile
+          image: busybox:1.36.1
+          {{- include "stream2pretrain.containerSecurityContext" . | nindent 10 }}
+          command:
+            - sh
+            - -ec
+            - |
+              : > /etc/bytewax/hostfile.txt
+              index=0
+              while [ "$index" -lt "{{ .Values.processor.fetcher.replicas }}" ]
+              do
+                echo "{{ $name }}-${index}.{{ $name }}.{{ .Release.Namespace }}.svc.cluster.local:9999" >> /etc/bytewax/hostfile.txt
+                index=$((index + 1))
+              done
+          volumeMounts:
+            - name: bytewax-hostfile
+              mountPath: /etc/bytewax
       containers:
         - name: fetcher
           image: {{ include "stream2pretrain.image" (dict "ctx" . "image" .Values.processor.fetcher.image "tag" .Values.processor.fetcher.tag) | quote }}
@@ -64,6 +84,8 @@ spec:
           ports:
             - name: metrics
               containerPort: 9090
+            - name: bytewax
+              containerPort: 9999
           env:
             {{- include "stream2pretrain.commonEnv" . | nindent 12 }}
             - name: S2P_COMPONENT
@@ -75,7 +97,19 @@ spec:
             - name: S2P_BYTEWAX_RECOVERY_NAME
               value: "fetcher-live-v5"
             - name: S2P_STATE_DIR
-              value: /var/lib/s2p/checkpoint
+              value: {{ ternary "/var/lib/s2p/state" "/var/lib/s2p/recovery" (gt (int .Values.processor.fetcher.replicas) 1) | quote }}
+            - name: S2P_BYTEWAX_RECOVERY_ROOT
+              value: /var/lib/s2p/recovery
+            - name: BYTEWAX_WORKERS_PER_PROCESS
+              value: {{ .Values.processor.fetcher.workersPerProcess | int | quote }}
+            - name: BYTEWAX_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: BYTEWAX_STATEFULSET_NAME
+              value: {{ $name | quote }}
+            - name: BYTEWAX_HOSTFILE_PATH
+              value: /etc/bytewax/hostfile.txt
             - name: S2P_CONSUMER_GROUP
               value: s2p-fetcher
             - name: S2P_FETCHER_INPUT_TOPICS
@@ -117,12 +151,21 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: checkpoint
-              mountPath: /var/lib/s2p/checkpoint
+            - name: state
+              mountPath: /var/lib/s2p/state
+            - name: recovery
+              mountPath: /var/lib/s2p/recovery
+            - name: bytewax-hostfile
+              mountPath: /etc/bytewax
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: checkpoint
+        - name: state
+          emptyDir: {}
+        - name: bytewax-hostfile
+          emptyDir: {}
+        - name: recovery
           persistentVolumeClaim:
             claimName: {{ $checkpointClaim | quote }}
 ---
@@ -136,10 +179,14 @@ metadata:
 spec:
   type: ClusterIP
   clusterIP: None
+  publishNotReadyAddresses: true
   ports:
     - name: metrics
       port: 9090
       targetPort: metrics
+    - name: bytewax
+      port: 9999
+      targetPort: bytewax
   selector:
     {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 4 }}
 {{- if .Values.processor.fetcher.canary.enabled }}

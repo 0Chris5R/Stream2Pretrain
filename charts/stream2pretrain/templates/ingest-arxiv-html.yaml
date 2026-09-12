@@ -1,25 +1,23 @@
 {{- /*
 arXiv full-paper-HTML fetcher.
 
-A fixed single-replica ``Deployment`` subscribes to ``raw.fetched`` and
-fetches the native HTML body for every freshly seen arXiv id. Historical
-backfill is intentionally not part of the deployed source catalogue.
+A Kafka consumer-group ``Deployment`` subscribes to the source-specific
+``arxiv.discovery`` topic and fetches the native HTML body for every freshly
+seen arXiv id. Historical backfill is intentionally not part of the deployed
+source catalogue.
 
-Per CLAUDE.md the egress class is ``arxiv`` (already wired in
-networkpolicies.yaml).
+The egress class is ``arxiv`` and is already wired in
+networkpolicies.yaml.
 
-Kafka-lag KEDA is deliberately absent here. The worker consumes the shared
-``raw.fetched`` topic and publishes enriched arXiv records back to that topic,
-so topic-wide lag is self-amplifying and is not an arXiv work metric. Keep one
-replica until a source-specific Prometheus backlog metric exists.
+Each Kafka partition has one consumer-group owner and each offset is committed
+only after durable handling. KEDA can therefore scale this worker from the
+source-specific backlog without counting the enriched records it publishes to
+``raw.fetched``.
 */ -}}
 {{- if .Values.sources.arxiv.htmlFetcher.enabled }}
 {{- $component := "ingest-arxiv-html" }}
 {{- $name := printf "%s-%s" (include "stream2pretrain.fullname" .) $component }}
 {{- $hf := .Values.ingest.arxivHtmlFetcher }}
-{{- if ne (int $hf.replicas) 1 }}
-{{- fail "ingest.arxivHtmlFetcher.replicas must be exactly 1 until a source-specific backlog scaler exists" }}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,7 +49,7 @@ spec:
             - --feed-name
             - {{ .Values.sources.arxiv.htmlFetcher.feedName | quote }}
             - --stream-topic
-            - {{ .Values.redpanda.topics.rawFetched | quote }}
+            - {{ .Values.redpanda.topics.arxivDiscovery | quote }}
             - --consumer-group
             - {{ $hf.consumerGroup | quote }}
             - --auto-offset-reset
@@ -72,4 +70,34 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+{{- if and .Values.keda.enabled (gt (int $hf.replicas) 1) }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ $name }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: 1
+  maxReplicaCount: {{ $hf.replicas }}
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ .Values.redpanda.bootstrapServers | quote }}
+        consumerGroup: {{ $hf.consumerGroup | quote }}
+        topic: {{ .Values.redpanda.topics.arxivDiscovery | quote }}
+        lagThreshold: "1"
+        offsetResetPolicy: {{ $hf.autoOffsetReset | quote }}
+        allowIdleConsumers: "false"
+      {{- if .Values.keda.auth.enabled }}
+      authenticationRef:
+        name: {{ include "stream2pretrain.fullname" . }}-redpanda
+      {{- end }}
+{{- end }}
 {{- end }}

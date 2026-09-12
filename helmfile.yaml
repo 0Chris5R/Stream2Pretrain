@@ -19,6 +19,8 @@ repositories:
     url: https://downloads.apache.org/polaris/helm-chart/
   - name: external-dns
     url: https://kubernetes-sigs.github.io/external-dns/
+  - name: cnpg
+    url: https://cloudnative-pg.github.io/charts
 
 environments:
   dev: {}
@@ -82,10 +84,18 @@ releases:
     values:
       - infra/helmfile-values/gatekeeper.{{ .Environment.Name }}.yaml
 
+  - name: cloudnative-pg
+    namespace: cnpg-system
+    chart: cnpg/cloudnative-pg
+    version: 0.29.0
+    labels: {tier: platform, component: database-operator}
+    values:
+      - infra/helmfile-values/cloudnative-pg.{{ .Environment.Name }}.yaml
+
   - name: redpanda
     namespace: redpanda
     chart: redpanda/redpanda
-    version: 5.9.5
+    version: 25.3.10
     labels: {tier: platform}
     values:
       - infra/helmfile-values/redpanda.{{ .Environment.Name }}.yaml
@@ -102,6 +112,9 @@ releases:
     namespace: polaris
     chart: ./charts/polaris-postgres
     labels: {tier: catalog}
+    needs: [cnpg-system/cloudnative-pg]
+    values:
+      - infra/helmfile-values/polaris-postgres.{{ .Environment.Name }}.yaml
 
   - name: polaris-metastore-bootstrap
     namespace: polaris

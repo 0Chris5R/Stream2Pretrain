@@ -184,16 +184,17 @@ class ProviderControlPlane:
             )
 
         try:
-            result = provider.generate_json(
-                role=role,
-                system=system,
-                user=user,
-                prompt_version=self.config.prompt_version,
-                max_output_tokens=effective_max_output,
-                temperature=temperature,
-                seed=seed,
-                checkpoint=checkpoint,
-            )
+            with self.quota.keepalive(reservation):
+                result = provider.generate_json(
+                    role=role,
+                    system=system,
+                    user=user,
+                    prompt_version=self.config.prompt_version,
+                    max_output_tokens=effective_max_output,
+                    temperature=temperature,
+                    seed=seed,
+                    checkpoint=checkpoint,
+                )
             trace = result.trace
             self.store.record_provider_result(
                 job_id=job_id,
@@ -240,17 +241,17 @@ class ProviderControlPlane:
             )
             raise
         finally:
-            self.quota.reconcile(reservation, trace)
-            self._event(
-                job_id=job_id,
-                paper_id=paper_id,
-                state="QUOTA_RECONCILED",
-                provider_trace_id=trace.trace_id if trace else None,
-                metadata={"provider": provider_name, "role": role},
-                attempt=resolved_attempt,
-                suffix=suffix,
-                update_job_state=False,
-            )
+            if self.quota.reconcile(reservation, trace):
+                self._event(
+                    job_id=job_id,
+                    paper_id=paper_id,
+                    state="QUOTA_RECONCILED",
+                    provider_trace_id=trace.trace_id if trace else None,
+                    metadata={"provider": provider_name, "role": role},
+                    attempt=resolved_attempt,
+                    suffix=suffix,
+                    update_job_state=False,
+                )
 
     def _event(
         self,

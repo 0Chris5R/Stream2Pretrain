@@ -14,7 +14,12 @@
     k3s_extra_exec_args: "--disable=traefik"
     cert_manager_email: ""
     rfc2136_zone: ""
-    longhorn_enabled: false
+    # The pinned role installs open-iscsi and nfs-common on every node before
+    # deploying Longhorn. Keep local-path as the default so retained PVCs are
+    # never migrated implicitly. Distributed Bytewax claims opt in explicitly.
+    longhorn_enabled: true
+    longhorn_version: "1.7.2"
+    longhorn_default_storage_class: false
     k3s_auto_upgrade_enabled: false
     kubeconfig_path: "../kubeconfig-stream2pretrain.yaml"
 

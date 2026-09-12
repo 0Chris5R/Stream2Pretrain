@@ -81,7 +81,10 @@ def test_minio_is_a_declarative_storage_tier() -> None:
     setup = (ROOT / "scripts" / "setup_dhbw_demo.sh").read_text()
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text()
     statefulset = (ROOT / "charts" / "minio" / "templates" / "statefulset.yaml").read_text()
-    pvc = (ROOT / "charts" / "minio" / "templates" / "pvc.yaml").read_text()
+    service = (ROOT / "charts" / "minio" / "templates" / "service.yaml").read_text()
+    disruption_budget = (
+        ROOT / "charts" / "minio" / "templates" / "poddisruptionbudget.yaml"
+    ).read_text()
     bucket_job = (ROOT / "charts" / "minio" / "templates" / "buckets-job.yaml").read_text()
 
     assert "chart: ./charts/minio" in helmfile
@@ -94,9 +97,13 @@ def test_minio_is_a_declarative_storage_tier() -> None:
     assert "--selector name=minio" in workflow
     assert "rollout status statefulset/minio" in workflow
     assert "kind: StatefulSet" in statefulset
-    assert "claimName: {{ .Values.persistence.claimName | quote }}" in statefulset
-    assert "kind: PersistentVolumeClaim" in pvc
-    assert "helm.sh/resource-policy: keep" in pvc
+    assert "replicas: {{ .Values.replicas }}" in statefulset
+    assert "volumeClaimTemplates:" in statefulset
+    assert 'accessModes: ["ReadWriteOnce"]' in statefulset
+    assert "persistentVolumeClaimRetentionPolicy:" in statefulset
+    assert "clusterIP: None" in service
+    assert "publishNotReadyAddresses: true" in service
+    assert "kind: PodDisruptionBudget" in disruption_budget
     assert "MINIO_PROMETHEUS_AUTH_TYPE" in statefulset
     assert "mc mb --ignore-existing" in bucket_job
 

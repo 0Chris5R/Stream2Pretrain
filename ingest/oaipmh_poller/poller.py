@@ -25,7 +25,7 @@ from ingest.common.kafka_producer import BronzeProducer
 from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
-from ingest.common.state import FeedStateStore
+from ingest.common.state import FeedStateStore, cursor_lease
 from ingest.oaipmh_poller.client import OAIClient
 from schemas.sourcefeed import SourceFeedSpec
 
@@ -63,7 +63,9 @@ async def poll_feed(
     async with (
         build_async_client(cfg, headers=headers) as client,
         BronzeProducer(
-            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-oai-poller"
+            cfg.redpanda_brokers,
+            topic=cfg.arxiv_discovery_topic,
+            client_id="s2p-oai-poller",
         ) as producer,
         MinioWriter(
             cfg.minio_endpoint,
@@ -170,11 +172,15 @@ async def _run(cfg: IngestConfig, feeds: list[SourceFeedSpec], **kw: Any) -> int
     total = 0
     failures: list[str] = []
     for feed in feeds:
-        try:
-            total += await poll_feed(feed, cfg, state_store=state_store, **kw)
-        except Exception as exc:
-            log.exception("oai.feed.error", feed=feed.name, err=str(exc))
-            failures.append(feed.name)
+        async with cursor_lease(feed.name) as owns_cursor:
+            if not owns_cursor:
+                log.info("oai.feed.cursor_owned", feed=feed.name)
+                continue
+            try:
+                total += await poll_feed(feed, cfg, state_store=state_store, **kw)
+            except Exception as exc:
+                log.exception("oai.feed.error", feed=feed.name, err=str(exc))
+                failures.append(feed.name)
     if failures:
         raise RuntimeError(f"OAI-PMH feed polling failed: {', '.join(failures)}")
     return total

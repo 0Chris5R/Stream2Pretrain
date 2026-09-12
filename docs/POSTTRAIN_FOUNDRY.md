@@ -8,7 +8,7 @@ evidence, not a second source fetch or extraction pipeline.
 The design follows the parts of current open post-training systems that are
 applicable to a paper-grounded data foundry. Kimi K3 uses source-material-guided
 task synthesis, specialized generators, multiple verification stages, and human
-annotation before SFT; its verifiable RL tasks run in checkable environments.
+annotation before SFT. Its verifiable RL tasks run in checkable environments.
 Kimi K2.5 likewise separates rule-verifiable tasks from open-ended work judged
 with rubrics. Tulu 3 separates SFT from reinforcement learning with verifiable
 rewards, while OpenThoughts combines deterministic math checking with independent
@@ -63,7 +63,7 @@ flowchart LR
 The foundry consumes `docs.curated` rather than polling arXiv itself. Every
 upstream source can therefore participate if curation assigns
 `posttrain_candidate`. Pre-fetch admission and pretraining curation are the
-single licence authority; the foundry does not repeat or reinterpret it. The current
+single licence authority. The foundry does not repeat or reinterpret it. The current
 adapter requires a `ScientificDocument`, so the first production cohort is
 scientific papers. Web and code-specific foundries require separate future
 contracts rather than forcing those formats through paper assumptions.
@@ -73,9 +73,9 @@ contracts rather than forcing those formats through paper assumptions.
 A record enters the durable candidate queue only when all of these are true:
 
 - `posttrain_candidate` is its primary route or one of its durable eligible
-  routes;
-- it has a structured scientific artifact in MinIO;
-- the Gold and scientific document identities match;
+  routes.
+- it has a structured scientific artifact in MinIO.
+- the Gold and scientific document identities match.
 - at least one training-retained stable body span exists.
 
 These conditions rely on the upstream guarantee that only licence-admitted
@@ -83,36 +83,45 @@ Gold records reach `docs.curated`. There is no post-training licence stage,
 licence hash, licence ledger, or second legal decision.
 
 At `S2P_FOUNDRY_DAILY_RUN_HOUR_UTC` and
-`S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC`, a one-replica scheduler commits exactly one
-cohort, including an empty cohort. It first drops unprocessed entries at or
-before the prior 24-hour boundary, then freezes all queued candidates received
-after that boundary and no later than the current boundary. Papers are ranked
-by token-weighted mean `arxiv-posttrain-suitability` score divided by five.
-Ties use reasoning, composite quality, recency and document ID. API cost and
-context length are not ranking inputs. The structural fallback for records
-without an active learned score is defined in `processor/foundry/worker.py`.
+`S2P_FOUNDRY_DAILY_RUN_MINUTE_UTC`, the worker fleet commits exactly one cohort,
+including an empty cohort. Shared PostgreSQL transaction coordination makes
+concurrent scheduler attempts idempotent. The winning transaction first drops
+unprocessed entries at or before the prior 24-hour boundary, then freezes all
+queued candidates received after that boundary and no later than the current
+boundary. Papers are ranked by token-weighted mean
+`arxiv-posttrain-suitability` score divided by five. Ties use reasoning,
+composite quality, recency and document ID. API cost and context length are not
+ranking inputs. The structural fallback for records without an active learned
+score is defined in `processor/foundry/worker.py`.
 
 The production schedule is 08:30 UTC, corresponding to 10:30 Europe/Berlin
 while daylight-saving time is active. The deployment is anchored by
 `S2P_FOUNDRY_DAILY_NOT_BEFORE_UTC=2026-08-28T08:30:00Z`, so changing the run
-hour cannot accidentally back-run the preceding day's cohort. The worker processes the entire frozen rank order serially until the next boundary. A provider-capacity stop
-does not admit older papers at the next boundary: any unfinished cohort members
-are removed, and only the newly completed 24-hour arrival window may compete.
+hour cannot accidentally back-run the preceding day's cohort. The worker fleet
+processes the entire frozen rank order serially until the next boundary. A
+provider-capacity stop does not admit older papers at the next boundary. Any
+unfinished cohort members are removed, and only the newly completed 24-hour
+arrival window may compete.
 New arrivals after the cutoff wait for the next cohort. An authenticated
 control API remains available for operator diagnostics, but the monitoring UI
 does not expose pipeline-control actions.
 
-The control store resets interrupted `processing` rows to `queued` after
-restart and resumes the same daily cutoff. A serialized background drain loop
-rechecks independently of source arrivals. Its 60-second poll interval and the
-00:00 UTC run-hour default are operational starting values marked
-`needs-measurement`; neither is a throughput claim.
+Candidate processing remains globally serial across the worker fleet. An
+expiring owner and fencing token protect the active candidate while the other
+replicas wait. After lease expiry, another replica may reclaim the paper, while
+the stale owner can no longer publish or mutate it. Startup returns expired or
+legacy unleased `processing` rows to `queued` and leaves live owners untouched.
+Each replica runs a background drain loop independently of source arrivals.
+PostgreSQL preserves the shared cutoff, rank order, and one-active-paper rule. The
+60-second poll interval and the 00:00 UTC run-hour default are operational
+starting values marked `needs-measurement`. Neither is a throughput claim.
 
 Candidate admission reads and validates the exact structured scientific JSON
 referenced by Gold, then snapshots those bytes beside the Gold payload in the
 durable queue. Provider work therefore does not depend on later MinIO reads of
-an artifact that was already acknowledged at admission. Unavailable source evidence prevents candidate generation; transient object-store
-failures remain retryable. Missing historical evidence does not become a
+an artifact that was already acknowledged at admission. Unavailable source
+evidence prevents candidate generation. Transient object-store failures remain
+retryable. Missing historical evidence does not become a
 fabricated content-quality rejection or a reconstructed paper from flat text.
 
 Every accepted paper-family package is assigned independently within its SFT
@@ -137,13 +146,13 @@ expected acceptance. Actual yield is exposed in the UI and metrics.
 Schemas for:
 
 - `PaperBundle`, stable spans, equations, tables, figures, official artifacts,
-  oracle recipes, and oracle results;
-- evidence nodes, edges, graph versions, compiler runs, and graph criticism;
+  oracle recipes, and oracle results.
+- evidence nodes, edges, graph versions, compiler runs, and graph criticism.
 - task specifications, public context policy, hidden targets, task family,
-  difficulty, and route;
-- verifier predicates and normalized verifier specifications;
-- answers, manifests, tool calls, turns, full trajectories, and loss masking;
-- provider model snapshots, traces, and quota states;
+  difficulty, and route.
+- verifier predicates and normalized verifier specifications.
+- answers, manifests, tool calls, turns, full trajectories, and loss masking.
+- provider model snapshots, traces, and quota states.
 - validation reports, append-only foundry events, artifacts, and signed package
   manifests.
 
@@ -187,10 +196,22 @@ Deterministic checks override model agreement wherever an exact check exists.
 
 ## 6. Quotas, retries, and resumability
 
-The SQLite WAL control plane is the single-writer stateful core locally and in
-the one-replica Kubernetes StatefulSet. It stores jobs, events, provider
-results, partial streams, traces, catalogues, artifacts, append-only human
-artifact audits, and the candidate queue.
+Kubernetes workers and API replicas share a PostgreSQL control plane. Local
+development and isolated tests can use the same store interfaces with a SQLite
+WAL fallback. The control plane stores jobs, events, provider results, partial
+streams, traces, catalogues, artifacts, append-only human artifact audits, the
+candidate queue, daily and manual runs, pool assignments, and the durable
+publication outbox. Candidate and quota reservations use expiring leases.
+Fencing tokens prevent a stale worker from completing, releasing, or deferring
+a candidate after ownership has moved. The daily-run and allocation
+transactions are serialized in PostgreSQL.
+
+The retired combined StatefulSet stored `control.sqlite3` and `quota.sqlite3`
+on `state-stream2pretrain-foundry-0`. Its Bytewax recovery copy is not a control
+database migration and does not preserve artifact audits. The guarded cutover
+requires the table-by-table SQLite-to-PostgreSQL migration, fingerprint
+manifest, and independent coordination-Secret markers described in
+[Storage ownership and scaling](storage-scaling.md#legacy-foundry-sqlite-cutover).
 
 Quota reservations cover Hetzner's published per-key 60-second limits: 10
 requests, 4,000,000 input tokens, and 100,000 output tokens. No daily provider
@@ -201,7 +222,7 @@ checkpoints, terminal call state, and `QUOTA_RECONCILED`. Capacity is reserved
 before transmission and reconciled with actual provider usage. A completed
 call is cached by job, stable call key, prompt version, and full request hash.
 Every possible transport attempt is reserved up front. Successful calls
-reconcile their exact attempt count and reported usage; failed calls or
+reconcile their exact attempt count and reported usage. Failed calls or
 missing usage reconcile conservatively at the reserved maximum.
 Transport retry keeps the same route and semantic request. Provider errors and
 minute-window exhaustion leave the current cohort resumable while it is still
@@ -214,8 +235,8 @@ On worker restart, abandoned quota reservations are charged conservatively.
 Every prior `CALL_PLANNED` or `CALL_STARTED` event without a matching terminal
 call event is then closed with an auditable restart-recovery `CALL_FAILED`
 event before the queue resumes. Cached complete provider results remain
-idempotent, while an actually interrupted request receives a new call attempt;
-the UI no longer presents the prior process's call as live indefinitely.
+idempotent, while an actually interrupted request receives a new call attempt.
+The UI no longer presents the prior process's call as live indefinitely.
 
 The API client performs real SSE streaming and saves reconstructable partial
 text hashes. It rejects invalid JSON, an unapproved exact returned route, a
@@ -225,12 +246,12 @@ missing exact model licence record, and authenticated catalogue drift.
 
 The compiler uses bounded passes rather than one unconstrained generation:
 
-1. extract claims and contributions tied to stable body spans;
-2. extract methods, algorithms, assumptions, inputs, and outputs;
-3. extract equations, quantities, tables, figures, results, and dependencies;
-4. extract limitations, qualifications, contradictions, and negative evidence;
+1. extract claims and contributions tied to stable body spans.
+2. extract methods, algorithms, assumptions, inputs, and outputs.
+3. extract equations, quantities, tables, figures, results, and dependencies.
+4. extract limitations, qualifications, contradictions, and negative evidence.
 5. canonicalize equations, units, identifiers, methods, table values, and
-   accepted equivalence classes;
+   accepted equivalence classes.
 6. identify caveats, changing definitions, conflicts, negative evidence, and
    unresolved ambiguity.
 
@@ -249,22 +270,22 @@ task context.
 
 The implemented task families are:
 
-- grounded technical explanation;
-- claim and evidence reconstruction;
-- derivation completion;
-- method-DAG reconstruction;
-- figure and table reasoning;
-- corruption diagnosis;
-- assumption and limitation consequence analysis;
-- long single-paper research with frozen tools;
-- official-artifact experiment configuration;
+- grounded technical explanation.
+- claim and evidence reconstruction.
+- derivation completion.
+- method-DAG reconstruction.
+- figure and table reasoning.
+- corruption diagnosis.
+- assumption and limitation consequence analysis.
+- long single-paper research with frozen tools.
+- official-artifact experiment configuration.
 - official-artifact result reproduction.
 
 Task proposal uses graph evidence and stable IDs. Content policy
 `scientific-reasoning-v2` prioritizes, in order, multi-step derivations,
 scaling-law or regime inference, multi-result numerical synthesis, assumption
 consequences, and algorithm analysis. Derivation and assumption families are
-capped at two tasks each; every other family is capped at one. Within a family,
+capped at two tasks each. Every other family is capped at one. Within a family,
 difficulty, distinct reasoning operations, answer-facing values, relations,
 and graph nodes determine priority. RL tasks rank before SFT tasks. Corruption
 diagnosis is last. The selector does not backfill unused slots with shallow
@@ -309,8 +330,8 @@ contract passes. Its prompt says that the readable report is the scientific
 answer and must show intermediate reasoning, calculations, assumptions, and
 the final requested values or expressions. It says that the manifest is
 machine-readable provenance, not a substitute for reasoning. Derivation tasks
-ask for an ordinary step-by-step mathematical argument and final expression;
-they do not require the learner to return evidence-span citations or internal
+ask for an ordinary step-by-step mathematical argument and final expression.
+They do not require the learner to return evidence-span citations or internal
 IDs. The hidden evidence links remain provenance for construction and audit.
 
 The grounding critic returns exactly one decision per trajectory. It may reject
@@ -318,7 +339,7 @@ only a concrete unsupported claim, contradiction, wrong calculation, or
 materially incomplete scientific conclusion. Manifest shape, node IDs,
 relation labels, ordering, and configuration keys are owned by executable
 checks. A proven format-only negative vote does not discard a scientifically
-sound trajectory; an empty or scientifically substantive negative vote still
+sound trajectory. An empty or scientifically substantive negative vote still
 fails closed. Every trajectory then runs the complete deterministic suite
 independently. A good SFT trajectory is retained even if its paired solution
 fails, and accepted packages contain only accepted trajectories. Rejected
@@ -327,7 +348,7 @@ critic decision, validation report, and provider-trace links.
 
 The exact versioned prompt text is generated by `_designer_system`,
 `_answerability_system`, `_solver_system`, and `_grounding_system` in
-`processor/foundry/tasking.py`; each function appends the live strict JSON
+`processor/foundry/tasking.py`. Each function appends the live strict JSON
 Schema to the literal policy above. Prompt version
 `paper-foundry-prompts-v7` invalidates earlier provider-call caches.
 
@@ -335,10 +356,10 @@ Schema to the literal policy above. Prompt version
 
 Packaged tools have no network access and operate only on bundled public data:
 
-- lexical search over stable spans;
-- exact span opening;
-- literal find;
-- an allowlisted AST calculator;
+- lexical search over stable spans.
+- exact span opening.
+- literal find.
+- an allowlisted AST calculator.
 - restricted symbolic simplify, expand, factor, solve, and equivalent checks.
 
 Tool count, result size, and expression structure are bounded. Imports, file
@@ -379,12 +400,12 @@ SFT but cannot be mislabeled as a machine-verifiable RL environment.
 No SFT or RL artifact is accepted from model consensus alone. The suite runs
 separately for each generated trajectory:
 
-- positive tests against independent trajectories;
-- equivalent-answer tests;
-- malformed, unsupported, evidence-swapped, and contradiction adversaries;
-- targeted verifier mutations with mutation-kill accounting;
-- metamorphic tests for order and equivalent representation changes;
-- deterministic replay;
+- positive tests against independent trajectories.
+- equivalent-answer tests.
+- malformed, unsupported, evidence-swapped, and contradiction adversaries.
+- targeted verifier mutations with mutation-kill accounting.
+- metamorphic tests for order and equivalent representation changes.
+- deterministic replay.
 - security tests for tool budget and code-execution attempts.
 
 The package includes the actual test-case and mutation JSONL, not a summary
@@ -400,7 +421,7 @@ diagnostics for SFT because they measure an RL reward rather than the quality of
 the supervised response. RL requires the complete suite, including every graph
 contract, adversarial check and mutation kill. A failed applicable gate rejects
 only that trajectory rather than discarding a sound sibling. An RL environment is accepted when at least one
-independently grounded reference trajectory passes every gate; only those
+independently grounded reference trajectory passes every gate. Only those
 passing references enter its package.
 
 A routed task that fails before producing a valid solution is persisted as a
@@ -427,7 +448,7 @@ context. It rejects symlinked artifact trees, hashes every embedded file, builds
 with Podman network disabled and pulls disabled, requires explicit build and
 runtime resource limits, resolves the final image content digest, and binds the
 embedded artifact hash to the recipe. Cloud promotion still requires publishing
-that exact digest through the team's image registry; the helper never pushes.
+that exact digest through the team's image registry. The helper never pushes.
 
 Local recipes run as Podman containers with no network, a read-only root,
 dropped capabilities, no-new-privileges, PID/CPU/RAM/time limits, a bounded
@@ -512,9 +533,10 @@ mechanical tests, which is never a production identity.
 Redpanda adds `foundry.jobs`, `foundry.events`, and `foundry.artifacts`.
 MinIO adds the `posttrain` bucket. Iceberg adds event and artifact tables. The
 Foundry buffers records across jobs and commits after 5,000 records or one hour.
-Its persistent SQLite state is an outbox, so Kafka or Iceberg publication can be
-replayed idempotently after a worker or storage failure without regenerating an
-artifact. The local SQL catalogue and cloud Polaris catalogue use the same
+Its coordination database is a durable outbox, so Kafka or Iceberg publication
+can be replayed idempotently after a worker or storage failure without
+regenerating an artifact. Kubernetes uses PostgreSQL and local development can
+use SQLite. The local SQL catalogue and cloud Polaris catalogue use the same
 record contracts.
 
 The foundry API exposes dashboard, jobs, job detail, artifacts, quotas, model
@@ -541,24 +563,33 @@ provider rate limiting.
 
 ## 14. Kubernetes deployment
 
-The chart adds a one-replica foundry StatefulSet with worker and control API
-sidecar, a ReadWriteOnce control-plane PVC, ClusterIP service, provider Secret,
-signing-key mount, exact provider egress class, ServiceMonitor, PrometheusRule,
-Grafana panels, oracle RBAC, and oracle deny-all network policy.
+The chart separates the Foundry worker StatefulSet from the stateless API
+Deployment. Worker replicas form one distributed Bytewax input execution with
+stable Pod identities, a headless peer Service, and a shared recovery claim.
+The API reads the shared PostgreSQL control plane and has no control-state PVC.
+The chart also supplies the provider Secret, signing-key mount, exact provider
+egress class, ServiceMonitor, PrometheusRule, Grafana panels, oracle RBAC, and
+oracle deny-all network policy.
 
-The StatefulSet is intentionally single-writer until a distributed control
-store is designed and measured. Provider work is naturally expensive and is
-serialized against shared quotas. Horizontal generation can later shard by paper family only
-after idempotency and quota ownership move to a shared transactional backend.
-The current CPU and memory requests and the 5 GiB control PVC are
-`needs-measurement` for sustained cloud operation.
+The measured profile keeps one worker and one API replica. The opt-in horizontal
+profile renders two workers with a Longhorn `ReadWriteMany` recovery claim and
+two API replicas. Deterministic candidate-lease, quota-lease, and fencing tests
+cover ownership and stale-worker rejection. Candidate processing remains
+globally serial by design, so additional workers provide coordinated intake and
+failover rather than parallel provider jobs. The two-replica topology is offline
+render and deterministic-test evidence only. Live multi-worker recovery,
+provider behavior, throughput, and safe replica limits remain
+`needs-measurement`. The current CPU and memory requests and the 5 GiB recovery
+claim also remain `needs-measurement` for sustained cloud operation.
 
 Required externally managed Secrets are:
 
 - `stream2pretrain-foundry-providers` with
-  `HETZNER_INFERENCE_API_KEY` and a random `controlToken`;
+  `HETZNER_INFERENCE_API_KEY` and a random `controlToken`.
 - `stream2pretrain-foundry-signing` with `ed25519.key` and `ed25519.crt`,
-  created once by deployment bootstrap unless it was pre-provisioned;
+  created once by deployment bootstrap unless it was pre-provisioned.
+- `stream2pretrain-coordination` with the shared PostgreSQL URL, derived by the
+  deployment from the Polaris persistence identity without logging it.
 - the existing MinIO and Polaris Secrets.
 
 The worker starts after `Qwen3.8-27B` is visible through authenticated model
@@ -618,14 +649,14 @@ are part of the handoff.
 
 The foundry is not operationally accepted until all of these are evidenced:
 
-- the authenticated Hetzner catalogue is stored and contains `Qwen3.8-27B`;
-- every live model trace records the exact Hetzner route and model;
-- at least one SFT and one RL package pass every deterministic gate;
-- package signatures verify after MinIO download;
+- the authenticated Hetzner catalogue is stored and contains `Qwen3.8-27B`.
+- every live model trace records the exact Hetzner route and model.
+- at least one SFT and one RL package pass every deterministic gate.
+- package signatures verify after MinIO download.
 - one interrupted call and one interrupted paper resume without duplicate
-  billing or artifacts;
-- the Post-training UI and Grafana panels match durable records;
-- artifact approval and rejection both preserve reviewer identity and history;
+  billing or artifacts.
+- the Post-training UI and Grafana panels match durable records.
+- artifact approval and rejection both preserve reviewer identity and history.
 - actual provider usage, acceptance yield, local resource use, and cloud
   resource use are measured rather than estimated.
 
@@ -636,10 +667,10 @@ to Stream2Train.
 
 To begin the live test, the project owner must provide or choose:
 
-1. a Hetzner Experiments Inference token for a project account;
+1. a Hetzner Experiments Inference token for a project account.
 2. confirmation that `Qwen3.8-27B` appears in the authenticated catalogue, or
-   approval for a separately licensed replacement route;
-3. the production Ed25519 signing Secret for cloud testing;
+   approval for a separately licensed replacement route.
+3. the production Ed25519 signing Secret for cloud testing.
 4. optional audited official-artifact manifests and digest-pinned oracle images.
 
 Reviewer names are entered manually in the Post-training UI for each artifact

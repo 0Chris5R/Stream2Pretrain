@@ -16,6 +16,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: {{ include "stream2pretrain-minio.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
+      stream2pretrain.io/service-role: client
   endpoints:
     - port: api
       path: /minio/v2/metrics/cluster

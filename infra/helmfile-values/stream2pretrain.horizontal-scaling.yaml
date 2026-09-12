@@ -1,0 +1,49 @@
+---
+# Opt-in verification and migration target for horizontal application scaling.
+# The measured dev profile remains unchanged until Longhorn capacity, retained
+# checkpoint copies, and a live multi-replica failover run are verified.
+ingest:
+  arxivHtmlFetcher:
+    replicas: 2
+  hf:
+    replicas: 2
+
+processor:
+  fetcher:
+    replicas: 2
+    checkpoint:
+      storageClass: longhorn
+      accessMode: ReadWriteMany
+  curate:
+    replicas: 2
+    checkpoint:
+      storageClass: longhorn
+      accessMode: ReadWriteMany
+  modelService:
+    replicas: 2
+    profiles:
+      quality:
+        autoscaling:
+          minReplicas: 2
+      kenlm:
+        autoscaling:
+          minReplicas: 2
+  iceberg:
+    replicas: 2
+    checkpoint:
+      storageClass: longhorn
+      accessMode: ReadWriteMany
+  duckdbApi:
+    replicas: 2
+  foundry:
+    workerReplicas: 2
+    apiReplicas: 2
+    state:
+      storageClass: longhorn
+      accessMode: ReadWriteMany
+
+sourceController:
+  replicas: 2
+
+ui:
+  replicas: 2

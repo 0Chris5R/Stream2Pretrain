@@ -95,18 +95,19 @@ processor:
       limits: {cpu: 2, memory: 4Gi}
   duckdbApi:
     replicas: 1
-    # The retained index bootstraps the complete Iceberg history once, then
-    # serves and updates that persistent baseline incrementally from Kafka.
+    # Each Pod rebuilds its derived index from Iceberg, then applies retained
+    # Kafka deltas to that private baseline.
     memoryLimit: 4GB
     resources:
       requests: {cpu: 100m, memory: 2Gi}
       limits: {cpu: 1, memory: 6Gi}
-  # Single-writer foundry on the measured control-plane image cache.
+  # The measured profile keeps one Foundry worker. Live multi-worker provider
+  # execution remains needs-measurement.
   foundry:
     enabled: true
 
 sourceController:
-  replicas: 1
+  replicas: 2
 
 ui:
   replicas: 1
@@ -144,5 +145,6 @@ ingest:
     maxPagesPerRun: 1
   arxivHtmlFetcher:
     maxRecordsPerLoop: 0
+    replicas: 2
   hf:
-    replicas: 1
+    replicas: 2

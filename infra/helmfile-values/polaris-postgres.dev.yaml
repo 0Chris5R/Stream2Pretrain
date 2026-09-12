@@ -1,0 +1,8 @@
+---
+# Three instances match the measured three-node cluster. Free CPU, memory,
+# local disk and database migration time need measurement before deployment.
+instances: 3
+
+persistence:
+  storageClass: local-path
+  size: 5Gi

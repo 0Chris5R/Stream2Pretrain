@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "stream2pretrain-minio.name" . }}
+  labels:
+    {{- include "stream2pretrain-minio.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "stream2pretrain-minio.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}

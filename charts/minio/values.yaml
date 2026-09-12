@@ -1,5 +1,7 @@
 fullnameOverride: minio
 
+replicas: 4
+
 image:
   repository: quay.io/minio/minio
   tag: RELEASE.2025-04-08T15-41-24Z
@@ -13,10 +15,9 @@ clientImage:
 credentialsSecret: minio-root
 
 persistence:
-  claimName: minio-data
   storageClass: local-path
-  # The recorded historical high-water mark was about 52 GiB. This request
-  # leaves measurable headroom without claiming that local-path enforces quota.
+  # This is the request for each MinIO member. Aggregate cluster capacity and
+  # migration time must be measured before changing an existing installation.
   size: 64Gi
 
 buckets:

@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from processor.foundry.config import ProviderConfig
+from processor.foundry.database import (
+    FOUNDRY_SCHEMA_LOCK_NAME,
+    connect_database,
+    database_dialect,
+    initialize_database_schema,
+)
 from schemas.foundry import ProviderTrace, QuotaState
 
 
@@ -30,6 +36,10 @@ class QuotaExceededError(RuntimeError):
         super().__init__(f"{provider} {window} {resource} limit would exceed {usable_limit}")
 
 
+class QuotaLeaseLostError(RuntimeError):
+    """Raised when a provider call outlives its reservation fence."""
+
+
 @dataclass(frozen=True, slots=True)
 class Reservation:
     reservation_id: str
@@ -42,20 +52,27 @@ class Reservation:
 
 
 class QuotaLedger:
-    """Single-writer SQLite ledger used by the foundry StatefulSet."""
+    """Transactional quota ledger shared by every Foundry worker replica."""
 
     def __init__(
         self,
         path: str,
         providers: dict[str, ProviderConfig],
+        *,
+        reservation_lease_seconds: float = 300.0,
     ) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
+        if reservation_lease_seconds <= 0:
+            raise ValueError("quota reservation lease must be positive")
+        self._conn = connect_database(path)
+        self._dialect = database_dialect(self._conn)
         self._providers = providers
+        self._reservation_lease_seconds = reservation_lease_seconds
         self._lock = threading.Lock()
-        self._conn.executescript(
-            """
+        initialize_database_schema(
+            self._conn,
+            dialect=self._dialect,
+            lock_name=FOUNDRY_SCHEMA_LOCK_NAME,
+            script="""
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS quota_windows (
@@ -80,10 +97,35 @@ class QuotaLedger:
               day_start TEXT NOT NULL,
               state TEXT NOT NULL,
               created_at TEXT NOT NULL,
-              reconciled_at TEXT
+              reconciled_at TEXT,
+              lease_expires_at TEXT
             );
-            """
+            """,
+            migrations=(self._ensure_reservation_columns,),
         )
+
+    def _ensure_reservation_columns(self) -> None:
+        if self._dialect == "postgresql":
+            self._conn.execute(
+                "ALTER TABLE quota_reservations ADD COLUMN IF NOT EXISTS lease_expires_at TEXT"
+            )
+        else:
+            existing = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(quota_reservations)").fetchall()
+            }
+            if "lease_expires_at" not in existing:
+                self._conn.execute(
+                    "ALTER TABLE quota_reservations ADD COLUMN lease_expires_at TEXT"
+                )
+
+    def database_ready(self) -> bool:
+        """Return whether the coordination database accepts a fresh query."""
+        with self._lock:
+            try:
+                return self._conn.execute("SELECT 1").fetchone() is not None
+            except Exception:
+                return False
 
     def close(self) -> None:
         with self._lock:
@@ -95,8 +137,15 @@ class QuotaLedger:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                lock_clause = " FOR UPDATE SKIP LOCKED" if self._dialect == "postgresql" else ""
                 rows = self._conn.execute(
-                    "SELECT * FROM quota_reservations WHERE state='reserved'"
+                    f"""
+                    SELECT * FROM quota_reservations
+                    WHERE state='reserved'
+                      AND (lease_expires_at IS NULL OR lease_expires_at<=?)
+                    {lock_clause}
+                    """,
+                    (now,),
                 ).fetchall()
                 for row in rows:
                     for kind, start in (
@@ -149,6 +198,7 @@ class QuotaLedger:
         requests: int = 1,
         now: datetime | None = None,
     ) -> Reservation:
+        self.reconcile_abandoned_reservations()
         config = self._providers[provider]
         current = (now or datetime.now(UTC)).astimezone(UTC)
         minute_start = current.replace(second=0, microsecond=0)
@@ -189,7 +239,10 @@ class QuotaLedger:
                     )
                 self._conn.execute(
                     """
-                    INSERT INTO quota_reservations VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, NULL)
+                    INSERT INTO quota_reservations(
+                      reservation_id,provider,requests,input_tokens,output_tokens,
+                      minute_start,day_start,state,created_at,reconciled_at,lease_expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, NULL, ?)
                     """,
                     (
                         reservation.reservation_id,
@@ -200,6 +253,7 @@ class QuotaLedger:
                         minute_start.isoformat(),
                         day_start.isoformat(),
                         current.isoformat(),
+                        (current + timedelta(seconds=self._reservation_lease_seconds)).isoformat(),
                     ),
                 )
                 self._conn.commit()
@@ -208,7 +262,64 @@ class QuotaLedger:
                 raise
         return reservation
 
-    def reconcile(self, reservation: Reservation, trace: ProviderTrace | None) -> None:
+    def renew(self, reservation: Reservation) -> bool:
+        now = datetime.now(UTC)
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE quota_reservations SET lease_expires_at=?
+                WHERE reservation_id=? AND state='reserved'
+                  AND lease_expires_at>?
+                """,
+                (
+                    (now + timedelta(seconds=self._reservation_lease_seconds)).isoformat(),
+                    reservation.reservation_id,
+                    now.isoformat(),
+                ),
+            )
+        return cursor.rowcount == 1
+
+    @contextmanager
+    def keepalive(self, reservation: Reservation) -> Iterator[None]:
+        """Renew a live provider reservation until its call is reconciled."""
+        stopped = threading.Event()
+        lost = threading.Event()
+        renewal_interval = max(0.05, self._reservation_lease_seconds / 3.0)
+
+        if not self.renew(reservation):
+            raise QuotaLeaseLostError(reservation.reservation_id)
+
+        def renew_loop() -> None:
+            while not stopped.wait(renewal_interval):
+                try:
+                    if not self.renew(reservation):
+                        lost.set()
+                        return
+                except Exception:
+                    continue
+
+        thread = threading.Thread(
+            target=renew_loop,
+            name=f"foundry-quota-{reservation.reservation_id}",
+            daemon=True,
+        )
+        thread.start()
+        completed = False
+        try:
+            yield
+            completed = True
+        finally:
+            stopped.set()
+            thread.join(timeout=min(5.0, renewal_interval))
+            if completed:
+                try:
+                    renewed = not lost.is_set() and self.renew(reservation)
+                except Exception as exc:
+                    raise QuotaLeaseLostError(reservation.reservation_id) from exc
+                if not renewed:
+                    raise QuotaLeaseLostError(reservation.reservation_id)
+
+    def reconcile(self, reservation: Reservation, trace: ProviderTrace | None) -> bool:
         actual_requests = trace.request_attempts if trace is not None else reservation.requests
         actual_input = (
             trace.input_tokens
@@ -224,15 +335,16 @@ class QuotaLedger:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                lock_clause = " FOR UPDATE" if self._dialect == "postgresql" else ""
                 row = self._conn.execute(
-                    "SELECT state FROM quota_reservations WHERE reservation_id=?",
+                    f"SELECT state FROM quota_reservations WHERE reservation_id=?{lock_clause}",
                     (reservation.reservation_id,),
                 ).fetchone()
                 if row is None:
                     raise KeyError(reservation.reservation_id)
                 if row["state"] != "reserved":
                     self._conn.rollback()
-                    return
+                    return False
                 for kind, start in (
                     ("minute", reservation.minute_start),
                     ("day", reservation.day_start),
@@ -268,6 +380,7 @@ class QuotaLedger:
             except Exception:
                 self._conn.rollback()
                 raise
+        return True
 
     def states(self, now: datetime | None = None) -> list[QuotaState]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
@@ -310,22 +423,28 @@ class QuotaLedger:
                     )
         return result
 
-    def _window(self, provider: str, kind: str, start: datetime) -> sqlite3.Row:
+    def _window(self, provider: str, kind: str, start: datetime) -> Any:
         self._conn.execute(
-            "INSERT OR IGNORE INTO quota_windows(provider, window_kind, window_start) VALUES (?, ?, ?)",
+            """
+            INSERT INTO quota_windows(provider,window_kind,window_start) VALUES (?, ?, ?)
+            ON CONFLICT(provider,window_kind,window_start) DO NOTHING
+            """,
             (provider, kind, start.isoformat()),
         )
+        lock_clause = " FOR UPDATE" if self._dialect == "postgresql" else ""
         row = self._conn.execute(
-            "SELECT * FROM quota_windows WHERE provider=? AND window_kind=? AND window_start=?",
+            "SELECT * FROM quota_windows "
+            "WHERE provider=? AND window_kind=? AND window_start=?"
+            f"{lock_clause}",
             (provider, kind, start.isoformat()),
         ).fetchone()
         assert row is not None
-        return cast(sqlite3.Row, row)
+        return cast(Any, row)
 
     def _assert_capacity(
         self,
         config: ProviderConfig,
-        row: sqlite3.Row,
+        row: Any,
         reservation: Reservation,
         kind: str,
     ) -> None:
@@ -357,4 +476,4 @@ def _remaining(limit: int | None, used: int) -> int | None:
     return None if limit is None else max(0, limit - used)
 
 
-__all__ = ["QuotaExceededError", "QuotaLedger", "Reservation"]
+__all__ = ["QuotaExceededError", "QuotaLeaseLostError", "QuotaLedger", "Reservation"]

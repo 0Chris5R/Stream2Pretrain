@@ -1,9 +1,11 @@
-image:
-  repository: postgres
-  tag: "17.6-alpine"
-  pullPolicy: IfNotPresent
+instances: 3
 
 credentialsSecret: polaris-persistence
+
+database:
+  name: polaris
+  owner: polaris
+  coordinationName: stream2pretrain
 
 persistence:
   storageClass: local-path
@@ -17,3 +19,5 @@ resources:
     cpu: "1"
     memory: 1Gi
 
+monitoring:
+  enabled: true

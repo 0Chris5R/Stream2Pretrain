@@ -70,6 +70,35 @@ def test_index_upserts_current_rows_and_drives_cursor_queries(tmp_path) -> None:
     connection.close()
 
 
+def test_replicas_build_independent_indexes_and_consumer_identities(tmp_path) -> None:
+    first_path = tmp_path / "replica-1" / "serving.duckdb"
+    second_path = tmp_path / "replica-2" / "serving.duckdb"
+    first = ServingIndex(
+        database_path=str(first_path), brokers="unused", decisions_topic="d", admissions_topic="a"
+    )
+    second = ServingIndex(
+        database_path=str(second_path),
+        brokers="unused",
+        decisions_topic="d",
+        admissions_topic="a",
+    )
+    first_connection = duckdb.connect(str(first_path))
+    second_connection = duckdb.connect(str(second_path))
+
+    first.apply_decision(first_connection, _gold(1))
+    assert first.counts()["decisions"] == 1
+    assert second.counts()["decisions"] == 0
+
+    second.apply_decisions(second_connection, [_gold(1), _gold(2)])
+    assert first.counts()["decisions"] == 1
+    assert second.counts()["decisions"] == 2
+    assert first._consumer_group(first_connection) != second._consumer_group(second_connection)
+    assert first_path.stat().st_ino != second_path.stat().st_ino
+
+    first_connection.close()
+    second_connection.close()
+
+
 def test_diagnostic_scores_survive_index_and_document_api(tmp_path) -> None:
     path = tmp_path / "diagnostics.duckdb"
     index = ServingIndex(

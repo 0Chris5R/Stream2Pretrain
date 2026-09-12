@@ -1,18 +1,19 @@
 # Stream2Pretrain MinIO chart
 
 This chart makes the object-store tier part of the repository's declarative
-deployment. It creates a single-node MinIO StatefulSet, ClusterIP Service,
-persistent volume, health probes, ServiceMonitor and an idempotent bucket
-bootstrap Job.
+deployment. It creates a distributed MinIO StatefulSet with one persistent
+volume per member, a client Service, a headless peer Service, health probes,
+a ServiceMonitor and an idempotent bucket bootstrap Job.
 
 The chart expects Secret `minio-root` in namespace `minio` with keys
 `accessKey` and `secretKey`. Credential values remain operator supplied and are
 never stored in Git.
 
-The course profile is intentionally a single-instance stateful deployment. It
-is sufficient for the demonstrated prototype but is not a claim of MinIO high
-availability. A larger deployment must use a distributed object store and
-measured failure-domain, capacity and restore settings.
+The chart rejects fewer than four members because that would fall back to a
+standalone topology. Pods prefer different Kubernetes nodes. The course
+cluster has three nodes, so one node can host more than one member. Failure
+domain placement, aggregate disk capacity and restore time must be measured
+before deploying this change to the retained installation.
 
 For a fresh cluster, deploy it through the storage tier:
 
@@ -20,7 +21,8 @@ For a fresh cluster, deploy it through the storage tier:
 ./scripts/setup_dhbw_demo.sh storage
 ```
 
-The chart owns the stable `minio-data` claim name. The DHBW values keep its
-measured 10 GiB request because the cluster's `local-path` provisioner cannot
-expand the retained volume online. Other environments can set a larger request
-before first installation.
+Each StatefulSet member owns a stable `data-<pod-name>` claim. The DHBW values
+retain the measured 10 GiB request per claim. The old standalone `minio-data`
+claim is not mounted by the distributed topology. Its objects require a
+verified copy and checksum procedure before an existing installation switches
+the client Service.

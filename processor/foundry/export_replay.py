@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+from processor.foundry.database import coordination_database_target
 from processor.foundry.store import FoundryStore
 from processor.foundry.util import canonical_json, sha256
 
@@ -17,7 +18,7 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     state_dir = os.environ.get("S2P_FOUNDRY_STATE_DIR", "/var/lib/s2p/foundry")
-    store = FoundryStore(str(Path(state_dir) / "control.sqlite3"))
+    store = FoundryStore(coordination_database_target(state_dir, "control.sqlite3"))
     try:
         fixture = store.replay_fixture(job_id=args.job_id)
     finally:

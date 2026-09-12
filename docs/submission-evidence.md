@@ -5,28 +5,39 @@
 The frozen 8 September 2026 evidence covers the live source adapters, Bytewax
 processing, Iceberg persistence, DuckDB serving, monitoring UI, stateless
 classifier services and experimental post-training Foundry. The screenshots in
-the repository represent the latest verified release and show their capture
+the repository represent the latest verified live release and show their capture
 time. The submission does not depend on external workflow pages to establish
 that these components ran.
 
-MinIO is a first-class release in the submitted Helmfile graph. A fresh
-installation creates its StatefulSet, PVC, Service, ServiceMonitor, and five
-buckets before Polaris and the application. On 8 September 2026 the live
-cluster completed the repository's guarded migration from the earlier
-Deployment to the Helm-managed StatefulSet. The migration retained and adopted
-the existing `minio-data` PVC and Service, started `minio-0`, compared all five
-buckets before and after the handoff, and deleted the obsolete Deployment only
-after the comparison succeeded. The pinned server and client images were also
-exercised independently in Podman with a stop-and-replace test against the same
-volume. The one-time migration utility was removed afterward; the final
-deployment path reconciles the Helm release directly.
+The repository has since added coordinated horizontal-scaling contracts and
+distributed infrastructure manifests. Those later changes are supported by
+offline Helm renders and deterministic concurrency tests. They are not shown
+in the frozen screenshots and are not presented as live multi-replica evidence.
+
+MinIO is a first-class release in the submitted Helmfile graph. The current
+chart creates four distributed members with one retained PVC each, client and
+peer Services, a ServiceMonitor, and five buckets before Polaris and the
+application. On 8 September 2026 the live cluster completed the repository's
+earlier guarded migration from a Deployment to a one-Pod Helm-managed
+StatefulSet. That migration retained and adopted the existing `minio-data` PVC
+and Service, started `minio-0`, compared all five buckets before and after the
+handoff, and deleted the obsolete Deployment only after the comparison
+succeeded. The pinned server and client images were also exercised
+independently in Podman with a stop-and-replace test against the same volume.
+This historical migration is not evidence for the current four-member layout.
 
 ## Deterministic verification
 
-- The canonical local test command completes with 641 passed tests and two
-  container-dependent integration tests skipped when no local stack is running.
+- The frozen local verification run completed with 641 passed tests and two
+  container-dependent integration tests skipped when no local stack was running.
 - Python lint and formatting checks pass.
 - The application and MinIO Helm charts render and lint successfully.
+- The opt-in horizontal profile renders two replicas for every application
+  component. It checks stable Bytewax and Foundry peer identities, RWX recovery
+  claims, independent DuckDB indexes, source leases, and stateless APIs.
+- Deterministic concurrency tests cover cursor exclusion and takeover, shared
+  curator duplicate and decision state, Iceberg optimistic commit conflicts,
+  independent serving indexes, and Foundry candidate and quota fencing.
 - The pinned MinIO server starts under Podman and the pinned client creates and
   lists `s2p-bronze`, `s2p-silver`, `s2p-gold`, `s2p-posttrain`, and `s2p-state`.
 - The repository security scan passes.
@@ -50,7 +61,7 @@ At 18:00 UTC on 8 September 2026, the live system recorded:
 | **Total** | **10,337** | **39,743** |
 
 All captured application containers were Ready. The production fetcher had a
-cumulative restart count of two; the remaining captured application containers
+cumulative restart count of two. The remaining captured application containers
 had zero. The five MinIO buckets occupied about 7.01 GiB at this snapshot.
 These values are a point-in-time operational record, not a throughput or
 capacity claim.
@@ -76,13 +87,16 @@ capacity claim.
 - The external `Qwen3.8-27B` endpoint is provider managed. Stream2Pretrain can
   adjust request concurrency, but does not claim Kubernetes autoscaling for a
   model it does not host.
-- Fetcher and curator replica changes remain coordinated Bytewax operations.
-  Iceberg and Foundry remain single writers in the measured profile.
+- The frozen evidence does not include a multi-replica source-controller,
+  ingest, Bytewax, Iceberg, DuckDB, or Foundry run. Their current scale-out
+  contracts are offline render and concurrency-test evidence only.
 - The curated platform-wide capture combines Ready/Running Pod rows from the
   successful read-only evidence workflow with Helm release records queried
   immediately afterward. It records Redpanda, the Helm-managed MinIO
   StatefulSet, Polaris/PostgreSQL, ingress, KEDA, monitoring, and representative
-  application workloads.
+  application workloads from the earlier topology. It does not demonstrate the
+  later three-broker Redpanda, four-member MinIO, three-instance CloudNativePG,
+  or two-replica application profile.
 
 The bounded 4 September measurement lasted 1,650.8 seconds and recorded 113
 normalized events and 32 curation decisions. Normalized input grew faster than

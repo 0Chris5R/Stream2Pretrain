@@ -39,7 +39,7 @@ from ingest.common.license_admission import (
 )
 from processor import common
 from processor.content_policy import CONTENT_POLICY_GENERATION
-from processor.decision_cache import DecisionCache
+from processor.decision_cache import DecisionCache, PostgresDecisionCache, build_decision_cache
 from processor.metrics import PROCESSOR_METRICS, ProcessorMetrics
 from processor.model_client import (
     CuratorModelClient,
@@ -53,7 +53,7 @@ from processor.operators.classifier_input import model_input, parse_sections
 from processor.operators.gopher import GopherFilter
 from processor.operators.hf_card_quality import assess_hf_card, is_hf_placeholder_section
 from processor.operators.kenlm_score import KenLMScorer, PerplexityResult
-from processor.operators.lshbloom import LSHBloomIndex
+from processor.operators.lshbloom import LSHBloomIndex, PostgresLSHIndex
 from processor.operators.minhash import MinHasher
 from processor.operators.pii import PiiSanitization, PiiScanner
 from processor.operators.quality import DevelopmentQualityScorer, QualityScore
@@ -129,14 +129,14 @@ class CurateState:
     c4: C4Filter
     kenlm: PerplexityScorer
     minhasher: MinHasher
-    lsh: LSHBloomIndex
+    lsh: LSHBloomIndex | PostgresLSHIndex
     source_quality: QualityScorer
     metadata_discovery: MetadataDiscoveryPolicy
     pii: PiiSanitizer
     tokenizer: Tokenizer
     policy_revision: str
     scoring_version: str
-    decision_cache: DecisionCache
+    decision_cache: DecisionCache | PostgresDecisionCache
     model_clients: tuple[CuratorModelClient, ...] = ()
     prefetched_quality_skips: frozenset[str] = frozenset()
     quality_cache: CachedQualityScorer | None = None
@@ -342,23 +342,30 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
             posttrain_quality = SourcePosttrainClassifier(source_quality)
     pii = PiiScanner(allow_fallback=not require_real_models)
     scoring_version = os.environ.get(SCORING_VERSION_ENV, CONTENT_POLICY_GENERATION)
+    coordination_database_url = os.environ.get("S2P_COORDINATION_DATABASE_URL", "").strip()
+    cache_dir = os.environ.get("S2P_CACHE_DIR", cfg.state_dir)
     minhasher = MinHasher()
     if require_real_models and minhasher.backend == "fallback-pyhash":
         raise RuntimeError("datasketch or rensa MinHash is required")
     # Each generation owns its dedup anchors so superseded projections cannot
     # reject the first clean record produced by a new policy.
-    lsh = LSHBloomIndex(
-        state_dir=os.path.join(cfg.state_dir, "lshbloom", scoring_version),
-    )
+    lsh: LSHBloomIndex | PostgresLSHIndex
+    if coordination_database_url:
+        lsh = PostgresLSHIndex(
+            coordination_database_url,
+            generation=scoring_version,
+        )
+    else:
+        lsh = LSHBloomIndex(
+            state_dir=os.path.join(cfg.state_dir, "lshbloom", scoring_version),
+        )
     if require_real_models and lsh.backend == "memory":
         raise RuntimeError("a durable LSHBloom backend is required")
     quality_cache = CachedQualityScorer(
-        source_quality, os.path.join(cfg.state_dir, "quality-scores.sqlite3")
+        source_quality, os.path.join(cache_dir, "quality-scores.sqlite3")
     )
     posttrain_cache = (
-        CachedQualityScorer(
-            posttrain_quality, os.path.join(cfg.state_dir, "posttrain-scores.sqlite3")
-        )
+        CachedQualityScorer(posttrain_quality, os.path.join(cache_dir, "posttrain-scores.sqlite3"))
         if posttrain_quality is not None
         else None
     )
@@ -374,7 +381,10 @@ def build_state(cfg: common.ProcessorConfig) -> CurateState:
         tokenizer=Tokenizer(allow_fallback=not require_real_models),
         policy_revision=os.environ.get(POLICY_REVISION_ENV, "git:dev") + ":source-gates-v1",
         scoring_version=scoring_version,
-        decision_cache=DecisionCache(os.path.join(cfg.state_dir, "decision-cache.sqlite3")),
+        decision_cache=build_decision_cache(
+            os.path.join(cfg.state_dir, "decision-cache.sqlite3"),
+            coordination_database_url,
+        ),
         model_clients=model_clients,
         quality_cache=quality_cache,
         posttrain_quality=posttrain_cache,

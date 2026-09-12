@@ -1,12 +1,23 @@
+{{- if lt (int .Values.replicas) 4 }}
+{{- fail "distributed MinIO requires at least four replicas" }}
+{{- end }}
+{{- $name := include "stream2pretrain-minio.name" . }}
+{{- $lastReplica := sub (int .Values.replicas) 1 }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "stream2pretrain-minio.name" . }}
+  name: {{ $name }}
   labels:
     {{- include "stream2pretrain-minio.labels" . | nindent 4 }}
 spec:
-  serviceName: {{ include "stream2pretrain-minio.name" . }}
-  replicas: 1
+  serviceName: {{ printf "%s-headless" $name }}
+  replicas: {{ .Values.replicas }}
+  podManagementPolicy: Parallel
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "stream2pretrain-minio.name" . }}
@@ -16,6 +27,16 @@ spec:
       labels:
         {{- include "stream2pretrain-minio.labels" . | nindent 8 }}
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: {{ $name }}
+                    app.kubernetes.io/instance: {{ .Release.Name }}
       securityContext:
         runAsNonRoot: false
         runAsUser: 0
@@ -28,7 +49,11 @@ spec:
         - name: minio
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["server", "/data", "--console-address", ":9001"]
+          args:
+            - server
+            - {{ printf "http://%s-{0...%d}.%s-headless.%s.svc.cluster.local/data" $name $lastReplica $name .Release.Namespace | quote }}
+            - --console-address
+            - :9001
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -81,6 +106,14 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: data
-          persistentVolumeClaim:
-            claimName: {{ .Values.persistence.claimName | quote }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "stream2pretrain-minio.labels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}

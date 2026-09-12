@@ -49,6 +49,18 @@ spec:
                 {{- include "stream2pretrain.commonEnv" . | nindent 16 }}
                 - name: S2P_COMPONENT
                   value: {{ $component | quote }}
+                - name: S2P_CURSOR_LEASE_BACKEND
+                  value: kubernetes
+                - name: S2P_CURSOR_LEASE_DURATION_SECONDS
+                  value: {{ .Values.sources.arxiv.rss.pollIntervalSeconds | quote }}
+                - name: S2P_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
                 - name: S2P_FEED_CONFIG
                   value: /etc/s2p/feeds/arxiv.json
                 - name: S2P_STATE_ROOT

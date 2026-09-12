@@ -1,7 +1,9 @@
 ---
-# The measured DHBW cluster claim is 10 GiB. local-path does not support online
-# expansion, so this value must match the retained claim used by the migration.
+# Keep the measured 10 GiB request for each member. The resulting aggregate
+# capacity and the standalone-to-distributed copy duration need measurement
+# before deployment to the retained cluster.
+replicas: 4
+
 persistence:
-  claimName: minio-data
   storageClass: local-path
   size: 10Gi

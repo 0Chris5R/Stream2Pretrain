@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Iterable
+import threading
+from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from processor.operators.minhash import MinHashSignature
 
@@ -381,6 +383,213 @@ class LSHBloomIndex:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+class PostgresLSHIndex:
+    """Transactional global near-duplicate index shared by curator replicas.
+
+    Advisory locks serialize documents that share at least one LSH bucket.
+    Workers with disjoint bucket sets proceed concurrently. The final probe is
+    repeated while those locks are held, so a speculative prefetch cannot race
+    another replica into admitting two members of the same near-duplicate
+    cluster.
+    """
+
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        generation: str,
+        num_bands: int = 28,
+        similarity_threshold: float = 0.80,
+        connect: Callable[..., Any] | None = None,
+        connection_errors: tuple[type[BaseException], ...] | None = None,
+    ) -> None:
+        if not 0.0 < similarity_threshold <= 1.0:
+            raise ValueError("similarity_threshold must be in (0, 1]")
+        if connect is None:
+            import psycopg  # type: ignore[import-not-found]
+
+            connect = psycopg.connect
+            connection_errors = (
+                psycopg.OperationalError,
+                psycopg.InterfaceError,
+            )
+        elif connection_errors is None:
+            connection_errors = (ConnectionError,)
+        self._database_url = database_url
+        self._connect = connect
+        self._connection_errors = connection_errors
+        self._conn: Any | None = None
+        self._closed = False
+        self._generation = generation
+        self._num_bands = num_bands
+        self._similarity_threshold = similarity_threshold
+        self._lock = threading.Lock()
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS curator_lsh_clusters (
+              generation TEXT NOT NULL,
+              cluster_id TEXT NOT NULL,
+              anchor_doc_id TEXT NOT NULL,
+              signature BYTEA NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (generation, cluster_id)
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS curator_lsh_bands (
+              generation TEXT NOT NULL,
+              cluster_key TEXT NOT NULL,
+              cluster_id TEXT NOT NULL,
+              PRIMARY KEY (generation, cluster_key),
+              FOREIGN KEY (generation, cluster_id)
+                REFERENCES curator_lsh_clusters(generation, cluster_id)
+            )
+            """
+        )
+
+    @property
+    def backend(self) -> str:
+        return "postgres"
+
+    def observe(self, doc_id: str, sig: MinHashSignature) -> NearDupResult:
+        cluster_keys = self._cluster_keys(sig)
+        with self._lock:
+
+            def observe_once(connection: Any) -> NearDupResult:
+                with connection.transaction():
+                    for cluster_key in sorted(cluster_keys):
+                        connection.execute(
+                            "SELECT pg_advisory_xact_lock(%s)",
+                            (self._advisory_lock_id(cluster_key),),
+                        )
+                    existing = self._probe_locked(connection, doc_id, sig, cluster_keys)
+                    if existing is not None:
+                        return existing
+                    cluster_id = self._cluster_id(doc_id, sig)
+                    connection.execute(
+                        """
+                        INSERT INTO curator_lsh_clusters(
+                          generation, cluster_id, anchor_doc_id, signature
+                        ) VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (generation, cluster_id) DO NOTHING
+                        """,
+                        (self._generation, cluster_id, doc_id, sig.digest),
+                    )
+                    for cluster_key in cluster_keys:
+                        connection.execute(
+                            """
+                            INSERT INTO curator_lsh_bands(generation, cluster_key, cluster_id)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (generation, cluster_key) DO NOTHING
+                            """,
+                            (self._generation, cluster_key, cluster_id),
+                        )
+                    return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
+
+            return self._with_reconnect(observe_once)
+
+    def probe(self, doc_id: str, sig: MinHashSignature) -> NearDupResult:
+        cluster_keys = self._cluster_keys(sig)
+        with self._lock:
+            existing = self._with_reconnect(
+                lambda connection: self._probe_locked(connection, doc_id, sig, cluster_keys)
+            )
+        return existing or NearDupResult(is_near_duplicate=False, cluster_id=None)
+
+    def _execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> Any:
+        return self._with_reconnect(lambda connection: connection.execute(sql, parameters))
+
+    def _with_reconnect(self, operation: Callable[[Any], Any]) -> Any:
+        """Replay one idempotent operation after a primary connection loss."""
+        for attempt in range(2):
+            connection = self._ensure_connection()
+            try:
+                return operation(connection)
+            except self._connection_errors:
+                self._discard_connection()
+                if attempt == 1:
+                    raise
+        raise AssertionError("unreachable")
+
+    def _ensure_connection(self) -> Any:
+        connection = self._conn
+        if connection is not None and not bool(getattr(connection, "closed", False)):
+            return connection
+        self._conn = None
+        if self._closed:
+            raise RuntimeError("PostgreSQL LSH index is closed")
+        self._conn = self._connect(self._database_url, autocommit=True)
+        return self._conn
+
+    def _discard_connection(self) -> None:
+        connection = self._conn
+        self._conn = None
+        if connection is not None:
+            with suppress(Exception):
+                connection.close()
+
+    def _probe_locked(
+        self,
+        connection: Any,
+        doc_id: str,
+        sig: MinHashSignature,
+        cluster_keys: list[str],
+    ) -> NearDupResult | None:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT c.cluster_id, c.anchor_doc_id, c.signature
+            FROM curator_lsh_bands AS b
+            JOIN curator_lsh_clusters AS c
+              ON c.generation = b.generation AND c.cluster_id = b.cluster_id
+            WHERE b.generation = %s AND b.cluster_key = ANY(%s)
+            ORDER BY c.cluster_id
+            """,
+            (self._generation, cluster_keys),
+        ).fetchall()
+        for cluster_id, anchor_doc_id, anchor_signature in rows:
+            normalized_cluster_id = str(cluster_id)
+            if str(anchor_doc_id) == doc_id:
+                return NearDupResult(
+                    is_near_duplicate=False,
+                    cluster_id=normalized_cluster_id,
+                )
+            if (
+                _signature_similarity(sig.digest, bytes(anchor_signature))
+                >= self._similarity_threshold
+            ):
+                return NearDupResult(
+                    is_near_duplicate=True,
+                    cluster_id=normalized_cluster_id,
+                )
+        return None
+
+    def _cluster_keys(self, sig: MinHashSignature) -> list[str]:
+        return [
+            LSHBloomIndex._cluster_key(index, band)
+            for index, band in enumerate(sig.band_keys(self._num_bands))
+        ]
+
+    def _cluster_id(self, doc_id: str, sig: MinHashSignature) -> str:
+        digest = hashlib.sha256(
+            self._generation.encode("utf-8") + b"\0" + doc_id.encode("utf-8") + b"\0" + sig.digest
+        ).hexdigest()
+        return f"cl-{digest[:24]}"
+
+    def _advisory_lock_id(self, cluster_key: str) -> int:
+        payload = f"{self._generation}\0{cluster_key}".encode()
+        return int.from_bytes(
+            hashlib.blake2b(payload, digest_size=8, person=b"s2plock").digest(),
+            "big",
+            signed=True,
+        )
+
+    def close(self) -> None:
+        self._closed = True
+        self._discard_connection()
 
 
 def memory_index() -> LSHBloomIndex:

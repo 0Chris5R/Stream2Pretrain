@@ -3,7 +3,7 @@
   "title": "Stream2Pretrain values",
   "type": "object",
   "additionalProperties": false,
-  "required": ["image", "redpanda", "minio", "iceberg", "sources", "ingest", "processor", "ui", "keda", "observability"],
+  "required": ["image", "coordination", "redpanda", "minio", "iceberg", "sources", "ingest", "processor", "ui", "keda", "observability"],
   "properties": {
     "image": {
       "type": "object",
@@ -21,6 +21,15 @@
     "commonLabels": {"type": "object"},
     "commonAnnotations": {"type": "object"},
     "profile": {"type": "string", "enum": ["dev", "prod"]},
+    "coordination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["databaseUrlSecret", "databaseUrlKey"],
+      "properties": {
+        "databaseUrlSecret": {"type": "string", "minLength": 1},
+        "databaseUrlKey": {"type": "string", "minLength": 1}
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
@@ -47,8 +56,9 @@
         "authSecret": {"type": "string"},
         "topics": {
           "type": "object",
-          "required": ["rawFetched", "smokeRaw", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "docsCuratedSmoke", "curationDecisions", "curationDecisionsSmoke", "licenseAdmissions", "licenseAdmissionsSmoke", "foundryJobs", "foundryEvents", "foundryArtifacts"],
+          "required": ["arxivDiscovery", "rawFetched", "smokeRaw", "docsNormalized", "docsNormalizedSmoke", "docsCurated", "docsCuratedSmoke", "curationDecisions", "curationDecisionsSmoke", "licenseAdmissions", "licenseAdmissionsSmoke", "foundryJobs", "foundryEvents", "foundryArtifacts"],
           "properties": {
+            "arxivDiscovery": {"type": "string"},
             "rawFetched": {"type": "string"},
             "smokeRaw": {"type": "string"},
             "docsNormalized": {"type": "string"},
@@ -219,7 +229,7 @@
           "properties": {
             "image": {"type": "string", "minLength": 1},
             "tag": {"type": "string"},
-            "replicas": {"type": "integer", "const": 1},
+            "replicas": {"type": "integer", "minimum": 1},
             "consumerGroup": {"type": "string", "minLength": 1},
             "autoOffsetReset": {"type": "string", "enum": ["earliest", "latest"]},
             "maxRecordsPerLoop": {"type": "integer", "minimum": 0},
@@ -235,19 +245,21 @@
         "maxWorkAgeSeconds": {"type": "integer", "minimum": 1},
         "fetcher": {
           "type": "object",
-          "required": ["replicas", "sourceBatchSize", "pdfProcessingEnabled", "checkpoint", "canary"],
+          "required": ["replicas", "workersPerProcess", "sourceBatchSize", "pdfProcessingEnabled", "checkpoint", "canary"],
           "properties": {
-            "replicas": {"type": "integer", "const": 1},
+            "replicas": {"type": "integer", "minimum": 1},
+            "workersPerProcess": {"type": "integer", "minimum": 1},
             "sourceBatchSize": {"type": "integer", "minimum": 1},
             "pdfProcessingEnabled": {"type": "boolean"},
             "doclingMaxBytes": {"type": "integer", "minimum": 1},
             "pdfHardTimeoutSeconds": {"type": "number", "exclusiveMinimum": 0},
             "checkpoint": {
               "type": "object",
-              "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
+              "required": ["existingClaim", "storageClass", "accessMode", "size", "recoveryPartitions", "snapshotSeconds"],
               "properties": {
                 "existingClaim": {"type": "string"},
                 "storageClass": {"type": "string"},
+                "accessMode": {"type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany"]},
                 "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
                 "recoveryPartitions": {"type": "integer", "minimum": 1},
                 "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
@@ -276,16 +288,19 @@
         },
         "curate": {
           "type": "object",
-          "required": ["replicas", "sourceBatchSize", "scoringVersion", "checkpoint"],
+          "required": ["replicas", "workersPerProcess", "sourceBatchSize", "scoringVersion", "checkpoint"],
           "properties": {
-            "replicas": {"type": "integer", "const": 1},
+            "replicas": {"type": "integer", "minimum": 1},
+            "workersPerProcess": {"type": "integer", "minimum": 1},
             "sourceBatchSize": {"type": "integer", "minimum": 1},
             "scoringVersion": {"type": "string", "minLength": 1},
             "checkpoint": {
               "type": "object",
-              "required": ["storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
+              "required": ["existingClaim", "storageClass", "accessMode", "size", "recoveryPartitions", "snapshotSeconds"],
               "properties": {
+                "existingClaim": {"type": "string"},
                 "storageClass": {"type": "string"},
+                "accessMode": {"type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany"]},
                 "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
                 "recoveryPartitions": {"type": "integer", "minimum": 1},
                 "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
@@ -295,16 +310,18 @@
         },
         "iceberg": {
           "type": "object",
-          "required": ["replicas", "sourceBatchSize", "checkpoint", "maintenance"],
+          "required": ["replicas", "workersPerProcess", "sourceBatchSize", "checkpoint", "maintenance"],
           "properties": {
-            "replicas": {"type": "integer", "const": 1},
+            "replicas": {"type": "integer", "minimum": 1},
+            "workersPerProcess": {"type": "integer", "minimum": 1},
             "sourceBatchSize": {"type": "integer", "minimum": 1},
             "checkpoint": {
               "type": "object",
-              "required": ["existingClaim", "storageClass", "size", "recoveryPartitions", "snapshotSeconds"],
+              "required": ["existingClaim", "storageClass", "accessMode", "size", "recoveryPartitions", "snapshotSeconds"],
               "properties": {
                 "existingClaim": {"type": "string"},
                 "storageClass": {"type": "string"},
+                "accessMode": {"type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany"]},
                 "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
                 "recoveryPartitions": {"type": "integer", "minimum": 1},
                 "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
@@ -342,19 +359,45 @@
             "servingIndex": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["existingClaim", "storageClass", "size", "batchSize"],
+              "required": ["size", "batchSize"],
+              "properties": {
+                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
+                "batchSize": {"type": "integer", "minimum": 1, "maximum": 5000}
+              }
+            }
+          }
+        },
+        "foundry": {
+          "type": "object",
+          "required": ["enabled", "workerReplicas", "workersPerProcess", "apiReplicas", "state"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "workerReplicas": {"type": "integer", "minimum": 1},
+            "workersPerProcess": {"type": "integer", "minimum": 1},
+            "apiReplicas": {"type": "integer", "minimum": 1},
+            "state": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["existingClaim", "storageClass", "accessMode", "size", "recoveryPartitions", "snapshotSeconds"],
               "properties": {
                 "existingClaim": {"type": "string"},
                 "storageClass": {"type": "string"},
+                "accessMode": {"type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany"]},
                 "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
-                "batchSize": {"type": "integer", "minimum": 1, "maximum": 5000}
+                "recoveryPartitions": {"type": "integer", "minimum": 1},
+                "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
               }
             }
           }
         }
       }
     },
-    "sourceController": {"type": "object"},
+    "sourceController": {
+      "type": "object",
+      "properties": {
+        "leaseDurationSeconds": {"type": "integer", "minimum": 1}
+      }
+    },
     "ui": {"type": "object"},
     "keda": {
       "type": "object",

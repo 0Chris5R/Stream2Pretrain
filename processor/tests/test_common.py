@@ -176,8 +176,19 @@ def test_run_bytewax_flow_initializes_and_reuses_recovery(monkeypatch, tmp_path)
         calls["part_count"] = part_count
         (path / "part-0.sqlite3").touch()
 
-    def fake_cli_main(flow, *, epoch_interval, recovery_config) -> None:
+    def fake_cli_main(
+        flow,
+        *,
+        workers_per_process,
+        process_id,
+        addresses,
+        epoch_interval,
+        recovery_config,
+    ) -> None:
         calls["flow"] = flow
+        calls["workers_per_process"] = workers_per_process
+        calls["process_id"] = process_id
+        calls["addresses"] = addresses
         calls["epoch_interval"] = epoch_interval
         calls["recovery_path"] = recovery_config.path
 
@@ -200,8 +211,82 @@ def test_run_bytewax_flow_initializes_and_reuses_recovery(monkeypatch, tmp_path)
     assert calls["init_count"] == 1
     assert calls["part_count"] == 1
     assert calls["flow"] is flow
+    assert calls["workers_per_process"] == 1
+    assert calls["process_id"] is None
+    assert calls["addresses"] is None
     assert calls["epoch_interval"].total_seconds() == 2.5  # type: ignore[union-attr]
     assert calls["recovery_path"] == expected
+
+
+def test_run_bytewax_flow_joins_distributed_execution_from_statefulset_env(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("S2P_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BYTEWAX_WORKERS_PER_PROCESS", "2")
+    monkeypatch.setenv("BYTEWAX_POD_NAME", "curator-1")
+    monkeypatch.setenv("BYTEWAX_STATEFULSET_NAME", "curator")
+    hostfile = tmp_path / "hostfile.txt"
+    hostfile.write_text("curator-0.curator:9999\ncurator-1.curator:9999\n", encoding="utf-8")
+    monkeypatch.setenv("BYTEWAX_HOSTFILE_PATH", str(hostfile))
+    calls: dict[str, object] = {}
+
+    class FakeRecoveryConfig:
+        def __init__(self, path) -> None:
+            self.path = path
+
+    def fake_init_db_dir(path, part_count) -> None:
+        for partition in range(part_count):
+            (path / f"part-{partition}.sqlite3").touch()
+
+    def fake_cli_main(_flow, **kwargs) -> None:
+        calls.update(kwargs)
+
+    bytewax_package = ModuleType("bytewax")
+    bytewax_package.__path__ = []  # type: ignore[attr-defined]
+    recovery_module = ModuleType("bytewax.recovery")
+    recovery_module.RecoveryConfig = FakeRecoveryConfig  # type: ignore[attr-defined]
+    recovery_module.init_db_dir = fake_init_db_dir  # type: ignore[attr-defined]
+    run_module = ModuleType("bytewax.run")
+    run_module.cli_main = fake_cli_main  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "bytewax", bytewax_package)
+    monkeypatch.setitem(sys.modules, "bytewax.recovery", recovery_module)
+    monkeypatch.setitem(sys.modules, "bytewax.run", run_module)
+
+    run_bytewax_flow(object(), load_config(), "curator")
+
+    assert calls["workers_per_process"] == 2
+    assert calls["process_id"] == 1
+    assert calls["addresses"] == ["curator-0.curator:9999", "curator-1.curator:9999"]
+
+
+def test_run_bytewax_flow_uses_separate_shared_recovery_root(monkeypatch, tmp_path) -> None:
+    local_state = tmp_path / "local"
+    shared_recovery = tmp_path / "shared"
+    monkeypatch.setenv("S2P_STATE_DIR", str(local_state))
+    monkeypatch.setenv("S2P_BYTEWAX_RECOVERY_ROOT", str(shared_recovery))
+    captured: dict[str, object] = {}
+
+    class FakeRecoveryConfig:
+        def __init__(self, path) -> None:
+            captured["path"] = path
+
+    def fake_init_db_dir(path, _part_count) -> None:
+        (path / "part-0.sqlite3").touch()
+
+    bytewax_package = ModuleType("bytewax")
+    bytewax_package.__path__ = []  # type: ignore[attr-defined]
+    recovery_module = ModuleType("bytewax.recovery")
+    recovery_module.RecoveryConfig = FakeRecoveryConfig  # type: ignore[attr-defined]
+    recovery_module.init_db_dir = fake_init_db_dir  # type: ignore[attr-defined]
+    run_module = ModuleType("bytewax.run")
+    run_module.cli_main = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "bytewax", bytewax_package)
+    monkeypatch.setitem(sys.modules, "bytewax.recovery", recovery_module)
+    monkeypatch.setitem(sys.modules, "bytewax.run", run_module)
+
+    run_bytewax_flow(object(), load_config(), "fetcher")
+
+    assert captured["path"] == shared_recovery / "bytewax" / "fetcher"
 
 
 def test_runtime_status_requires_runtime_and_every_source() -> None:

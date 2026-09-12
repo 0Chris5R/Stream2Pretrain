@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from schemas.topics import ARXIV_DISCOVERY
+
 
 def _env(name: str, default: str | None = None) -> str:
     val = os.environ.get(name, default)
@@ -51,6 +53,7 @@ class IngestConfig:
     feed_config_path: str | None = None
     request_jitter_max_seconds: float = 0.5
     raw_topic: str = "raw.fetched"
+    arxiv_discovery_topic: str = ARXIV_DISCOVERY
     license_admissions_topic: str = "license.admissions"
 
     @property
@@ -83,5 +86,6 @@ def load_config() -> IngestConfig:
         http_max_retries=_env_int("S2P_HTTP_MAX_RETRIES", 4),
         feed_config_path=_env_optional("S2P_FEED_CONFIG"),
         raw_topic=_env("S2P_RAW_TOPIC", "raw.fetched"),
+        arxiv_discovery_topic=_env("S2P_ARXIV_DISCOVERY_TOPIC", ARXIV_DISCOVERY),
         license_admissions_topic=_env("S2P_LICENSE_ADMISSIONS_TOPIC", "license.admissions"),
     )

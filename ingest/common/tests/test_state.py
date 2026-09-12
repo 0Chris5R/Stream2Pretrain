@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ingest.common.state import FeedStateStore
+import pytest
+
+import ingest.common.state as state_module
+from ingest.common.state import FeedStateStore, KubernetesCursorLease
 
 
 def test_round_trip(tmp_path: Path) -> None:
@@ -121,7 +126,142 @@ def test_s3_backend_creates_missing_state_bucket() -> None:
 
 
 def test_unknown_state_backend_is_rejected(tmp_path: Path) -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="unsupported feed-state backend"):
         FeedStateStore(tmp_path, backend="database")
+
+
+class _KubeError(Exception):
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+
+class _FakeCoordinationApi:
+    def __init__(self) -> None:
+        self.lease: Any | None = None
+        self.version = 0
+
+    def read_namespaced_lease(self, *_: str) -> Any:
+        if self.lease is None:
+            raise _KubeError(404)
+        return self.lease
+
+    def create_namespaced_lease(self, _namespace: str, body: Any) -> None:
+        if self.lease is not None:
+            raise _KubeError(409)
+        self.version += 1
+        body.metadata.resource_version = str(self.version)
+        self.lease = body
+
+    def replace_namespaced_lease(self, _name: str, _namespace: str, body: Any) -> None:
+        if self.lease is None:
+            raise _KubeError(404)
+        if body.metadata.resource_version != self.lease.metadata.resource_version:
+            raise _KubeError(409)
+        self.version += 1
+        body.metadata.resource_version = str(self.version)
+        self.lease = body
+
+
+def test_kubernetes_cursor_lease_excludes_a_second_owner(monkeypatch) -> None:
+    monkeypatch.setenv("S2P_NAMESPACE", "stream2pretrain")
+    monkeypatch.setenv("S2P_COMPONENT", "ingest-hf-cards")
+    api = _FakeCoordinationApi()
+    first = KubernetesCursorLease("hf-models", duration_seconds=600, coordination_api=api)
+    second = KubernetesCursorLease("hf-models", duration_seconds=600, coordination_api=api)
+
+    assert first.try_acquire() is True
+    assert second.try_acquire() is False
+
+    first.release()
+    assert second.try_acquire() is True
+
+
+def test_kubernetes_cursor_lease_can_take_expired_owner(monkeypatch) -> None:
+    monkeypatch.setenv("S2P_NAMESPACE", "stream2pretrain")
+    api = _FakeCoordinationApi()
+    first = KubernetesCursorLease("oai-arxiv", duration_seconds=1, coordination_api=api)
+    second = KubernetesCursorLease("oai-arxiv", duration_seconds=1, coordination_api=api)
+
+    assert first.try_acquire() is True
+    api.lease.spec.renew_time = datetime.now(tz=UTC) - timedelta(seconds=2)
+
+    assert second.try_acquire() is True
+    assert api.lease.spec.holder_identity == second.identity
+
+
+@pytest.mark.asyncio
+async def test_cursor_lease_renews_while_the_owner_is_running(monkeypatch) -> None:
+    monkeypatch.setenv("S2P_CURSOR_LEASE_BACKEND", "kubernetes")
+    monkeypatch.setenv("S2P_CURSOR_LEASE_DURATION_SECONDS", "600")
+    renewed = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    class FakeLease:
+        instance: FakeLease | None = None
+
+        def __init__(self, *_: object, **__: object) -> None:
+            self.renewals = 0
+            self.released = False
+            FakeLease.instance = self
+
+        def try_acquire(self) -> bool:
+            return True
+
+        def renew(self) -> bool:
+            self.renewals += 1
+            renewed.set()
+            return True
+
+        def release(self) -> None:
+            self.released = True
+
+    async def yield_once(_: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(state_module, "KubernetesCursorLease", FakeLease)
+    monkeypatch.setattr(state_module.asyncio, "sleep", yield_once)
+
+    async with state_module.cursor_lease("source-controller") as owns_cursor:
+        assert owns_cursor is True
+        await asyncio.wait_for(renewed.wait(), timeout=1)
+
+    assert FakeLease.instance is not None
+    assert FakeLease.instance.renewals >= 1
+    assert FakeLease.instance.released is True
+
+
+@pytest.mark.asyncio
+async def test_cursor_lease_cancels_owner_when_renewal_is_lost(monkeypatch) -> None:
+    monkeypatch.setenv("S2P_CURSOR_LEASE_BACKEND", "kubernetes")
+    monkeypatch.setenv("S2P_CURSOR_LEASE_DURATION_SECONDS", "600")
+    real_sleep = asyncio.sleep
+
+    class FakeLease:
+        instance: FakeLease | None = None
+
+        def __init__(self, *_: object, **__: object) -> None:
+            self.released = False
+            FakeLease.instance = self
+
+        def try_acquire(self) -> bool:
+            return True
+
+        def renew(self) -> bool:
+            return False
+
+        def release(self) -> None:
+            self.released = True
+
+    async def yield_once(_: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(state_module, "KubernetesCursorLease", FakeLease)
+    monkeypatch.setattr(state_module.asyncio, "sleep", yield_once)
+
+    with pytest.raises(asyncio.CancelledError, match="cursor lease lost: source-controller"):
+        async with state_module.cursor_lease("source-controller") as owns_cursor:
+            assert owns_cursor is True
+            await asyncio.Future()
+
+    assert FakeLease.instance is not None
+    assert FakeLease.instance.released is True

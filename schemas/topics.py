@@ -18,6 +18,7 @@ from typing import Final
 
 # Topic name constants. Kept as module-level finals so they appear verbatim in
 # k8s manifests, rpk scripts, and OpenTelemetry span attributes.
+ARXIV_DISCOVERY: Final[str] = "arxiv.discovery"
 RAW_FETCHED: Final[str] = "raw.fetched"
 RAW_SMOKE: Final[str] = "raw.smoke"
 DOCS_NORMALIZED: Final[str] = "docs.normalized"
@@ -33,6 +34,7 @@ FOUNDRY_EVENTS: Final[str] = "foundry.events"
 FOUNDRY_ARTIFACTS: Final[str] = "foundry.artifacts"
 
 ALL_TOPICS: Final[tuple[str, ...]] = (
+    ARXIV_DISCOVERY,
     RAW_FETCHED,
     RAW_SMOKE,
     DOCS_NORMALIZED,
@@ -76,7 +78,7 @@ class TopicConfig:
         ]
 
 
-# Dev profile: single-broker Redpanda, light retention, easy to wipe.
+# Local development profile: single-broker Redpanda, light retention, easy to wipe.
 # 7-day retention is enough to replay a full demo cycle.
 _DEV_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 _SMOKE_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -86,8 +88,14 @@ _PROD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 
 def dev_topic_configs() -> list[TopicConfig]:
-    """Topic configs for the local dev stack and small k3s clusters."""
+    """Topic configs for the local single-broker development stack."""
     return [
+        TopicConfig(
+            ARXIV_DISCOVERY,
+            partitions=4,
+            replication_factor=1,
+            retention_ms=_DEV_RETENTION_MS,
+        ),
         TopicConfig(
             RAW_FETCHED, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
@@ -122,7 +130,7 @@ def dev_topic_configs() -> list[TopicConfig]:
             retention_ms=_SMOKE_RETENTION_MS,
         ),
         TopicConfig(
-            LICENSE_ADMISSIONS, partitions=1, replication_factor=1, retention_ms=_DEV_RETENTION_MS
+            LICENSE_ADMISSIONS, partitions=4, replication_factor=1, retention_ms=_DEV_RETENTION_MS
         ),
         TopicConfig(
             LICENSE_ADMISSIONS_SMOKE,
@@ -149,6 +157,12 @@ def prod_topic_configs() -> list[TopicConfig]:
     throughput benchmark (needs-measurement).
     """
     return [
+        TopicConfig(
+            ARXIV_DISCOVERY,
+            partitions=12,
+            replication_factor=3,
+            retention_ms=_PROD_RETENTION_MS,
+        ),
         TopicConfig(
             RAW_FETCHED, partitions=12, replication_factor=3, retention_ms=_PROD_RETENTION_MS
         ),

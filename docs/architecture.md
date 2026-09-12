@@ -2,9 +2,10 @@
 
 ## Kappa data flow
 
-![Stream2Pretrain Kappa architecture](architecture.svg)
+![Stream2Pretrain Kappa architecture](diagram-architecture.svg)
 
-The companion Mermaid definition is in [`architecture.mmd`](architecture.mmd)
+The companion Mermaid definition is in
+[`diagram-architecture.mmd`](diagram-architecture.mmd)
 and provides a more detailed editable view of the same data flow.
 
 The system is streaming-only. Live input and explicitly approved replay use the
@@ -15,6 +16,7 @@ retrieval and never enter document, route, or acceptance totals.
 
 | Topic | Producer | Consumer |
 |---|---|---|
+| `arxiv.discovery` | RSS and OAI-PMH discovery workers | partitioned arXiv full-text workers |
 | `license.admissions` | content ingest workers | Iceberg writer and monitoring |
 | `raw.fetched` | content ingest workers | Bytewax fetcher |
 | `docs.normalized` | Bytewax fetcher | Bytewax curator |
@@ -46,16 +48,20 @@ retrieval and never enter document, route, or acceptance totals.
 - `s2p-gold`: Iceberg data and metadata for route decisions and accepted text.
 - `s2p-posttrain`: generated tasks, trajectories, environments, packages, and
   audit evidence.
-- retained PVCs: Bytewax recovery, dedup state, and Foundry control state.
+- retained PVCs: Bytewax and Foundry recovery state.
+- PostgreSQL: Polaris metadata, global curator duplicate and decision state,
+  and Foundry queue, quota, call, and audit coordination.
 
 The repository-owned [`charts/minio`](../charts/minio) release creates the
-single-node course object store, persistent volume, monitoring endpoint and
-required buckets. A distributed MinIO or external S3 service is the documented
-larger-deployment replacement.
+four-member distributed object store, one retained volume per member, client
+and peer Services, monitoring endpoint, and required buckets. This topology is
+render-validated. The frozen live evidence shows the earlier one-member layout,
+so migration time, node-loss recovery, and usable capacity remain
+`needs-measurement`.
 
 The physical Iceberg tables are `license_admissions`, `curation_decisions`, and
 `curated`. DuckDB combines admission and curation rows into the logical corpus
-route ledger used by the cockpit; the ledger is a serving view, not a fourth
+route ledger used by the cockpit. The ledger is a serving view, not a fourth
 physical table.
 
 ## References
@@ -76,11 +82,24 @@ artifact mutates product state.
 
 ## Scaling
 
-Independently committing ingest workers and stateless model services can scale
-horizontally. The core Bytewax flows currently run as one coordinated execution
-per stage because recovery and global near-duplicate state must not be forked by
-ordinary replica scaling. CPU, memory, lag, and object growth are measured in
-Prometheus. The external Foundry model API is provider managed, so the project
-controls request concurrency rather than its replica count. Any production
-throughput claim remains `needs-measurement` until a target-cluster run records
-it.
+Every application component has an explicit horizontal-scaling contract.
+SourceFeed reconciliation is active-passive through a Kubernetes Lease, feed
+pollers lease each cursor, and arXiv full-text workers use consumer-group
+partition ownership on `arxiv.discovery`. Stateless model, API, and UI
+Deployments scale through replica settings or KEDA.
+
+Fetcher, curator, Iceberg writer, and Foundry worker replicas each form one
+distributed Bytewax execution with stable peer identities and shared RWX
+recovery. The curator coordinates global duplicate and decision state in
+PostgreSQL. Iceberg writers retry optimistic commit conflicts with deterministic
+row identities. Foundry workers use fenced PostgreSQL candidate and quota
+leases. Each DuckDB API replica rebuilds a private serving index from Iceberg
+and retained Kafka topics.
+
+The horizontal profile renders two replicas for every application component,
+and deterministic tests exercise the coordination primitives. This is offline
+contract evidence, not a live failover or throughput result. The frozen cluster
+evidence demonstrates UI and classifier replicas only. The external Foundry
+model API is provider managed, so the project controls request concurrency
+rather than its replica count. Live multi-replica recovery, safe replica limits,
+and production throughput remain `needs-measurement`.

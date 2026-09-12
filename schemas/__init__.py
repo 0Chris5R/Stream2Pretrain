@@ -56,6 +56,7 @@ from schemas.scientific import (
 from schemas.silver import SilverRecord, SilverSegment, SilverTags
 from schemas.sourcefeed import SourceFeedSpec
 from schemas.topics import (
+    ARXIV_DISCOVERY,
     CURATION_DECISIONS,
     DOCS_CURATED,
     DOCS_NORMALIZED,
@@ -71,6 +72,7 @@ from schemas.topics import (
 )
 
 __all__ = [
+    "ARXIV_DISCOVERY",
     "CURATION_DECISIONS",
     "DOCS_CURATED",
     "DOCS_NORMALIZED",

@@ -57,7 +57,11 @@ def test_monitoring_queries_are_isolated_from_explicit_history_queries() -> None
     assert "await run_query(service.as_of, ts)" in source
     assert "S2P_SERVING_INDEX_ENABLED" in chart
     assert "mountPath: /var/lib/s2p-serving" in chart
-    assert "helm.sh/resource-policy: keep" in chart
+    assert "type: RollingUpdate" in chart
+    assert "maxUnavailable: 0" in chart
+    assert "emptyDir:" in chart
+    assert "persistentVolumeClaim:" not in chart
+    assert "ReadWriteOnce" not in chart
     assert '"_serving_history_decisions"' in index
     assert "_copy_relation" in index
     assert "startupProbe:" in chart

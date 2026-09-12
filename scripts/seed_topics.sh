@@ -2,8 +2,9 @@
 # Stream2Pretrain - create the managed Redpanda topics on the local dev cluster.
 #
 # Idempotent: rpk returns non-zero on "topic already exists"; we tolerate that.
-# Partition / replication match schemas/topics.py::dev_topic_configs (4 / 1
-# for document streams, 1 / 1 for control streams).
+# Partition counts match schemas/topics.py::dev_topic_configs. Replication is
+# configurable so local Docker keeps one replica while the cluster profile can
+# use its three-broker replication factor.
 #
 # Usage:
 #   bash scripts/seed_topics.sh                 # talks to localhost:9092
@@ -12,8 +13,14 @@
 set -euo pipefail
 
 BROKERS="${RPK_BROKERS:-localhost:9092}"
+TOPIC_REPLICAS="${S2P_TOPIC_REPLICATION_FACTOR:-1}"
 RETENTION_MS_DEV=$((7 * 24 * 60 * 60 * 1000))   # 7 days
 RETENTION_MS_SMOKE=$((24 * 60 * 60 * 1000))     # 1 day
+
+if ! [[ "$TOPIC_REPLICAS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "S2P_TOPIC_REPLICATION_FACTOR must be a positive integer" >&2
+  exit 1
+fi
 
 # Prefer running rpk inside the dev container if it is up; otherwise fall back
 # to a host-installed rpk binary. This avoids forcing every contributor to
@@ -51,19 +58,20 @@ create_topic() {
   fi
 }
 
-create_topic "raw.fetched"      4 1
-create_topic "raw.smoke"        4 1 "$RETENTION_MS_SMOKE"
-create_topic "docs.normalized"  4 1
-create_topic "docs.normalized.smoke" 4 1 "$RETENTION_MS_SMOKE"
-create_topic "docs.curated"     4 1
-create_topic "docs.curated.smoke" 4 1 "$RETENTION_MS_SMOKE"
-create_topic "curation.decisions" 4 1
-create_topic "curation.decisions.smoke" 4 1 "$RETENTION_MS_SMOKE"
-create_topic "license.admissions" 1 1
-create_topic "license.admissions.smoke" 4 1 "$RETENTION_MS_SMOKE"
-create_topic "foundry.jobs"     1 1
-create_topic "foundry.events"   1 1
-create_topic "foundry.artifacts" 1 1
+create_topic "arxiv.discovery"  4 "$TOPIC_REPLICAS"
+create_topic "raw.fetched"      4 "$TOPIC_REPLICAS"
+create_topic "raw.smoke"        4 "$TOPIC_REPLICAS" "$RETENTION_MS_SMOKE"
+create_topic "docs.normalized"  4 "$TOPIC_REPLICAS"
+create_topic "docs.normalized.smoke" 4 "$TOPIC_REPLICAS" "$RETENTION_MS_SMOKE"
+create_topic "docs.curated"     4 "$TOPIC_REPLICAS"
+create_topic "docs.curated.smoke" 4 "$TOPIC_REPLICAS" "$RETENTION_MS_SMOKE"
+create_topic "curation.decisions" 4 "$TOPIC_REPLICAS"
+create_topic "curation.decisions.smoke" 4 "$TOPIC_REPLICAS" "$RETENTION_MS_SMOKE"
+create_topic "license.admissions" 4 "$TOPIC_REPLICAS"
+create_topic "license.admissions.smoke" 4 "$TOPIC_REPLICAS" "$RETENTION_MS_SMOKE"
+create_topic "foundry.jobs"     1 "$TOPIC_REPLICAS"
+create_topic "foundry.events"   1 "$TOPIC_REPLICAS"
+create_topic "foundry.artifacts" 1 "$TOPIC_REPLICAS"
 
 echo
 echo "current topics:"

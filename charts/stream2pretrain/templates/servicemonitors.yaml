@@ -1,6 +1,6 @@
 {{- if .Values.observability.serviceMonitor.enabled }}
 {{- $fullName := include "stream2pretrain.fullname" . -}}
-{{- $components := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" "foundry" }}
+{{- $components := list "ingest-hf-cards" "processor-fetcher" "processor-curate" "processor-iceberg-writer" }}
 {{- range $component := $components }}
 ---
 apiVersion: monitoring.coreos.com/v1
@@ -25,6 +25,33 @@ spec:
       interval: {{ $.Values.observability.serviceMonitor.interval }}
       scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout }}
       path: /metrics
+{{- end }}
+{{- if .Values.processor.foundry.enabled }}
+{{- range $component := list "foundry-worker" "foundry-api" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullName }}-{{ $component }}
+  namespace: {{ $.Values.observability.serviceMonitor.namespace }}
+  labels:
+    {{- include "stream2pretrain.componentLabels" (dict "ctx" $ "component" $component) | nindent 4 }}
+    {{- with $.Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ $.Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
+  endpoints:
+    - port: {{ ternary "metrics" "http" (eq $component "foundry-worker") }}
+      interval: {{ $.Values.observability.serviceMonitor.interval }}
+      scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+{{- end }}
 {{- end }}
 {{- $root := . }}
 {{- if .Values.processor.modelService.enabled }}

@@ -37,7 +37,7 @@ from ingest.common.logging import configure_logging, get_logger
 from ingest.common.minio_writer import MinioWriter
 from ingest.common.otel import init_tracer
 from ingest.common.rate_limit import TokenBucket
-from ingest.common.state import FeedStateStore
+from ingest.common.state import FeedStateStore, cursor_lease
 from schemas.sourcefeed import SourceFeedSpec
 
 log = get_logger(__name__)
@@ -173,7 +173,9 @@ async def run_pass(cfg: IngestConfig, feeds: Iterable[SourceFeedSpec]) -> int:
     async with (
         build_async_client(cfg) as client,
         BronzeProducer(
-            cfg.redpanda_brokers, topic=cfg.raw_topic, client_id="s2p-rss-poller"
+            cfg.redpanda_brokers,
+            topic=cfg.arxiv_discovery_topic,
+            client_id="s2p-rss-poller",
         ) as producer,
         MinioWriter(
             cfg.minio_endpoint,
@@ -183,18 +185,22 @@ async def run_pass(cfg: IngestConfig, feeds: Iterable[SourceFeedSpec]) -> int:
         ) as minio,
     ):
         for feed in feeds:
-            try:
-                total += await poll_feed(
-                    feed,
-                    client=client,
-                    producer=producer,
-                    minio=minio,
-                    bucket=cfg.minio_bronze_bucket,
-                    state_store=state_store,
-                )
-            except Exception as exc:
-                log.exception("feed.unhandled_error", feed=feed.name, err=str(exc))
-                failures.append(feed.name)
+            async with cursor_lease(feed.name) as owns_cursor:
+                if not owns_cursor:
+                    log.info("feed.cursor_owned", feed=feed.name)
+                    continue
+                try:
+                    total += await poll_feed(
+                        feed,
+                        client=client,
+                        producer=producer,
+                        minio=minio,
+                        bucket=cfg.minio_bronze_bucket,
+                        state_store=state_store,
+                    )
+                except Exception as exc:
+                    log.exception("feed.unhandled_error", feed=feed.name, err=str(exc))
+                    failures.append(feed.name)
     if failures:
         raise RuntimeError(f"RSS feed polling failed: {', '.join(failures)}")
     return total

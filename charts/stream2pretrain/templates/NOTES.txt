@@ -4,8 +4,8 @@ Components:
 - Ingest: arXiv (OAI-PMH + 4 RSS + native HTML fetcher) and Hugging Face
   model/dataset cards.
 - Processor: fetcher (Resiliparse), curator (Bytewax StatefulSet), Iceberg
-  writer, and post-training foundry (paper-to-SFT/RL
-  StatefulSet plus control API and per-artifact human audits).
+  writer, and post-training foundry (paper-to-SFT/RL worker StatefulSet,
+  independently scaled control API, and per-artifact human audits).
 - Source scheduling: source-controller (kopf) + SourceFeed CRDs.
 {{- if .Values.ui.ingress.enabled }}
 - UI: Next.js 16 reachable at https://{{ .Values.ui.ingress.host }}/ once DNS
@@ -20,6 +20,8 @@ Required external secrets (create before installing or use sealed-secrets):
       --from-literal=accessKey=... --from-literal=secretKey=...
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.sources.huggingface.models.tokenSecret }} \
       --from-literal=token=hf_...
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.coordination.databaseUrlSecret }} \
+      --from-literal={{ .Values.coordination.databaseUrlKey }}=postgresql://...
 {{- if .Values.processor.foundry.enabled }}
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.processor.foundry.providerSecret }} \
       --from-literal={{ .Values.processor.foundry.hetznerKey }}=... \
@@ -40,6 +42,7 @@ The deployment bootstrap creates {{ .Values.processor.foundry.signingKeySecret }
 once when absent. Pre-provision that Secret before installation to use a
 team-managed Ed25519 identity.
 {{- if .Values.processor.foundry.enabled }}
-  kubectl -n {{ .Release.Namespace }} get statefulset/{{ include "stream2pretrain.fullname" . }}-foundry
+  kubectl -n {{ .Release.Namespace }} get statefulset/{{ include "stream2pretrain.fullname" . }}-foundry-worker
+  kubectl -n {{ .Release.Namespace }} get deployment/{{ include "stream2pretrain.fullname" . }}-foundry-api
   # The configured Hetzner Qwen3.8 model must be discoverable before the worker is Ready.
 {{- end }}

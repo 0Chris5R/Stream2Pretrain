@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -50,6 +51,7 @@ DEFAULT_GOLD_NAMESPACE: str = "gold"
 DEFAULT_GOLD_TABLE: str = "curated"
 DEFAULT_BATCH_SIZE: int = 256
 DEFAULT_FLUSH_INTERVAL_SECONDS: int = 60
+DEFAULT_COMMIT_ATTEMPTS: int = 8
 DecisionKey = tuple[str, str, str, str]
 
 
@@ -72,6 +74,41 @@ def _is_missing_catalog_table(exc: Exception) -> bool:
     name = exc.__class__.__name__.lower()
     message = str(exc).lower()
     return "nosuchtable" in name or "not found" in message or "does not exist" in message
+
+
+def _is_table_already_exists(exc: Exception) -> bool:
+    name = exc.__class__.__name__.lower()
+    return "tablealreadyexists" in name or "alreadyexiststable" in name
+
+
+def _is_retryable_commit_error(exc: Exception) -> bool:
+    return type(exc).__name__ in {
+        "CommitFailedException",
+        "CommitStateUnknownException",
+    }
+
+
+def _commit_attempts() -> int:
+    return _positive_int_env("S2P_ICEBERG_COMMIT_ATTEMPTS", DEFAULT_COMMIT_ATTEMPTS)
+
+
+def _commit_retry_delay(attempt: int) -> float:
+    """Match the bounded retry policy used by the other Iceberg sinks."""
+    return min(2.0, 0.1 * 2**attempt)
+
+
+def _create_table_or_load(
+    catalog: Catalog,
+    identifier: tuple[str, str],
+    **create_kwargs: Any,
+) -> Table:
+    """Return the table created by this replica or the concurrent winner."""
+    try:
+        return catalog.create_table(identifier=identifier, **create_kwargs)
+    except Exception as exc:
+        if not _is_table_already_exists(exc):
+            raise
+        return catalog.load_table(identifier)
 
 
 def _ensure_optional_columns(table: Table, columns: tuple[tuple[str, object], ...]) -> None:
@@ -113,7 +150,7 @@ class LicenseAdmissionWriter:
 
     def __init__(self, catalog: Catalog) -> None:
         self._catalog = catalog
-        self._known_ids: set[str] | None = None
+        self._lock = threading.Lock()
 
     def add(self, decision: LicenseAdmissionDecision) -> bool:
         """Compatibility wrapper for callers that submit one decision."""
@@ -121,26 +158,44 @@ class LicenseAdmissionWriter:
 
     def add_batch(self, decisions: list[LicenseAdmissionDecision]) -> int:
         """Append one data file and snapshot for all new decisions in the batch."""
+        with self._lock:
+            return self._add_batch_locked(decisions)
+
+    def _add_batch_locked(self, decisions: list[LicenseAdmissionDecision]) -> int:
+        """Commit one batch while serializing worker threads in this process."""
         if not decisions:
             return 0
-        table = self._ensure_table()
-        _ensure_maintenance_properties(table)
-        if self._known_ids is None:
-            self._known_ids = self._load_ids(table)
-        pending: list[LicenseAdmissionDecision] = []
-        pending_ids: set[str] = set()
+        unique: list[LicenseAdmissionDecision] = []
+        unique_ids: set[str] = set()
         for decision in decisions:
-            if decision.decision_id in self._known_ids or decision.decision_id in pending_ids:
+            if decision.decision_id in unique_ids:
                 continue
-            pending.append(decision)
-            pending_ids.add(decision.decision_id)
-        if not pending:
-            return 0
-        table.append(self._to_arrow(pending))
-        self._known_ids.update(pending_ids)
-        return len(pending)
+            unique.append(decision)
+            unique_ids.add(decision.decision_id)
+
+        attempts = _commit_attempts()
+        for attempt in range(attempts):
+            try:
+                table = self._ensure_table()
+                _ensure_maintenance_properties(table)
+                durable_ids = self._load_ids(table)
+                pending = [
+                    decision for decision in unique if decision.decision_id not in durable_ids
+                ]
+                if not pending:
+                    return 0
+                table.append(self._to_arrow(pending))
+                return len(pending)
+            except Exception as exc:
+                if not _is_retryable_commit_error(exc) or attempt == attempts - 1:
+                    raise
+                time.sleep(_commit_retry_delay(attempt))
+        raise AssertionError("unreachable")
 
     def _load_ids(self, table: Table) -> set[str]:
+        refresh = getattr(table, "refresh", None)
+        if callable(refresh):
+            refresh()
         return {
             str(value)
             for value in table.scan(selected_fields=("decision_id",))
@@ -211,7 +266,8 @@ class LicenseAdmissionWriter:
             PartitionField(6, 1001, IdentityTransform(), "status"),
             PartitionField(5, 1002, MonthTransform(), "observed_month"),
         )
-        return self._catalog.create_table(
+        return _create_table_or_load(
+            self._catalog,
             identifier,
             schema=schema,
             partition_spec=spec,
@@ -349,7 +405,6 @@ class IcebergWriter:
         self._batch_size = batch_size
         self._buffer = _Buffer()
         self._lock = threading.Lock()
-        self._known_keys: dict[str, set[DecisionKey]] = {}
 
     @classmethod
     def from_config(
@@ -399,68 +454,79 @@ class IcebergWriter:
         rows = list(self._buffer.rows)
         watermark = self._buffer.watermark
         accepted_rows = [row for row in rows if _is_trainable_gold(row)]
-        decisions_table = self._ensure_decisions_table()
-        _ensure_maintenance_properties(decisions_table)
-        decision_rows = self._uncommitted_rows("decisions", decisions_table, rows)
-        gold_table = self._ensure_table() if accepted_rows else None
-        if gold_table is not None:
-            _ensure_maintenance_properties(gold_table)
-        gold_rows = (
-            self._uncommitted_rows("gold", gold_table, accepted_rows)
-            if gold_table is not None
-            else []
-        )
         started = time.perf_counter()
-        decision_snapshot_id: int | None = None
-        if decision_rows:
-            decision_snapshot_id = self._append(
-                decisions_table,
-                self._to_arrow(decision_rows),
-                _rows_watermark(decision_rows),
+        decisions_committed, decision_snapshot_id = self._commit_unique_rows(
+            table_loader=self._ensure_decisions_table,
+            rows=rows,
+            failure_message="iceberg decision append failed: buffer preserved",
+        )
+        rows_committed = 0
+        if accepted_rows:
+            rows_committed, _gold_snapshot_id = self._commit_unique_rows(
+                table_loader=self._ensure_table,
+                rows=accepted_rows,
+                failure_message=(
+                    "gold append failed after the durable decision commit. Replay is safe"
+                ),
             )
-            if decision_snapshot_id is None:
-                raise RuntimeError(
-                    f"iceberg decision append failed for {len(decision_rows)} rows; buffer preserved"
-                )
-            self._remember_rows("decisions", decision_rows)
-
-        if gold_rows and gold_table is not None:
-            gold_snapshot_id = self._append(
-                gold_table,
-                self._to_arrow(gold_rows),
-                _rows_watermark(gold_rows),
-            )
-            if gold_snapshot_id is None:
-                raise RuntimeError(
-                    "gold append failed after the durable decision commit; replay is safe"
-                )
-            self._remember_rows("gold", gold_rows)
         elapsed = time.perf_counter() - started
         self._buffer.reset()
         if self._metrics is not None:
             self._metrics.record_iceberg_flush(
-                rows=len(gold_rows),
-                decisions=len(decision_rows),
+                rows=rows_committed,
+                decisions=decisions_committed,
                 seconds=elapsed,
             )
         return WriterStats(
-            rows_committed=len(gold_rows),
-            decisions_committed=len(decision_rows),
+            rows_committed=rows_committed,
+            decisions_committed=decisions_committed,
             snapshot_id=decision_snapshot_id,
             watermark=watermark,
         )
 
+    def _commit_unique_rows(
+        self,
+        *,
+        table_loader: Callable[[], Table],
+        rows: list[GoldRecord],
+        failure_message: str,
+    ) -> tuple[int, int | None]:
+        """Commit rows after checking durable keys on every metadata version.
+
+        Each attempt loads a fresh table and scans its committed recipe keys.
+        This makes process memory a performance detail rather than the source
+        of truth. A concurrent append conflict or unknown commit state reloads
+        both metadata and keys before deciding whether another append is safe.
+        """
+        attempts = _commit_attempts()
+        for attempt in range(attempts):
+            try:
+                table = table_loader()
+                _ensure_maintenance_properties(table)
+                pending = self._uncommitted_rows(table, rows)
+                if not pending:
+                    return 0, None
+                snapshot_id = self._append(
+                    table,
+                    self._to_arrow(pending),
+                    _rows_watermark(pending),
+                )
+                if snapshot_id is None:
+                    raise RuntimeError(failure_message)
+                return len(pending), snapshot_id
+            except Exception as exc:
+                if not _is_retryable_commit_error(exc) or attempt == attempts - 1:
+                    raise
+                time.sleep(_commit_retry_delay(attempt))
+        raise AssertionError("unreachable")
+
     def _uncommitted_rows(
         self,
-        cache_name: str,
         table: Table,
         rows: list[GoldRecord],
     ) -> list[GoldRecord]:
         """Return one row per recipe key that the target table does not contain."""
-        existing = self._known_keys.get(cache_name)
-        if existing is None:
-            existing = self._load_existing_keys(table)
-            self._known_keys[cache_name] = existing
+        existing = self._load_existing_keys(table)
         pending: set[DecisionKey] = set()
         output: list[GoldRecord] = []
         for row in rows:
@@ -508,9 +574,6 @@ class IcebergWriter:
             }
         except Exception as exc:
             raise RuntimeError("failed to read committed Iceberg decision keys") from exc
-
-    def _remember_rows(self, cache_name: str, rows: list[GoldRecord]) -> None:
-        self._known_keys.setdefault(cache_name, set()).update(_decision_key(row) for row in rows)
 
     def _ensure_table(self) -> Table:
         """Create the accepted Gold table if missing."""
@@ -683,8 +746,9 @@ class IcebergWriter:
                 source_id=14, field_id=1002, transform=MonthTransform(), name="valid_from_month"
             ),
         )
-        return self._catalog.create_table(
-            identifier=identifier,
+        return _create_table_or_load(
+            self._catalog,
+            identifier,
             schema=schema,
             partition_spec=partition_spec,
             properties={
@@ -903,6 +967,15 @@ def _is_trainable_gold(record: GoldRecord) -> bool:
     )
 
 
+def _kafka_partition_key(message: object) -> str:
+    """Keep each source partition ordered while distributing partitions."""
+    topic = getattr(message, "topic", None)
+    partition = getattr(message, "partition", None)
+    if not isinstance(topic, str) or not isinstance(partition, int):
+        raise RuntimeError("Kafka source message is missing topic or partition metadata")
+    return f"{topic}:{partition}"
+
+
 def build_dataflow(
     cfg: common.ProcessorConfig,
     *,
@@ -925,7 +998,7 @@ def build_dataflow(
             DEFAULT_FLUSH_INTERVAL_SECONDS,
         )
     )
-    flow = Dataflow(os.environ.get("S2P_BYTEWAX_FLOW_NAME", "s2p-iceberg-writer-live-v2"))
+    flow = Dataflow(os.environ.get("S2P_BYTEWAX_FLOW_NAME", "s2p-iceberg-writer-live-v3"))
     # The configured offset is only the bootstrap frontier for a new recovery
     # database. Once snapshots exist, Bytewax recovery owns progress.
     start_offset = common.kafka_starting_offset()
@@ -940,14 +1013,14 @@ def build_dataflow(
     )
     inp = op.input("docs_curated", flow, source)
 
-    def _decode_gold(msg: object) -> GoldRecord | None:
+    def _decode_gold(msg: object) -> tuple[str, GoldRecord] | None:
         payload = getattr(msg, "value", None)
         if payload is None:
             failure_writer.record(stage="iceberg-gold", message=msg, reason="kafka_tombstone")
             PROCESSOR_METRICS.record_failure(stage="iceberg", reason="kafka_tombstone")
             return None
         try:
-            return common.gold_loads(payload)
+            return (_kafka_partition_key(msg), common.gold_loads(payload))
         except Exception as exc:
             with tracer.start_as_current_span("iceberg.decode") as span:
                 span.record_exception(exc)
@@ -959,9 +1032,10 @@ def build_dataflow(
             PROCESSOR_METRICS.record_failure(stage="iceberg", reason=type(exc).__name__)
             return None
 
-    def _ingest(batch: tuple[str, list[GoldRecord]]) -> None:
+    def _ingest(batch: tuple[str, list[tuple[str, GoldRecord]]]) -> None:
         with tracer.start_as_current_span("iceberg.append") as span:
-            _key, rows = batch
+            _key, partition_rows = batch
+            rows = [row for _, row in partition_rows]
             stats = None
             for row in rows:
                 result = writer.add(row)
@@ -981,7 +1055,7 @@ def build_dataflow(
             )
 
     decoded = op.filter_map("decode_curated", inp, _decode_gold)
-    keyed = op.key_on("key_curated", decoded, lambda _record: "iceberg")
+    keyed = op.key_on("key_curated", decoded, lambda item: item[0])
     batches = op.collect(
         "batch_curated",
         keyed,
@@ -1001,7 +1075,7 @@ def build_dataflow(
     )
     admission_inp = op.input("license_admissions", flow, admission_source)
 
-    def _decode_admission(msg: object) -> LicenseAdmissionDecision | None:
+    def _decode_admission(msg: object) -> tuple[str, LicenseAdmissionDecision] | None:
         payload = getattr(msg, "value", None)
         if payload is None:
             failure_writer.record(
@@ -1012,7 +1086,10 @@ def build_dataflow(
             PROCESSOR_METRICS.record_failure(stage="iceberg", reason="kafka_tombstone")
             return None
         try:
-            return LicenseAdmissionDecision.model_validate_json(payload)
+            return (
+                _kafka_partition_key(msg),
+                LicenseAdmissionDecision.model_validate_json(payload),
+            )
         except ValueError as exc:
             failure_writer.record(
                 stage="iceberg-license-admission",
@@ -1022,10 +1099,13 @@ def build_dataflow(
             PROCESSOR_METRICS.record_failure(stage="iceberg", reason=type(exc).__name__)
             return None
 
-    def _ingest_admission(batch: tuple[str, list[LicenseAdmissionDecision]]) -> None:
+    def _ingest_admission(
+        batch: tuple[str, list[tuple[str, LicenseAdmissionDecision]]],
+    ) -> None:
         with tracer.start_as_current_span("iceberg.license_admission") as span:
             try:
-                _key, decisions = batch
+                _key, partition_decisions = batch
+                decisions = [decision for _, decision in partition_decisions]
                 committed = admission_writer.add_batch(decisions)
                 span.set_attribute("batch_records", len(decisions))
                 span.set_attribute("committed", committed)
@@ -1041,7 +1121,7 @@ def build_dataflow(
     keyed_admissions = op.key_on(
         "key_license_admissions",
         decoded_admissions,
-        lambda _decision: "iceberg",
+        lambda item: item[0],
     )
     admission_batches = op.collect(
         "batch_license_admissions",
@@ -1076,6 +1156,6 @@ def main() -> None:
     common.run_bytewax_flow(
         flow,
         cfg,
-        os.environ.get("S2P_BYTEWAX_RECOVERY_NAME", "iceberg-writer-live-v2"),
+        os.environ.get("S2P_BYTEWAX_RECOVERY_NAME", "iceberg-writer-live-v3"),
         runtime_status=runtime_status,
     )

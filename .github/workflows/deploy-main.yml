@@ -148,7 +148,7 @@ jobs:
             storage=true
           fi
           if grep -Eq \
-            '^(charts/polaris-(postgres|metastore-bootstrap)/.*|infra/helmfile-values/polaris\.dev\.yaml|helmfile\.yaml)$' \
+            '^(charts/polaris-(postgres|metastore-bootstrap)/.*|infra/helmfile-values/(cloudnative-pg|polaris-postgres|polaris)\.dev\.yaml|helmfile\.yaml)$' \
             "$changed"; then
             catalog=true
           fi
@@ -288,14 +288,16 @@ jobs:
           if ("CronJob", "stream2pretrain-ingest-blogs") in by_name:
               raise SystemExit("aggregate ingest-blogs CronJob must not be rendered")
           for kind, name in (
-              ("Deployment", "stream2pretrain-processor-fetcher"),
+              ("StatefulSet", "stream2pretrain-processor-fetcher"),
               ("StatefulSet", "stream2pretrain-processor-curate"),
-              ("Deployment", "stream2pretrain-processor-iceberg-writer"),
-              ("Deployment", "stream2pretrain-ingest-arxiv-html"),
+              ("StatefulSet", "stream2pretrain-processor-iceberg-writer"),
           ):
               resource = by_name.get((kind, name))
               if resource is None or resource.get("spec", {}).get("replicas") != 1:
                   raise SystemExit(f"core workload must render exactly one replica: {name}")
+          arxiv_fetcher = by_name.get(("Deployment", "stream2pretrain-ingest-arxiv-html"))
+          if arxiv_fetcher is None or arxiv_fetcher.get("spec", {}).get("replicas") != 2:
+              raise SystemExit("arXiv fetcher must render two eligible replicas")
 
           for profile in ("quality",):
               name = f"stream2pretrain-processor-model-service-{profile}"
@@ -336,7 +338,7 @@ jobs:
 
           runtime_contracts = (
               (
-                  "Deployment",
+                  "StatefulSet",
                   "stream2pretrain-processor-fetcher",
                   "fetcher",
                   {
@@ -358,13 +360,13 @@ jobs:
                   },
               ),
               (
-                  "Deployment",
+                  "StatefulSet",
                   "stream2pretrain-processor-iceberg-writer",
                   "iceberg-writer",
                   {
                       "S2P_KAFKA_START_OFFSET": "stored",
-                      "S2P_BYTEWAX_FLOW_NAME": "s2p-iceberg-writer-live-v2",
-                      "S2P_BYTEWAX_RECOVERY_NAME": "iceberg-writer-live-v2",
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-iceberg-writer-live-v3",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "iceberg-writer-live-v3",
                       "S2P_BYTEWAX_RECOVERY_PARTITIONS": "1",
                   },
               ),
@@ -384,7 +386,6 @@ jobs:
               "stream2pretrain-processor-fetcher",
               "stream2pretrain-processor-curate",
               "stream2pretrain-processor-iceberg-writer",
-              "stream2pretrain-ingest-arxiv-html",
           }
           rendered_scalers = {
               item.get("metadata", {}).get("name")
@@ -394,6 +395,179 @@ jobs:
           overlap = sorted(forbidden_scalers & rendered_scalers)
           if overlap:
               raise SystemExit(f"invalid Kafka-lag ScaledObject rendered: {overlap}")
+          PY
+          scaled_chart="$RUNNER_TEMP/stream2pretrain-horizontal-rendered.yaml"
+          helm lint charts/stream2pretrain \
+            -f charts/stream2pretrain/values-dev.yaml \
+            -f infra/helmfile-values/stream2pretrain.dev.yaml \
+            -f infra/helmfile-values/stream2pretrain.horizontal-scaling.yaml
+          helm template stream2pretrain charts/stream2pretrain \
+            --namespace stream2pretrain \
+            -f charts/stream2pretrain/values-dev.yaml \
+            -f infra/helmfile-values/stream2pretrain.dev.yaml \
+            -f infra/helmfile-values/stream2pretrain.horizontal-scaling.yaml \
+            > "$scaled_chart"
+          uv run python - "$scaled_chart" <<'PY'
+          import sys
+
+          import yaml
+
+
+          resources = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+          by_name = {
+              (item.get("kind"), item.get("metadata", {}).get("name")): item
+              for item in resources
+          }
+          contracts = (
+              (
+                  "stream2pretrain-processor-fetcher",
+                  "fetcher",
+                  {
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-fetcher-live-v5",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "fetcher-live-v5",
+                  },
+              ),
+              (
+                  "stream2pretrain-processor-curate",
+                  "curate",
+                  {
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-curate-live-v5",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "curate-live-v5",
+                  },
+              ),
+              (
+                  "stream2pretrain-processor-iceberg-writer",
+                  "iceberg-writer",
+                  {
+                      "S2P_BYTEWAX_FLOW_NAME": "s2p-iceberg-writer-live-v3",
+                      "S2P_BYTEWAX_RECOVERY_NAME": "iceberg-writer-live-v3",
+                  },
+              ),
+              ("stream2pretrain-foundry-worker", "worker", {}),
+          )
+          for workload_name, container_name, component_env in contracts:
+              statefulset = by_name.get(("StatefulSet", workload_name))
+              service = by_name.get(("Service", workload_name))
+              if statefulset is None or statefulset["spec"].get("replicas") != 2:
+                  raise SystemExit(
+                      f"distributed Bytewax StatefulSet must render two replicas: {workload_name}"
+                  )
+              if service is None or service["spec"].get("clusterIP") != "None":
+                  raise SystemExit(
+                      f"distributed Bytewax peer Service must be headless: {workload_name}"
+                  )
+              if service["spec"].get("publishNotReadyAddresses") is not True:
+                  raise SystemExit(
+                      f"distributed Bytewax peer discovery must publish starting Pods: {workload_name}"
+                  )
+
+              pod_spec = statefulset["spec"]["template"]["spec"]
+              hostfile_init = next(
+                  item
+                  for item in pod_spec.get("initContainers", [])
+                  if item.get("name") == "bytewax-hostfile"
+              )
+              hostfile_script = "\n".join(hostfile_init.get("command", []))
+              expected_host = f"{workload_name}-${{index}}.{workload_name}."
+              if expected_host not in hostfile_script:
+                  raise SystemExit(
+                      f"distributed Bytewax hostfile does not use stable peer DNS: {workload_name}"
+                  )
+
+              container = next(
+                  item
+                  for item in pod_spec["containers"]
+                  if item.get("name") == container_name
+              )
+              env = {item["name"]: item for item in container.get("env", [])}
+              expected_values = {
+                  "BYTEWAX_STATEFULSET_NAME": workload_name,
+                  "BYTEWAX_HOSTFILE_PATH": "/etc/bytewax/hostfile.txt",
+                  **component_env,
+              }
+              for key, expected in expected_values.items():
+                  if env.get(key, {}).get("value") != expected:
+                      raise SystemExit(
+                          f"distributed Bytewax environment drifted for {workload_name}: {key}"
+                      )
+              pod_name_ref = env.get("BYTEWAX_POD_NAME", {}).get("valueFrom", {})
+              if pod_name_ref.get("fieldRef", {}).get("fieldPath") != "metadata.name":
+                  raise SystemExit(
+                      f"distributed Bytewax process identity is not the Pod name: {workload_name}"
+                  )
+
+              recovery_volume = next(
+                  item for item in pod_spec["volumes"] if item.get("name") == "recovery"
+              )
+              claim_name = recovery_volume["persistentVolumeClaim"]["claimName"]
+              claim = by_name.get(("PersistentVolumeClaim", claim_name))
+              if claim is None:
+                  raise SystemExit(
+                      f"distributed Bytewax checkpoint claim is not rendered: {workload_name}"
+                  )
+              claim_spec = claim["spec"]
+              if "ReadWriteMany" not in claim_spec.get("accessModes", []):
+                  raise SystemExit(
+                      f"distributed Bytewax checkpoint is not RWX: {workload_name}"
+                  )
+              if claim_spec.get("storageClassName") != "longhorn":
+                  raise SystemExit(
+                      f"distributed Bytewax checkpoint is not on Longhorn: {workload_name}"
+                  )
+
+          replicated_deployments = (
+              "stream2pretrain-ingest-arxiv-html",
+              "stream2pretrain-ingest-hf-cards",
+              "stream2pretrain-duckdb",
+              "stream2pretrain-foundry-api",
+              "stream2pretrain-source-controller",
+              "stream2pretrain-ui",
+          )
+          for name in replicated_deployments:
+              deployment = by_name.get(("Deployment", name))
+              if deployment is None or deployment["spec"].get("replicas") != 2:
+                  raise SystemExit(
+                      f"horizontal application profile must render two replicas: {name}"
+                  )
+
+          for profile in ("quality", "kenlm"):
+              name = f"stream2pretrain-processor-model-service-{profile}"
+              scaler = by_name.get(("ScaledObject", name))
+              if scaler is None or scaler["spec"].get("minReplicaCount") != 2:
+                  raise SystemExit(
+                      f"horizontal model profile must retain two replicas: {name}"
+                  )
+
+          duckdb = by_name[("Deployment", "stream2pretrain-duckdb")]
+          serving_index = next(
+              item
+              for item in duckdb["spec"]["template"]["spec"]["volumes"]
+              if item.get("name") == "serving-index"
+          )
+          if "emptyDir" not in serving_index:
+              raise SystemExit("each DuckDB replica needs an independent rebuildable index")
+
+          for name in (
+              "stream2pretrain-ingest-rss",
+              "stream2pretrain-ingest-oaipmh",
+          ):
+              cronjob = by_name[("CronJob", name)]
+              container = cronjob["spec"]["jobTemplate"]["spec"]["template"]["spec"][
+                  "containers"
+              ][0]
+              env = {item["name"]: item.get("value") for item in container.get("env", [])}
+              if env.get("S2P_CURSOR_LEASE_BACKEND") != "kubernetes":
+                  raise SystemExit(f"source worker lacks shared cursor fencing: {name}")
+
+          source_controller = by_name[("Deployment", "stream2pretrain-source-controller")]
+          controller = source_controller["spec"]["template"]["spec"]["containers"][0]
+          controller_env = {
+              item["name"]: item.get("value") for item in controller.get("env", [])
+          }
+          if controller_env.get("S2P_CURSOR_LEASE_BACKEND") != "kubernetes":
+              raise SystemExit("SourceController lacks shared leader election")
+          if ("PodDisruptionBudget", "stream2pretrain-source-controller") not in by_name:
+              raise SystemExit("replicated SourceController lacks a disruption budget")
           PY
           helmfile \
             --helm-binary "$(command -v helm)" \
@@ -1204,6 +1378,135 @@ jobs:
           kubectl --request-timeout=20s get nodes
           finish_phase "VPN and cluster connection"
 
+          if [[ "$DEPLOY_MODE" == "deploy" ]]; then
+            migration_guard_render="$RUNNER_TEMP/stream2pretrain-migration-guard.yaml"
+            helm template stream2pretrain charts/stream2pretrain \
+              --namespace stream2pretrain \
+              -f charts/stream2pretrain/values-dev.yaml \
+              -f infra/helmfile-values/stream2pretrain.dev.yaml \
+              > "$migration_guard_render"
+            legacy_checkpoint_contracts="$(
+              uv run python - "$migration_guard_render" <<'PY'
+          import sys
+
+          import yaml
+
+
+          resources = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+          claims = {
+              item.get("metadata", {}).get("name")
+              for item in resources
+              if item.get("kind") == "PersistentVolumeClaim"
+          }
+          statefulsets = {
+              item.get("metadata", {}).get("labels", {}).get(
+                  "app.kubernetes.io/component"
+              ): item
+              for item in resources
+              if item.get("kind") == "StatefulSet"
+          }
+          for component, legacy_claim in (
+              ("processor-curate", "checkpoint-stream2pretrain-processor-curate-0"),
+              ("foundry-worker", "state-stream2pretrain-foundry-0"),
+          ):
+              statefulset = statefulsets.get(component)
+              if statefulset is None:
+                  continue
+              recovery = next(
+                  volume
+                  for volume in statefulset["spec"]["template"]["spec"]["volumes"]
+                  if volume.get("name") == "recovery"
+              )
+              claim_name = recovery["persistentVolumeClaim"]["claimName"]
+              managed = "true" if claim_name in claims else "false"
+              print(
+                  "|".join(
+                      (
+                          component,
+                          str(statefulset["spec"]["replicas"]),
+                          claim_name,
+                          managed,
+                          legacy_claim,
+                      )
+                  )
+              )
+          PY
+            )"
+            while IFS='|' read -r component replicas claim managed legacy_claim; do
+              [[ -n "$component" ]] || continue
+              if ! kubectl -n stream2pretrain get "pvc/$legacy_claim" \
+                >/dev/null 2>&1; then
+                continue
+              fi
+              if [[ "$managed" == "true" ]]; then
+                echo "Legacy Bytewax recovery still exists: $legacy_claim" >&2
+                echo "Set the component existingClaim to an explicitly copied and verified target before this upgrade." >&2
+                exit 1
+              fi
+              if ! target_claim="$(
+                kubectl -n stream2pretrain get "pvc/$claim" -o json 2>/dev/null
+              )"; then
+                echo "Copied Bytewax checkpoint target is missing: $claim" >&2
+                echo "Copy and verify $legacy_claim before this upgrade." >&2
+                exit 1
+              fi
+              migrated_from="$(
+                jq -r '.metadata.annotations["stream2pretrain.io/migrated-from"] // empty' \
+                  <<< "$target_claim"
+              )"
+              migration_verified="$(
+                jq -r '.metadata.annotations["stream2pretrain.io/migration-verified"] // empty' \
+                  <<< "$target_claim"
+              )"
+              if [[ "$migrated_from" != "$legacy_claim" \
+                 || "$migration_verified" != "true" ]]; then
+                echo "Bytewax migration target is not marked as copied and verified: $claim" >&2
+                echo "Migrate recovery plus local decision and duplicate state before setting the migration annotations." >&2
+                echo "Required annotations: stream2pretrain.io/migrated-from=$legacy_claim and stream2pretrain.io/migration-verified=true" >&2
+                exit 1
+              fi
+              if [[ "$component" == "foundry-worker" ]]; then
+                if ! coordination_secret="$(
+                  kubectl -n stream2pretrain get \
+                    secret/stream2pretrain-coordination -o json 2>/dev/null
+                )"; then
+                  echo "Foundry control-state migration marker Secret is missing." >&2
+                  exit 1
+                fi
+                foundry_control_migrated_from="$(
+                  jq -r '.metadata.annotations["stream2pretrain.io/foundry-control-migrated-from"] // empty' \
+                    <<< "$coordination_secret"
+                )"
+                foundry_control_migration_verified="$(
+                  jq -r '.metadata.annotations["stream2pretrain.io/foundry-control-migration-verified"] // empty' \
+                    <<< "$coordination_secret"
+                )"
+                foundry_control_manifest_sha256="$(
+                  jq -r '.metadata.annotations["stream2pretrain.io/foundry-control-migration-manifest-sha256"] // empty' \
+                    <<< "$coordination_secret"
+                )"
+                if [[ "$foundry_control_migrated_from" != "$legacy_claim" \
+                   || "$foundry_control_migration_verified" != "true" \
+                   || ! "$foundry_control_manifest_sha256" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+                  echo "Foundry SQLite control and quota migration is not independently verified." >&2
+                  echo "Annotate secret/stream2pretrain-coordination with the migrated source, verified flag and 64-hex manifest digest." >&2
+                  exit 1
+                fi
+              fi
+              if [[ "$replicas" -gt 1 ]]; then
+                target_modes="$(jq -r '.spec.accessModes // [] | join(",")' <<< "$target_claim")"
+                target_class="$(jq -r '.spec.storageClassName // empty' <<< "$target_claim")"
+                if [[ ",$target_modes," != *,ReadWriteMany,* \
+                   || -z "$target_class" \
+                   || "$target_class" == "local-path" ]]; then
+                  echo "Copied Bytewax checkpoint target is not explicit non-local RWX storage: $claim" >&2
+                  exit 1
+                fi
+              fi
+            done <<< "$legacy_checkpoint_contracts"
+            finish_phase "Legacy Bytewax checkpoint migration guard"
+          fi
+
           if [[ "$DNS_INFRA_CHANGED" == "true" ]]; then
             kubectl -n kube-system patch deployment/coredns \
               --type=strategic \
@@ -1251,7 +1554,7 @@ jobs:
               python - < scripts/capture_submission_metrics.py > "$evidence_dir/metrics.json"
             kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
               python - < scripts/inspect_object_store.py > "$evidence_dir/storage.json"
-            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-foundry -c api -- \
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-foundry-api -c api -- \
               python - foundry < scripts/check_pipeline_live.py > "$evidence_dir/foundry.json"
             for node in $(kubectl get nodes -o name); do
               node="${node#node/}"
@@ -1267,11 +1570,11 @@ jobs:
               python - duckdb < scripts/check_pipeline_live.py
             kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-curate -c curate -- \
               python - curator < scripts/check_pipeline_live.py
-            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-processor-fetcher -- \
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-fetcher -- \
               python - fetcher < scripts/check_pipeline_live.py
             kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-curate -c curate -- \
               python - < scripts/live_classifier_diagnostics.py
-            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-foundry -c api -- \
+            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-foundry-api -c api -- \
               python - foundry < scripts/check_pipeline_live.py
             exit 0
           fi
@@ -1308,21 +1611,23 @@ jobs:
           if [[ "$DEPLOY_MODE" == "validate-foundry" ]]; then
             echo "::group::Bounded live foundry validation"
             kubectl -n stream2pretrain rollout status \
-              statefulset/stream2pretrain-foundry --timeout=180s
+              statefulset/stream2pretrain-foundry-worker --timeout=180s
+            kubectl -n stream2pretrain rollout status \
+              deployment/stream2pretrain-foundry-api --timeout=180s
             # The headless Service publishes not-ready addresses so the worker
             # and API sidecars can discover each other during startup. Wait on
             # the concrete Pod before asking port-forward to select a target.
             kubectl -n stream2pretrain wait \
               --for=condition=Ready \
-              pod/stream2pretrain-foundry-0 --timeout=180s
-            # Run inside the API sidecar so the Foundry bearer token is never
+              pod/stream2pretrain-foundry-worker-0 --timeout=180s
+            # Run inside the API Deployment so the Foundry bearer token is never
             # consumed by the Kubernetes API server or printed by the runner.
             validation_status=0
             kubectl -n stream2pretrain exec -i \
-              statefulset/stream2pretrain-foundry -c api -- python - \
+              deployment/stream2pretrain-foundry-api -c api -- python - \
               < scripts/validate_foundry_live.py || validation_status=$?
             kubectl -n stream2pretrain exec -i \
-              statefulset/stream2pretrain-foundry -c api -- python - \
+              deployment/stream2pretrain-foundry-api -c api -- python - \
               < scripts/foundry_diagnostics.py || true
             echo "::endgroup::"
             if [[ "$validation_status" -ne 0 ]]; then
@@ -1569,7 +1874,7 @@ jobs:
             # can fail on an init container before returning the actual crash.
             for target in \
               stream2pretrain-processor-curate-0:curate \
-              stream2pretrain-foundry-0:worker; do
+              stream2pretrain-foundry-worker-0:worker; do
               pod="${target%:*}"
               container="${target##*:}"
               echo "::group::Application crash: ${pod}/${container}"
@@ -1613,13 +1918,16 @@ jobs:
             helm status stream2pretrain -n stream2pretrain --show-desc || true
             echo "::endgroup::"
             echo "::group::Polaris metastore state"
-            kubectl -n polaris get statefulset,job,pod,pvc -o wide || true
+            kubectl -n polaris get \
+              clusters.postgresql.cnpg.io,job,pod,pvc -o wide || true
+            kubectl -n polaris describe \
+              cluster.postgresql.cnpg.io/polaris-postgres || true
             kubectl -n polaris describe job/polaris-metastore-bootstrap || true
             kubectl -n polaris describe pod \
               -l job-name=polaris-metastore-bootstrap || true
             kubectl -n polaris logs job/polaris-metastore-bootstrap \
               --all-containers --prefix --timestamps --tail=400 || true
-            kubectl -n polaris logs statefulset/polaris-postgres \
+            kubectl -n polaris logs -l cnpg.io/cluster=polaris-postgres \
               --all-containers --prefix --timestamps --tail=200 || true
             echo "::endgroup::"
             kubectl get nodes -o json | jq -r '
@@ -1721,6 +2029,7 @@ jobs:
             echo "::group::Redpanda topic and consumer-group state"
             kubectl -n redpanda get pod,statefulset -o wide || true
             for topic in \
+              arxiv.discovery \
               raw.fetched \
               raw.smoke \
               docs.normalized \
@@ -1740,7 +2049,7 @@ jobs:
               s2p-curate \
               s2p-iceberg-writer \
               s2p-iceberg-writer-licenses \
-              s2p-arxiv-html-fetcher; do
+              s2p-arxiv-html-fetcher-v2; do
               kubectl -n redpanda exec statefulset/redpanda -- \
                 rpk group describe "$group" || true
             done
@@ -1962,7 +2271,7 @@ jobs:
             done
             echo "::group::Durable post-training diagnosis"
             kubectl -n stream2pretrain exec -i \
-              statefulset/stream2pretrain-foundry -c api -- python - \
+              deployment/stream2pretrain-foundry-api -c api -- python - \
               < scripts/foundry_diagnostics.py || true
             echo "::endgroup::"
             echo "::endgroup::"
@@ -2327,6 +2636,22 @@ jobs:
              && { [[ "$STORAGE_CHANGED" == "true" ]] \
                || ! kubectl -n minio get service/minio >/dev/null 2>&1; }; then
             echo "::group::Reconcile MinIO storage"
+            legacy_minio_claim="$(
+              kubectl -n minio get statefulset/minio -o json 2>/dev/null \
+                | jq -r '
+                    first(
+                      .spec.template.spec.volumes[]?
+                      | select(.name == "data")
+                      | .persistentVolumeClaim.claimName
+                    ) // empty
+                  ' \
+                || true
+            )"
+            if [[ -n "$legacy_minio_claim" ]]; then
+              echo "The retained standalone MinIO claim has not been migrated." >&2
+              echo "Measure and verify a copy into the distributed MinIO claims before this upgrade." >&2
+              exit 1
+            fi
             helmfile \
               --helm-binary "$(command -v helm)" \
               --file helmfile.yaml \
@@ -2361,15 +2686,40 @@ jobs:
 
           if [[ "$CATALOG_CHANGED" == "true" ]]; then
             echo "::group::Reconcile persistent Polaris metastore"
+            if kubectl -n polaris get statefulset/polaris-postgres >/dev/null 2>&1 \
+               && ! kubectl -n polaris get \
+                 cluster.postgresql.cnpg.io/polaris-postgres >/dev/null 2>&1; then
+              echo "The retained standalone Polaris PostgreSQL data has not been migrated." >&2
+              echo "Measure and verify a pg_dump/restore into CloudNativePG before this upgrade." >&2
+              exit 1
+            fi
             kubectl create namespace polaris --dry-run=client -o yaml | kubectl apply -f -
+            helmfile \
+              --helm-binary "$(command -v helm)" \
+              --file helmfile.yaml \
+              --environment dev \
+              --selector name=cloudnative-pg \
+              sync \
+              --reset-values \
+              --wait \
+              --timeout 300 \
+              --suppress-secrets
+            kubectl wait --for=condition=Established \
+              customresourcedefinition/clusters.postgresql.cnpg.io --timeout=180s
+            kubectl -n cnpg-system rollout status \
+              deployment/cloudnative-pg --timeout=180s
             if ! kubectl -n polaris get secret polaris-persistence >/dev/null 2>&1; then
               postgres_password="$(openssl rand -hex 32)"
               kubectl -n polaris create secret generic polaris-persistence \
+                --type=kubernetes.io/basic-auth \
                 --from-literal=username=polaris \
                 --from-literal=password="$postgres_password" \
                 --from-literal=jdbcUrl='jdbc:postgresql://polaris-postgres.polaris.svc.cluster.local:5432/polaris'
               unset postgres_password
             fi
+            kubectl -n polaris patch secret polaris-persistence \
+              --type=merge \
+              -p '{"type":"kubernetes.io/basic-auth"}' >/dev/null
             for key in username password jdbcUrl; do
               if ! kubectl -n polaris get secret polaris-persistence -o json \
                 | jq -e --arg key "$key" '.data[$key] | length > 0' >/dev/null; then
@@ -2451,8 +2801,8 @@ jobs:
               --wait \
               --timeout 300 \
               --suppress-secrets
-            kubectl -n polaris rollout status \
-              statefulset/polaris-postgres --timeout=300s
+            kubectl -n polaris wait --for=condition=Ready \
+              cluster.postgresql.cnpg.io/polaris-postgres --timeout=300s
 
             if ! helmfile \
               --helm-binary "$(command -v helm)" \
@@ -2491,6 +2841,29 @@ jobs:
           else
             echo "Keeping the Polaris catalog tier unchanged."
           fi
+
+          coordination_username="$(
+            kubectl -n polaris get secret polaris-persistence \
+              -o jsonpath='{.data.username}' | base64 --decode
+          )"
+          coordination_password="$(
+            kubectl -n polaris get secret polaris-persistence \
+              -o jsonpath='{.data.password}' | base64 --decode
+          )"
+          encoded_coordination_username="$(
+            jq -rn --arg value "$coordination_username" '$value | @uri'
+          )"
+          encoded_coordination_password="$(
+            jq -rn --arg value "$coordination_password" '$value | @uri'
+          )"
+          coordination_url="postgresql://${encoded_coordination_username}:${encoded_coordination_password}@polaris-postgres.polaris.svc.cluster.local:5432/stream2pretrain"
+          kubectl -n stream2pretrain create secret generic stream2pretrain-coordination \
+            --from-literal=url="$coordination_url" \
+            --dry-run=client -o yaml \
+            | kubectl apply -f -
+          unset coordination_username coordination_password
+          unset encoded_coordination_username encoded_coordination_password coordination_url
+          finish_phase "Shared worker coordination identity"
 
           # Artifact signing is an internal cluster identity, not an external
           # provider credential. Create it once when absent and reuse it on
@@ -2549,6 +2922,122 @@ jobs:
             echo "GHCR_PULL_TOKEN is empty. The published images must be public."
           fi
 
+          desired_application="$RUNNER_TEMP/stream2pretrain-desired.yaml"
+          helm template stream2pretrain charts/stream2pretrain \
+            --namespace stream2pretrain \
+            -f charts/stream2pretrain/values-dev.yaml \
+            -f infra/helmfile-values/stream2pretrain.dev.yaml \
+            "${helm_overrides[@]}" \
+            > "$desired_application"
+          bytewax_storage_contracts="$(
+            uv run python - "$desired_application" <<'PY'
+          import sys
+
+          import yaml
+
+
+          resources = [item for item in yaml.safe_load_all(open(sys.argv[1])) if item]
+          claims = {
+              item.get("metadata", {}).get("name"): item
+              for item in resources
+              if item.get("kind") == "PersistentVolumeClaim"
+          }
+          components = {
+              "processor-fetcher",
+              "processor-curate",
+              "processor-iceberg-writer",
+              "foundry-worker",
+          }
+          for item in resources:
+              if item.get("kind") != "StatefulSet":
+                  continue
+              labels = item.get("metadata", {}).get("labels", {})
+              component = labels.get("app.kubernetes.io/component")
+              if component not in components:
+                  continue
+              replicas = int(item.get("spec", {}).get("replicas", 1))
+              volumes = item["spec"]["template"]["spec"].get("volumes", [])
+              recovery = next(volume for volume in volumes if volume.get("name") == "recovery")
+              claim_name = recovery["persistentVolumeClaim"]["claimName"]
+              rendered_claim = claims.get(claim_name)
+              if rendered_claim is None:
+                  access_mode = "-"
+                  storage_class = "-"
+                  managed = "false"
+              else:
+                  claim_spec = rendered_claim.get("spec", {})
+                  access_modes = claim_spec.get("accessModes", [])
+                  access_mode = access_modes[0] if access_modes else "-"
+                  storage_class = claim_spec.get("storageClassName") or "-"
+                  managed = "true"
+              print(
+                  "|".join(
+                      (
+                          component,
+                          str(replicas),
+                          claim_name,
+                          access_mode,
+                          storage_class,
+                          managed,
+                      )
+                  )
+              )
+          PY
+          )"
+          while IFS='|' read -r component replicas claim desired_mode desired_class managed; do
+            [[ -n "$component" ]] || continue
+            if [[ "$replicas" -le 1 ]]; then
+              continue
+            fi
+            if [[ "$managed" == "true" ]]; then
+              if [[ "$desired_mode" != "ReadWriteMany" || "$desired_class" == "-" ]]; then
+                echo "Distributed Bytewax requires an explicit RWX checkpoint: $component" >&2
+                exit 1
+              fi
+              provisioner="$(
+                kubectl get "storageclass/$desired_class" \
+                  -o jsonpath='{.provisioner}' 2>/dev/null || true
+              )"
+              if [[ -z "$provisioner" ]]; then
+                echo "Checkpoint StorageClass does not exist: $desired_class" >&2
+                exit 1
+              fi
+              if [[ "$desired_class" == "longhorn" \
+                 && "$provisioner" != "driver.longhorn.io" ]]; then
+                echo "StorageClass longhorn is not owned by the Longhorn CSI driver." >&2
+                exit 1
+              fi
+            fi
+            if ! kubectl -n stream2pretrain get "pvc/$claim" >/dev/null 2>&1; then
+              if [[ "$managed" != "true" ]]; then
+                echo "Pre-provisioned Bytewax checkpoint claim is missing: $claim" >&2
+                exit 1
+              fi
+              continue
+            fi
+            actual_mode="$(
+              kubectl -n stream2pretrain get "pvc/$claim" -o json \
+                | jq -r '.spec.accessModes | join(",")'
+            )"
+            actual_class="$(
+              kubectl -n stream2pretrain get "pvc/$claim" \
+                -o jsonpath='{.spec.storageClassName}'
+            )"
+            class_mismatch=false
+            if [[ "$desired_class" != "-" && "$actual_class" != "$desired_class" ]]; then
+              class_mismatch=true
+            fi
+            if [[ ",$actual_mode," != *,ReadWriteMany,* \
+               || "$class_mismatch" == "true" ]]; then
+              echo "Retained Bytewax checkpoint cannot be changed in place: $claim" >&2
+              echo "Current access/class: $actual_mode/$actual_class" >&2
+              echo "Required access/class: ReadWriteMany/$desired_class" >&2
+              echo "Copy and verify the checkpoint on a matching claim before scaling." >&2
+              exit 1
+            fi
+          done <<< "$bytewax_storage_contracts"
+          finish_phase "Bytewax shared-storage contract"
+
           # Only quiesce a multi-GiB model service when its immutable image
           # digest actually changes. Unchanged services keep their Pods, model
           # memory, HPA state, and readiness throughout the release.
@@ -2595,20 +3084,13 @@ jobs:
             --field-selector=status.phase=Failed \
             --ignore-not-found --wait=true
 
-          # A single-replica StatefulSet cannot replace a crash-looping Pod
-          # during a wait-based Helm upgrade: the unhealthy old Pod keeps the
-          # rollout blocked until Helm times out. If Foundry is already down,
-          # remove only its Pod before the upgrade. Scaling the controller to
-          # zero preserves its PVC; Helm immediately restores the declared
-          # replica count using the new image and configuration.
-          foundry_ready="$(
-            kubectl -n stream2pretrain get pod stream2pretrain-foundry-0 \
-              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' \
-              2>/dev/null || true
-          )"
+          # Foundry workers use OnDelete updates so a changed immutable image
+          # needs an explicit coordinated stop. The legacy combined
+          # StatefulSet is also stopped before Helm replaces that topology.
           foundry_target_image="${registry}/stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
           foundry_current_image="$(
-            kubectl -n stream2pretrain get statefulset stream2pretrain-foundry -o json \
+            kubectl -n stream2pretrain get \
+              statefulset/stream2pretrain-foundry-worker -o json \
               2>/dev/null \
               | jq -r '
                   first(
@@ -2619,19 +3101,97 @@ jobs:
                 ' \
               || true
           )"
-          if kubectl -n stream2pretrain get statefulset stream2pretrain-foundry \
-               >/dev/null 2>&1 \
-             && [[ "$foundry_ready" != "True" ]] \
+          if kubectl -n stream2pretrain get \
+               statefulset/stream2pretrain-foundry-worker >/dev/null 2>&1 \
              && [[ "$foundry_current_image" != "$foundry_target_image" ]]; then
-            echo "Replacing unhealthy Foundry Pod while preserving its PVC."
+            echo "Quiescing the Foundry worker for an immutable image change."
+            kubectl -n stream2pretrain scale \
+              statefulset/stream2pretrain-foundry-worker --replicas=0
+            kubectl -n stream2pretrain wait --for=delete \
+              pod/stream2pretrain-foundry-worker-0 --timeout=180s \
+              || ! kubectl -n stream2pretrain get \
+                pod/stream2pretrain-foundry-worker-0 \
+                >/dev/null 2>&1
+          fi
+          if kubectl -n stream2pretrain get \
+            statefulset/stream2pretrain-foundry >/dev/null 2>&1; then
+            echo "Quiescing the legacy combined Foundry StatefulSet before topology migration."
             kubectl -n stream2pretrain scale \
               statefulset/stream2pretrain-foundry --replicas=0
             kubectl -n stream2pretrain wait --for=delete \
               pod/stream2pretrain-foundry-0 --timeout=180s \
-              || ! kubectl -n stream2pretrain get pod stream2pretrain-foundry-0 \
+              || ! kubectl -n stream2pretrain get pod/stream2pretrain-foundry-0 \
                 >/dev/null 2>&1
-          elif [[ "$foundry_ready" != "True" ]]; then
-            echo "Leaving the unchanged Foundry Pod untouched; it cannot delay this release."
+          fi
+
+          bytewax_quiesced_resources=()
+          restore_quiesced_bytewax() {
+            local saved
+            local resource
+            local previous_replicas
+            for saved in "${bytewax_quiesced_resources[@]}"; do
+              resource="${saved%:*}"
+              previous_replicas="${saved##*:}"
+              kubectl -n stream2pretrain scale "$resource" \
+                --replicas="$previous_replicas" || true
+            done
+          }
+          if [[ "$CORE_CHANGED" == "true" ]]; then
+            echo "Quiescing coordinated Bytewax executions before Helm changes membership."
+            for resource in \
+              statefulset/stream2pretrain-processor-fetcher \
+              statefulset/stream2pretrain-processor-curate \
+              statefulset/stream2pretrain-processor-iceberg-writer \
+              statefulset/stream2pretrain-foundry-worker \
+              deployment/stream2pretrain-processor-fetcher \
+              deployment/stream2pretrain-processor-iceberg-writer; do
+              if ! kubectl -n stream2pretrain get "$resource" >/dev/null 2>&1; then
+                continue
+              fi
+              previous_replicas="$(
+                kubectl -n stream2pretrain get "$resource" \
+                  -o jsonpath='{.spec.replicas}'
+              )"
+              bytewax_quiesced_resources+=("$resource:$previous_replicas")
+              kubectl -n stream2pretrain scale "$resource" --replicas=0
+            done
+            for component in \
+              processor-fetcher \
+              processor-curate \
+              processor-iceberg-writer \
+              foundry-worker; do
+              if ! kubectl -n stream2pretrain wait --for=delete pod \
+                -l "app.kubernetes.io/component=$component" --timeout=180s; then
+                if kubectl -n stream2pretrain get pod \
+                  -l "app.kubernetes.io/component=$component" -o name \
+                  | grep -q .; then
+                  echo "Bytewax Pods did not stop cleanly: $component" >&2
+                  restore_quiesced_bytewax
+                  exit 1
+                fi
+              fi
+            done
+          fi
+
+          legacy_curator_statefulset="$(
+            kubectl -n stream2pretrain get \
+              statefulset/stream2pretrain-processor-curate -o json 2>/dev/null \
+              || true
+          )"
+          if [[ -n "$legacy_curator_statefulset" ]] \
+             && [[ "$(
+               jq '.spec.volumeClaimTemplates // [] | length' \
+                 <<< "$legacy_curator_statefulset"
+             )" -gt 0 ]]; then
+            echo "Recreating the migrated curator StatefulSet without its immutable claim template."
+            kubectl -n stream2pretrain delete \
+              statefulset/stream2pretrain-processor-curate --wait=true
+          fi
+          if kubectl -n stream2pretrain get \
+            statefulset/stream2pretrain-foundry >/dev/null 2>&1; then
+            echo "Removing the quiesced legacy combined Foundry StatefulSet."
+            kubectl -n stream2pretrain delete \
+              statefulset/stream2pretrain-foundry --wait=true
           fi
 
           # GitHub serialises this workflow, but a teammate can still start a
@@ -2682,6 +3242,7 @@ jobs:
             sleep 15
           done
           if [[ "$release_applied" != true ]]; then
+            restore_quiesced_bytewax
             report_deploy_failure
             exit 1
           fi
@@ -2727,7 +3288,7 @@ jobs:
               # work, not an unhealthy API, and must not be judged by the
               # generic one-minute rollout bound.
               workload_timeout=600
-            elif [[ "$workload" == deployment/stream2pretrain-processor-fetcher* ]]; then
+            elif [[ "$workload" == statefulset/stream2pretrain-processor-fetcher* ]]; then
               # The fetcher image includes the full CPU scientific extraction
               # stack and is about 1.7 GB. A cold node pull was measured at 48s,
               # leaving no time for process startup under the old 60s bound.
@@ -2871,10 +3432,22 @@ jobs:
                         spec: (
                           $template.spec
                           | .restartPolicy = "Never"
+                          | .initContainers = (
+                              [
+                                (.initContainers // [])[]
+                                | select(.name != "bytewax-hostfile")
+                              ]
+                            )
                           | .containers = [
                               .containers[]
                               | select(.name == "curate")
                               | .name = "curate-canary"
+                              | .volumeMounts = (
+                                  [
+                                    (.volumeMounts // [])[]
+                                    | select(.name != "bytewax-hostfile")
+                                  ]
+                                )
                               # The one-record smoke lane uses the identical
                               # curator and keeps the production burst limits,
                               # but it must not reserve a second full steady-
@@ -2897,6 +3470,14 @@ jobs:
                                         and .name != "S2P_BYTEWAX_FLOW_NAME"
                                         and .name != "S2P_BYTEWAX_RECOVERY_NAME"
                                         and .name != "S2P_BYTEWAX_RECOVERY_PARTITIONS"
+                                        and .name != "S2P_CHECKPOINT_DIR"
+                                        and .name != "S2P_STATE_DIR"
+                                        and .name != "S2P_CACHE_DIR"
+                                        and .name != "S2P_BYTEWAX_RECOVERY_ROOT"
+                                        and .name != "BYTEWAX_POD_NAME"
+                                        and .name != "BYTEWAX_STATEFULSET_NAME"
+                                        and .name != "BYTEWAX_HOSTFILE_PATH"
+                                        and .name != "S2P_COORDINATION_DATABASE_URL"
                                         and .name != "S2P_PROCESSING_FAILURE_BUCKET"
                                         and .name != "S2P_PROCESSING_FAILURE_PREFIX"
                                       )
@@ -2912,6 +3493,10 @@ jobs:
                                       {name: "S2P_BYTEWAX_FLOW_NAME", value: "s2p-curate-smoke-v1"},
                                       {name: "S2P_BYTEWAX_RECOVERY_NAME", value: "curate-smoke-v1"},
                                       {name: "S2P_BYTEWAX_RECOVERY_PARTITIONS", value: "1"},
+                                      {name: "S2P_CHECKPOINT_DIR", value: "/var/lib/s2p/recovery"},
+                                      {name: "S2P_STATE_DIR", value: "/var/lib/s2p/state"},
+                                      {name: "S2P_CACHE_DIR", value: "/var/lib/s2p/cache"},
+                                      {name: "S2P_BYTEWAX_RECOVERY_ROOT", value: "/var/lib/s2p/recovery"},
                                       {name: "S2P_PROCESSING_FAILURE_BUCKET", value: "$(S2P_STATE_BUCKET)"},
                                       {name: "S2P_PROCESSING_FAILURE_PREFIX", value: "canary-processing-failures/curate"}
                                     ]
@@ -2920,10 +3505,13 @@ jobs:
                           | .volumes = (
                               [
                                 (.volumes // [])[]
-                                | select(.name != "checkpoint")
+                                | select(
+                                    .name != "recovery"
+                                    and .name != "bytewax-hostfile"
+                                  )
                               ]
                               + [{
-                                  name: "checkpoint",
+                                  name: "recovery",
                                   emptyDir: {sizeLimit: "2Gi"}
                                 }]
                             )

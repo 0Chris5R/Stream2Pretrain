@@ -10,6 +10,7 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+from ingest.common.state import cursor_lease
 from schemas.sourcefeed import SourceFeedSpec
 
 _ARXIV_DISCOVERY_SOURCE_ORDER = (
@@ -557,7 +558,9 @@ def _builtin_source_status(
         if succeeded:
             latest = max(
                 succeeded,
-                key=lambda job: getattr(getattr(job, "metadata", None), "creation_timestamp", None),
+                key=lambda job: str(
+                    getattr(getattr(job, "metadata", None), "creation_timestamp", "")
+                ),
             )
             last_success = _as_utc_iso(
                 getattr(getattr(latest, "status", None), "completion_time", None)
@@ -689,12 +692,34 @@ async def serve_rest_api(port: int = 8080) -> None:
 
 
 async def run_controller_services(kopf: Any, namespace: str) -> None:
-    """Run SourceFeed reconciliation and its read-only status API."""
+    """Run an active-passive reconciler beside the replicated status API."""
     settings = kopf.OperatorSettings()
     settings.scanning.disabled = True
+
+    async def run_elected_operator() -> None:
+        if os.environ.get("S2P_CURSOR_LEASE_BACKEND", "none").strip().lower() == "none":
+            await kopf.operator(namespace=namespace, standalone=True, settings=settings)
+            return
+        raw_duration = os.environ.get("S2P_CURSOR_LEASE_DURATION_SECONDS", "")
+        duration_seconds = int(raw_duration)
+        retry_seconds = max(1.0, duration_seconds / 3)
+        while True:
+            try:
+                async with cursor_lease("source-controller") as is_leader:
+                    if not is_leader:
+                        await asyncio.sleep(retry_seconds)
+                        continue
+                    await kopf.operator(namespace=namespace, standalone=True, settings=settings)
+            except asyncio.CancelledError as exc:
+                if not exc.args or not str(exc.args[0]).startswith("cursor lease lost:"):
+                    raise
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+
     await asyncio.gather(
         serve_rest_api(port=int(os.environ.get("S2P_CONTROL_API_PORT", "8080"))),
-        kopf.operator(namespace=namespace, standalone=True, settings=settings),
+        run_elected_operator(),
     )
 
 

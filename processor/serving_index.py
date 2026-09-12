@@ -95,9 +95,11 @@ class ServingIndex:
 
     @property
     def ready(self) -> bool:
-        # _initialize completed the authoritative baseline before start().
-        # A healthy reader may serve that snapshot while consumers catch up.
-        return self.running
+        # Every replica starts from its own authoritative baseline and then
+        # replays retained topic deltas with an independent consumer identity.
+        # Do not add a newly rolled replica to the Service until both topics
+        # have reached the high-water marks captured at assignment time.
+        return self.running and self.caught_up
 
     @property
     def caught_up(self) -> bool:

@@ -10,7 +10,10 @@ metadata:
 spec:
   replicas: {{ .Values.processor.duckdbApi.replicas }}
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "stream2pretrain.componentSelectorLabels" (dict "ctx" . "component" $component) | nindent 6 }}
@@ -83,28 +86,11 @@ spec:
           emptyDir:
             sizeLimit: {{ .Values.processor.duckdbApi.tempStorageSizeLimit }}
         - name: serving-index
-          persistentVolumeClaim:
-            claimName: {{ default (printf "%s-serving-index" $name) .Values.processor.duckdbApi.servingIndex.existingClaim }}
-{{- if not .Values.processor.duckdbApi.servingIndex.existingClaim }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ printf "%s-serving-index" $name }}
-  namespace: {{ .Release.Namespace }}
-  annotations:
-    helm.sh/resource-policy: keep
-  labels:
-    {{- include "stream2pretrain.componentLabels" (dict "ctx" . "component" $component) | nindent 4 }}
-spec:
-  accessModes: ["ReadWriteOnce"]
-  {{- if .Values.processor.duckdbApi.servingIndex.storageClass }}
-  storageClassName: {{ .Values.processor.duckdbApi.servingIndex.storageClass | quote }}
-  {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.processor.duckdbApi.servingIndex.size }}
-{{- end }}
+          # The index is a derived read model. Each replica rebuilds its own
+          # database from Iceberg and retained Kafka topics, so replicas never
+          # coordinate writes through one volume.
+          emptyDir:
+            sizeLimit: {{ .Values.processor.duckdbApi.servingIndex.size }}
 ---
 apiVersion: v1
 kind: Service

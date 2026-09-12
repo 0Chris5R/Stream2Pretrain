@@ -13,6 +13,7 @@ from aiohttp import web
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from processor.foundry.config import provider_configs
+from processor.foundry.database import coordination_database_target
 from processor.foundry.inspection import ArtifactInspector, accepted_trajectories
 from processor.foundry.metrics import HUMAN_AUDITS
 from processor.foundry.quota import QuotaLedger
@@ -26,9 +27,11 @@ def build_app(
 ) -> web.Application:
     state_dir = os.environ.get("S2P_FOUNDRY_STATE_DIR", "/var/lib/s2p/foundry")
     providers = provider_configs()
-    control_store = store or FoundryStore(os.path.join(state_dir, "control.sqlite3"))
+    control_store = store or FoundryStore(
+        coordination_database_target(state_dir, "control.sqlite3")
+    )
     quota_ledger = quota or QuotaLedger(
-        os.path.join(state_dir, "quota.sqlite3"),
+        coordination_database_target(state_dir, "quota.sqlite3"),
         providers,
     )
     package_client = s3_client or _s3_client()
@@ -37,6 +40,15 @@ def build_app(
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def readiness(_: web.Request) -> web.Response:
+        control_ready = control_store.database_ready()
+        quota_ready = quota_ledger.database_ready()
+        ready = control_ready and quota_ready
+        return web.json_response(
+            {"status": "ok" if ready else "not ready"},
+            status=200 if ready else 503,
+        )
 
     async def dashboard(_: web.Request) -> web.Response:
         payload = control_store.dashboard()
@@ -272,7 +284,7 @@ def build_app(
     app.add_routes(
         [
             web.get("/healthz", health),
-            web.get("/readyz", health),
+            web.get("/readyz", readiness),
             web.get("/metrics", metrics),
             web.get("/api/foundry/dashboard", dashboard),
             web.get("/api/foundry/activity", activity),

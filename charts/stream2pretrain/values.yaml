@@ -22,6 +22,13 @@ commonAnnotations: {}
 # requests via the per-component overrides below.
 profile: dev
 
+# Shared transactional coordination for horizontally scaled stateful workers.
+# The referenced Secret must contain a PostgreSQL connection URL. Local and
+# unit-test profiles may leave this empty while running exactly one replica.
+coordination:
+  databaseUrlSecret: stream2pretrain-coordination
+  databaseUrlKey: url
+
 # -----------------------------------------------------------------------------
 # Service account / RBAC
 # -----------------------------------------------------------------------------
@@ -49,6 +56,7 @@ redpanda:
   saslMechanism: ""
   authSecret: ""
   topics:
+    arxivDiscovery: arxiv.discovery
     rawFetched: raw.fetched
     smokeRaw: raw.smoke
     docsNormalized: docs.normalized
@@ -201,7 +209,7 @@ ingest:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 512Mi}
   # arXiv full-paper-HTML fetcher. Long-running Deployment that
-  # subscribes to raw.fetched for arXiv ids and fetches the rendered
+  # subscribes to arxiv.discovery for arXiv ids and fetches the rendered
   # HTML body (with ar5iv as fallback). Toggle via
   # ``sources.arxiv.htmlFetcher.enabled``.
   arxivHtmlFetcher:
@@ -214,9 +222,8 @@ ingest:
     autoOffsetReset: earliest
     # Optional bounded drain for explicit diagnostics. Production is unlimited.
     maxRecordsPerLoop: 0
-    # The shared raw.fetched topic also carries this worker's output, so its
-    # Kafka lag is not a valid autoscaling signal. Keep one fixed replica until
-    # a source-specific Prometheus backlog metric is implemented.
+    # The source-specific discovery topic makes Kafka lag a valid scaling
+    # signal without counting the enriched records published to raw.fetched.
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {cpu: 1, memory: 768Mi}
@@ -256,9 +263,11 @@ processor:
     # Bytewax owns source progress in a durable recovery database. Scale this
     # as one coordinated execution, never with independent Kafka-lag replicas.
     replicas: 1
+    workersPerProcess: 1
     checkpoint:
       existingClaim: ""
       storageClass: ""
+      accessMode: ReadWriteOnce
       size: 2Gi
       recoveryPartitions: 4
       snapshotSeconds: 1
@@ -294,6 +303,7 @@ processor:
     # Section RPCs still fill all four inference replicas; no input is omitted.
     sourceBatchSize: 4
     replicas: 1
+    workersPerProcess: 1
     requireRealModels: true
     doclingEnabled: false
     usePresidio: true
@@ -308,7 +318,9 @@ processor:
       requests: {cpu: 500m, memory: 2Gi}
       limits: {cpu: 2, memory: 6Gi}
     checkpoint:
+      existingClaim: ""
       storageClass: ""
+      accessMode: ReadWriteOnce
       size: 20Gi
       recoveryPartitions: 4
       snapshotSeconds: 1
@@ -362,6 +374,7 @@ processor:
     image: stream2pretrain/processor-iceberg-writer
     sourceBatchSize: 1
     replicas: 1
+    workersPerProcess: 1
     resources:
       # Reserve memory for table metadata, Arrow buffers and input recovery.
       requests: {cpu: 200m, memory: 1Gi}
@@ -371,6 +384,7 @@ processor:
     checkpoint:
       existingClaim: ""
       storageClass: ""
+      accessMode: ReadWriteOnce
       size: 2Gi
       # This single coordinated writer has one retained Bytewax recovery
       # partition. Kafka topic partitioning is independent of this state-shard
@@ -408,11 +422,9 @@ processor:
     threads: 1
     maxTempDirectorySize: 3GB
     tempStorageSizeLimit: 4Gi
-    # Kafka-backed current-state read model. Iceberg remains authoritative;
-    # this retained index prevents interactive pages from scanning history.
+    # Kafka-backed current-state read model. Iceberg remains authoritative.
+    # Each Pod rebuilds this derived index instead of sharing persistent state.
     servingIndex:
-      existingClaim: ""
-      storageClass: local-path
       size: 10Gi
       batchSize: 250
     resources:
@@ -421,7 +433,9 @@ processor:
   foundry:
     enabled: true
     image: stream2pretrain/processor-foundry
-    replicas: 1
+    workerReplicas: 1
+    workersPerProcess: 1
+    apiReplicas: 1
     apiPort: 8092
     dailyRunHourUtc: 8
     dailyRunMinuteUtc: 30 # 10:30 Europe/Berlin while CEST is active
@@ -441,9 +455,15 @@ processor:
     signingCertKey: ed25519.crt
     hetznerModels:
       - Qwen3.8-27B
+    # PostgreSQL stores shared control state and quota leases. This volume is
+    # only the coordinated Bytewax recovery database.
     state:
+      existingClaim: ""
       storageClass: ""
+      accessMode: ReadWriteOnce
       size: 5Gi # needs-measurement after the first cloud pilot
+      recoveryPartitions: 4
+      snapshotSeconds: 1
     workerResources:
       requests: {cpu: 250m, memory: 512Mi} # needs-measurement
       limits: {cpu: 1, memory: 2Gi} # needs-measurement
@@ -458,6 +478,9 @@ sourceController:
   image: stream2pretrain/processor
   replicas: 1
   apiPort: 8080
+  # Preserve the current ten-minute lease while keeping leader election
+  # independent from any source poll interval.
+  leaseDurationSeconds: 600
   resources:
     requests: {cpu: 100m, memory: 256Mi}
     limits: {cpu: 500m, memory: 512Mi}

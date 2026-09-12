@@ -1,10 +1,11 @@
 ---
-# Values currently proven by the running DHBW cluster. The single broker and
-# existing 50 GiB claim provide no replication and are not a capacity claim.
+# Three brokers match the three-node DHBW topology. Whether the existing nodes
+# have enough free CPU, RAM and local disk for the replicated retained backlog
+# must be measured before this profile is deployed.
 statefulset:
-  replicas: 1
+  replicas: 3
   podAntiAffinity:
-    type: soft
+    type: hard
 console:
   enabled: false
   ingress:
@@ -44,7 +45,7 @@ listeners:
 config:
   cluster:
     auto_create_topics_enabled: false
-    default_topic_replications: 1
+    default_topic_replications: 3
     log_retention_ms: 604800000     # 7 days
     log_segment_size: 67108864      # 64 MiB
 storage:
@@ -58,15 +59,12 @@ resources:
   memory:
     container:
       max: 2Gi
-# Redpanda chart 5.9.5 creates its ServiceMonitor from `monitoring`, not the
-# legacy `serviceMonitor` key. Keep the release label aligned with the
-# kube-prometheus-stack selector convention as well.
+# Redpanda chart 25.3.10 creates its ServiceMonitor from `monitoring`. Keep the
+# release label aligned with the kube-prometheus-stack selector convention.
 monitoring:
   enabled: true
   scrapeInterval: 30s
   labels:
     release: kube-prometheus-stack
 post_install_job:
-  enabled: false
-post_upgrade_job:
   enabled: false
