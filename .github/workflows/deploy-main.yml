@@ -468,7 +468,7 @@ jobs:
                   if item.get("name") == "bytewax-hostfile"
               )
               hostfile_script = "\n".join(hostfile_init.get("command", []))
-              expected_host = f"{workload_name}-${{index}}.{workload_name}."
+              expected_host = f"{workload_name}-$" + "{index}." + f"{workload_name}."
               if expected_host not in hostfile_script:
                   raise SystemExit(
                       f"distributed Bytewax hostfile does not use stable peer DNS: {workload_name}"
