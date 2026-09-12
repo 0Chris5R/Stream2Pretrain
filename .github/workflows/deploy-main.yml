@@ -221,6 +221,10 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/helmfile" /usr/local/bin/helmfile
           helmfile version
 
+      - name: Register Helm repositories
+        if: needs.changes.outputs.helm == 'true'
+        run: helmfile repos
+
       - name: Install Python dependencies
         if: needs.changes.outputs.python == 'true' || needs.changes.outputs.helm == 'true'
         run: uv sync --all-packages --all-groups --locked
