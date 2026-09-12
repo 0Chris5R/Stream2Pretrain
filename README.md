@@ -123,7 +123,6 @@ Typical user flow:
 5. Open Post-training and inspect the daily ranked path. The `Inspect` view shows tasks, trajectories, verifiers, validation evidence, provenance, and package files for human review.
 The API and dashboard screenshots in Section 11 come from the same live cluster.
 
-
 ## 8. Kubernetes Deployment
 
 | Kubernetes object | Components |
