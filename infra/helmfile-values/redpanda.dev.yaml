@@ -1,9 +1,6 @@
 ---
-# Three brokers match the three-node DHBW topology. Whether the existing nodes
-# have enough free CPU, RAM and local disk for the replicated retained backlog
-# must be measured before this profile is deployed.
 statefulset:
-  replicas: 3
+  replicas: 1
   podAntiAffinity:
     type: hard
 console:
@@ -45,7 +42,7 @@ listeners:
 config:
   cluster:
     auto_create_topics_enabled: false
-    default_topic_replications: 3
+    default_topic_replications: 1
     log_retention_ms: 604800000     # 7 days
     log_segment_size: 67108864      # 64 MiB
 storage:

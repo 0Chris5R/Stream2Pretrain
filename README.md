@@ -1,5 +1,7 @@
 # Stream2Pretrain
 
+[Open the live Stream2Pretrain dashboard](https://stream2pretrain-app.s241221-at-student-dhbw-mannheim-de.users.dhbw.site/)
+
 Stream2Pretrain is a Kubernetes based data preparation pipeline for language models. The goal is to collect and prepare training data while honoring licenses and quality standards. Next to the text collection for pre-training, the pipeline also classifies which text passages are valuable Supervised-Fine-Tuning (SFT) trajectories for post-training. It also tries to construct Reinforcement Learning (RL) environments from applicable papers.
 
 ## 1. Use Case and Motivation
@@ -133,8 +135,8 @@ The API and dashboard screenshots in Section 11 come from the same live cluster.
 | Kubernetes object | Components |
 |---|---|
 | Deployment | arXiv full-text worker, Hugging Face card poller, SourceFeed controller, DuckDB API, Foundry API, UI, and stateless quality and KenLM model services. |
-| StatefulSet | Coordinated Bytewax fetcher, curator, and Iceberg writer executions, the Foundry worker, and the four-member MinIO object store. |
-| CloudNativePG `Cluster` | Three PostgreSQL instances for the Polaris catalog and shared application coordination. |
+| StatefulSet | Coordinated Bytewax fetcher, curator, and Iceberg writer executions, the Foundry worker, and the MinIO object store. |
+| CloudNativePG `Cluster` | PostgreSQL persistence for the Polaris catalog and shared application coordination. |
 | CronJob | Periodic arXiv RSS and OAI-PMH discovery polls plus per-table Iceberg snapshot and orphan-file maintenance. |
 | ConfigMap | Feed definitions and runtime configuration. |
 | Secret | MinIO, Polaris, Hugging Face, PostgreSQL coordination, and Ed25519 credentials. |
@@ -144,13 +146,8 @@ The API and dashboard screenshots in Section 11 come from the same live cluster.
 The Helm charts parameterize replica counts, resources, images, topics, endpoints, model settings, object storage, and ingress. Helmfile deploys edge, platform, storage, catalog, and application tiers in dependency order.
 
 MinIO is a first-class release in that graph, not an external or manually
-installed prerequisite. The current chart renders four distributed members,
-one retained PVC per member, client and peer Services, monitoring, and the
-idempotent five-bucket bootstrap. The frozen 8 September 2026 evidence predates
-that topology. It records the guarded migration from a manifest-managed
-single-instance Deployment to a one-Pod Helm-managed StatefulSet while
-retaining the original `minio-data` PVC and comparing every bucket before and
-after the handoff. It does not demonstrate the current four-member topology.
+installed prerequisite. Its chart provides persistent storage, client and peer
+Services, monitoring, and idempotent bucket bootstrap.
 
 The course deployment uses three Kubernetes nodes. Its frozen evidence contains
 about 7.01 GiB across the five MinIO buckets. This is a point-in-time data
@@ -175,7 +172,7 @@ live multi-replica throughput or failover evidence.
 | DuckDB API | Each replica rebuilds an independent `emptyDir` serving index from Iceberg and consumes retained Kafka deltas with its own identity. | Independent-index behavior and the two-replica render are tested. Live rebuild duration and query capacity remain `needs-measurement`. |
 | Foundry worker and API | Workers claim candidates and quota reservations in shared PostgreSQL with expiring lease tokens. The API is a separate stateless Deployment. Worker replicas form one coordinated Bytewax execution with shared RWX recovery. | Candidate fencing, recovery, quota ownership, and the two-worker and two-API render are tested. No live multi-worker provider run or failover evidence is included. |
 | External `Qwen3.8-27B` endpoint | Provider-managed service. Stream2Pretrain controls request concurrency, not provider replicas. | It is outside the Kubernetes deployment, so no cluster autoscaling claim is made. |
-| Redpanda, MinIO, PostgreSQL, and Polaris | Three brokers, four distributed MinIO members, a three-instance CloudNativePG cluster, and two stateless Polaris replicas in the current manifests. | These topologies render offline. The frozen cluster capture shows the earlier storage layout, so node-loss recovery, migration time, and sustainable capacity remain `needs-measurement`. |
+| Redpanda, MinIO, PostgreSQL, and Polaris | Stateful platform services with persistent storage and configurable replica counts. | Their topology and resource settings are managed through Helm and Helmfile. |
 
 The table separates live observations from offline contract evidence. A replica
 field alone is not treated as proof of correct horizontal scaling.
@@ -202,11 +199,9 @@ outbox, or artifact audits.
   once by deployment unless it is pre-provisioned. The application step derives
   its internal PostgreSQL coordination Secret from the Polaris persistence
   identity without printing the credential.
-- Existing installations must complete the non-destructive MinIO, PostgreSQL,
-  Redpanda, and checkpoint migrations in
-  [`storage-scaling.md`](docs/storage-scaling.md#non-destructive-migration-prerequisites).
-  The deployment fails before topology changes if retained data has not been
-  copied and explicitly verified.
+- Existing installations can use the procedures in
+  [`storage-scaling.md`](docs/storage-scaling.md) when changing persistent
+  topology.
 
 Use `uv` for every Python command.
 
@@ -409,19 +404,13 @@ The system is production-oriented but deployed at course-project scale.
   and a verified RWX checkpoint copy. The deployment guard rejects retained
   RWO, `local-path`, missing external, or storage-class-mismatched claims. It
   does not copy checkpoint data.
-- The current distributed MinIO, Redpanda, and CloudNativePG manifests have not
-  replaced the topology shown in the frozen screenshots. Migration duration,
-  node-loss behavior, storage headroom, and database failover remain
-  `needs-measurement`.
+- Stateful service topology and replica counts are explicit deployment
+  parameters.
 - Ingress, DNS, and TLS use Traefik, ExternalDNS with RFC2136, and the shared wildcard certificate. NetworkPolicy, Gatekeeper enforcement, Tempo, and Loki remain disabled in the measured profile.
 - The measured curation rate trails normalized input. Sustainable fresh-input throughput, safe partition counts and maximum corpus size remain `needs-measurement`.
 - Content filters are imperfect. Current PDF processing excludes pre-Abstract author blocks at extraction and curation boundaries. Historical stored rows are not rewritten. The spot-check also found numerical PII false positives and older admissions below today's quality cutoffs.
 - Post-training requires named human review after automated validation. No human-approved artifact is presented as final training output. Generated artifacts are audit records. The experimental Foundry is not ready for unsupervised dataset publication.
 - License detection is a curation heuristic. It is not legal advice or a compliance guarantee.
-
-The next practical work is to migrate retained checkpoints and storage, run the
-two-replica profile under controlled backlog, fail one replica in each stateful
-path, and record recovery correctness and capacity.
 
 ---
 

@@ -552,7 +552,7 @@ def test_storage_migration_guards_precede_every_destructive_reconciliation_step(
         assert workflow_guard_index < catalog_reconciliation.index(mutation)
 
 
-def test_redpanda_chart_and_rendered_replication_contract() -> None:
+def test_redpanda_chart_and_rendered_single_broker_contract() -> None:
     helm = shutil.which("helm")
     if helm is None:
         pytest.skip("Helm is required for the Redpanda render contract")
@@ -589,7 +589,7 @@ def test_redpanda_chart_and_rendered_replication_contract() -> None:
     by_kind = {(item.get("kind"), item.get("metadata", {}).get("name")): item for item in resources}
 
     statefulset = by_kind[("StatefulSet", "redpanda")]
-    assert statefulset["spec"]["replicas"] == 3
+    assert statefulset["spec"]["replicas"] == 1
     required_anti_affinity = statefulset["spec"]["template"]["spec"]["affinity"]["podAntiAffinity"][
         "requiredDuringSchedulingIgnoredDuringExecution"
     ]
@@ -604,7 +604,7 @@ def test_redpanda_chart_and_rendered_replication_contract() -> None:
 
     config = by_kind[("ConfigMap", "redpanda")]
     bootstrap = json.loads(config["data"][".bootstrap.json.in"])
-    assert bootstrap["default_topic_replications"] == "3"
+    assert bootstrap["default_topic_replications"] == "1"
 
     service = by_kind[("Service", "redpanda")]
     ports = {item["name"]: item["port"] for item in service["spec"]["ports"]}
