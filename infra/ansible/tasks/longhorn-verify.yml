@@ -1,0 +1,211 @@
+---
+# Helm considers a release installed before every node can attach an iSCSI or
+# RWX NFS volume. Verify Longhorn's own live Node conditions and capacity data
+# before migration claims are created. These tasks use the k3s kubectl client
+# directly, so a fresh Ansible control machine needs only the checked-in role.
+- name: Wait for Longhorn manager Pods on every node
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/kubectl -n longhorn-system rollout status
+      daemonset/longhorn-manager --timeout=300s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  changed_when: false
+
+- name: Wait until the Longhorn CSI DaemonSet exists
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/kubectl -n longhorn-system get
+      daemonset/longhorn-csi-plugin
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  register: stream2pretrain_longhorn_csi_daemonset
+  changed_when: false
+  until: stream2pretrain_longhorn_csi_daemonset.rc == 0
+  retries: 30
+  delay: 5
+
+- name: Wait for Longhorn CSI Pods on every node
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/kubectl -n longhorn-system rollout status
+      daemonset/longhorn-csi-plugin --timeout=300s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  changed_when: false
+
+- name: Wait for Longhorn host conditions required by RWX mounts
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/kubectl -n longhorn-system wait
+      --for=condition={{ item }}=True nodes.longhorn.io --all --timeout=300s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  changed_when: false
+  loop:
+    - Ready
+    - Schedulable
+    - MountPropagation
+    - RequiredPackages
+    - Multipathd
+    - KernelModulesLoaded
+    - NFSClientInstalled
+
+- name: Read the Longhorn StorageClass contract
+  ansible.builtin.command:
+    cmd: /usr/local/bin/kubectl get storageclass/longhorn -o json
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  register: stream2pretrain_longhorn_storage_class_raw
+  changed_when: false
+
+- name: Decode the Longhorn StorageClass contract
+  ansible.builtin.set_fact:
+    stream2pretrain_longhorn_storage_class: >-
+      {{ stream2pretrain_longhorn_storage_class_raw.stdout | from_json }}
+
+- name: Validate the non-default Longhorn StorageClass contract
+  ansible.builtin.assert:
+    that:
+      - stream2pretrain_longhorn_storage_class.provisioner == 'driver.longhorn.io'
+      - >-
+        (stream2pretrain_longhorn_storage_class.metadata.annotations | default({}))
+        .get('storageclass.kubernetes.io/is-default-class', 'false') != 'true'
+      - >-
+        (stream2pretrain_longhorn_storage_class.parameters | default({}))
+        .get('numberOfReplicas', '') == longhorn_replica_count | string
+    fail_msg: >-
+      Longhorn must expose a non-default StorageClass named longhorn with the
+      Longhorn CSI provisioner and the approved replica count.
+
+- name: Read Kubernetes node count for Longhorn validation
+  ansible.builtin.command:
+    cmd: /usr/local/bin/kubectl get nodes -o json
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  register: stream2pretrain_kubernetes_nodes_raw
+  changed_when: false
+
+- name: Decode Kubernetes nodes for Longhorn validation
+  ansible.builtin.set_fact:
+    stream2pretrain_kubernetes_nodes: >-
+      {{ stream2pretrain_kubernetes_nodes_raw.stdout | from_json }}
+
+- name: Read Longhorn Node readiness and capacity measurements
+  ansible.builtin.command:
+    cmd: /usr/local/bin/kubectl -n longhorn-system get nodes.longhorn.io -o json
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  register: stream2pretrain_longhorn_nodes_raw
+  changed_when: false
+  until: >-
+    (stream2pretrain_longhorn_nodes_raw.stdout | from_json)['items'] | length
+    == (stream2pretrain_kubernetes_nodes['items'] | length)
+  retries: 30
+  delay: 10
+
+- name: Decode Longhorn Node readiness and capacity measurements
+  ansible.builtin.set_fact:
+    stream2pretrain_longhorn_nodes: >-
+      {{ stream2pretrain_longhorn_nodes_raw.stdout | from_json }}
+
+- name: Read scheduler-eligible Longhorn nodes
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/kubectl
+      - -n
+      - longhorn-system
+      - get
+      - nodes.longhorn.io
+      - -o
+      - >-
+        go-template={% raw %}{{range .items}}{{ $node := . }}{{if and
+        $node.spec.allowScheduling (not $node.spec.evictionRequested)}}{{range
+        $diskName, $diskStatus := $node.status.diskStatus}}{{ $diskSpec := index
+        $node.spec.disks $diskName }}{{if and $diskSpec.allowScheduling (not
+        $diskSpec.evictionRequested)}}{{range $condition :=
+        $diskStatus.conditions}}{{if and (eq $condition.type "Schedulable") (eq
+        $condition.status "True")}}{{$node.metadata.name}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}{{end}}{{end}}{% endraw %}
+  environment:
+    KUBECONFIG: "{{ kubeconfig_root }}"
+  register: stream2pretrain_longhorn_schedulable_nodes
+  changed_when: false
+
+- name: Validate enough nodes can place the approved replica count
+  ansible.builtin.assert:
+    that:
+      - >-
+        stream2pretrain_longhorn_schedulable_nodes.stdout_lines
+        | unique | list | length
+        >= longhorn_replica_count | int
+    fail_msg: >-
+      Longhorn does not have enough scheduler-eligible nodes for the approved replica
+      count. Do not create migration claims.
+
+- name: Validate Longhorn node count and measured disk capacity
+  vars:
+    disk_status: "{{ item.status.diskStatus | default({}) | dict2items }}"
+  ansible.builtin.assert:
+    that:
+      - >-
+        stream2pretrain_longhorn_nodes['items'] | length
+        == stream2pretrain_kubernetes_nodes['items'] | length
+      - >-
+        stream2pretrain_longhorn_nodes['items']
+        | map(attribute='metadata.name') | sort | list
+        == stream2pretrain_kubernetes_nodes['items']
+        | map(attribute='metadata.name') | sort | list
+      - disk_status | length > 0
+      - >-
+        disk_status | selectattr('value.storageAvailable', 'defined')
+        | selectattr('value.storageAvailable', 'gt', 0) | list | length
+        == disk_status | length
+      - >-
+        disk_status | selectattr('value.storageMaximum', 'defined')
+        | selectattr('value.storageMaximum', 'gt', 0) | list | length
+        == disk_status | length
+      - >-
+        disk_status | selectattr('value.diskPath', 'defined')
+        | selectattr('value.diskPath', 'equalto', longhorn_data_path) | list | length
+        == disk_status | length
+    fail_msg: >-
+      Longhorn did not report usable per-node storage capacity at the expected
+      data path. Do not create migration claims or choose a replica count until
+      this is fixed.
+  loop: "{{ stream2pretrain_longhorn_nodes['items'] }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
+# These condition names are reported by Longhorn 1.7.2's v1beta2 Node API.
+- name: Validate Longhorn Node conditions required for RWX mounts
+  vars:
+    required_conditions:
+      - Ready
+      - Schedulable
+      - MountPropagation
+      - RequiredPackages
+      - Multipathd
+      - KernelModulesLoaded
+      - NFSClientInstalled
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.0.status.conditions | default([])
+        | selectattr('type', 'equalto', item.1)
+        | selectattr('status', 'equalto', 'True') | list | length == 1
+    fail_msg: >-
+      Longhorn node {{ item.0.metadata.name }} does not satisfy the {{ item.1
+      }} condition required for a safe RWX volume.
+  loop: "{{ stream2pretrain_longhorn_nodes['items'] | product(required_conditions) | list }}"
+  loop_control:
+    label: "{{ item.0.metadata.name }}: {{ item.1 }}"
+
+- name: Print measured Longhorn per-node capacity
+  ansible.builtin.debug:
+    msg:
+      node: "{{ item.metadata.name }}"
+      data_path: "{{ longhorn_data_path }}"
+      disk_status: "{{ item.status.diskStatus }}"
+  loop: "{{ stream2pretrain_longhorn_nodes['items'] }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"

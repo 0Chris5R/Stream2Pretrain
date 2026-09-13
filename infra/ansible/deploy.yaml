@@ -20,8 +20,16 @@
     longhorn_enabled: true
     longhorn_version: "1.7.2"
     longhorn_default_storage_class: false
+    # Do not override the role's replica-count default until the Longhorn Node
+    # status reports its actual per-node capacity. The StorageClass value is
+    # immutable for existing volumes, so a guessed count would be unsafe.
+    longhorn_data_path: /var/lib/longhorn/
     k3s_auto_upgrade_enabled: false
     kubeconfig_path: "../kubeconfig-stream2pretrain.yaml"
+
+  pre_tasks:
+    - name: Configure Longhorn host prerequisites on every cluster node
+      ansible.builtin.import_tasks: tasks/longhorn-prerequisites.yml
 
   roles:
     - role: k3s-dhbw-cloud-role
@@ -92,6 +100,12 @@
       when: k3s_role == 'server'
       ansible.builtin.debug:
         var: stream2pretrain_node_table.stdout_lines
+
+    - name: Verify Longhorn readiness and measured capacity
+      when:
+        - k3s_role == 'server'
+        - longhorn_enabled | bool
+      ansible.builtin.import_tasks: tasks/longhorn-verify.yml
 
   handlers:
     - name: Restart k3s

@@ -112,6 +112,14 @@ OPENRC_PATH=/absolute/path/to/openrc.sh \
 OPENRC_PATH=/absolute/path/to/openrc.sh \
   ./scripts/setup_dhbw_demo.sh cluster
 
+# Existing cluster only: install Longhorn without Terraform or k3s reconciliation.
+# The inventory must reach every existing server and agent over SSH.
+# Replace the value only after reviewing the measured per-node capacity.
+uv run --with ansible-core==2.17.13 ansible-playbook \
+  -i infra/terraform/generated-inventory.yml \
+  -e 'longhorn_replica_count=MEASURED_AND_APPROVED_VALUE' \
+  infra/ansible/install-longhorn.yaml
+
 # Apply each in-cluster ownership tier after its prerequisites exist
 ./scripts/setup_dhbw_demo.sh platform
 ./scripts/setup_dhbw_demo.sh storage
@@ -138,6 +146,16 @@ reconciles four document-topic partitions with replication factor three.
 `application` installs the local Stream2Pretrain chart. Loki, Tempo, and
 Alloy are excluded until their MinIO credentials, retention, storage, and
 resource requirements are measured.
+
+For an already provisioned cluster, `install-longhorn.yaml` is the focused
+path. It installs the Longhorn 1.7.2 Debian prerequisites on every node,
+reconciles only the pinned Longhorn release, retains `local-path` as the
+default StorageClass, and checks Longhorn's actual Node readiness and disk
+capacity data. It deliberately does not choose a replica count. The command
+requires a measured and approved count, then fails until every node has the
+prerequisites for iSCSI and RWX NFS mounts and reports usable Longhorn disk
+capacity. The reported values are evidence for the migration decision, not a
+substitute for sizing its target claims.
 
 The Polaris release uses its production relational JDBC backend. A dedicated
 CloudNativePG cluster retains catalog and coordination data across three

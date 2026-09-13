@@ -212,8 +212,8 @@ def test_different_text_not_near_dup() -> None:
 
 
 def test_postgres_index_shares_atomic_clusters_between_replicas() -> None:
-    clusters: dict[tuple[str, str], tuple[str, bytes]] = {}
-    bands: dict[tuple[str, str], str] = {}
+    clusters: dict[tuple[str, str, int, str], tuple[str, bytes]] = {}
+    bands: dict[tuple[str, str, int, str], str] = {}
     advisory_locks: list[int] = []
 
     class Result:
@@ -238,30 +238,35 @@ def test_postgres_index_shares_atomic_clusters_between_replicas() -> None:
             if "pg_advisory_xact_lock" in sql:
                 advisory_locks.append(int(params[0]))
             elif "SELECT DISTINCT c.cluster_id" in sql:
-                generation = str(params[0])
-                keys = list(params[1])
+                generation, backend, num_perms, keys = params
                 cluster_ids = sorted(
                     {
-                        bands[(generation, str(key))]
+                        bands[(str(generation), str(backend), int(num_perms), str(key))]
                         for key in keys
-                        if (generation, str(key)) in bands
+                        if (str(generation), str(backend), int(num_perms), str(key)) in bands
                     }
                 )
                 return Result(
                     [
-                        (cluster_id, *clusters[(generation, cluster_id)])
+                        (
+                            cluster_id,
+                            *clusters[(str(generation), str(backend), int(num_perms), cluster_id)],
+                        )
                         for cluster_id in cluster_ids
                     ]
                 )
             elif "INSERT INTO curator_lsh_clusters" in sql:
-                generation, cluster_id, doc_id, signature = params
+                generation, backend, num_perms, cluster_id, doc_id, signature = params
                 clusters.setdefault(
-                    (str(generation), str(cluster_id)),
+                    (str(generation), str(backend), int(num_perms), str(cluster_id)),
                     (str(doc_id), bytes(signature)),
                 )
             elif "INSERT INTO curator_lsh_bands" in sql:
-                generation, cluster_key, cluster_id = params
-                bands.setdefault((str(generation), str(cluster_key)), str(cluster_id))
+                generation, backend, num_perms, cluster_key, cluster_id = params
+                bands.setdefault(
+                    (str(generation), str(backend), int(num_perms), str(cluster_key)),
+                    str(cluster_id),
+                )
             return Result()
 
         def close(self) -> None:
@@ -298,9 +303,94 @@ def test_postgres_index_shares_atomic_clusters_between_replicas() -> None:
     assert len(advisory_locks) == 16 * 3
 
 
+def test_postgres_index_preserves_legacy_all_band_generation() -> None:
+    h = MinHasher(num_perms=64)
+    legacy_signature = h.signature("legacy band only state remains globally visible")
+    new_signature = h.signature("a distinct document enters the legacy generation")
+    legacy_bands: dict[tuple[str, str, int, str], str] = {
+        ("legacy-v1", legacy_signature.backend, legacy_signature.num_perms, cluster_key): (
+            "cl-legacy"
+        )
+        for cluster_key in (
+            LSHBloomIndex._cluster_key(index, band)
+            for index, band in enumerate(legacy_signature.band_keys(16))
+        )
+    }
+
+    class Result:
+        def __init__(self, rows: list[tuple[object, ...]] | None = None) -> None:
+            self._rows = rows or []
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return self._rows
+
+    class Transaction:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class Connection:
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        def execute(self, sql: str, params: tuple[object, ...] = ()) -> Result:
+            if "SELECT 1" in sql and "curator_lsh_legacy_bands" in sql:
+                generation, backend, num_perms = params
+                found = any(
+                    key[:3] == (str(generation), str(backend), int(num_perms))
+                    for key in legacy_bands
+                )
+                return Result([(1,)] if found else [])
+            if "SELECT cluster_key, cluster_id" in sql:
+                generation, backend, num_perms, keys = params
+                return Result(
+                    [
+                        (
+                            str(key),
+                            legacy_bands[(str(generation), str(backend), int(num_perms), str(key))],
+                        )
+                        for key in keys
+                        if (str(generation), str(backend), int(num_perms), str(key)) in legacy_bands
+                    ]
+                )
+            if "INSERT INTO curator_lsh_legacy_bands" in sql:
+                generation, backend, num_perms, cluster_key, cluster_id = params
+                legacy_bands.setdefault(
+                    (str(generation), str(backend), int(num_perms), str(cluster_key)),
+                    str(cluster_id),
+                )
+            return Result()
+
+        def close(self) -> None:
+            return None
+
+    def connect(_url: str, *, autocommit: bool) -> Connection:
+        assert autocommit is True
+        return Connection()
+
+    index = PostgresLSHIndex(
+        "postgresql://coordination",
+        generation="legacy-v1",
+        num_bands=16,
+        connect=connect,
+    )
+
+    duplicate = index.observe("sha256:" + "b" * 64, legacy_signature)
+    admitted = index.observe("sha256:" + "c" * 64, new_signature)
+    replay = index.probe("sha256:" + "d" * 64, new_signature)
+
+    assert duplicate.is_near_duplicate is True
+    assert duplicate.cluster_id == "cl-legacy"
+    assert admitted.is_near_duplicate is False
+    assert replay.is_near_duplicate is True
+    assert replay.cluster_id == admitted.cluster_id
+
+
 def test_postgres_index_replays_transaction_after_primary_failover() -> None:
-    clusters: dict[tuple[str, str], tuple[str, bytes]] = {}
-    bands: dict[tuple[str, str], str] = {}
+    clusters: dict[tuple[str, str, int, str], tuple[str, bytes]] = {}
+    bands: dict[tuple[str, str, int, str], str] = {}
     connections: list[Connection] = []
 
     class FailoverError(Exception):
@@ -333,30 +423,35 @@ def test_postgres_index_replays_transaction_after_primary_failover() -> None:
                 self.fail_first_lock = False
                 raise FailoverError("primary changed")
             if "SELECT DISTINCT c.cluster_id" in sql:
-                generation = str(params[0])
-                keys = list(params[1])
+                generation, backend, num_perms, keys = params
                 cluster_ids = sorted(
                     {
-                        bands[(generation, str(key))]
+                        bands[(str(generation), str(backend), int(num_perms), str(key))]
                         for key in keys
-                        if (generation, str(key)) in bands
+                        if (str(generation), str(backend), int(num_perms), str(key)) in bands
                     }
                 )
                 return Result(
                     [
-                        (cluster_id, *clusters[(generation, cluster_id)])
+                        (
+                            cluster_id,
+                            *clusters[(str(generation), str(backend), int(num_perms), cluster_id)],
+                        )
                         for cluster_id in cluster_ids
                     ]
                 )
             if "INSERT INTO curator_lsh_clusters" in sql:
-                generation, cluster_id, doc_id, signature = params
+                generation, backend, num_perms, cluster_id, doc_id, signature = params
                 clusters.setdefault(
-                    (str(generation), str(cluster_id)),
+                    (str(generation), str(backend), int(num_perms), str(cluster_id)),
                     (str(doc_id), bytes(signature)),
                 )
             if "INSERT INTO curator_lsh_bands" in sql:
-                generation, cluster_key, cluster_id = params
-                bands.setdefault((str(generation), str(cluster_key)), str(cluster_id))
+                generation, backend, num_perms, cluster_key, cluster_id = params
+                bands.setdefault(
+                    (str(generation), str(backend), int(num_perms), str(cluster_key)),
+                    str(cluster_id),
+                )
             return Result()
 
         def close(self) -> None:

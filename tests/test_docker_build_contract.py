@@ -367,6 +367,9 @@ def test_manual_setup_blocks_incompatible_checkpoint_migrations_before_quiescing
     assert "stream2pretrain.io/migrated-from" in guard
     assert "stream2pretrain.io/migration-verified" in guard
     assert "Migrate recovery plus local decision and duplicate state" in guard
+    assert "stream2pretrain.io/curator-control-migrated-from" in guard
+    assert "stream2pretrain.io/curator-control-migration-verified" in guard
+    assert "stream2pretrain.io/curator-control-migration-manifest-sha256" in guard
     assert "stream2pretrain.io/foundry-control-migrated-from" in guard
     assert "stream2pretrain.io/foundry-control-migration-verified" in guard
     assert "stream2pretrain.io/foundry-control-migration-manifest-sha256" in guard
@@ -401,12 +404,22 @@ def test_workflow_guards_legacy_bytewax_state_before_any_deploy_mutation() -> No
     assert "stream2pretrain.io/migrated-from" in guard
     assert "stream2pretrain.io/migration-verified" in guard
     assert "Migrate recovery plus local decision and duplicate state" in guard
+    assert "stream2pretrain.io/curator-control-migrated-from" in guard
+    assert "stream2pretrain.io/curator-control-migration-verified" in guard
+    assert "stream2pretrain.io/curator-control-migration-manifest-sha256" in guard
     assert "stream2pretrain.io/foundry-control-migrated-from" in guard
     assert "stream2pretrain.io/foundry-control-migration-verified" in guard
     assert "stream2pretrain.io/foundry-control-migration-manifest-sha256" in guard
     assert "^[0-9A-Fa-f]{64}$" in guard
     assert guard_start < workflow.index("kubectl create namespace stream2pretrain")
     assert guard_start < workflow.index("kubectl -n kube-system patch deployment/coredns")
+
+    assert "stream2pretrain-legacy-curator-inventory-v1" in workflow
+    assert "keys-unavailable-while-live" in workflow
+    assert "decision-cache.sqlite3" in workflow
+    assert "COUNT(*) FILTER (WHERE key LIKE 'cluster:%')" in workflow
+    assert "COUNT(*) FILTER (WHERE key LIKE 'anchor:%')" in workflow
+    assert "COUNT(*) FILTER (WHERE key LIKE 'signature:%')" in workflow
 
     recreate = workflow.split('legacy_curator_statefulset="$(', 1)[1].split(
         "# GitHub serialises this workflow", 1

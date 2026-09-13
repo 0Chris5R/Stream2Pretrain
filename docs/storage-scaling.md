@@ -94,6 +94,61 @@ perform these migrations.
 Keep every source volume and backup until the restored services pass these
 checks. Deletion and rollback cleanup require separate explicit approval.
 
+### Legacy curator control-state cutover
+
+The single-replica curator created the claim
+`checkpoint-stream2pretrain-processor-curate-0`. Its recovery mount also held
+the SQLite decision cache and the durable LSHBloom near-duplicate index under
+the active scoring generation. The scaled curator uses PostgreSQL tables
+`curator_decisions`, `curator_lsh_clusters`, `curator_lsh_bands`, and
+`curator_lsh_legacy_bands` instead. Copying the Bytewax recovery files to
+Longhorn does not transfer those tables.
+
+Before replacing the old curator StatefulSet, stop its Bytewax execution and
+mount the retained claim read-only in a maintenance environment that can reach
+the coordination database. Preserve the claim, then run the checked migration:
+
+```bash
+export S2P_COORDINATION_DATABASE_URL="$DATABASE_URL_FROM_COORDINATION_SECRET"
+migration_result="$(
+  uv run python scripts/migrate_curator_state_to_postgres.py \
+    --state-dir /mnt/checkpoint-stream2pretrain-processor-curate-0 \
+    --snapshot-dir /retained/curator-state-migration
+)"
+printf '%s\n' "$migration_result"
+manifest_sha256="$(jq -r .manifest_sha256 <<< "$migration_result")"
+```
+
+The migration snapshots the SQLite decision cache and every readable LSHBloom
+generation before it writes. It imports the exact decision bytes, trainable
+flag, duplicate-cluster anchor, signature, and band ownership under a curator
+advisory lock. It accepts only an empty target or a target whose type-aware
+row-count and SHA-256 fingerprints already match the source. Signature-aware
+generations retain their cluster anchors, MinHash signatures, and band rows in
+the normal LSH tables. Older band-only generations retain every original band
+membership in `curator_lsh_legacy_bands`. The PostgreSQL index evaluates those
+rows with the original all-band match rule, so the migration does not invent
+missing anchors or signatures and does not weaken earlier duplicate decisions.
+Its `migration-manifest.json` records source-file hashes plus the fingerprints
+for all four PostgreSQL tables.
+
+Review and retain that manifest with the source snapshots. Only a `migrated` or
+`verified-existing` result permits the independent control-state marker:
+
+```bash
+kubectl -n stream2pretrain annotate --overwrite \
+  secret/stream2pretrain-coordination \
+  stream2pretrain.io/curator-control-migrated-from=checkpoint-stream2pretrain-processor-curate-0 \
+  stream2pretrain.io/curator-control-migration-verified=true \
+  "stream2pretrain.io/curator-control-migration-manifest-sha256=$manifest_sha256"
+```
+
+The recovery target needs its own `migrated-from` and `migration-verified`
+annotations. Deployment validates both proof sets before deleting the legacy
+StatefulSet. Keep the legacy claim, the file-copy manifest, the PostgreSQL
+migration snapshots, and the migration manifest until the restored curator
+passes readiness and replay checks.
+
 ### Legacy Foundry SQLite cutover
 
 The retired `stream2pretrain-foundry` StatefulSet created the claim

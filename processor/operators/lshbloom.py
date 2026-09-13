@@ -430,11 +430,13 @@ class PostgresLSHIndex:
             """
             CREATE TABLE IF NOT EXISTS curator_lsh_clusters (
               generation TEXT NOT NULL,
+              signature_backend TEXT NOT NULL,
+              num_perms INTEGER NOT NULL CHECK (num_perms > 0),
               cluster_id TEXT NOT NULL,
               anchor_doc_id TEXT NOT NULL,
-              signature BYTEA NOT NULL,
+              signature BYTEA NOT NULL CHECK (octet_length(signature) = num_perms * 4),
               created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-              PRIMARY KEY (generation, cluster_id)
+              PRIMARY KEY (generation, signature_backend, num_perms, cluster_id)
             )
             """
         )
@@ -442,11 +444,27 @@ class PostgresLSHIndex:
             """
             CREATE TABLE IF NOT EXISTS curator_lsh_bands (
               generation TEXT NOT NULL,
+              signature_backend TEXT NOT NULL,
+              num_perms INTEGER NOT NULL,
               cluster_key TEXT NOT NULL,
               cluster_id TEXT NOT NULL,
-              PRIMARY KEY (generation, cluster_key),
-              FOREIGN KEY (generation, cluster_id)
-                REFERENCES curator_lsh_clusters(generation, cluster_id)
+              PRIMARY KEY (generation, signature_backend, num_perms, cluster_key),
+              FOREIGN KEY (generation, signature_backend, num_perms, cluster_id)
+                REFERENCES curator_lsh_clusters(
+                  generation, signature_backend, num_perms, cluster_id
+                )
+            )
+            """
+        )
+        self._execute(
+            """
+            CREATE TABLE IF NOT EXISTS curator_lsh_legacy_bands (
+              generation TEXT NOT NULL,
+              signature_backend TEXT NOT NULL,
+              num_perms INTEGER NOT NULL CHECK (num_perms > 0),
+              cluster_key TEXT NOT NULL,
+              cluster_id TEXT NOT NULL,
+              PRIMARY KEY (generation, signature_backend, num_perms, cluster_key)
             )
             """
         )
@@ -464,7 +482,20 @@ class PostgresLSHIndex:
                     for cluster_key in sorted(cluster_keys):
                         connection.execute(
                             "SELECT pg_advisory_xact_lock(%s)",
-                            (self._advisory_lock_id(cluster_key),),
+                            (
+                                self._advisory_lock_id(
+                                    cluster_key,
+                                    signature_backend=sig.backend,
+                                    num_perms=sig.num_perms,
+                                ),
+                            ),
+                        )
+                    if self._uses_legacy_band_mode(connection, sig):
+                        return self._observe_legacy_locked(
+                            connection,
+                            doc_id,
+                            sig,
+                            cluster_keys,
                         )
                     existing = self._probe_locked(connection, doc_id, sig, cluster_keys)
                     if existing is not None:
@@ -473,20 +504,39 @@ class PostgresLSHIndex:
                     connection.execute(
                         """
                         INSERT INTO curator_lsh_clusters(
-                          generation, cluster_id, anchor_doc_id, signature
-                        ) VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (generation, cluster_id) DO NOTHING
+                          generation, signature_backend, num_perms, cluster_id,
+                          anchor_doc_id, signature
+                        ) VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (
+                          generation, signature_backend, num_perms, cluster_id
+                        ) DO NOTHING
                         """,
-                        (self._generation, cluster_id, doc_id, sig.digest),
+                        (
+                            self._generation,
+                            sig.backend,
+                            sig.num_perms,
+                            cluster_id,
+                            doc_id,
+                            sig.digest,
+                        ),
                     )
                     for cluster_key in cluster_keys:
                         connection.execute(
                             """
-                            INSERT INTO curator_lsh_bands(generation, cluster_key, cluster_id)
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (generation, cluster_key) DO NOTHING
+                            INSERT INTO curator_lsh_bands(
+                              generation, signature_backend, num_perms, cluster_key, cluster_id
+                            ) VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (
+                              generation, signature_backend, num_perms, cluster_key
+                            ) DO NOTHING
                             """,
-                            (self._generation, cluster_key, cluster_id),
+                            (
+                                self._generation,
+                                sig.backend,
+                                sig.num_perms,
+                                cluster_key,
+                                cluster_id,
+                            ),
                         )
                     return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
 
@@ -495,10 +545,104 @@ class PostgresLSHIndex:
     def probe(self, doc_id: str, sig: MinHashSignature) -> NearDupResult:
         cluster_keys = self._cluster_keys(sig)
         with self._lock:
-            existing = self._with_reconnect(
-                lambda connection: self._probe_locked(connection, doc_id, sig, cluster_keys)
-            )
+
+            def probe_once(connection: Any) -> NearDupResult | None:
+                if self._uses_legacy_band_mode(connection, sig):
+                    return self._probe_legacy_locked(connection, sig, cluster_keys)
+                return self._probe_locked(connection, doc_id, sig, cluster_keys)
+
+            existing = self._with_reconnect(probe_once)
         return existing or NearDupResult(is_near_duplicate=False, cluster_id=None)
+
+    def _uses_legacy_band_mode(self, connection: Any, sig: MinHashSignature) -> bool:
+        rows = connection.execute(
+            """
+            SELECT 1
+            FROM curator_lsh_legacy_bands
+            WHERE generation = %s
+              AND signature_backend = %s
+              AND num_perms = %s
+            LIMIT 1
+            """,
+            (self._generation, sig.backend, sig.num_perms),
+        ).fetchall()
+        return bool(rows)
+
+    def _legacy_band_owners(
+        self,
+        connection: Any,
+        sig: MinHashSignature,
+        cluster_keys: list[str],
+    ) -> dict[str, str]:
+        rows = connection.execute(
+            """
+            SELECT cluster_key, cluster_id
+            FROM curator_lsh_legacy_bands
+            WHERE generation = %s
+              AND signature_backend = %s
+              AND num_perms = %s
+              AND cluster_key = ANY(%s)
+            """,
+            (self._generation, sig.backend, sig.num_perms, cluster_keys),
+        ).fetchall()
+        return {str(cluster_key): str(cluster_id) for cluster_key, cluster_id in rows}
+
+    def _probe_legacy_locked(
+        self,
+        connection: Any,
+        sig: MinHashSignature,
+        cluster_keys: list[str],
+    ) -> NearDupResult | None:
+        owners = self._legacy_band_owners(connection, sig, cluster_keys)
+        existing_cluster: str | None = None
+        for cluster_key in cluster_keys:
+            cluster_id = owners.get(cluster_key)
+            if cluster_id is None:
+                return None
+            existing_cluster = existing_cluster or cluster_id
+        if existing_cluster is None:
+            return None
+        return NearDupResult(is_near_duplicate=True, cluster_id=existing_cluster)
+
+    def _observe_legacy_locked(
+        self,
+        connection: Any,
+        doc_id: str,
+        sig: MinHashSignature,
+        cluster_keys: list[str],
+    ) -> NearDupResult:
+        owners = self._legacy_band_owners(connection, sig, cluster_keys)
+        existing_cluster: str | None = None
+        all_seen = True
+        for cluster_key in cluster_keys:
+            cluster_id = owners.get(cluster_key)
+            if cluster_id is None:
+                all_seen = False
+                break
+            existing_cluster = existing_cluster or cluster_id
+        if all_seen and existing_cluster is not None:
+            return NearDupResult(is_near_duplicate=True, cluster_id=existing_cluster)
+
+        cluster_id = existing_cluster or self._cluster_id(doc_id, sig)
+        for cluster_key in cluster_keys:
+            connection.execute(
+                """
+                INSERT INTO curator_lsh_legacy_bands(
+                  generation, signature_backend, num_perms, cluster_key, cluster_id
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (
+                  generation, signature_backend, num_perms, cluster_key
+                ) DO NOTHING
+                """,
+                (
+                    self._generation,
+                    sig.backend,
+                    sig.num_perms,
+                    cluster_key,
+                    cluster_id,
+                ),
+            )
+        return NearDupResult(is_near_duplicate=False, cluster_id=cluster_id)
 
     def _execute(self, sql: str, parameters: tuple[Any, ...] = ()) -> Any:
         return self._with_reconnect(lambda connection: connection.execute(sql, parameters))
@@ -544,11 +688,17 @@ class PostgresLSHIndex:
             SELECT DISTINCT c.cluster_id, c.anchor_doc_id, c.signature
             FROM curator_lsh_bands AS b
             JOIN curator_lsh_clusters AS c
-              ON c.generation = b.generation AND c.cluster_id = b.cluster_id
-            WHERE b.generation = %s AND b.cluster_key = ANY(%s)
+              ON c.generation = b.generation
+              AND c.signature_backend = b.signature_backend
+              AND c.num_perms = b.num_perms
+              AND c.cluster_id = b.cluster_id
+            WHERE b.generation = %s
+              AND b.signature_backend = %s
+              AND b.num_perms = %s
+              AND b.cluster_key = ANY(%s)
             ORDER BY c.cluster_id
             """,
-            (self._generation, cluster_keys),
+            (self._generation, sig.backend, sig.num_perms, cluster_keys),
         ).fetchall()
         for cluster_id, anchor_doc_id, anchor_signature in rows:
             normalized_cluster_id = str(cluster_id)
@@ -575,12 +725,26 @@ class PostgresLSHIndex:
 
     def _cluster_id(self, doc_id: str, sig: MinHashSignature) -> str:
         digest = hashlib.sha256(
-            self._generation.encode("utf-8") + b"\0" + doc_id.encode("utf-8") + b"\0" + sig.digest
+            self._generation.encode("utf-8")
+            + b"\0"
+            + sig.backend.encode("utf-8")
+            + b"\0"
+            + str(sig.num_perms).encode("ascii")
+            + b"\0"
+            + doc_id.encode("utf-8")
+            + b"\0"
+            + sig.digest
         ).hexdigest()
         return f"cl-{digest[:24]}"
 
-    def _advisory_lock_id(self, cluster_key: str) -> int:
-        payload = f"{self._generation}\0{cluster_key}".encode()
+    def _advisory_lock_id(
+        self,
+        cluster_key: str,
+        *,
+        signature_backend: str,
+        num_perms: int,
+    ) -> int:
+        payload = (f"{self._generation}\0{signature_backend}\0{num_perms}\0{cluster_key}").encode()
         return int.from_bytes(
             hashlib.blake2b(payload, digest_size=8, person=b"s2plock").digest(),
             "big",

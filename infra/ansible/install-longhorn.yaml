@@ -1,0 +1,131 @@
+---
+- name: Install Longhorn on the existing Stream2Pretrain cluster
+  hosts: stream2pretrain
+  become: true
+  gather_facts: true
+
+  vars:
+    # Keep the existing local-path class as the default. Applications opt in to
+    # Longhorn only after their retained state is copied and verified.
+    longhorn_enabled: true
+    longhorn_version: "1.7.2"
+    longhorn_default_storage_class: false
+    longhorn_replica_auto_balance: least-effort
+    longhorn_node_drain_policy: block-for-eviction-if-contains-last-replica
+    longhorn_storage_over_provisioning_percentage: 300
+    longhorn_data_path: /var/lib/longhorn/
+    kubeconfig_root: /etc/rancher/k3s/k3s.yaml
+
+  pre_tasks:
+    - name: Require an approved positive Longhorn replica count
+      ansible.builtin.assert:
+        that:
+          - longhorn_replica_count is defined
+          - longhorn_replica_count | string is match('^[1-9][0-9]*$')
+        fail_msg: >-
+          Set longhorn_replica_count to the measured and approved number of
+          replicas before this focused installation can change the cluster.
+
+    - name: Require the existing k3s control-plane Helm client
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        cmd: /usr/local/bin/helm version --short
+      changed_when: false
+
+    - name: Require the existing k3s control-plane kubectl client
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        cmd: /usr/local/bin/kubectl version --client=true
+      changed_when: false
+
+    - name: Read the existing Kubernetes node count
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        cmd: /usr/local/bin/kubectl get nodes -o json
+      environment:
+        KUBECONFIG: "{{ kubeconfig_root }}"
+      register: stream2pretrain_existing_kubernetes_nodes_raw
+      changed_when: false
+
+    - name: Assert the approved Longhorn replica count fits the cluster
+      when: k3s_role == 'server'
+      vars:
+        stream2pretrain_existing_kubernetes_nodes: >-
+          {{ stream2pretrain_existing_kubernetes_nodes_raw.stdout | from_json }}
+      ansible.builtin.assert:
+        that:
+          - >-
+            longhorn_replica_count | int
+            <= stream2pretrain_existing_kubernetes_nodes['items'] | length
+        fail_msg: >-
+          The approved Longhorn replica count exceeds the actual Kubernetes
+          node count and would leave volumes degraded.
+
+    - name: Configure Longhorn host prerequisites on every cluster node
+      ansible.builtin.import_tasks: tasks/longhorn-prerequisites.yml
+
+    - name: Register the Longhorn Helm repository on the k3s server
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/helm
+          - repo
+          - add
+          - longhorn
+          - https://charts.longhorn.io
+          - --force-update
+      changed_when: false
+
+    - name: Update the Longhorn Helm repository on the k3s server
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/helm
+          - repo
+          - update
+          - longhorn
+      changed_when: false
+
+  tasks:
+    # These values match the pinned role's Longhorn 1.7.2 configuration. The
+    # replica count must be passed explicitly after reviewing measured capacity.
+    # This direct Helm invocation avoids requiring kubernetes.core on the
+    # Ansible control machine and does not reconcile k3s or Terraform.
+    - name: Reconcile the pinned Longhorn release on the k3s server
+      when: k3s_role == 'server'
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/helm
+          - upgrade
+          - --install
+          - longhorn
+          - longhorn/longhorn
+          - --namespace
+          - longhorn-system
+          - --create-namespace
+          - --version
+          - "{{ longhorn_version }}"
+          - --set
+          - "persistence.defaultClass={{ longhorn_default_storage_class | ternary('true', 'false') }}"
+          - --set
+          - "persistence.defaultClassReplicaCount={{ longhorn_replica_count }}"
+          - --set
+          - "defaultSettings.defaultReplicaCount={{ longhorn_replica_count }}"
+          - --set-string
+          - "defaultSettings.replicaAutoBalance={{ longhorn_replica_auto_balance }}"
+          - --set-string
+          - "defaultSettings.nodeDrainPolicy={{ longhorn_node_drain_policy }}"
+          - --set
+          - >-
+            defaultSettings.storageOverProvisioningPercentage={{
+            longhorn_storage_over_provisioning_percentage }}
+          - --wait
+          - --timeout
+          - 10m
+      environment:
+        KUBECONFIG: "{{ kubeconfig_root }}"
+
+  post_tasks:
+    - name: Verify Longhorn readiness and measured capacity on the k3s server
+      when: k3s_role == 'server'
+      ansible.builtin.import_tasks: tasks/longhorn-verify.yml

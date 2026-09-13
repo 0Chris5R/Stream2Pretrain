@@ -261,6 +261,9 @@ PY
   local migrated_from
   local migration_verified
   local coordination_secret
+  local curator_control_migrated_from
+  local curator_control_migration_verified
+  local curator_control_manifest_sha256
   local foundry_control_migrated_from
   local foundry_control_migration_verified
   local foundry_control_manifest_sha256
@@ -311,6 +314,34 @@ PY
         printf 'Required annotations: stream2pretrain.io/migrated-from=%s and stream2pretrain.io/migration-verified=true\n' \
           "$legacy_claim" >&2
         return 1
+      fi
+      if [[ "$component" == "processor-curate" ]]; then
+        if ! coordination_secret="$(
+          kubectl -n stream2pretrain get \
+            secret/stream2pretrain-coordination -o json 2>/dev/null
+        )"; then
+          printf 'Curator control-state migration marker Secret is missing.\n' >&2
+          return 1
+        fi
+        curator_control_migrated_from="$(
+          jq -r '.metadata.annotations["stream2pretrain.io/curator-control-migrated-from"] // empty' \
+            <<< "$coordination_secret"
+        )"
+        curator_control_migration_verified="$(
+          jq -r '.metadata.annotations["stream2pretrain.io/curator-control-migration-verified"] // empty' \
+            <<< "$coordination_secret"
+        )"
+        curator_control_manifest_sha256="$(
+          jq -r '.metadata.annotations["stream2pretrain.io/curator-control-migration-manifest-sha256"] // empty' \
+            <<< "$coordination_secret"
+        )"
+        if [[ "$curator_control_migrated_from" != "$legacy_claim" \
+           || "$curator_control_migration_verified" != "true" \
+           || ! "$curator_control_manifest_sha256" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+          printf 'Curator decision and duplicate PostgreSQL migration is not independently verified.\n' >&2
+          printf 'Annotate secret/stream2pretrain-coordination with the migrated source, verified flag and 64-hex manifest digest.\n' >&2
+          return 1
+        fi
       fi
       if [[ "$component" == "foundry-worker" ]]; then
         if ! coordination_secret="$(

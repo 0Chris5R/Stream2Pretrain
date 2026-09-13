@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import uuid
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from pathlib import Path
@@ -124,6 +125,51 @@ class PostgresConnection:
         except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
             self._discard_connection()
             raise
+
+    def copy_records(
+        self,
+        table: str,
+        columns: tuple[str, ...],
+        rows: Iterable[Iterable[Any]],
+    ) -> None:
+        """Stream typed rows through PostgreSQL COPY in the current transaction."""
+        identifiers = (table, *columns)
+        if not all(re.fullmatch(r"[a-z][a-z0-9_]*", identifier) for identifier in identifiers):
+            raise ValueError("COPY requires simple lower-case SQL identifiers")
+        statement = f"COPY {table} ({','.join(columns)}) FROM STDIN"
+        cursor: Any | None = None
+        try:
+            cursor = self._ensure_connection().cursor()
+            with cursor.copy(statement) as copy:
+                for row in rows:
+                    copy.write_row(tuple(row))
+        except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
+            self._discard_connection()
+            raise
+        finally:
+            if cursor is not None:
+                with suppress(Exception):
+                    cursor.close()
+
+    def stream_rows(self, sql: str, parameters: Iterable[Any] = ()) -> Iterable[Any]:
+        """Yield a server-side cursor without materializing a large result set."""
+
+        def stream() -> Iterable[Any]:
+            cursor: Any | None = None
+            try:
+                cursor = self._ensure_connection().cursor(name=f"s2p_stream_{uuid.uuid4().hex}")
+                cursor.itersize = 1_000
+                cursor.execute(_postgres_sql(sql), tuple(parameters))
+                yield from cursor
+            except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
+                self._discard_connection()
+                raise
+            finally:
+                if cursor is not None:
+                    with suppress(Exception):
+                        cursor.close()
+
+        return stream()
 
     def executescript(self, script: str) -> None:
         for statement in script.split(";"):

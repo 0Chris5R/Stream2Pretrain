@@ -1,0 +1,174 @@
+---
+# Longhorn 1.7.2 checks this complete package set from every manager Pod. The
+# pinned k3s role configures the same prerequisites during a full cluster
+# bootstrap. Keep this focused task file for an existing cluster, where
+# reconciling k3s or Terraform solely to install Longhorn would be unsafe.
+- name: Install all Longhorn 1.7.2 Debian package prerequisites
+  when: longhorn_enabled | bool
+  ansible.builtin.apt:
+    name:
+      - nfs-common
+      - open-iscsi
+      - cryptsetup
+      - dmsetup
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+
+- name: Read installed Longhorn prerequisite packages
+  when: longhorn_enabled | bool
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Assert all Longhorn 1.7.2 packages are installed
+  when: longhorn_enabled | bool
+  ansible.builtin.assert:
+    that:
+      - item in ansible_facts.packages
+    fail_msg: "Longhorn 1.7.2 prerequisite package is missing: {{ item }}"
+  loop:
+    - nfs-common
+    - open-iscsi
+    - cryptsetup
+    - dmsetup
+
+- name: Persist the kernel modules required by Longhorn
+  when: longhorn_enabled | bool
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/longhorn.conf
+    content: |
+      iscsi_tcp
+      dm_crypt
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Load the kernel modules required by Longhorn
+  when: longhorn_enabled | bool
+  ansible.builtin.command:
+    cmd: "modprobe {{ item }}"
+  changed_when: false
+  loop:
+    - iscsi_tcp
+    - dm_crypt
+
+- name: Enable the iSCSI daemon for Longhorn
+  when: longhorn_enabled | bool
+  ansible.builtin.systemd:
+    name: iscsid
+    enabled: true
+    state: started
+
+- name: Check the kernel modules required by Longhorn
+  when: longhorn_enabled | bool
+  ansible.builtin.stat:
+    path: "/sys/module/{{ item }}"
+  register: stream2pretrain_longhorn_kernel_modules
+  loop:
+    - iscsi_tcp
+    - dm_crypt
+
+- name: Assert the Longhorn kernel modules are loaded
+  when: longhorn_enabled | bool
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: "Longhorn requires the {{ item.item }} kernel module on every node."
+  loop: "{{ stream2pretrain_longhorn_kernel_modules.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Gather service facts for the Longhorn multipath safeguard
+  when: longhorn_enabled | bool
+  ansible.builtin.service_facts:
+
+- name: Assert the iSCSI daemon is running
+  when: longhorn_enabled | bool
+  ansible.builtin.assert:
+    that:
+      - "'iscsid.service' in ansible_facts.services"
+      - ansible_facts.services['iscsid.service'].state == 'running'
+    fail_msg: Longhorn requires the iscsid service to be running on every node.
+
+# This is the precise safeguard used by the pinned role. It applies only to
+# DHBWCloud's virtio-root VMs. On a node with an sd* root device we leave
+# multipath unchanged and let the later Longhorn readiness validation reject it
+# instead of risking the host root disk.
+- name: Read the root device before configuring the Longhorn multipath safeguard
+  when:
+    - longhorn_enabled | bool
+    - "'multipathd.service' in (ansible_facts.services | default({}))"
+  ansible.builtin.command:
+    cmd: findmnt --noheadings --output SOURCE /
+  register: stream2pretrain_root_device
+  changed_when: false
+
+- name: Require a virtio root device before blacklisting Longhorn iSCSI devices
+  when:
+    - longhorn_enabled | bool
+    - "'multipathd.service' in (ansible_facts.services | default({}))"
+  ansible.builtin.assert:
+    that:
+      - stream2pretrain_root_device.stdout | trim is match('^/dev/vd')
+    fail_msg: >-
+      Refusing to blacklist sd* devices while the root device is not virtio.
+      Resolve multipathd safely for this host before installing Longhorn.
+
+- name: Check for active multipath devices before stopping multipathd
+  when:
+    - longhorn_enabled | bool
+    - "'multipathd.service' in (ansible_facts.services | default({}))"
+  ansible.builtin.command:
+    cmd: multipath -ll
+  register: stream2pretrain_active_multipath_devices
+  changed_when: false
+
+- name: Refuse to stop multipathd while it owns a device map
+  when:
+    - longhorn_enabled | bool
+    - "'multipathd.service' in (ansible_facts.services | default({}))"
+  ansible.builtin.assert:
+    that:
+      - stream2pretrain_active_multipath_devices.stdout | trim | length == 0
+    fail_msg: >-
+      Active multipath device maps exist. Resolve them before disabling
+      multipathd for Longhorn.
+
+- name: Ensure the multipathd drop-in directory exists
+  when:
+    - longhorn_enabled | bool
+    - "'multipathd.service' in (ansible_facts.services | default({}))"
+  ansible.builtin.file:
+    path: /etc/multipath/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Keep multipathd away from Longhorn iSCSI devices
+  when:
+    - longhorn_enabled | bool
+    - "'multipathd.service' in (ansible_facts.services | default({}))"
+  ansible.builtin.copy:
+    dest: /etc/multipath/conf.d/longhorn.conf
+    content: |
+      # Managed by Stream2Pretrain. Do not edit.
+      blacklist {
+          devnode "^sd[a-z0-9]+"
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  register: stream2pretrain_longhorn_multipath_blacklist
+
+- name: Stop and disable multipathd for Longhorn iSCSI safety
+  when:
+    - longhorn_enabled | bool
+    - "'multipathd.service' in (ansible_facts.services | default({}))"
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - multipathd.service
+    - multipathd.socket

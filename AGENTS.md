@@ -14,6 +14,8 @@ records the exact processing rules and model prompts.
   containers, models, or paid provider calls without an explicit request.
 - Do not use the workstation's default Kubernetes context. Cloud diagnostics
   use the configured GitHub Actions VPN workflow.
+- Do not resize VMs, disks or existing PVCs. If measured capacity is
+  insufficient, stop at the capacity guard and report the blocker.
 - Preserve unrelated files and running services. Never stop another project
   to free a port.
 - Measure throughput, resource consumption and quality. Unknown values are
