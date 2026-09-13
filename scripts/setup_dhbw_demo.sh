@@ -254,124 +254,15 @@ PY
   local claim_name
   local desired_storage_class
   local managed
-  local legacy_claim
   local actual_claim
   local actual_access_modes
   local actual_storage_class
-  local migrated_from
-  local migration_verified
-  local coordination_secret
-  local curator_control_migrated_from
-  local curator_control_migration_verified
-  local curator_control_manifest_sha256
-  local foundry_control_migrated_from
-  local foundry_control_migration_verified
-  local foundry_control_manifest_sha256
   while IFS=$'\t' read -r \
     component workload replicas claim_name desired_storage_class managed; do
     if [[ -z "$workload" ]]; then
       continue
     fi
     actual_claim=""
-    legacy_claim=""
-    case "$component" in
-      processor-curate)
-        legacy_claim=checkpoint-stream2pretrain-processor-curate-0
-        ;;
-      foundry-worker)
-        legacy_claim=state-stream2pretrain-foundry-0
-        ;;
-    esac
-    if [[ -n "$legacy_claim" ]] \
-       && kubectl -n stream2pretrain get "persistentvolumeclaim/$legacy_claim" \
-         >/dev/null 2>&1; then
-      if [[ "$managed" == "true" ]]; then
-        printf 'Legacy Bytewax recovery still exists: %s\n' "$legacy_claim" >&2
-        printf 'Set the component existingClaim to an explicitly copied and verified target before this upgrade.\n' >&2
-        return 1
-      fi
-      if ! actual_claim="$(
-        kubectl -n stream2pretrain get \
-          "persistentvolumeclaim/$claim_name" -o json 2>/dev/null
-      )"; then
-        printf 'Copied Bytewax checkpoint target is missing: %s\n' "$claim_name" >&2
-        printf 'Copy and verify %s before this upgrade.\n' "$legacy_claim" >&2
-        return 1
-      fi
-      migrated_from="$(
-        jq -r '.metadata.annotations["stream2pretrain.io/migrated-from"] // empty' \
-          <<< "$actual_claim"
-      )"
-      migration_verified="$(
-        jq -r '.metadata.annotations["stream2pretrain.io/migration-verified"] // empty' \
-          <<< "$actual_claim"
-      )"
-      if [[ "$migrated_from" != "$legacy_claim" \
-         || "$migration_verified" != "true" ]]; then
-        printf 'Bytewax migration target is not marked as copied and verified: %s\n' \
-          "$claim_name" >&2
-        printf 'Migrate recovery plus local decision and duplicate state before setting the migration annotations.\n' >&2
-        printf 'Required annotations: stream2pretrain.io/migrated-from=%s and stream2pretrain.io/migration-verified=true\n' \
-          "$legacy_claim" >&2
-        return 1
-      fi
-      if [[ "$component" == "processor-curate" ]]; then
-        if ! coordination_secret="$(
-          kubectl -n stream2pretrain get \
-            secret/stream2pretrain-coordination -o json 2>/dev/null
-        )"; then
-          printf 'Curator control-state migration marker Secret is missing.\n' >&2
-          return 1
-        fi
-        curator_control_migrated_from="$(
-          jq -r '.metadata.annotations["stream2pretrain.io/curator-control-migrated-from"] // empty' \
-            <<< "$coordination_secret"
-        )"
-        curator_control_migration_verified="$(
-          jq -r '.metadata.annotations["stream2pretrain.io/curator-control-migration-verified"] // empty' \
-            <<< "$coordination_secret"
-        )"
-        curator_control_manifest_sha256="$(
-          jq -r '.metadata.annotations["stream2pretrain.io/curator-control-migration-manifest-sha256"] // empty' \
-            <<< "$coordination_secret"
-        )"
-        if [[ "$curator_control_migrated_from" != "$legacy_claim" \
-           || "$curator_control_migration_verified" != "true" \
-           || ! "$curator_control_manifest_sha256" =~ ^[0-9A-Fa-f]{64}$ ]]; then
-          printf 'Curator decision and duplicate PostgreSQL migration is not independently verified.\n' >&2
-          printf 'Annotate secret/stream2pretrain-coordination with the migrated source, verified flag and 64-hex manifest digest.\n' >&2
-          return 1
-        fi
-      fi
-      if [[ "$component" == "foundry-worker" ]]; then
-        if ! coordination_secret="$(
-          kubectl -n stream2pretrain get \
-            secret/stream2pretrain-coordination -o json 2>/dev/null
-        )"; then
-          printf 'Foundry control-state migration marker Secret is missing.\n' >&2
-          return 1
-        fi
-        foundry_control_migrated_from="$(
-          jq -r '.metadata.annotations["stream2pretrain.io/foundry-control-migrated-from"] // empty' \
-            <<< "$coordination_secret"
-        )"
-        foundry_control_migration_verified="$(
-          jq -r '.metadata.annotations["stream2pretrain.io/foundry-control-migration-verified"] // empty' \
-            <<< "$coordination_secret"
-        )"
-        foundry_control_manifest_sha256="$(
-          jq -r '.metadata.annotations["stream2pretrain.io/foundry-control-migration-manifest-sha256"] // empty' \
-            <<< "$coordination_secret"
-        )"
-        if [[ "$foundry_control_migrated_from" != "$legacy_claim" \
-           || "$foundry_control_migration_verified" != "true" \
-           || ! "$foundry_control_manifest_sha256" =~ ^[0-9A-Fa-f]{64}$ ]]; then
-          printf 'Foundry SQLite control and quota migration is not independently verified.\n' >&2
-          printf 'Annotate secret/stream2pretrain-coordination with the migrated source, verified flag and 64-hex manifest digest.\n' >&2
-          return 1
-        fi
-      fi
-    fi
     if [[ -z "$actual_claim" ]] \
        && ! actual_claim="$(
          kubectl -n stream2pretrain get \

@@ -183,10 +183,10 @@ field alone is not treated as proof of correct horizontal scaling.
 The legacy curator claim held Bytewax recovery together with the SQLite
 decision cache and LSH near-duplicate index. The legacy Foundry claim held
 Bytewax recovery together with the SQLite control and quota databases. The
-deployment checks recovery-copy annotations and separate PostgreSQL migration
-manifest markers before replacing either topology. Copying recovery files alone
-does not preserve curator duplicate decisions, Foundry queue and quota state,
-the outbox, or artifact audits.
+deployment reuses those claims at one replica. The retained migration manifests
+record the separate PostgreSQL control-state cutovers. Recovery files alone do
+not preserve curator duplicate decisions, Foundry queue and quota state, the
+outbox, or artifact audits.
 
 ## 9. Deployment Guide
 

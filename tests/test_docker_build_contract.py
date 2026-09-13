@@ -338,6 +338,8 @@ def test_manual_setup_restarts_bytewax_as_a_coordinated_execution() -> None:
     ):
         checkpoint = scaling["processor"][component][checkpoint_key]
         assert scaling["processor"][component][replica_key] == 2
+        if component in {"curate", "foundry"}:
+            assert checkpoint["existingClaim"] == ""
         assert checkpoint["accessMode"] == "ReadWriteMany"
         assert checkpoint["storageClass"] == "longhorn"
     assert scaling["processor"]["foundry"]["apiReplicas"] == 2
@@ -346,7 +348,24 @@ def test_manual_setup_restarts_bytewax_as_a_coordinated_execution() -> None:
     assert scaling["ui"]["replicas"] == 2
 
 
-def test_manual_setup_blocks_incompatible_checkpoint_migrations_before_quiescing() -> None:
+def test_dev_profile_reuses_retained_single_replica_checkpoint_claims() -> None:
+    values = yaml.safe_load(
+        (ROOT / "infra" / "helmfile-values" / "stream2pretrain.dev.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert (
+        values["processor"]["curate"]["checkpoint"]["existingClaim"]
+        == "checkpoint-stream2pretrain-processor-curate-0"
+    )
+    assert (
+        values["processor"]["foundry"]["state"]["existingClaim"]
+        == "state-stream2pretrain-foundry-0"
+    )
+
+
+def test_manual_setup_validates_checkpoint_storage_before_quiescing() -> None:
     setup = (ROOT / "scripts" / "setup_dhbw_demo.sh").read_text(encoding="utf-8")
     guard = setup.split("validate_bytewax_checkpoint_storage() {", 1)[1].split(
         "\n}\n\nrestore_quiesced_bytewax_executions()", 1
@@ -361,19 +380,6 @@ def test_manual_setup_blocks_incompatible_checkpoint_migrations_before_quiescing
     assert 'if [[ ",$actual_access_modes," != *,ReadWriteMany,* ]]' in guard
     assert 'if [[ "$actual_storage_class" == "local-path" ]]' in guard
     assert 'if [[ "$actual_storage_class" != "$desired_storage_class" ]]' in guard
-    assert "checkpoint-stream2pretrain-processor-curate-0" in guard
-    assert "state-stream2pretrain-foundry-0" in guard
-    assert 'if [[ "$managed" == "true" ]]' in guard
-    assert "stream2pretrain.io/migrated-from" in guard
-    assert "stream2pretrain.io/migration-verified" in guard
-    assert "Migrate recovery plus local decision and duplicate state" in guard
-    assert "stream2pretrain.io/curator-control-migrated-from" in guard
-    assert "stream2pretrain.io/curator-control-migration-verified" in guard
-    assert "stream2pretrain.io/curator-control-migration-manifest-sha256" in guard
-    assert "stream2pretrain.io/foundry-control-migrated-from" in guard
-    assert "stream2pretrain.io/foundry-control-migration-verified" in guard
-    assert "stream2pretrain.io/foundry-control-migration-manifest-sha256" in guard
-    assert "^[0-9A-Fa-f]{64}$" in guard
     assert "delete persistentvolumeclaim" not in guard
     assert application.index("validate_bytewax_checkpoint_storage") < application.index(
         "ensure_foundry_signing_identity"
@@ -392,34 +398,10 @@ def test_manual_setup_blocks_incompatible_checkpoint_migrations_before_quiescing
     )
 
 
-def test_workflow_guards_legacy_bytewax_state_before_any_deploy_mutation() -> None:
+def test_workflow_replaces_legacy_statefulsets_without_a_manual_marker_guard() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
-    guard_start = workflow.index('if [[ "$DEPLOY_MODE" == "deploy" ]]; then')
-    guard_end = workflow.index('if [[ "$DNS_INFRA_CHANGED" == "true" ]]', guard_start)
-    guard = workflow[guard_start:guard_end]
-
-    assert "checkpoint-stream2pretrain-processor-curate-0" in guard
-    assert "state-stream2pretrain-foundry-0" in guard
-    assert 'if [[ "$managed" == "true" ]]' in guard
-    assert "stream2pretrain.io/migrated-from" in guard
-    assert "stream2pretrain.io/migration-verified" in guard
-    assert "Migrate recovery plus local decision and duplicate state" in guard
-    assert "stream2pretrain.io/curator-control-migrated-from" in guard
-    assert "stream2pretrain.io/curator-control-migration-verified" in guard
-    assert "stream2pretrain.io/curator-control-migration-manifest-sha256" in guard
-    assert "stream2pretrain.io/foundry-control-migrated-from" in guard
-    assert "stream2pretrain.io/foundry-control-migration-verified" in guard
-    assert "stream2pretrain.io/foundry-control-migration-manifest-sha256" in guard
-    assert "^[0-9A-Fa-f]{64}$" in guard
-    assert guard_start < workflow.index("kubectl create namespace stream2pretrain")
-    assert guard_start < workflow.index("kubectl -n kube-system patch deployment/coredns")
-
-    assert "stream2pretrain-legacy-curator-inventory-v1" in workflow
-    assert "keys-unavailable-while-live" in workflow
-    assert "decision-cache.sqlite3" in workflow
-    assert "COUNT(*) FILTER (WHERE key LIKE 'cluster:%')" in workflow
-    assert "COUNT(*) FILTER (WHERE key LIKE 'anchor:%')" in workflow
-    assert "COUNT(*) FILTER (WHERE key LIKE 'signature:%')" in workflow
+    assert "Legacy Bytewax recovery still exists" not in workflow
+    assert "stream2pretrain-legacy-curator-inventory-v1" not in workflow
 
     recreate = workflow.split('legacy_curator_statefulset="$(', 1)[1].split(
         "# GitHub serialises this workflow", 1

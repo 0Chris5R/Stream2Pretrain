@@ -17,6 +17,7 @@ processor:
   curate:
     replicas: 2
     checkpoint:
+      existingClaim: ""
       storageClass: longhorn
       accessMode: ReadWriteMany
   modelService:
@@ -39,6 +40,7 @@ processor:
     workerReplicas: 2
     apiReplicas: 2
     state:
+      existingClaim: ""
       storageClass: longhorn
       accessMode: ReadWriteMany
 

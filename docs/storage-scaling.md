@@ -116,7 +116,6 @@ migration_result="$(
     --snapshot-dir /retained/curator-state-migration
 )"
 printf '%s\n' "$migration_result"
-manifest_sha256="$(jq -r .manifest_sha256 <<< "$migration_result")"
 ```
 
 The migration snapshots the SQLite decision cache and every readable LSHBloom
@@ -132,22 +131,10 @@ missing anchors or signatures and does not weaken earlier duplicate decisions.
 Its `migration-manifest.json` records source-file hashes plus the fingerprints
 for all four PostgreSQL tables.
 
-Review and retain that manifest with the source snapshots. Only a `migrated` or
-`verified-existing` result permits the independent control-state marker:
-
-```bash
-kubectl -n stream2pretrain annotate --overwrite \
-  secret/stream2pretrain-coordination \
-  stream2pretrain.io/curator-control-migrated-from=checkpoint-stream2pretrain-processor-curate-0 \
-  stream2pretrain.io/curator-control-migration-verified=true \
-  "stream2pretrain.io/curator-control-migration-manifest-sha256=$manifest_sha256"
-```
-
-The recovery target needs its own `migrated-from` and `migration-verified`
-annotations. Deployment validates both proof sets before deleting the legacy
-StatefulSet. Keep the legacy claim, the file-copy manifest, the PostgreSQL
-migration snapshots, and the migration manifest until the restored curator
-passes readiness and replay checks.
+At one replica, the replacement StatefulSet can mount the retained legacy claim
+directly through `existingClaim`. Keep the legacy claim, any file-copy manifest,
+the PostgreSQL migration snapshots, and the migration manifest until the
+restored curator passes readiness and replay checks.
 
 ### Legacy Foundry SQLite cutover
 
@@ -171,7 +158,6 @@ migration_result="$(
     --snapshot-dir /retained/foundry-sqlite-migration
 )"
 printf '%s\n' "$migration_result"
-manifest_sha256="$(jq -r .manifest_sha256 <<< "$migration_result")"
 ```
 
 The command uses SQLite's backup API for consistent copies of both databases,
@@ -184,23 +170,11 @@ type-aware SHA-256 content fingerprint for every control and quota table. A
 mismatch rolls back the import. The retained snapshot directory contains both
 SQLite backups and `migration-manifest.json`.
 
-Review the manifest, retain it with the backups, and mark the coordination
-Secret only after the command reports `migrated` or `verified-existing`:
-
-```bash
-kubectl -n stream2pretrain annotate --overwrite \
-  secret/stream2pretrain-coordination \
-  stream2pretrain.io/foundry-control-migrated-from=state-stream2pretrain-foundry-0 \
-  stream2pretrain.io/foundry-control-migration-verified=true \
-  "stream2pretrain.io/foundry-control-migration-manifest-sha256=$manifest_sha256"
-```
-
-The deployment paths fail before topology mutation while the legacy claim
-exists and these three independent control-migration annotations are absent or
-invalid. The recovery-claim annotations remain a separate requirement. Keep the
-legacy claim, both SQLite snapshots, and the manifest until PostgreSQL queries
-confirm the expected queue, quota, outbox, artifact, and audit rows and the new
-worker and API pass readiness.
+Review the manifest and retain it with the backups. At one replica, the
+replacement worker can reuse the retained legacy claim through `existingClaim`.
+Keep the legacy claim, both SQLite snapshots, and the manifest until PostgreSQL
+queries confirm the expected queue, quota, outbox, artifact, and audit rows and
+the new worker and API pass readiness.
 
 Measure durable bytes per accepted document, all decision-row bytes, transient
 bytes per admitted input, daily arrival rate and retention. Daily growth is

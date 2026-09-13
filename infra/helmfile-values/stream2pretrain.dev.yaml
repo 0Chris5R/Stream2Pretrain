@@ -65,6 +65,8 @@ processor:
     requireRealModels: true
     doclingEnabled: false
     usePresidio: true
+    checkpoint:
+      existingClaim: checkpoint-stream2pretrain-processor-curate-0
     resources:
       # Reserve state/cache headroom independently of inference services.
       requests: {cpu: 500m, memory: 2Gi}
@@ -105,6 +107,8 @@ processor:
   # execution remains needs-measurement.
   foundry:
     enabled: true
+    state:
+      existingClaim: state-stream2pretrain-foundry-0
 
 sourceController:
   replicas: 2
