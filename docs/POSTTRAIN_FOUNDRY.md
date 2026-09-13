@@ -563,21 +563,11 @@ provider rate limiting.
 
 ## 14. Kubernetes deployment
 
-The chart separates the Foundry worker StatefulSet from the stateless API
-Deployment. Worker replicas form one distributed Bytewax input execution with
-stable Pod identities, a headless peer Service, and a shared recovery claim.
-The API reads the shared PostgreSQL control plane and has no control-state PVC.
-The chart also supplies the provider Secret, signing-key mount, exact provider
-egress class, ServiceMonitor, PrometheusRule, Grafana panels, oracle RBAC, and
-oracle deny-all network policy.
-
-The measured profile keeps one worker and one API replica. The opt-in horizontal
-profile renders two workers with a Longhorn `ReadWriteMany` recovery claim and
-two API replicas. Deterministic candidate-lease, quota-lease, and fencing tests
-cover ownership and stale-worker rejection. Candidate processing remains
-globally serial by design, so additional workers provide coordinated intake and
-failover rather than parallel provider jobs. The two-replica topology is offline
-render and deterministic-test evidence only. Live multi-worker recovery,
+The chart runs the Foundry worker and API as sidecars in one StatefulSet Pod.
+Both containers share the retained Foundry volume, while the Service exposes
+the API and worker metrics. The chart also supplies the provider Secret,
+signing-key mount, exact provider egress class, ServiceMonitor, PrometheusRule,
+Grafana panels, oracle RBAC, and oracle deny-all network policy.
 provider behavior, throughput, and safe replica limits remain
 `needs-measurement`. The current CPU and memory requests and the 5 GiB recovery
 claim also remain `needs-measurement` for sustained cloud operation.

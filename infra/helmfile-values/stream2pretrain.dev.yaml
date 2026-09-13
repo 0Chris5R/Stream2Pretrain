@@ -103,12 +103,8 @@ processor:
     resources:
       requests: {cpu: 100m, memory: 2Gi}
       limits: {cpu: 1, memory: 6Gi}
-  # The measured profile keeps one Foundry worker. Live multi-worker provider
-  # execution remains needs-measurement.
   foundry:
     enabled: true
-    state:
-      existingClaim: state-stream2pretrain-foundry-0
 
 sourceController:
   replicas: 2

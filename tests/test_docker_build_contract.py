@@ -235,7 +235,6 @@ def test_horizontal_profile_renders_every_application_component_for_scale_out() 
                 "S2P_BYTEWAX_RECOVERY_NAME": "iceberg-writer-live-v3",
             },
         ),
-        "stream2pretrain-foundry-worker": ("worker", {}),
     }
     for name, (container_name, expected_env) in workloads.items():
         statefulset = by_name[("StatefulSet", name)]
@@ -267,11 +266,17 @@ def test_horizontal_profile_renders_every_application_component_for_scale_out() 
         "stream2pretrain-ingest-arxiv-html",
         "stream2pretrain-ingest-hf-cards",
         "stream2pretrain-duckdb",
-        "stream2pretrain-foundry-api",
         "stream2pretrain-source-controller",
         "stream2pretrain-ui",
     ):
         assert by_name[("Deployment", name)]["spec"]["replicas"] == 2
+
+    foundry = by_name[("StatefulSet", "stream2pretrain-foundry")]
+    assert foundry["spec"]["replicas"] == 1
+    assert {item["name"] for item in foundry["spec"]["template"]["spec"]["containers"]} == {
+        "worker",
+        "api",
+    }
 
     for profile in ("quality", "kenlm"):
         name = f"stream2pretrain-processor-model-service-{profile}"
@@ -320,7 +325,7 @@ def test_manual_setup_restarts_bytewax_as_a_coordinated_execution() -> None:
         "stream2pretrain-processor-fetcher",
         "stream2pretrain-processor-curate",
         "stream2pretrain-processor-iceberg-writer",
-        "stream2pretrain-foundry-worker",
+        "stream2pretrain-foundry",
     ):
         assert f"statefulset/{workload}" in setup
     assert '"statefulset/$workload" --timeout=300s' in setup
@@ -334,15 +339,14 @@ def test_manual_setup_restarts_bytewax_as_a_coordinated_execution() -> None:
         ("fetcher", "replicas", "checkpoint"),
         ("curate", "replicas", "checkpoint"),
         ("iceberg", "replicas", "checkpoint"),
-        ("foundry", "workerReplicas", "state"),
     ):
         checkpoint = scaling["processor"][component][checkpoint_key]
         assert scaling["processor"][component][replica_key] == 2
-        if component in {"curate", "foundry"}:
+        if component == "curate":
             assert checkpoint["existingClaim"] == ""
         assert checkpoint["accessMode"] == "ReadWriteMany"
         assert checkpoint["storageClass"] == "longhorn"
-    assert scaling["processor"]["foundry"]["apiReplicas"] == 2
+    assert "foundry" not in scaling["processor"]
     assert scaling["processor"]["duckdbApi"]["replicas"] == 2
     assert scaling["sourceController"]["replicas"] == 2
     assert scaling["ui"]["replicas"] == 2
@@ -359,10 +363,10 @@ def test_dev_profile_reuses_retained_single_replica_checkpoint_claims() -> None:
         values["processor"]["curate"]["checkpoint"]["existingClaim"]
         == "checkpoint-stream2pretrain-processor-curate-0"
     )
-    assert (
-        values["processor"]["foundry"]["state"]["existingClaim"]
-        == "state-stream2pretrain-foundry-0"
-    )
+    base = yaml.safe_load((ROOT / "charts" / "stream2pretrain" / "values.yaml").read_text())
+    assert base["processor"]["foundry"]["replicas"] == 1
+    assert "workerReplicas" not in base["processor"]["foundry"]
+    assert "apiReplicas" not in base["processor"]["foundry"]
 
 
 def test_manual_setup_validates_checkpoint_storage_before_quiescing() -> None:
@@ -409,20 +413,16 @@ def test_workflow_replaces_legacy_statefulsets_without_a_manual_marker_guard() -
     assert ".spec.volumeClaimTemplates // [] | length" in recreate
     assert "delete" in recreate
     assert "statefulset/stream2pretrain-processor-curate" in recreate
-    assert "statefulset/stream2pretrain-foundry" in recreate
+    assert "statefulset/stream2pretrain-foundry" not in recreate
 
 
-def test_workflow_uses_split_foundry_workloads_and_isolates_curator_canary() -> None:
+def test_workflow_uses_single_pod_foundry_and_isolates_curator_canary() -> None:
     workflow = (ROOT / ".github" / "workflows" / "deploy-main.yml").read_text(encoding="utf-8")
 
-    assert "exec -i statefulset/stream2pretrain-foundry -c api" not in workflow
-    assert (
-        "rollout status \\\n              statefulset/stream2pretrain-foundry --timeout"
-        not in workflow
-    )
-    assert "deployment/stream2pretrain-foundry-api -c api" in workflow
-    assert "statefulset/stream2pretrain-foundry-worker --timeout=180s" in workflow
-    assert "stream2pretrain-foundry-worker-0:worker" in workflow
+    assert "exec -i statefulset/stream2pretrain-foundry -c api" in workflow
+    assert "deployment/stream2pretrain-foundry-api -c api" not in workflow
+    assert "statefulset/stream2pretrain-foundry-worker" in workflow
+    assert "stream2pretrain-foundry-0:worker" in workflow
 
     canary = workflow.split('curator_canary_job="s2p-curate-smoke-', 1)[1].split(
         'production_curator_limits="$(', 1
@@ -651,9 +651,9 @@ def test_workload_alerts_follow_controller_ownership() -> None:
 
     assert 'deployment=~"{{ $fullName }}-(duckdb|ui)"' in rules
     assert 'statefulset=~"{{ $fullName }}-processor-(fetcher|curate|iceberg-writer)"' in rules
-    assert 'statefulset="{{ $fullName }}-foundry-worker"' in rules
-    assert 'deployment="{{ $fullName }}-foundry-api"' in rules
-    assert 'statefulset="{{ $fullName }}-foundry"' not in rules
+    assert 'statefulset="{{ $fullName }}-foundry"' in rules
+    assert 'statefulset="{{ $fullName }}-foundry-worker"' not in rules
+    assert 'deployment="{{ $fullName }}-foundry-api"' not in rules
 
 
 def test_catalog_bootstrap_precedes_application_rollout() -> None:

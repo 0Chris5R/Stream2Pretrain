@@ -44,7 +44,7 @@ def test_topic_reconciliation_fails_closed_on_replication_mismatch() -> None:
         Path(__file__).resolve().parents[1] / "scripts" / "reconcile_topic_partitions.sh"
     ).read_text(encoding="utf-8")
 
-    assert 'replication_factor="${S2P_TOPIC_REPLICATION_FACTOR:-3}"' in script
+    assert 'replication_factor="${S2P_TOPIC_REPLICATION_FACTOR:-1}"' in script
     assert "NR > 1 && $1 == topic {print $3; exit}" in script
     assert '[[ "$current_replication" -ne "$replication_factor" ]]' in script
     assert "No automatic live reassignment is attempted." in script

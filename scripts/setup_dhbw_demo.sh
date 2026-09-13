@@ -206,7 +206,6 @@ workloads = {
     "processor-fetcher": ("fetcher", "checkpoint"),
     "processor-curate": ("curate", "checkpoint"),
     "processor-iceberg-writer": ("iceberg", "checkpoint"),
-    "foundry-worker": ("foundry", "state"),
 }
 for component, (values_key, checkpoint_key) in workloads.items():
     statefulset = statefulsets.get(component)
@@ -308,11 +307,6 @@ delete_legacy_bytewax_statefulsets() {
     kubectl -n stream2pretrain delete \
       statefulset/stream2pretrain-processor-curate --wait=true
   fi
-  if kubectl -n stream2pretrain get \
-    statefulset/stream2pretrain-foundry >/dev/null 2>&1; then
-    kubectl -n stream2pretrain delete \
-      statefulset/stream2pretrain-foundry --wait=true
-  fi
 }
 
 restore_quiesced_bytewax_executions() {
@@ -405,7 +399,7 @@ apply_application_tier() {
     stream2pretrain-processor-fetcher \
     stream2pretrain-processor-curate \
     stream2pretrain-processor-iceberg-writer \
-    stream2pretrain-foundry-worker
+    stream2pretrain-foundry
   do
     if ! kubectl -n stream2pretrain get "statefulset/$workload" >/dev/null 2>&1; then
       continue

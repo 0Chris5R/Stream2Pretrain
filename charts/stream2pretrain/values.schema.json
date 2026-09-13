@@ -369,23 +369,24 @@
         },
         "foundry": {
           "type": "object",
-          "required": ["enabled", "workerReplicas", "workersPerProcess", "apiReplicas", "state"],
+          "required": ["enabled", "replicas", "state"],
+          "not": {
+            "anyOf": [
+              {"required": ["workerReplicas"]},
+              {"required": ["workersPerProcess"]},
+              {"required": ["apiReplicas"]}
+            ]
+          },
           "properties": {
             "enabled": {"type": "boolean"},
-            "workerReplicas": {"type": "integer", "minimum": 1},
-            "workersPerProcess": {"type": "integer", "minimum": 1},
-            "apiReplicas": {"type": "integer", "minimum": 1},
+            "replicas": {"type": "integer", "const": 1},
             "state": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["existingClaim", "storageClass", "accessMode", "size", "recoveryPartitions", "snapshotSeconds"],
+              "required": ["storageClass", "size"],
               "properties": {
-                "existingClaim": {"type": "string"},
                 "storageClass": {"type": "string"},
-                "accessMode": {"type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany"]},
-                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"},
-                "recoveryPartitions": {"type": "integer", "minimum": 1},
-                "snapshotSeconds": {"type": "number", "exclusiveMinimum": 0}
+                "size": {"type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$"}
               }
             }
           }

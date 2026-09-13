@@ -2425,7 +2425,7 @@ def test_coordination_database_target_prefers_shared_url(
     )
 
 
-def test_foundry_chart_separates_scalable_worker_and_api_workloads() -> None:
+def test_foundry_chart_uses_single_stateful_worker_and_api_pod() -> None:
     repository = Path(__file__).resolve().parents[2]
     template = (repository / "charts/stream2pretrain/templates/processor-foundry.yaml").read_text(
         encoding="utf-8"
@@ -2435,31 +2435,28 @@ def test_foundry_chart_separates_scalable_worker_and_api_workloads() -> None:
         (repository / "charts/stream2pretrain/values.schema.json").read_text(encoding="utf-8")
     )
 
-    assert '$workerComponent := "foundry-worker"' in template
-    assert '$apiComponent := "foundry-api"' in template
-    assert "kind: StatefulSet" in template
-    assert "kind: Deployment" in template
-    assert template.count("- name: S2P_COORDINATION_DATABASE_URL") == 2
-    worker_template, api_template = template.split("kind: Deployment", maxsplit=1)
-    assert 'include "stream2pretrain.commonEnv"' in worker_template
-    assert 'include "stream2pretrain.commonEnv"' not in api_template
+    assert '$component := "foundry"' in template
+    assert template.count("kind: StatefulSet") == 1
+    assert "kind: Deployment" not in template
+    assert "replicas: {{ .Values.processor.foundry.replicas }}" in template
+    assert "- name: worker" in template
+    assert "- name: api" in template
+    assert 'accessModes: ["ReadWriteOnce"]' in template
+    assert 'include "stream2pretrain.commonEnv"' in template
     for variable in (
-        "S2P_ENV",
-        "LOG_LEVEL",
         "MINIO_ENDPOINT",
         "AWS_DEFAULT_REGION",
         "MINIO_ACCESS_KEY",
         "MINIO_SECRET_KEY",
     ):
-        assert f"- name: {variable}" in api_template
-    assert "POLARIS_CREDENTIAL" not in api_template
-    assert "REDPANDA_BROKERS" not in api_template
-    assert "processor.foundry.state.accessMode must be ReadWriteMany" in template
-    assert "workerReplicas: 1" in values
-    assert "apiReplicas: 1" in values
+        assert f"- name: {variable}" in template
+    assert "replicas: 1" in values
     foundry_schema = schema["properties"]["processor"]["properties"]["foundry"]
-    assert foundry_schema["properties"]["workerReplicas"]["minimum"] == 1
-    assert foundry_schema["properties"]["apiReplicas"]["minimum"] == 1
+    assert "replicas" in foundry_schema["required"]
+    assert foundry_schema["properties"]["replicas"]["const"] == 1
+    assert "workerReplicas" not in foundry_schema["properties"]
+    assert "workersPerProcess" not in foundry_schema["properties"]
+    assert "apiReplicas" not in foundry_schema["properties"]
 
 
 def test_candidate_queue_ranks_snapshot_by_composite_score(tmp_path: Path) -> None:

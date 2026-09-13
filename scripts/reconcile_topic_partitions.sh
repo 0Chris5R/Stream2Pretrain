@@ -22,7 +22,7 @@ kubectl_retry() {
 }
 
 target="${S2P_CORE_TOPIC_PARTITIONS:-4}"
-replication_factor="${S2P_TOPIC_REPLICATION_FACTOR:-3}"
+replication_factor="${S2P_TOPIC_REPLICATION_FACTOR:-1}"
 max_message_bytes="${S2P_KAFKA_MESSAGE_MAX_BYTES:-2097152}"
 core_retention_ms="${S2P_CORE_TOPIC_RETENTION_MS:-604800000}"
 smoke_retention_ms="${S2P_SMOKE_TOPIC_RETENTION_MS:-86400000}"

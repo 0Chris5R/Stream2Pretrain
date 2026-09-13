@@ -433,9 +433,7 @@ processor:
   foundry:
     enabled: true
     image: stream2pretrain/processor-foundry
-    workerReplicas: 1
-    workersPerProcess: 1
-    apiReplicas: 1
+    replicas: 1
     apiPort: 8092
     dailyRunHourUtc: 8
     dailyRunMinuteUtc: 30 # 10:30 Europe/Berlin while CEST is active
@@ -455,15 +453,9 @@ processor:
     signingCertKey: ed25519.crt
     hetznerModels:
       - Qwen3.8-27B
-    # PostgreSQL stores shared control state and quota leases. This volume is
-    # only the coordinated Bytewax recovery database.
     state:
-      existingClaim: ""
       storageClass: ""
-      accessMode: ReadWriteOnce
       size: 5Gi # needs-measurement after the first cloud pilot
-      recoveryPartitions: 4
-      snapshotSeconds: 1
     workerResources:
       requests: {cpu: 250m, memory: 512Mi} # needs-measurement
       limits: {cpu: 1, memory: 2Gi} # needs-measurement

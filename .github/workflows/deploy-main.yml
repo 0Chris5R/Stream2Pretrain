@@ -18,6 +18,7 @@ on:
           - audit-ui
           - validate-sources
           - validate-foundry
+          - restore-foundry
           - inspect-storage
           - maintain-storage
           - capture-evidence
@@ -447,7 +448,6 @@ jobs:
                       "S2P_BYTEWAX_RECOVERY_NAME": "iceberg-writer-live-v3",
                   },
               ),
-              ("stream2pretrain-foundry-worker", "worker", {}),
           )
           for workload_name, container_name, component_env in contracts:
               statefulset = by_name.get(("StatefulSet", workload_name))
@@ -523,7 +523,6 @@ jobs:
               "stream2pretrain-ingest-arxiv-html",
               "stream2pretrain-ingest-hf-cards",
               "stream2pretrain-duckdb",
-              "stream2pretrain-foundry-api",
               "stream2pretrain-source-controller",
               "stream2pretrain-ui",
           )
@@ -1435,7 +1434,7 @@ jobs:
               python - < scripts/capture_submission_metrics.py > "$evidence_dir/metrics.json"
             kubectl -n stream2pretrain exec -i deployment/stream2pretrain-duckdb -- \
               python - < scripts/inspect_object_store.py > "$evidence_dir/storage.json"
-            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-foundry-api -c api -- \
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-foundry -c api -- \
               python - foundry < scripts/check_pipeline_live.py > "$evidence_dir/foundry.json"
             for node in $(kubectl get nodes -o name); do
               node="${node#node/}"
@@ -1455,7 +1454,7 @@ jobs:
               python - fetcher < scripts/check_pipeline_live.py
             kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-processor-curate -c curate -- \
               python - < scripts/live_classifier_diagnostics.py
-            kubectl -n stream2pretrain exec -i deployment/stream2pretrain-foundry-api -c api -- \
+            kubectl -n stream2pretrain exec -i statefulset/stream2pretrain-foundry -c api -- \
               python - foundry < scripts/check_pipeline_live.py
             exit 0
           fi
@@ -1492,28 +1491,29 @@ jobs:
           if [[ "$DEPLOY_MODE" == "validate-foundry" ]]; then
             echo "::group::Bounded live foundry validation"
             kubectl -n stream2pretrain rollout status \
-              statefulset/stream2pretrain-foundry-worker --timeout=180s
-            kubectl -n stream2pretrain rollout status \
-              deployment/stream2pretrain-foundry-api --timeout=180s
-            # The headless Service publishes not-ready addresses so the worker
-            # and API sidecars can discover each other during startup. Wait on
-            # the concrete Pod before asking port-forward to select a target.
+              statefulset/stream2pretrain-foundry --timeout=180s
             kubectl -n stream2pretrain wait \
               --for=condition=Ready \
-              pod/stream2pretrain-foundry-worker-0 --timeout=180s
-            # Run inside the API Deployment so the Foundry bearer token is never
+              pod/stream2pretrain-foundry-0 --timeout=180s
+            # Run inside the API sidecar so the Foundry bearer token is never
             # consumed by the Kubernetes API server or printed by the runner.
             validation_status=0
             kubectl -n stream2pretrain exec -i \
-              deployment/stream2pretrain-foundry-api -c api -- python - \
+              statefulset/stream2pretrain-foundry -c api -- python - \
               < scripts/validate_foundry_live.py || validation_status=$?
             kubectl -n stream2pretrain exec -i \
-              deployment/stream2pretrain-foundry-api -c api -- python - \
+              statefulset/stream2pretrain-foundry -c api -- python - \
               < scripts/foundry_diagnostics.py || true
             echo "::endgroup::"
             if [[ "$validation_status" -ne 0 ]]; then
               exit "$validation_status"
             fi
+            exit 0
+          fi
+
+          if [[ "$DEPLOY_MODE" == "restore-foundry" ]]; then
+            bash scripts/restore_foundry_single_pod.sh
+            finish_phase "Foundry single-pod restore"
             exit 0
           fi
 
@@ -1755,7 +1755,7 @@ jobs:
             # can fail on an init container before returning the actual crash.
             for target in \
               stream2pretrain-processor-curate-0:curate \
-              stream2pretrain-foundry-worker-0:worker; do
+              stream2pretrain-foundry-0:worker; do
               pod="${target%:*}"
               container="${target##*:}"
               echo "::group::Application crash: ${pod}/${container}"
@@ -2152,7 +2152,7 @@ jobs:
             done
             echo "::group::Durable post-training diagnosis"
             kubectl -n stream2pretrain exec -i \
-              deployment/stream2pretrain-foundry-api -c api -- python - \
+              statefulset/stream2pretrain-foundry -c api -- python - \
               < scripts/foundry_diagnostics.py || true
             echo "::endgroup::"
             echo "::endgroup::"
@@ -2827,7 +2827,6 @@ jobs:
               "processor-fetcher",
               "processor-curate",
               "processor-iceberg-writer",
-              "foundry-worker",
           }
           for item in resources:
               if item.get("kind") != "StatefulSet":
@@ -2965,46 +2964,6 @@ jobs:
             --field-selector=status.phase=Failed \
             --ignore-not-found --wait=true
 
-          # Foundry workers use OnDelete updates so a changed immutable image
-          # needs an explicit coordinated stop. The legacy combined
-          # StatefulSet is also stopped before Helm replaces that topology.
-          foundry_target_image="${registry}/stream2pretrain/processor-foundry@${IMAGE_DIGEST_PROCESSOR_FOUNDRY}"
-          foundry_current_image="$(
-            kubectl -n stream2pretrain get \
-              statefulset/stream2pretrain-foundry-worker -o json \
-              2>/dev/null \
-              | jq -r '
-                  first(
-                    .spec.template.spec.containers[]?
-                    | select(.name == "worker")
-                    | .image
-                  ) // empty
-                ' \
-              || true
-          )"
-          if kubectl -n stream2pretrain get \
-               statefulset/stream2pretrain-foundry-worker >/dev/null 2>&1 \
-             && [[ "$foundry_current_image" != "$foundry_target_image" ]]; then
-            echo "Quiescing the Foundry worker for an immutable image change."
-            kubectl -n stream2pretrain scale \
-              statefulset/stream2pretrain-foundry-worker --replicas=0
-            kubectl -n stream2pretrain wait --for=delete \
-              pod/stream2pretrain-foundry-worker-0 --timeout=180s \
-              || ! kubectl -n stream2pretrain get \
-                pod/stream2pretrain-foundry-worker-0 \
-                >/dev/null 2>&1
-          fi
-          if kubectl -n stream2pretrain get \
-            statefulset/stream2pretrain-foundry >/dev/null 2>&1; then
-            echo "Quiescing the legacy combined Foundry StatefulSet before topology migration."
-            kubectl -n stream2pretrain scale \
-              statefulset/stream2pretrain-foundry --replicas=0
-            kubectl -n stream2pretrain wait --for=delete \
-              pod/stream2pretrain-foundry-0 --timeout=180s \
-              || ! kubectl -n stream2pretrain get pod/stream2pretrain-foundry-0 \
-                >/dev/null 2>&1
-          fi
-
           bytewax_quiesced_resources=()
           restore_quiesced_bytewax() {
             local saved
@@ -3024,6 +2983,7 @@ jobs:
               statefulset/stream2pretrain-processor-curate \
               statefulset/stream2pretrain-processor-iceberg-writer \
               statefulset/stream2pretrain-foundry-worker \
+              statefulset/stream2pretrain-foundry \
               deployment/stream2pretrain-processor-fetcher \
               deployment/stream2pretrain-processor-iceberg-writer; do
               if ! kubectl -n stream2pretrain get "$resource" >/dev/null 2>&1; then
@@ -3040,7 +3000,8 @@ jobs:
               processor-fetcher \
               processor-curate \
               processor-iceberg-writer \
-              foundry-worker; do
+              foundry-worker \
+              foundry; do
               if ! kubectl -n stream2pretrain wait --for=delete pod \
                 -l "app.kubernetes.io/component=$component" --timeout=180s; then
                 if kubectl -n stream2pretrain get pod \
@@ -3068,13 +3029,6 @@ jobs:
             kubectl -n stream2pretrain delete \
               statefulset/stream2pretrain-processor-curate --wait=true
           fi
-          if kubectl -n stream2pretrain get \
-            statefulset/stream2pretrain-foundry >/dev/null 2>&1; then
-            echo "Removing the quiesced legacy combined Foundry StatefulSet."
-            kubectl -n stream2pretrain delete \
-              statefulset/stream2pretrain-foundry --wait=true
-          fi
-
           # GitHub serialises this workflow, but a teammate can still start a
           # manual Helm upgrade against the same release. Helm may complete
           # that competing revision and return `release: already exists` to
@@ -3184,6 +3138,34 @@ jobs:
             fi
             log="$RUNNER_TEMP/rollout-${workload//\//-}.log"
             (
+              update_strategy="$(
+                kubectl -n stream2pretrain get "$workload" \
+                  -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null \
+                  || true
+              )"
+              if [[ "$workload" == statefulset/* \
+                 && "$update_strategy" == "OnDelete" ]]; then
+                deadline=$((SECONDS + workload_timeout))
+                while (( SECONDS < deadline )); do
+                  state="$(kubectl -n stream2pretrain get "$workload" -o json)"
+                  desired="$(jq -r '.spec.replicas // 0' <<< "$state")"
+                  current="$(jq -r '.status.currentReplicas // 0' <<< "$state")"
+                  ready="$(jq -r '.status.readyReplicas // 0' <<< "$state")"
+                  generation="$(jq -r '.metadata.generation // 0' <<< "$state")"
+                  observed="$(jq -r '.status.observedGeneration // 0' <<< "$state")"
+                  current_revision="$(jq -r '.status.currentRevision // ""' <<< "$state")"
+                  update_revision="$(jq -r '.status.updateRevision // ""' <<< "$state")"
+                  echo "STATEFULSET_PROGRESS workload=$workload desired=$desired current=$current ready=$ready generation=$generation observed=$observed"
+                  if (( current == desired && ready == desired \
+                        && observed >= generation )) \
+                     && [[ "$current_revision" == "$update_revision" ]]; then
+                    exit 0
+                  fi
+                  sleep 5
+                done
+                echo "Timed out waiting for OnDelete StatefulSet readiness: $workload" >&2
+                exit 1
+              fi
               kubectl -n stream2pretrain rollout status \
                 "$workload" --timeout="${workload_timeout}s"
             ) >"$log" 2>&1 &

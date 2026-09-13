@@ -42,7 +42,6 @@ The deployment bootstrap creates {{ .Values.processor.foundry.signingKeySecret }
 once when absent. Pre-provision that Secret before installation to use a
 team-managed Ed25519 identity.
 {{- if .Values.processor.foundry.enabled }}
-  kubectl -n {{ .Release.Namespace }} get statefulset/{{ include "stream2pretrain.fullname" . }}-foundry-worker
-  kubectl -n {{ .Release.Namespace }} get deployment/{{ include "stream2pretrain.fullname" . }}-foundry-api
+  kubectl -n {{ .Release.Namespace }} get statefulset/{{ include "stream2pretrain.fullname" . }}-foundry
   # The configured Hetzner Qwen3.8 model must be discoverable before the worker is Ready.
 {{- end }}

@@ -103,12 +103,9 @@ The DuckDB API stores its serving index in per-Pod `emptyDir` state. Every
 replica rebuilds from Iceberg and then consumes retained Kafka deltas with an
 independent consumer identity. Replicas never write one DuckDB file.
 
-Foundry workers share candidate, quota, call, and outbox coordination in
-PostgreSQL. Expiring lease tokens fence stale candidate owners. The worker
-StatefulSet is separate from the stateless API Deployment, and multiple worker
-processes use one coordinated Bytewax execution with shared RWX recovery. The
-`Qwen3.8-27B` model remains an external provider API. Stream2Pretrain controls
-request concurrency, not provider replicas.
+The Foundry worker and API run as sidecars in one StatefulSet Pod and share its
+retained state volume. The `Qwen3.8-27B` model remains an external provider API.
+Stream2Pretrain controls request concurrency, not provider replicas.
 
 The repository verifies these paths with deterministic concurrency tests and a
 two-replica Helm render. The frozen cluster evidence demonstrates UI and model
@@ -239,8 +236,8 @@ diagnostics.
 ## 4. Restart from checkpoint
 
 The fetcher, curator, and Iceberg writer resume from their Bytewax recovery
-databases. The Foundry worker uses the same recovery contract for its input
-flow and PostgreSQL for queue coordination. During
+databases. The Foundry worker resumes its input flow and queue from the retained
+Foundry volume. During
 the one-time native-consumer-to-Bytewax cutover, `startingOffset=stored`
 bridges the last broker commit only when no Bytewax recovery snapshot exists.
 The deployment writes and validates the identity-bound
@@ -288,7 +285,7 @@ kubectl -n stream2pretrain create secret generic stream2pretrain-foundry-signing
     --dry-run=client -o yaml | kubectl apply -f -
 
 # 5.4 Restart the Foundry workload to pick up the new key.
-kubectl -n stream2pretrain rollout restart statefulset/stream2pretrain-foundry-worker
+kubectl -n stream2pretrain rollout restart statefulset/stream2pretrain-foundry
 ```
 
 Existing packages retain the certificate stored with their signature. Newly

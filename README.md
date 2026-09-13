@@ -134,8 +134,8 @@ The API and dashboard screenshots in Section 11 come from the same live cluster.
 
 | Kubernetes object | Components |
 |---|---|
-| Deployment | arXiv full-text worker, Hugging Face card poller, SourceFeed controller, DuckDB API, Foundry API, UI, and stateless quality and KenLM model services. |
-| StatefulSet | Coordinated Bytewax fetcher, curator, and Iceberg writer executions, the Foundry worker, and the MinIO object store. |
+| Deployment | arXiv full-text worker, Hugging Face card poller, SourceFeed controller, DuckDB API, UI, and stateless quality and KenLM model services. |
+| StatefulSet | Coordinated Bytewax fetcher, curator, and Iceberg writer executions, the Foundry worker and API, and the MinIO object store. |
 | CloudNativePG `Cluster` | PostgreSQL persistence for the Polaris catalog and shared application coordination. |
 | CronJob | Periodic arXiv RSS and OAI-PMH discovery polls plus per-table Iceberg snapshot and orphan-file maintenance. |
 | ConfigMap | Feed definitions and runtime configuration. |
@@ -170,7 +170,7 @@ live multi-replica throughput or failover evidence.
 | arXiv full-text worker | Kafka consumer-group partition ownership on the source-specific `arxiv.discovery` topic, with KEDA driven by that topic's lag. | Partition-specific commit behavior and the two-replica chart are tested. Live multi-replica backlog recovery remains `needs-measurement`. |
 | Fetcher, curator, and Iceberg writer | One distributed Bytewax execution per stage, using stable StatefulSet peers, fixed recovery identities, and a shared RWX checkpoint. The curator uses PostgreSQL for atomic duplicate and decision state. The writer retries optimistic Iceberg conflicts and preserves deterministic row identity. | The two-process topology renders and concurrency tests cover shared curator state and commit conflicts. The retained `local-path` checkpoints must be copied and verified on Longhorn before a live rescale. No live multi-replica Bytewax run is claimed. |
 | DuckDB API | Each replica rebuilds an independent `emptyDir` serving index from Iceberg and consumes retained Kafka deltas with its own identity. | Independent-index behavior and the two-replica render are tested. Live rebuild duration and query capacity remain `needs-measurement`. |
-| Foundry worker and API | Workers claim candidates and quota reservations in shared PostgreSQL with expiring lease tokens. The API is a separate stateless Deployment. Worker replicas form one coordinated Bytewax execution with shared RWX recovery. | Candidate fencing, recovery, quota ownership, and the two-worker and two-API render are tested. No live multi-worker provider run or failover evidence is included. |
+| Foundry | One StatefulSet Pod runs the worker and API against the retained state volume. | Candidate processing, artifact inspection, and named human review use the same durable Foundry state. |
 | External `Qwen3.8-27B` endpoint | Provider-managed service. Stream2Pretrain controls request concurrency, not provider replicas. | It is outside the Kubernetes deployment, so no cluster autoscaling claim is made. |
 | Redpanda, MinIO, PostgreSQL, and Polaris | Stateful platform services with persistent storage and configurable replica counts. | Their topology and resource settings are managed through Helm and Helmfile. |
 
@@ -400,7 +400,7 @@ The system is production-oriented but deployed at course-project scale.
   optimistic Iceberg conflict handling, independent DuckDB indexes, and Foundry
   candidate fencing are implemented and tested. Their live multi-replica
   recovery and throughput remain `needs-measurement`.
-- Scaling a Bytewax or Foundry worker execution requires a coordinated restart
+- Scaling a Bytewax worker execution requires a coordinated restart
   and a verified RWX checkpoint copy. The deployment guard rejects retained
   RWO, `local-path`, missing external, or storage-class-mismatched claims. It
   does not copy checkpoint data.
