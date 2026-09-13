@@ -143,7 +143,7 @@ jobs:
             redpanda=true
           fi
           if grep -Eq \
-            '^(\.github/workflows/deploy-main\.yml$|charts/minio/.*|infra/helmfile-values/minio\.dev\.yaml$|helmfile\.yaml$|scripts/setup_dhbw_demo\.sh$)' \
+            '^(charts/minio/.*|infra/helmfile-values/minio\.dev\.yaml$|helmfile\.yaml$)' \
             "$changed"; then
             storage=true
           fi
