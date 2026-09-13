@@ -10,14 +10,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from processor.foundry.database import (
-    connect_database,
-    coordination_database_target,
-    database_dialect,
-)
-
 
 def _foundry_status() -> dict[str, object]:
+    from processor.foundry.database import (
+        connect_database,
+        coordination_database_target,
+        database_dialect,
+    )
+
     state_dir = os.environ.get("S2P_FOUNDRY_STATE_DIR", "/var/lib/s2p/foundry")
     target = coordination_database_target(state_dir, "control.sqlite3")
     connection = connect_database(target, read_only=True)

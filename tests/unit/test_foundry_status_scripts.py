@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import builtins
 import json
+import runpy
 from collections.abc import Iterator
 from typing import Any
 
@@ -10,6 +12,21 @@ import pytest
 
 import scripts.check_pipeline_live as pipeline_status
 import scripts.foundry_diagnostics as diagnostics
+from processor.foundry import database as foundry_database
+
+
+def test_pipeline_status_import_does_not_require_foundry_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def reject_foundry_database(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "processor.foundry.database":
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_foundry_database)
+    runpy.run_path(pipeline_status.__file__, run_name="check_pipeline_live_test")
 
 
 class _Cursor:
@@ -83,12 +100,17 @@ def test_foundry_status_scripts_use_shared_postgres_read_only_connection(
         "S2P_COORDINATION_DATABASE_URL",
         "postgresql://coordination/foundry",
     )
-    monkeypatch.setattr(module, "connect_database", connect)
-    monkeypatch.setattr(module, "database_dialect", lambda _connection: "postgresql")
-
     if module is pipeline_status:
+        monkeypatch.setattr(foundry_database, "connect_database", connect)
+        monkeypatch.setattr(
+            foundry_database,
+            "database_dialect",
+            lambda _connection: "postgresql",
+        )
         payload = pipeline_status._foundry_status()
     else:
+        monkeypatch.setattr(module, "connect_database", connect)
+        monkeypatch.setattr(module, "database_dialect", lambda _connection: "postgresql")
         diagnostics.main()
         payload = json.loads(capsys.readouterr().out)
 
